@@ -1,0 +1,169 @@
+"""Image embedding backends: DINOv2 (HuggingFace) and SSCD (TorchScript)."""
+import hashlib
+import importlib.metadata
+import io
+import sys
+from pathlib import Path
+
+import torch
+from PIL import Image
+from torchvision import transforms
+from transformers import AutoImageProcessor, AutoModel
+
+DEFAULT_NORMALIZE_SIZE = 512
+DEFAULT_MODEL_DINOV2 = "facebook/dinov2-large"
+DEFAULT_MODEL_SSCD = "sscd_disc_mixup.torchscript.pt"
+
+_SSCD_INPUT_SIZE = 288
+_IMAGENET_MEAN = [0.485, 0.456, 0.406]
+_IMAGENET_STD = [0.229, 0.224, 0.225]
+
+
+def get_library_versions() -> dict[str, str]:
+    libs = ["torch", "transformers", "torchvision", "qdrant-client", "Pillow"]
+    versions: dict[str, str] = {"python": sys.version}
+    for lib in libs:
+        try:
+            versions[lib] = importlib.metadata.version(lib)
+        except importlib.metadata.PackageNotFoundError:
+            versions[lib] = "unknown"
+    return versions
+
+
+def hash_bytes(data: bytes) -> str:
+    """Return SHA-256 hex digest of already-loaded bytes."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def _resolve_device(device: str) -> str:
+    if device != "auto":
+        return device
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def _open_rgb(data: bytes) -> Image.Image:
+    return Image.open(io.BytesIO(data)).convert("RGB")
+
+
+# ---------------------------------------------------------------------------
+# DINOv2
+# ---------------------------------------------------------------------------
+
+class DINOv2Embedder:
+    def __init__(self, model_name: str, device: str = "auto", normalize_size: int = DEFAULT_NORMALIZE_SIZE) -> None:
+        self.model_name = model_name
+        self.normalize_size = normalize_size
+        self.device = _resolve_device(device)
+        self.processor = AutoImageProcessor.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(model_name).to(self.device)
+        self.model.eval()
+        self._model_hash: str | None = None
+
+    @property
+    def embedding_dim(self) -> int:
+        return self.model.config.hidden_size  # type: ignore[no-any-return]
+
+    @property
+    def model_hash(self) -> str:
+        if self._model_hash is None:
+            h = hashlib.sha256()
+            for name, param in sorted(self.model.state_dict().items()):
+                h.update(name.encode())
+                h.update(param.detach().cpu().contiguous().numpy().tobytes())
+            self._model_hash = h.hexdigest()
+        return self._model_hash
+
+    def normalize_batch_bytes(self, image_data: list[bytes]) -> list[Image.Image]:
+        return [
+            _open_rgb(d).resize((self.normalize_size, self.normalize_size), Image.Resampling.LANCZOS)
+            for d in image_data
+        ]
+
+    def embed_images(self, images: list[Image.Image]) -> list[list[float]]:
+        inputs = self.processor(images=images, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        return outputs.last_hidden_state[:, 0, :].cpu().tolist()
+
+
+# ---------------------------------------------------------------------------
+# SSCD
+# ---------------------------------------------------------------------------
+
+def _sscd_preprocess(data: bytes) -> Image.Image:
+    """Aspect-ratio-preserving resize to 115 % then center-crop to 288×288."""
+    img = _open_rgb(data)
+    size = _SSCD_INPUT_SIZE
+    scale = int(size * 1.15)
+    w, h = img.size
+    new_w, new_h = (scale, int(h * scale / w)) if w <= h else (int(w * scale / h), scale)
+    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    left, top = (new_w - size) // 2, (new_h - size) // 2
+    return img.crop((left, top, left + size, top + size))
+
+
+class SSCDEmbedder:
+    def __init__(self, model_name: str, device: str = "auto") -> None:
+        self.model_name = model_name
+        self.normalize_size = _SSCD_INPUT_SIZE
+        self.device = _resolve_device(device)
+        if not Path(model_name).exists():
+            raise FileNotFoundError(
+                f"SSCD checkpoint not found: {model_name}\n"
+                "Download it from:\n"
+                "  https://github.com/facebookresearch/sscd-copy-detection/releases\n"
+                "Then pass it with:  --model /path/to/sscd_disc_mixup.torchscript.pt"
+            )
+        self._model = torch.jit.load(model_name, map_location=self.device)
+        self._model.eval()
+        self._to_tensor = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
+        ])
+        self._model_hash: str | None = None
+
+    @property
+    def embedding_dim(self) -> int:
+        return 512
+
+    @property
+    def model_hash(self) -> str:
+        if self._model_hash is None:
+            h = hashlib.sha256()
+            with open(self.model_name, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            self._model_hash = h.hexdigest()
+        return self._model_hash
+
+    def normalize_batch_bytes(self, image_data: list[bytes]) -> list[Image.Image]:
+        return [_sscd_preprocess(d) for d in image_data]
+
+    def embed_images(self, images: list[Image.Image]) -> list[list[float]]:
+        batch = torch.stack([self._to_tensor(img) for img in images]).to(self.device)
+        with torch.no_grad():
+            embeddings = self._model(batch)
+        return embeddings.cpu().tolist()
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+AnyEmbedder = DINOv2Embedder | SSCDEmbedder
+
+
+def load_embedder(model: str, device: str = "auto", normalize_size: int = DEFAULT_NORMALIZE_SIZE) -> AnyEmbedder:
+    """Load the appropriate embedder based on the model string.
+
+    A local .pt / .torchscript.pt path → SSCD.
+    Anything else → DINOv2 via HuggingFace.
+    """
+    p = Path(model)
+    if p.suffix == ".pt" or ".torchscript" in p.name:
+        return SSCDEmbedder(model_name=model, device=device)
+    return DINOv2Embedder(model_name=model, device=device, normalize_size=normalize_size)
