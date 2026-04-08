@@ -38,9 +38,9 @@ def index(
     sscd: bool = typer.Option(False, "--sscd", help=f"Use SSCD backend (default model: {DEFAULT_MODEL_SSCD})"),
     dino: bool = typer.Option(False, "--dino", help=f"Use DINOv2 backend (default model: {DEFAULT_MODEL_DINOV2})"),
     model: str | None = typer.Option(None, help="Override the model path / HuggingFace identifier"),
-    normalize_size: int = typer.Option(DEFAULT_NORMALIZE_SIZE, help="DINOv2: resize images to N×N before embedding"),
+    normalize_size: int = typer.Option(DEFAULT_NORMALIZE_SIZE, help="DINOv2: resize images to N×N"),
     qdrant_url: str = typer.Option("http://localhost:6333", help="Qdrant server URL"),
-    collection: str | None = typer.Option(None, help="Qdrant collection name (default: sfn-sscd or sfn-dinov2)"),
+    collection: str | None = typer.Option(None, help="Qdrant collection (default: sfn-sscd or sfn-dinov2)"),
     batch_size: int = typer.Option(32, min=1, help="Images per embedding batch"),
     device: str = typer.Option("auto", help="Compute device: auto | cuda | cpu | mps"),
     skip_existing: bool = typer.Option(True, help="Skip images already present in the collection"),
@@ -60,11 +60,15 @@ def index(
     except FileNotFoundError as exc:
         typer.echo(f"[ERROR] {exc}", err=True)
         raise typer.Exit(1)
-    typer.echo(f"  backend={type(embedder).__name__}  dim={embedder.embedding_dim}  device={embedder.device}")
+    typer.echo(
+        f"  backend={type(embedder).__name__}  dim={embedder.embedding_dim}  device={embedder.device}"
+    )
 
     typer.echo(f"Connecting to Qdrant  collection={resolved_collection!r} ...")
     try:
-        indexer = Indexer(url=qdrant_url, collection=resolved_collection, embedding_dim=embedder.embedding_dim)
+        indexer = Indexer(
+            url=qdrant_url, collection=resolved_collection, embedding_dim=embedder.embedding_dim
+        )
     except ValueError as exc:
         typer.echo(f"[ERROR] {exc}", err=True)
         raise typer.Exit(1)
@@ -184,7 +188,8 @@ def index(
             f"  |  normalize {total_norm_s:.2f}s ({_fmt_rate(indexed, total_norm_s, 'img')})"
             f"  |  embed {total_embed_s:.2f}s ({_fmt_rate(indexed, total_embed_s, 'img')})"
             f"  |  upsert {total_upsert_s:.2f}s"
-            f"  |  pipeline {total_s:.2f}s  {_fmt_rate(indexed, total_s, 'img')}  {total_s / indexed * 1000:.0f} ms/img"
+            f"  |  pipeline {total_s:.2f}s  {_fmt_rate(indexed, total_s, 'img')}"
+            f"  {total_s / indexed * 1000:.0f} ms/img"
         )
 
 

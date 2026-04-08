@@ -33,7 +33,7 @@ class Indexer:
             existing_dim = info.config.params.vectors.size  # type: ignore[union-attr]
             if existing_dim != dim:
                 raise ValueError(
-                    f"Collection '{self.collection}' already exists with vector dim={existing_dim}, "
+                    f"Collection '{self.collection}' already exists with dim={existing_dim}, "
                     f"but the current model produces dim={dim}. "
                     f"Use a different --collection or the matching --backend."
                 )

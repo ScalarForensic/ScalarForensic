@@ -54,7 +54,9 @@ def _open_rgb(data: bytes) -> Image.Image:
 # ---------------------------------------------------------------------------
 
 class DINOv2Embedder:
-    def __init__(self, model_name: str, device: str = "auto", normalize_size: int = DEFAULT_NORMALIZE_SIZE) -> None:
+    def __init__(
+        self, model_name: str, device: str = "auto", normalize_size: int = DEFAULT_NORMALIZE_SIZE
+    ) -> None:
         self.model_name = model_name
         self.normalize_size = normalize_size
         self.device = _resolve_device(device)
@@ -78,8 +80,9 @@ class DINOv2Embedder:
         return self._model_hash
 
     def normalize_batch_bytes(self, image_data: list[bytes]) -> list[Image.Image]:
+        size = self.normalize_size
         return [
-            _open_rgb(d).resize((self.normalize_size, self.normalize_size), Image.Resampling.LANCZOS)
+            _open_rgb(d).resize((size, size), Image.Resampling.LANCZOS)
             for d in image_data
         ]
 
@@ -157,7 +160,9 @@ class SSCDEmbedder:
 AnyEmbedder = DINOv2Embedder | SSCDEmbedder
 
 
-def load_embedder(model: str, device: str = "auto", normalize_size: int = DEFAULT_NORMALIZE_SIZE) -> AnyEmbedder:
+def load_embedder(
+    model: str, device: str = "auto", normalize_size: int = DEFAULT_NORMALIZE_SIZE
+) -> AnyEmbedder:
     """Load the appropriate embedder based on the model string.
 
     A local .pt / .torchscript.pt path → SSCD.
