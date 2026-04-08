@@ -29,10 +29,6 @@ def _fmt_mbps(bytes_total: int, seconds: float) -> str:
     return f"{bytes_total / 1e6 / seconds:.1f} MB/s"
 
 
-app = typer.Typer(add_completion=False)
-
-
-@app.command(no_args_is_help=True)
 def index(
     input_dir: Path = typer.Argument(..., exists=True, file_okay=False, help="Root dir of images"),
     sscd: bool = typer.Option(False, "--sscd", help="Use SSCD backend (512-dim copy-detection)"),
@@ -193,4 +189,4 @@ def index(
 
 
 def main() -> None:
-    app(prog_name="sfn")
+    typer.run(index)

@@ -30,7 +30,12 @@ class Indexer:
             )
         else:
             info = self.client.get_collection(self.collection)
-            existing_dim = info.config.params.vectors.size  # type: ignore[union-attr]
+            vectors_config = info.config.params.vectors
+            if isinstance(vectors_config, dict):
+                raise ValueError(
+                    f"Collection '{self.collection}' uses named vectors — not supported."
+                )
+            existing_dim = vectors_config.size  # type: ignore[union-attr]
             if existing_dim != dim:
                 raise ValueError(
                     f"Collection '{self.collection}' already exists with dim={existing_dim}, "
@@ -70,6 +75,11 @@ class Indexer:
         shared_metadata: dict,
     ) -> None:
         """Upsert vectors with full forensic metadata payload."""
+        if not len(image_paths) == len(image_hashes) == len(embeddings):
+            raise ValueError(
+                f"Batch length mismatch: paths={len(image_paths)}, "
+                f"hashes={len(image_hashes)}, embeddings={len(embeddings)}"
+            )
         indexed_at = datetime.now(UTC).isoformat()
         points = [
             PointStruct(
