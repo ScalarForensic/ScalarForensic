@@ -74,10 +74,17 @@ class DINOv2Embedder:
     @property
     def model_hash(self) -> str:
         if self._model_hash is None:
+            from huggingface_hub import snapshot_download
+
+            snapshot_path = Path(snapshot_download(self.model_name, local_files_only=True))
             h = hashlib.sha256()
-            for name, param in sorted(self.model.state_dict().items()):
-                h.update(name.encode())
-                h.update(param.detach().cpu().contiguous().numpy().tobytes())
+            for file in sorted(snapshot_path.rglob("*")):
+                if not file.is_file():
+                    continue
+                h.update(file.name.encode())
+                with file.open("rb") as f:
+                    for chunk in iter(lambda: f.read(65536), b""):
+                        h.update(chunk)
             self._model_hash = h.hexdigest()
         return self._model_hash
 
@@ -163,14 +170,12 @@ AnyEmbedder = DINOv2Embedder | SSCDEmbedder
 
 
 def load_embedder(
-    model: str, device: str = "auto", normalize_size: int = DEFAULT_NORMALIZE_SIZE
+    model: str,
+    use_sscd: bool,
+    device: str = "auto",
+    normalize_size: int = DEFAULT_NORMALIZE_SIZE,
 ) -> AnyEmbedder:
-    """Load the appropriate embedder based on the model string.
-
-    A local .pt / .torchscript.pt path → SSCD.
-    Anything else → DINOv2 via HuggingFace.
-    """
-    p = Path(model)
-    if p.suffix == ".pt" or ".torchscript" in p.name:
+    """Load the embedder for the explicitly selected backend."""
+    if use_sscd:
         return SSCDEmbedder(model_name=model, device=device)
     return DINOv2Embedder(model_name=model, device=device, normalize_size=normalize_size)

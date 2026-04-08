@@ -53,7 +53,9 @@ def index(
 
     typer.echo(f"Loading model {resolved_model!r} on device={device!r} ...")
     try:
-        embedder = load_embedder(model=resolved_model, device=device, normalize_size=normalize_size)
+        embedder = load_embedder(
+            model=resolved_model, use_sscd=use_sscd, device=device, normalize_size=normalize_size
+        )
     except FileNotFoundError as exc:
         typer.echo(f"[ERROR] {exc}", err=True)
         raise typer.Exit(1)

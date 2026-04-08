@@ -43,12 +43,14 @@ class Indexer:
                     f"but the current model produces dim={dim}. "
                     f"Use a different --collection or the matching --backend."
                 )
-        # Ensure image_hash is indexed for fast dedup lookups (idempotent).
-        self.client.create_payload_index(
-            collection_name=self.collection,
-            field_name="image_hash",
-            field_schema=PayloadSchemaType.KEYWORD,
-        )
+        # Create image_hash payload index if not already present.
+        info = self.client.get_collection(self.collection)
+        if "image_hash" not in (info.payload_schema or {}):
+            self.client.create_payload_index(
+                collection_name=self.collection,
+                field_name="image_hash",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
 
     def get_indexed_hashes(self, hashes: list[str]) -> set[str]:
         """Return the subset of hashes that are already in the collection."""
