@@ -1,4 +1,5 @@
 """CLI entry point for ScalarForensic."""
+
 from itertools import batched
 from pathlib import Path
 from time import perf_counter
@@ -56,8 +57,10 @@ def index(
     except FileNotFoundError as exc:
         typer.echo(f"[ERROR] {exc}", err=True)
         raise typer.Exit(1)
-    typer.echo(f"  backend={type(embedder).__name__}  dim={embedder.embedding_dim}"
-               f"  device={embedder.device}")
+    typer.echo(
+        f"  backend={type(embedder).__name__}  dim={embedder.embedding_dim}"
+        f"  device={embedder.device}"
+    )
 
     typer.echo(f"Connecting to Qdrant  collection={resolved_collection!r} ...")
     try:

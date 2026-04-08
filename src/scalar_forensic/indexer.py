@@ -1,4 +1,5 @@
 """Qdrant collection management and vector upsert."""
+
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,10 +57,7 @@ class Indexer:
         results, _ = self.client.scroll(
             collection_name=self.collection,
             scroll_filter=Filter(
-                should=[
-                    FieldCondition(key="image_hash", match=MatchValue(value=h))
-                    for h in hashes
-                ]
+                should=[FieldCondition(key="image_hash", match=MatchValue(value=h)) for h in hashes]
             ),
             limit=len(hashes),
             with_payload=["image_hash"],

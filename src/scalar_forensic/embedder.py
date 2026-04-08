@@ -1,4 +1,5 @@
 """Image embedding backends: DINOv2 (HuggingFace) and SSCD (TorchScript)."""
+
 import hashlib
 import importlib.metadata
 import io
@@ -53,6 +54,7 @@ def _open_rgb(data: bytes) -> Image.Image:
 # DINOv2
 # ---------------------------------------------------------------------------
 
+
 class DINOv2Embedder:
     def __init__(
         self, model_name: str, device: str = "auto", normalize_size: int = DEFAULT_NORMALIZE_SIZE
@@ -81,10 +83,7 @@ class DINOv2Embedder:
 
     def normalize_batch_bytes(self, image_data: list[bytes]) -> list[Image.Image]:
         size = self.normalize_size
-        return [
-            _open_rgb(d).resize((size, size), Image.Resampling.LANCZOS)
-            for d in image_data
-        ]
+        return [_open_rgb(d).resize((size, size), Image.Resampling.LANCZOS) for d in image_data]
 
     def embed_images(self, images: list[Image.Image]) -> list[list[float]]:
         inputs = self.processor(images=images, return_tensors="pt").to(self.device)
@@ -96,6 +95,7 @@ class DINOv2Embedder:
 # ---------------------------------------------------------------------------
 # SSCD
 # ---------------------------------------------------------------------------
+
 
 def _sscd_preprocess(data: bytes) -> Image.Image:
     """Aspect-ratio-preserving resize to 115 % then center-crop to 288×288."""
@@ -123,10 +123,12 @@ class SSCDEmbedder:
             )
         self._model = torch.jit.load(model_name, map_location=self.device)
         self._model.eval()
-        self._to_tensor = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
-        ])
+        self._to_tensor = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
+            ]
+        )
         self._model_hash: str | None = None
 
     @property

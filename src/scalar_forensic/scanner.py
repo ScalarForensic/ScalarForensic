@@ -1,4 +1,5 @@
 """Recursive image file discovery."""
+
 from collections.abc import Iterator
 from pathlib import Path
 
