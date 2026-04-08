@@ -1,0 +1,103 @@
+"""Qdrant collection management and vector upsert."""
+
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PayloadSchemaType,
+    PointStruct,
+    VectorParams,
+)
+
+
+class Indexer:
+    def __init__(self, url: str, collection: str, embedding_dim: int) -> None:
+        self.client = QdrantClient(url=url)
+        self.collection = collection
+        self._ensure_collection(embedding_dim)
+
+    def _ensure_collection(self, dim: int) -> None:
+        existing = {c.name for c in self.client.get_collections().collections}
+        if self.collection not in existing:
+            self.client.create_collection(
+                collection_name=self.collection,
+                vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+            )
+        else:
+            info = self.client.get_collection(self.collection)
+            vectors_config = info.config.params.vectors
+            if isinstance(vectors_config, dict):
+                raise ValueError(
+                    f"Collection '{self.collection}' uses named vectors — not supported."
+                )
+            existing_dim = vectors_config.size  # type: ignore[union-attr]
+            if existing_dim != dim:
+                raise ValueError(
+                    f"Collection '{self.collection}' already exists with dim={existing_dim}, "
+                    f"but the current model produces dim={dim}. "
+                    f"Use a different --collection or the matching --backend."
+                )
+        # Create image_hash payload index if not already present.
+        info = self.client.get_collection(self.collection)
+        if "image_hash" not in (info.payload_schema or {}):
+            self.client.create_payload_index(
+                collection_name=self.collection,
+                field_name="image_hash",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+
+    def get_indexed_hashes(self, hashes: list[str]) -> set[str]:
+        """Return the subset of hashes that are already in the collection."""
+        if not hashes:
+            return set()
+        results, _ = self.client.scroll(
+            collection_name=self.collection,
+            scroll_filter=Filter(
+                should=[FieldCondition(key="image_hash", match=MatchValue(value=h)) for h in hashes]
+            ),
+            limit=len(hashes),
+            with_payload=["image_hash"],
+            with_vectors=False,
+        )
+        return {r.payload["image_hash"] for r in results}
+
+    def upsert_batch(
+        self,
+        image_paths: list[Path],
+        image_hashes: list[str],
+        embeddings: list[list[float]],
+        shared_metadata: dict,
+    ) -> None:
+        """Upsert vectors with full forensic metadata payload."""
+        if not len(image_paths) == len(image_hashes) == len(embeddings):
+            raise ValueError(
+                f"Batch length mismatch: paths={len(image_paths)}, "
+                f"hashes={len(image_hashes)}, embeddings={len(embeddings)}"
+            )
+        indexed_at = datetime.now(UTC).isoformat()
+        points = [
+            PointStruct(
+                id=str(uuid.uuid5(uuid.NAMESPACE_URL, image_hash)),
+                vector=embedding,
+                payload={
+                    # Forensic identifiers
+                    "image_hash": image_hash,
+                    "image_path": str(image_path.resolve()),
+                    "indexed_at": indexed_at,
+                    # Model & library provenance
+                    "model_name": shared_metadata["model_name"],
+                    "model_hash": shared_metadata["model_hash"],
+                    "embedding_dim": shared_metadata["embedding_dim"],
+                    "normalize_size": shared_metadata["normalize_size"],
+                    "library_versions": shared_metadata["library_versions"],
+                },
+            )
+            for image_path, image_hash, embedding in zip(image_paths, image_hashes, embeddings)
+        ]
+        self.client.upsert(collection_name=self.collection, points=points)

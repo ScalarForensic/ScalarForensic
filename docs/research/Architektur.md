@@ -11,7 +11,7 @@ https://github.com/ScalarForensic/ScalarForensic
         * noch zu klären: Hardware, Netzwerk
         * CLI-Tool
         * Anbindung 
-            * CSAM-Datensatz
+            * Datensatz
             * Qdrant
             * Embeddings (GPU?)
         * Berechnungsschritte
