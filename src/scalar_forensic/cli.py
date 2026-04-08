@@ -117,18 +117,33 @@ def index(
         hash_s = perf_counter() - t0
         total_hash_s += hash_s
 
-        # --- Dedup via indexed Qdrant payload ---
+        # --- Dedup within this batch, then against indexed Qdrant payload ---
+        unique_path_by_hash: dict[str, Path] = {}
+        duplicate_hashes_in_batch = 0
+        for p, h in path_hash_pairs:
+            if h in unique_path_by_hash:
+                duplicate_hashes_in_batch += 1
+                continue
+            unique_path_by_hash[h] = p
+        unique_path_hash_pairs = [(p, h) for h, p in unique_path_by_hash.items()]
+
         if skip_existing:
-            already_indexed = indexer.get_indexed_hashes([h for _, h in path_hash_pairs])
+            already_indexed = indexer.get_indexed_hashes([h for _, h in unique_path_hash_pairs])
         else:
             already_indexed = set()
 
         data_by_path = {p: data for p, data in raw}
-        to_embed = [(p, h) for p, h in path_hash_pairs if h not in already_indexed]
-        skipped += len(path_hash_pairs) - len(to_embed)
+        to_embed = [(p, h) for p, h in unique_path_hash_pairs if h not in already_indexed]
+        skipped += duplicate_hashes_in_batch + (
+            len(unique_path_hash_pairs) - len(to_embed)
+        )
 
         if not to_embed:
-            typer.echo(f"  batch {batch_num}: {len(path_hash_pairs)} skipped (already indexed)")
+            typer.echo(
+                f"  batch {batch_num}: {len(path_hash_pairs)} skipped "
+                f"({duplicate_hashes_in_batch} duplicate-in-batch, "
+                f"{len(unique_path_hash_pairs)} already indexed candidates checked)"
+            )
             continue
 
         paths, hashes = zip(*to_embed)
