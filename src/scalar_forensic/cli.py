@@ -34,16 +34,16 @@ app = typer.Typer(add_completion=False)
 
 @app.command(no_args_is_help=True)
 def index(
-    input_dir: Path = typer.Argument(..., exists=True, file_okay=False, help="Root directory of images"),
-    sscd: bool = typer.Option(False, "--sscd", help=f"Use SSCD backend (default model: {DEFAULT_MODEL_SSCD})"),
-    dino: bool = typer.Option(False, "--dino", help=f"Use DINOv2 backend (default model: {DEFAULT_MODEL_DINOV2})"),
-    model: str | None = typer.Option(None, help="Override the model path / HuggingFace identifier"),
-    normalize_size: int = typer.Option(DEFAULT_NORMALIZE_SIZE, help="DINOv2: resize images to N×N"),
+    input_dir: Path = typer.Argument(..., exists=True, file_okay=False, help="Root dir of images"),
+    sscd: bool = typer.Option(False, "--sscd", help="Use SSCD backend (512-dim copy-detection)"),
+    dino: bool = typer.Option(False, "--dino", help="Use DINOv2 backend (1024-dim semantic)"),
+    model: str | None = typer.Option(None, help="Override model path / HuggingFace identifier"),
+    normalize_size: int = typer.Option(DEFAULT_NORMALIZE_SIZE, help="DINOv2: resize to N×N"),
     qdrant_url: str = typer.Option("http://localhost:6333", help="Qdrant server URL"),
-    collection: str | None = typer.Option(None, help="Qdrant collection (default: sfn-sscd or sfn-dinov2)"),
+    collection: str | None = typer.Option(None, help="Qdrant collection name"),
     batch_size: int = typer.Option(32, min=1, help="Images per embedding batch"),
     device: str = typer.Option("auto", help="Compute device: auto | cuda | cpu | mps"),
-    skip_existing: bool = typer.Option(True, help="Skip images already present in the collection"),
+    skip_existing: bool = typer.Option(True, help="Skip images already in the collection"),
 ) -> None:
     """Embed all images under INPUT_DIR and store vectors in Qdrant."""
     if sscd and dino:
@@ -60,9 +60,8 @@ def index(
     except FileNotFoundError as exc:
         typer.echo(f"[ERROR] {exc}", err=True)
         raise typer.Exit(1)
-    typer.echo(
-        f"  backend={type(embedder).__name__}  dim={embedder.embedding_dim}  device={embedder.device}"
-    )
+    typer.echo(f"  backend={type(embedder).__name__}  dim={embedder.embedding_dim}"
+               f"  device={embedder.device}")
 
     typer.echo(f"Connecting to Qdrant  collection={resolved_collection!r} ...")
     try:
