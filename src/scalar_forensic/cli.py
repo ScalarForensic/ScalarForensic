@@ -136,9 +136,7 @@ def index(
 
         data_by_path = {p: data for p, data in raw}
         to_embed = [(p, h) for p, h in unique_path_hash_pairs if h not in already_indexed]
-        skipped += duplicate_hashes_in_batch + (
-            len(unique_path_hash_pairs) - len(to_embed)
-        )
+        skipped += duplicate_hashes_in_batch + (len(unique_path_hash_pairs) - len(to_embed))
 
         if not to_embed:
             typer.echo(
