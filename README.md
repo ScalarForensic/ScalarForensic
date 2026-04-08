@@ -19,8 +19,8 @@ uv sync
 ## Usage
 
 ```bash
-uv run sfn <image-dir> --sscd
-uv run sfn <image-dir> --dino
+uv run sfn index <image-dir> --sscd
+uv run sfn index <image-dir> --dino
 ```
 
 ### Backends
