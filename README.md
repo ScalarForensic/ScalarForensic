@@ -182,6 +182,8 @@ bash scripts/download_deps.sh
 
 This runs `uv export --frozen` to capture the locked dependency list, then downloads all wheels into `vendor/` using `uv pip download`. Because it goes through uv, the custom PyTorch CUDA index configured in `pyproject.toml` is respected automatically — torch and torchvision are fetched from the correct source.
 
+> **Platform requirement:** wheels are specific to OS, CPU architecture, and Python version. Run this script on a machine that matches the airgapped target (e.g. `linux/x86_64`, Python 3.11). Downloading on macOS or a different Python version and transferring to a Linux target will cause install failures on the offline machine.
+
 For optional groups add flags:
 
 ```bash

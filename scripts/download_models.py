@@ -40,10 +40,11 @@ def _progress(block_num: int, block_size: int, total_size: int) -> None:
         print(f"\r  {pct:3d}%  {mb:.1f} / {total_mb:.1f} MB", end="", flush=True)
 
 
-def download_sscd() -> None:
+def download_sscd(force: bool = False) -> None:
     SSCD_DEST.parent.mkdir(parents=True, exist_ok=True)
-    if SSCD_DEST.exists():
+    if SSCD_DEST.exists() and not force:
         print(f"SSCD: already present at {SSCD_DEST} — skipping.")
+        print("  (pass --force to re-download if the file is corrupted or incomplete)")
         return
     tmp = SSCD_DEST.with_suffix(".tmp")
     print(f"Downloading SSCD checkpoint → {SSCD_DEST} ...")
@@ -93,13 +94,18 @@ def main() -> None:
     parser.add_argument("--sscd", action="store_true", help="Download SSCD checkpoint only")
     parser.add_argument("--dino", action="store_true", help="Download DINOv2 snapshot only")
     parser.add_argument("--all", dest="all_models", action="store_true", help="Download both (default)")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download even if the file already exists (use when a prior run was interrupted or the file is corrupted)",
+    )
     args = parser.parse_args()
 
     do_sscd = args.sscd or args.all_models or not (args.sscd or args.dino)
     do_dino = args.dino or args.all_models or not (args.sscd or args.dino)
 
     if do_sscd:
-        download_sscd()
+        download_sscd(force=args.force)
     if do_dino:
         download_dino()
 

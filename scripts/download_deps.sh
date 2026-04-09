@@ -5,6 +5,12 @@
 # Transfer the generated vendor/ directory and requirements.txt to the
 # offline system alongside the rest of the project folder.
 #
+# IMPORTANT: wheels are platform- and Python-version-specific.
+# Run this script on a machine with the same OS, CPU architecture, and
+# Python version as the airgapped target (e.g. linux/x86_64, Python 3.11).
+# Downloading on macOS or a different Python version and transferring to a
+# Linux/x86_64 target will result in install failures on the offline machine.
+#
 # Usage:
 #   bash scripts/download_deps.sh              # core deps → vendor/
 #   bash scripts/download_deps.sh --web        # include web-UI group
