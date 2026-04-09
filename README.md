@@ -27,7 +27,7 @@ All settings live in `.env`. Copy `.env.example` to get started — every key is
 | `SFN_COLLECTION_DINO` | `sfn-dinov2` | Collection name for DINOv2 vectors |
 | `SFN_COLLECTION_SSCD` | `sfn-sscd` | Collection name for SSCD vectors |
 | `SFN_MODEL_DINO` | `facebook/dinov2-large` | DINOv2 model identifier |
-| `SFN_MODEL_SSCD` | `sscd_disc_mixup.torchscript.pt` | Path to SSCD checkpoint |
+| `SFN_MODEL_SSCD` | `models/sscd_disc_mixup.torchscript.pt` | Path to SSCD checkpoint |
 | `SFN_NORMALIZE_SIZE` | `512` | DINOv2 resize dimension (N×N px) |
 | `SFN_BATCH_SIZE` | `32` | Images per embedding batch |
 | `SFN_DEVICE` | `auto` | Compute device: `auto` \| `cuda` \| `cpu` \| `mps` |
@@ -72,11 +72,19 @@ Both flags can be specified together. Images are read and hashed once; each mode
 SSCD is not on HuggingFace — download the checkpoint manually:
 
 ```bash
-wget https://dl.fbaipublicfiles.com/sscd-copy-detection/sscd_disc_mixup.torchscript.pt
+mkdir -p models
+wget -P models https://dl.fbaipublicfiles.com/sscd-copy-detection/sscd_disc_mixup.torchscript.pt
 ```
 
-Place it in the project directory or set `SFN_MODEL_SSCD=/path/to/sscd_disc_mixup.torchscript.pt` in `.env`.  
-DINOv2 downloads automatically on first run.
+The default path is `models/sscd_disc_mixup.torchscript.pt` relative to where you run the command. Override with `SFN_MODEL_SSCD=/absolute/path` in `.env`.
+
+DINOv2 downloads automatically on first run into the HuggingFace cache. For offline use, snapshot it first:
+
+```bash
+python -c "from transformers import AutoModel; AutoModel.from_pretrained('facebook/dinov2-large', cache_dir='models/dinov2-large')"
+```
+
+Then set `SFN_MODEL_DINO=models/dinov2-large` in `.env`.
 
 ### Supported image formats
 
