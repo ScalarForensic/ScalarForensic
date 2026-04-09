@@ -4,7 +4,7 @@ Large-scale image vector indexer for forensic use. Embeds images into a Qdrant v
 
 ## Requirements
 
-- Python 3.13+
+- Python 3.12 (pinned — see [GPU setup](#gpu--hardware-acceleration) for why)
 - [uv](https://github.com/astral-sh/uv)
 - Qdrant: `docker run -p 6333:6333 qdrant/qdrant`
 
@@ -16,6 +16,42 @@ cd ScalarForensic
 uv sync
 cp .env.example .env   # edit to match your environment
 ```
+
+## GPU / hardware acceleration
+
+The repo ships pre-configured for **AMD ROCm 6.4**. The NVIDIA CUDA index is present but commented out — swap the active blocks in `pyproject.toml` to switch backends.
+
+### AMD ROCm (current default)
+
+**System requirements:** ROCm 6.4 installed system-wide (`rocm-smi --showdriverversion`).
+
+**Supported GPU families (ROCm 6.4):**
+- RDNA 2: gfx1030 / 1031 / 1032 (RX 6000 series)
+- RDNA 3: gfx1100 / 1101 / 1102 (RX 7000 series)
+- RDNA 4: gfx1201 (RX 9070 / 9070 XT) — supported natively, no `HSA_OVERRIDE_GFX_VERSION` needed
+
+In `SFN_DEVICE`, both `auto` and `cuda` resolve to the ROCm/HIP backend — PyTorch uses the CUDA interface for ROCm.
+
+**Why Python 3.12 is pinned:**
+PyTorch ships `pytorch-triton-rocm` with a plain `linux_x86_64` wheel tag instead of the `manylinux` tag uv expects. uv's index resolver rejects it as platform-incompatible. The workaround in `pyproject.toml` pins it as a direct project dependency with a hard-coded wheel URL so uv skips tag validation — and direct URL sources in uv only work for packages listed in project dependencies, which requires a fixed Python version to select the right `cpXYZ` wheel.
+
+**Upgrading PyTorch or switching ROCm versions:**
+
+1. Pick the target index — available versions are listed at `https://download.pytorch.org/whl/torch/`.
+2. In `pyproject.toml`, update `[[tool.uv.index]]` to point at the new ROCm index (e.g. `rocm7.2`) and update the `[tool.uv.sources]` `index` references to match.
+3. Find the `pytorch-triton-rocm` version that the new torch requires (visible in the wheel's `.metadata` file at `https://download.pytorch.org/whl/<rocm-index>/torch-<version>+rocm<X.Y>-cpXYZ-cpXYZ-linux_x86_64.whl.metadata`).
+4. Update the `pytorch-triton-rocm==X.Y.Z` pin in `[project.dependencies]` and the direct URL in `[tool.uv.sources]` to match. The URL pattern is:
+   ```
+   https://download-r2.pytorch.org/whl/pytorch_triton_rocm-X.Y.Z-cpABC-cpABC-linux_x86_64.whl
+   ```
+5. Run `uv sync --reinstall-package torch --reinstall-package torchvision --reinstall-package pytorch-triton-rocm`.
+
+### NVIDIA CUDA
+
+1. In `pyproject.toml`, comment out the `pytorch-rocm64` index block and uncomment the `pytorch-cu128` block.
+2. In `[tool.uv.sources]`, point `torch` and `torchvision` at `pytorch-cu128` and remove the `pytorch-triton-rocm` entry entirely (not needed on CUDA).
+3. Remove the `pytorch-triton-rocm` line from `[project.dependencies]`.
+4. Run `uv sync --reinstall-package torch --reinstall-package torchvision`.
 
 ## Configuration
 
