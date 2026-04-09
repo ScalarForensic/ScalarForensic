@@ -5,19 +5,18 @@ import importlib.metadata
 import io
 import sys
 from pathlib import Path
+from typing import TypedDict
 
 import torch
 from PIL import Image
 from torchvision import transforms
 from transformers import AutoImageProcessor, AutoModel
 
-DEFAULT_NORMALIZE_SIZE = 512
-DEFAULT_MODEL_DINOV2 = "facebook/dinov2-large"
-DEFAULT_MODEL_SSCD = "sscd_disc_mixup.torchscript.pt"
-
 _SSCD_INPUT_SIZE = 288
 _IMAGENET_MEAN = [0.485, 0.456, 0.406]
 _IMAGENET_STD = [0.229, 0.224, 0.225]
+
+_EXIF_GPS_IFD_TAG = 34853  # PIL ExifTags.Base.GPSInfo
 
 
 def get_library_versions() -> dict[str, str]:
@@ -34,6 +33,25 @@ def get_library_versions() -> dict[str, str]:
 def hash_bytes(data: bytes) -> str:
     """Return SHA-256 hex digest of already-loaded bytes."""
     return hashlib.sha256(data).hexdigest()
+
+
+class ExifInfo(TypedDict):
+    exif: bool
+    exif_geo_data: bool
+
+
+def extract_exif(data: bytes) -> ExifInfo:
+    """Return EXIF presence flags from raw image bytes.
+
+    Opens the image without converting to RGB — colour conversion strips EXIF on
+    some formats. Falls back to exif=False on any error.
+    """
+    try:
+        img = Image.open(io.BytesIO(data))
+        exif_obj = img.getexif()
+        return ExifInfo(exif=len(exif_obj) > 0, exif_geo_data=_EXIF_GPS_IFD_TAG in exif_obj)
+    except Exception:  # noqa: BLE001
+        return ExifInfo(exif=False, exif_geo_data=False)
 
 
 def _resolve_device(device: str) -> str:
@@ -56,9 +74,7 @@ def _open_rgb(data: bytes) -> Image.Image:
 
 
 class DINOv2Embedder:
-    def __init__(
-        self, model_name: str, device: str = "auto", normalize_size: int = DEFAULT_NORMALIZE_SIZE
-    ) -> None:
+    def __init__(self, model_name: str, device: str = "auto", normalize_size: int = 512) -> None:
         self.model_name = model_name
         self.normalize_size = normalize_size
         self.device = _resolve_device(device)
@@ -126,7 +142,7 @@ class SSCDEmbedder:
                 f"SSCD checkpoint not found: {model_name}\n"
                 "Download it from:\n"
                 "  https://github.com/facebookresearch/sscd-copy-detection/releases\n"
-                "Then pass it with:  --model /path/to/sscd_disc_mixup.torchscript.pt"
+                "Then set SFN_MODEL_SSCD=/path/to/sscd_disc_mixup.torchscript.pt in .env"
             )
         self._model = torch.jit.load(model_name, map_location=self.device)
         self._model.eval()
@@ -173,7 +189,7 @@ def load_embedder(
     model: str,
     use_sscd: bool,
     device: str = "auto",
-    normalize_size: int = DEFAULT_NORMALIZE_SIZE,
+    normalize_size: int = 512,
 ) -> AnyEmbedder:
     """Load the embedder for the explicitly selected backend."""
     if use_sscd:

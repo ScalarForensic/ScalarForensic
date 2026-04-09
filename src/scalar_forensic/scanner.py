@@ -3,11 +3,43 @@
 from collections.abc import Iterator
 from pathlib import Path
 
-IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"})
+IMAGE_EXTENSIONS = frozenset(
+    {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".bmp",
+        ".tiff",
+        ".tif",
+        ".webp",
+        ".gif",
+        ".jp2",
+        ".ico",
+        ".psd",
+    }
+)
+
+_HEIF_EXTENSIONS = frozenset({".heic", ".heif"})
+_HEIF_AVAILABLE: bool = False
+
+
+def _maybe_register_heif() -> None:
+    global _HEIF_AVAILABLE
+    try:
+        import pillow_heif  # noqa: PLC0415
+
+        pillow_heif.register_heif_opener()
+        _HEIF_AVAILABLE = True
+    except ImportError:
+        pass
+
+
+_maybe_register_heif()
 
 
 def scan_images(root: Path) -> Iterator[Path]:
     """Recursively yield image file paths under root."""
+    extensions = IMAGE_EXTENSIONS | (_HEIF_EXTENSIONS if _HEIF_AVAILABLE else frozenset())
     for path in root.rglob("*"):
-        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
+        if path.is_file() and path.suffix.lower() in extensions:
             yield path
