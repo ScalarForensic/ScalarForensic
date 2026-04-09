@@ -81,9 +81,7 @@ class Indexer:
         results, _ = self.client.scroll(
             collection_name=self.collection,
             scroll_filter=Filter(
-                should=[
-                    FieldCondition(key="image_path", match=MatchValue(value=p)) for p in paths
-                ]
+                should=[FieldCondition(key="image_path", match=MatchValue(value=p)) for p in paths]
             ),
             limit=len(paths),
             with_payload=["image_path"],

@@ -71,8 +71,7 @@ def index(
     typer.echo(f"Config: {env_source}")
     typer.echo(f"HEIF/HEIC support: {heif_status}")
     typer.echo(
-        f"Dedup mode: {settings.duplicate_check_mode}"
-        f"  |  EXIF extraction: {settings.extract_exif}"
+        f"Dedup mode: {settings.duplicate_check_mode}  |  EXIF extraction: {settings.extract_exif}"
     )
 
     resolved_input = input_dir or settings.input_dir

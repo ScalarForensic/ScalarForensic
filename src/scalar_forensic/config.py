@@ -26,9 +26,7 @@ class Settings:
         self.collection_dino: str = os.environ.get("SFN_COLLECTION_DINO", "sfn-dinov2")
         self.collection_sscd: str = os.environ.get("SFN_COLLECTION_SSCD", "sfn-sscd")
         self.model_dino: str = os.environ.get("SFN_MODEL_DINO", "facebook/dinov2-large")
-        self.model_sscd: str = os.environ.get(
-            "SFN_MODEL_SSCD", "sscd_disc_mixup.torchscript.pt"
-        )
+        self.model_sscd: str = os.environ.get("SFN_MODEL_SSCD", "sscd_disc_mixup.torchscript.pt")
         self.normalize_size: int = self._parse_int("SFN_NORMALIZE_SIZE", 512)
         self.batch_size: int = self._parse_int("SFN_BATCH_SIZE", 32)
         self.device: str = os.environ.get("SFN_DEVICE", "auto")

@@ -74,9 +74,7 @@ def _open_rgb(data: bytes) -> Image.Image:
 
 
 class DINOv2Embedder:
-    def __init__(
-        self, model_name: str, device: str = "auto", normalize_size: int = 512
-    ) -> None:
+    def __init__(self, model_name: str, device: str = "auto", normalize_size: int = 512) -> None:
         self.model_name = model_name
         self.normalize_size = normalize_size
         self.device = _resolve_device(device)

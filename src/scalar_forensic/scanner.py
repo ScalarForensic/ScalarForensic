@@ -3,10 +3,21 @@
 from collections.abc import Iterator
 from pathlib import Path
 
-IMAGE_EXTENSIONS = frozenset({
-    ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp",
-    ".gif", ".jp2", ".ico", ".psd",
-})
+IMAGE_EXTENSIONS = frozenset(
+    {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".bmp",
+        ".tiff",
+        ".tif",
+        ".webp",
+        ".gif",
+        ".jp2",
+        ".ico",
+        ".psd",
+    }
+)
 
 _HEIF_EXTENSIONS = frozenset({".heic", ".heif"})
 _HEIF_AVAILABLE: bool = False
