@@ -37,6 +37,17 @@ All settings live in `.env`. Copy `.env.example` to get started — every key is
 
 ## Usage
 
+### Web UI (Phase 2)
+
+```bash
+uv sync --group web
+uv run sfn-web          # → http://localhost:8080
+```
+
+Upload images or folders, select query modes (Exact / Altered / Semantic), and explore results with interactive threshold and result-count sliders. Hit images are loaded on demand from the server filesystem.
+
+### Indexing CLI (Phase 1)
+
 ```bash
 uv run sfn <image-dir> --sscd
 uv run sfn <image-dir> --dino
@@ -97,3 +108,19 @@ Set `SFN_EXTRACT_EXIF=true` to store two boolean fields on every indexed point:
 |-------|---------|
 | `exif` | Whether the image contains any EXIF data |
 | `exif_geo_data` | Whether the image contains GPS/geolocation data |
+
+---
+
+## Web UI query modes
+
+| Mode | Logic | Requires |
+|------|-------|---------|
+| **Exact** | SHA-256 hash match — byte-identical file | Any indexed collection |
+| **Altered** | SSCD vector search — cropped, recolored, or lightly modified copies | `sfn-sscd` collection |
+| **Semantic** | DINOv2 vector search — same scene, subject, or style | `sfn-dinov2` collection |
+
+Modes are automatically disabled in the UI if the corresponding collection has not been indexed yet.
+
+## Third-party licenses
+
+Bundled assets and their licenses are listed in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md). All are compatible with GPL-3.

@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 sfn = "scalar_forensic.cli:main"
+sfn-web = "scalar_forensic.web.app:start"
 
 [dependency-groups]
 dev = [
@@ -27,6 +28,20 @@ dev = [
 heif = [
     "pillow-heif>=0.13",
 ]
+web = [
+    "fastapi>=0.111",
+    "uvicorn>=0.29",
+    "python-multipart>=0.0.9",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
 
 [build-system]
 requires = ["hatchling"]
