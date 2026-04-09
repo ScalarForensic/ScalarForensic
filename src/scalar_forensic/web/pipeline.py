@@ -30,11 +30,14 @@ def _get_embedder(key: str, settings: Settings) -> AnyEmbedder:
         else:
             local_model = settings.model_dino
             use_sscd = False
-        effective_model = (
-            settings.embedding_model or local_model
-            if settings.embedding_endpoint
-            else local_model
-        )
+        if settings.embedding_endpoint:
+            if not settings.embedding_model:
+                raise ValueError(
+                    "SFN_EMBEDDING_MODEL must be set when SFN_EMBEDDING_ENDPOINT is configured."
+                )
+            effective_model = settings.embedding_model
+        else:
+            effective_model = local_model
         _embedder_cache[key] = load_embedder(
             model=effective_model,
             use_sscd=use_sscd,

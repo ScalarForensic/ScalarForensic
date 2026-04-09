@@ -278,9 +278,10 @@ class RemoteEmbedder:
 
     Images are JPEG-encoded and sent as base64 data-URIs in the ``input`` array,
     which is the convention used by servers such as Infinity and similar multimodal
-    embedding APIs.  The endpoint URL and an optional Bearer API key are the only
-    required configuration.  ``embedding_dim`` must match the dimension the remote
-    model actually produces (set via ``SFN_EMBEDDING_DIM``).
+    embedding APIs.  Required configuration: endpoint URL (``SFN_EMBEDDING_ENDPOINT``),
+    model name (``SFN_EMBEDDING_MODEL``), and embedding dimension (``SFN_EMBEDDING_DIM``,
+    must match the dimension the remote model actually produces).  An optional Bearer
+    API key may be provided via ``SFN_EMBEDDING_API_KEY``.
     """
 
     def __init__(
@@ -339,13 +340,13 @@ class RemoteEmbedder:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             body = exc.read().decode(errors="replace")
-            raise RuntimeError(
-                f"Embedding endpoint returned HTTP {exc.code}: {body}"
-            ) from exc
+            raise RuntimeError(f"Embedding endpoint returned HTTP {exc.code}: {body}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Embedding endpoint connection failed: {exc.reason}") from exc
 
         items = sorted(data["data"], key=lambda x: x["index"])
         return [item["embedding"] for item in items]

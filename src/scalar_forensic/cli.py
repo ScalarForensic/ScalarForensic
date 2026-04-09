@@ -104,11 +104,16 @@ def index(
     for use_sscd, model_name, collection in models_to_run:
         backend_name = "SSCD" if use_sscd else "DINOv2"
         typer.echo(f"Loading {backend_name} model {model_name!r} on device={settings.device!r} ...")
-        effective_model = (
-            settings.embedding_model or model_name
-            if settings.embedding_endpoint
-            else model_name
-        )
+        if settings.embedding_endpoint:
+            if not settings.embedding_model:
+                typer.echo(
+                    "[ERROR] SFN_EMBEDDING_MODEL must be set when SFN_EMBEDDING_ENDPOINT is configured.",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            effective_model = settings.embedding_model
+        else:
+            effective_model = model_name
         try:
             embedder = load_embedder(
                 model=effective_model,
