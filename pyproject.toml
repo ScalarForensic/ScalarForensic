@@ -48,9 +48,9 @@ explicit = true
 #   uv sync --reinstall-package torch --reinstall-package torchvision
 # rocm7.2 is the newest index (torch 2.11.0); older cards may need rocm6.x or earlier.
 [[tool.uv.index]]
-name = "pytorch-rocm72"
-url = "https://download.pytorch.org/whl/rocm7.2"
-explicit = true
+#name = "pytorch-rocm72"
+#url = "https://download.pytorch.org/whl/rocm7.2"
+#explicit = true
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu128" }]
