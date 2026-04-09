@@ -9,14 +9,14 @@ import logging
 from collections.abc import Generator
 from dataclasses import dataclass, field
 
-logger = logging.getLogger(__name__)
-
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import AnyEmbedder, hash_bytes, load_embedder, preprocess_batch
 from scalar_forensic.web.session import FileEntry, Session
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Embedder cache — models are expensive to load; keep them alive per process

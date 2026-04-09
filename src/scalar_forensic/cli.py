@@ -103,7 +103,6 @@ def index(
     specs: list[tuple[AnyEmbedder, Indexer, str]] = []
     for use_sscd, model_name, collection in models_to_run:
         backend_name = "SSCD" if use_sscd else "DINOv2"
-        typer.echo(f"Loading {backend_name} model {model_name!r} on device={settings.device!r} ...")
         if settings.embedding_endpoint:
             if not settings.embedding_model:
                 typer.echo(
@@ -113,8 +112,13 @@ def index(
                 )
                 raise typer.Exit(1)
             effective_model = settings.embedding_model
+            typer.echo(
+                f"Using remote {backend_name} embedder at {settings.embedding_endpoint!r}"
+                f" (model={effective_model!r}) ..."
+            )
         else:
             effective_model = model_name
+            typer.echo(f"Loading {backend_name} model {model_name!r} on device={settings.device!r} ...")
         try:
             embedder = load_embedder(
                 model=effective_model,
