@@ -267,6 +267,7 @@ def index(
             def _make_upsert(idx, ps, hs, embs, meta, exif):
                 def _job():
                     idx.upsert_batch(ps, hs, embs, meta, exif)
+
                 return _job
 
             upsert_jobs.append(

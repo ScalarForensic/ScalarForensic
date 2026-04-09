@@ -81,15 +81,17 @@ def extract_exif_detailed(data: bytes) -> dict:
         if result["exif_geo_data"]:
             gps_ifd = exif_obj.get_ifd(_EXIF_GPS_IFD_TAG)
             try:
-                lat_dms = gps_ifd.get(2)   # GPSLatitude
-                lat_ref = gps_ifd.get(1)   # GPSLatitudeRef 'N'/'S'
-                lon_dms = gps_ifd.get(4)   # GPSLongitude
-                lon_ref = gps_ifd.get(3)   # GPSLongitudeRef 'E'/'W'
+                lat_dms = gps_ifd.get(2)  # GPSLatitude
+                lat_ref = gps_ifd.get(1)  # GPSLatitudeRef 'N'/'S'
+                lon_dms = gps_ifd.get(4)  # GPSLongitude
+                lon_ref = gps_ifd.get(3)  # GPSLongitudeRef 'E'/'W'
                 if lat_dms and lon_dms:
+
                     def _dms(dms: tuple, ref: str) -> float:
                         d, m, s = [float(x) for x in dms]
                         v = d + m / 60.0 + s / 3600.0
                         return -v if ref in ("S", "W") else v
+
                     result["gps_lat"] = round(_dms(lat_dms, lat_ref or "N"), 6)
                     result["gps_lon"] = round(_dms(lon_dms, lon_ref or "E"), 6)
             except Exception:  # noqa: BLE001
@@ -125,6 +127,7 @@ def _cap_short_side(img: Image.Image) -> Image.Image:
 
 def preprocess_batch(image_data: list[bytes]) -> list[Image.Image]:
     """Shared pre-step: open RGB, cap short side to _SHARED_CAP px, parallelised over CPU cores."""
+
     def _process(data: bytes) -> Image.Image:
         return _cap_short_side(_open_rgb(data))
 
