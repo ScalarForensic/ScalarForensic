@@ -36,6 +36,15 @@ class Settings:
         self.duplicate_check_mode: str = self._parse_dedup_mode()
         self.extract_exif: bool = self._parse_bool("SFN_EXTRACT_EXIF", default=False)
 
+        # --- Qdrant auth (optional) ---
+        self.qdrant_api_key: str | None = os.environ.get("SFN_QDRANT_API_KEY") or None
+
+        # --- Remote embeddings endpoint (optional, OpenAI-compatible) ---
+        self.embedding_endpoint: str | None = os.environ.get("SFN_EMBEDDING_ENDPOINT") or None
+        self.embedding_api_key: str | None = os.environ.get("SFN_EMBEDDING_API_KEY") or None
+        self.embedding_model: str | None = os.environ.get("SFN_EMBEDDING_MODEL") or None
+        self.embedding_dim: int = self._parse_int("SFN_EMBEDDING_DIM", 0)
+
     def _parse_int(self, key: str, default: int) -> int:
         raw = os.environ.get(key)
         if raw is None:
