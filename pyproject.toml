@@ -34,9 +34,22 @@ web = [
     "python-multipart>=0.0.9",
 ]
 
+# NVIDIA CUDA (default)
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+# AMD ROCm — the version must match what your GPU hardware supports.
+# Check with: rocm-smi --showdriverversion
+# Available wheel versions: https://download.pytorch.org/whl/torch/
+# Replace X.Y below with your ROCm version, then change the index name in
+# [tool.uv.sources] to match and run:
+#   uv sync --reinstall-package torch --reinstall-package torchvision
+# rocm7.2 is the newest index (torch 2.11.0); older cards may need rocm6.x or earlier.
+[[tool.uv.index]]
+name = "pytorch-rocm72"
+url = "https://download.pytorch.org/whl/rocm7.2"
 explicit = true
 
 [tool.uv.sources]
