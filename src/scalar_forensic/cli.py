@@ -118,7 +118,9 @@ def index(
             )
         else:
             effective_model = model_name
-            typer.echo(f"Loading {backend_name} model {model_name!r} on device={settings.device!r} ...")
+            typer.echo(
+                f"Loading {backend_name} model {model_name!r} on device={settings.device!r} ..."
+            )
         try:
             embedder = load_embedder(
                 model=effective_model,
