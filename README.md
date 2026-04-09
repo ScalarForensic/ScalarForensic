@@ -67,21 +67,34 @@ All files in all subdirectories of the given folder are scanned recursively.
 
 Both flags can be specified together. Images are read and hashed once; each model embeds and upserts to its own collection.
 
-### SSCD setup (one-time)
+### Model setup (one-time)
 
-SSCD is not on HuggingFace — download the checkpoint manually:
+Use the download script to fetch both models in one step:
+
+```bash
+uv run python scripts/download_models.py          # both models
+uv run python scripts/download_models.py --sscd   # SSCD only
+uv run python scripts/download_models.py --dino   # DINOv2 only
+```
+
+This places the files at the default paths (`models/sscd_disc_mixup.torchscript.pt` and `models/dinov2-large/`) so no `.env` changes are needed.
+
+**Manual alternative — SSCD:**
 
 ```bash
 mkdir -p models
 wget -P models https://dl.fbaipublicfiles.com/sscd-copy-detection/sscd_disc_mixup.torchscript.pt
 ```
 
-The default path is `models/sscd_disc_mixup.torchscript.pt` relative to where you run the command. Override with `SFN_MODEL_SSCD=/absolute/path` in `.env`.
+**Manual alternative — DINOv2:**
 
-DINOv2 downloads automatically on first run into the HuggingFace cache. For offline use, snapshot it first:
+DINOv2 downloads automatically on first run into the HuggingFace cache. To snapshot it for offline use:
 
 ```bash
-python -c "from transformers import AutoModel; AutoModel.from_pretrained('facebook/dinov2-large', cache_dir='models/dinov2-large')"
+python -c "
+from huggingface_hub import snapshot_download
+snapshot_download('facebook/dinov2-large', local_dir='models/dinov2-large')
+"
 ```
 
 Then set `SFN_MODEL_DINO=models/dinov2-large` in `.env`.
@@ -147,9 +160,77 @@ uv run python test/prepare_searchfiles.py --count 20 --seed 7
 `prepare_searchfiles.py` prints step-by-step instructions at the end:
 install deps → download SSCD model → start Qdrant → index → start web server → visit `localhost:8080` → upload from `test/searchfiles/`.
 
-## Roadmap
+## Offline / airgapped deployment
 
-- **Offline / air-gapped deployment** — bundle both models (`models/sscd_disc_mixup.torchscript.pt` + `models/dinov2-large/`) and a pre-populated uv package cache so the entire project folder can be copied to an offline machine and run with `uv sync --offline`
+Both models and all Python dependencies can be pre-downloaded and bundled with the project so the entire folder runs without internet access.
+
+### On the internet-connected machine
+
+**1. Download models:**
+
+```bash
+uv run python scripts/download_models.py
+```
+
+Models land at `models/sscd_disc_mixup.torchscript.pt` and `models/dinov2-large/` — the default paths, so no `.env` changes are needed.
+
+**2. Download Python wheels:**
+
+```bash
+bash scripts/download_deps.sh
+```
+
+This runs `uv export --frozen` to capture the locked dependency list, then downloads all wheels into `vendor/` using `uv pip download`. Because it goes through uv, the custom PyTorch CUDA index configured in `pyproject.toml` is respected automatically — torch and torchvision are fetched from the correct source.
+
+For optional groups add flags:
+
+```bash
+bash scripts/download_deps.sh --web        # include web-UI dependencies
+bash scripts/download_deps.sh --heif       # include HEIF/HEIC support
+bash scripts/download_deps.sh --web --heif # all optional groups
+```
+
+**3. Save the Qdrant Docker image:**
+
+```bash
+docker pull qdrant/qdrant
+docker save qdrant/qdrant | gzip > qdrant.tar.gz
+```
+
+**4. Transfer** the entire project folder to the offline machine, including:
+
+| Path | Contents |
+|------|----------|
+| `models/` | SSCD checkpoint + DINOv2 snapshot |
+| `vendor/` | Python wheels |
+| `requirements.txt` | Locked dependency list (written by the script) |
+| `qdrant.tar.gz` | Qdrant Docker image |
+
+---
+
+### On the airgapped machine
+
+**5. Install Python dependencies from the local wheelhouse:**
+
+```bash
+uv venv
+uv pip install --no-index --find-links vendor/ -r requirements.txt
+uv pip install --no-deps -e .
+```
+
+**6. Load and start Qdrant:**
+
+```bash
+docker load < qdrant.tar.gz
+docker run -p 6333:6333 qdrant/qdrant
+```
+
+**7. Run:**
+
+```bash
+source .venv/bin/activate
+sfn <image-dir> --dino --sscd
+```
 
 ## Third-party licenses
 
