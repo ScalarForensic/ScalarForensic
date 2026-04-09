@@ -25,19 +25,25 @@ _embedder_cache: dict[str, AnyEmbedder] = {}
 def _get_embedder(key: str, settings: Settings) -> AnyEmbedder:
     if key not in _embedder_cache:
         if key == "sscd":
-            _embedder_cache[key] = load_embedder(
-                model=settings.model_sscd,
-                use_sscd=True,
-                device=settings.device,
-                normalize_size=settings.normalize_size,
-            )
+            local_model = settings.model_sscd
+            use_sscd = True
         else:
-            _embedder_cache[key] = load_embedder(
-                model=settings.model_dino,
-                use_sscd=False,
-                device=settings.device,
-                normalize_size=settings.normalize_size,
-            )
+            local_model = settings.model_dino
+            use_sscd = False
+        effective_model = (
+            settings.embedding_model or local_model
+            if settings.embedding_endpoint
+            else local_model
+        )
+        _embedder_cache[key] = load_embedder(
+            model=effective_model,
+            use_sscd=use_sscd,
+            device=settings.device,
+            normalize_size=settings.normalize_size,
+            remote_endpoint=settings.embedding_endpoint,
+            remote_api_key=settings.embedding_api_key,
+            embedding_dim=settings.embedding_dim,
+        )
     return _embedder_cache[key]
 
 
@@ -160,7 +166,7 @@ def query_session(
 
     Fast — no re-embedding. Called on every slider change.
     """
-    client = QdrantClient(url=settings.qdrant_url)
+    client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
     results: list[FileResult] = []
 
     for entry in session.files:
@@ -295,7 +301,7 @@ def _query_vector(
 def get_available_modes(settings: Settings) -> list[str]:
     """Return which query modes are usable based on existing Qdrant collections."""
     try:
-        client = QdrantClient(url=settings.qdrant_url)
+        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
         existing = {c.name for c in client.get_collections().collections}
     except Exception:  # noqa: BLE001
         return []

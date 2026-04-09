@@ -17,8 +17,10 @@ from qdrant_client.models import (
 
 
 class Indexer:
-    def __init__(self, url: str, collection: str, embedding_dim: int) -> None:
-        self.client = QdrantClient(url=url)
+    def __init__(
+        self, url: str, collection: str, embedding_dim: int, api_key: str | None = None
+    ) -> None:
+        self.client = QdrantClient(url=url, api_key=api_key)
         self.collection = collection
         self._ensure_collection(embedding_dim)
 

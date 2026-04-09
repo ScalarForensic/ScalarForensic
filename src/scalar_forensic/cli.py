@@ -104,14 +104,22 @@ def index(
     for use_sscd, model_name, collection in models_to_run:
         backend_name = "SSCD" if use_sscd else "DINOv2"
         typer.echo(f"Loading {backend_name} model {model_name!r} on device={settings.device!r} ...")
+        effective_model = (
+            settings.embedding_model or model_name
+            if settings.embedding_endpoint
+            else model_name
+        )
         try:
             embedder = load_embedder(
-                model=model_name,
+                model=effective_model,
                 use_sscd=use_sscd,
                 device=settings.device,
                 normalize_size=settings.normalize_size,
+                remote_endpoint=settings.embedding_endpoint,
+                remote_api_key=settings.embedding_api_key,
+                embedding_dim=settings.embedding_dim,
             )
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, ValueError) as exc:
             typer.echo(f"[ERROR] {exc}", err=True)
             raise typer.Exit(1)
         fp16 = embedder.device == "cuda"
@@ -128,6 +136,7 @@ def index(
                 url=settings.qdrant_url,
                 collection=collection,
                 embedding_dim=embedder.embedding_dim,
+                api_key=settings.qdrant_api_key,
             )
         except ValueError as exc:
             typer.echo(f"[ERROR] {exc}", err=True)

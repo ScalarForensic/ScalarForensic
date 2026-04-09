@@ -1,9 +1,13 @@
-"""Image embedding backends: DINOv2 (HuggingFace) and SSCD (TorchScript)."""
+"""Image embedding backends: DINOv2 (HuggingFace), SSCD (TorchScript), and remote OpenAI-compat."""
 
+import base64
 import hashlib
 import importlib.metadata
 import io
+import json
 import sys
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TypedDict
@@ -265,10 +269,93 @@ class SSCDEmbedder:
 
 
 # ---------------------------------------------------------------------------
+# Remote (OpenAI-compatible embeddings endpoint)
+# ---------------------------------------------------------------------------
+
+
+class RemoteEmbedder:
+    """Calls an OpenAI-compatible POST /v1/embeddings endpoint.
+
+    Images are JPEG-encoded and sent as base64 data-URIs in the ``input`` array,
+    which is the convention used by servers such as Infinity and similar multimodal
+    embedding APIs.  The endpoint URL and an optional Bearer API key are the only
+    required configuration.  ``embedding_dim`` must match the dimension the remote
+    model actually produces (set via ``SFN_EMBEDDING_DIM``).
+    """
+
+    def __init__(
+        self,
+        endpoint: str,
+        model_name: str,
+        embedding_dim: int,
+        api_key: str | None = None,
+        normalize_size: int = 512,
+    ) -> None:
+        self.endpoint = endpoint.rstrip("/")
+        self.model_name = model_name
+        self._embedding_dim = embedding_dim
+        self._api_key = api_key
+        self.normalize_size = normalize_size
+        self.device = "remote"
+        self._model_hash: str | None = None
+
+    @property
+    def embedding_dim(self) -> int:
+        return self._embedding_dim
+
+    @property
+    def inference_dtype(self) -> str:
+        return "float32"
+
+    @property
+    def model_hash(self) -> str:
+        if self._model_hash is None:
+            h = hashlib.sha256()
+            h.update(self.endpoint.encode())
+            h.update(self.model_name.encode())
+            self._model_hash = h.hexdigest()
+        return self._model_hash
+
+    def normalize_batch_bytes(self, images: list[Image.Image]) -> list[Image.Image]:
+        return images  # server-side preprocessing assumed
+
+    def embed_images(self, images: list[Image.Image]) -> list[list[float]]:
+        inputs: list[str] = []
+        for img in images:
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=95)
+            b64 = base64.b64encode(buf.getvalue()).decode()
+            inputs.append(f"data:image/jpeg;base64,{b64}")
+
+        payload = json.dumps({"model": self.model_name, "input": inputs}).encode()
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+
+        req = urllib.request.Request(
+            f"{self.endpoint}/v1/embeddings",
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode(errors="replace")
+            raise RuntimeError(
+                f"Embedding endpoint returned HTTP {exc.code}: {body}"
+            ) from exc
+
+        items = sorted(data["data"], key=lambda x: x["index"])
+        return [item["embedding"] for item in items]
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
-AnyEmbedder = DINOv2Embedder | SSCDEmbedder
+AnyEmbedder = DINOv2Embedder | SSCDEmbedder | RemoteEmbedder
 
 
 def load_embedder(
@@ -276,8 +363,30 @@ def load_embedder(
     use_sscd: bool,
     device: str = "auto",
     normalize_size: int = 512,
+    *,
+    remote_endpoint: str | None = None,
+    remote_api_key: str | None = None,
+    embedding_dim: int = 0,
 ) -> AnyEmbedder:
-    """Load the embedder for the explicitly selected backend."""
+    """Load the embedder for the selected backend.
+
+    When *remote_endpoint* is set the remote OpenAI-compatible endpoint is used
+    and *use_sscd* / *device* are ignored.  *embedding_dim* must be > 0 in that
+    case (set ``SFN_EMBEDDING_DIM`` to the dimension the remote model produces).
+    """
+    if remote_endpoint is not None:
+        if embedding_dim <= 0:
+            raise ValueError(
+                "SFN_EMBEDDING_DIM must be set to a positive integer "
+                "when SFN_EMBEDDING_ENDPOINT is configured."
+            )
+        return RemoteEmbedder(
+            endpoint=remote_endpoint,
+            model_name=model,
+            embedding_dim=embedding_dim,
+            api_key=remote_api_key,
+            normalize_size=normalize_size,
+        )
     if use_sscd:
         return SSCDEmbedder(model_name=model, device=device)
     return DINOv2Embedder(model_name=model, device=device, normalize_size=normalize_size)
