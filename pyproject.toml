@@ -12,6 +12,7 @@ dependencies = [
     "torchvision>=0.15",
     "transformers>=4.40",
     "Pillow>=10.0",
+    "python-dotenv>=1.0",
 ]
 
 [project.scripts]
@@ -22,6 +23,9 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=6.0",
     "ruff>=0.11",
+]
+heif = [
+    "pillow-heif>=0.13",
 ]
 
 [build-system]

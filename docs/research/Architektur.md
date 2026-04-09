@@ -8,21 +8,31 @@ https://github.com/ScalarForensic/ScalarForensic
 
 * Mehrkomponentensystem
     * Stage1 - Batch Embedding
-        * noch zu klären: Hardware, Netzwerk
-        * CLI-Tool
-        * Anbindung 
-            * Datensatz
-            * Qdrant
-            * Embeddings (GPU?)
+        * CLI-Tool (`sfn`)
+        * Konfiguration via `.env` (alle Defaults, kein CLI-Overload)
+        * Anbindung
+            * Datensatz (Ordner rekursiv, alle Unterordner)
+            * Qdrant (URL konfigurierbar)
+            * Embeddings (GPU/CPU/MPS, automatische Erkennung)
         * Berechnungsschritte
-            * Normalisierung derBilder
-            * Embedding (Batching/sequentiell)
-            * Qdrant
-                * + Metadaten
+            * Lesen & Hashing (SHA-256, einmalig pro Bild)
+            * Deduplizierung
+                * Modi: `hash` | `filepath` | `both`
+                * `filepath` sinnvoll für große Dateien (z.B. Video)
+            * Normalisierung der Bilder
+            * Embedding (Batching, SSCD & DINOv2 gleichzeitig möglich)
+            * Qdrant Upsert
+                * Metadaten
                     * Library-Versionen
                     * Hashwert des Embedding-Modells
                     * Hashwert der Bilder
-                    * etc
+                    * Absoluter Dateipfad
+                    * Zeitstempel
+                    * `exif` (bool) — EXIF-Daten vorhanden?
+                    * `exif_geo_data` (bool) — GPS-Daten vorhanden?
+        * Unterstützte Bildformate
+            * `.jpg` `.jpeg` `.png` `.bmp` `.tiff` `.tif` `.webp` `.gif` `.jp2` `.ico` `.psd`
+            * `.heic` `.heif` optional (pillow-heif)
     * Stage2 - GUI Client
         * Flask
         * Embeddings (CPU oder Netzwerk-API)
@@ -43,3 +53,4 @@ https://github.com/ScalarForensic/ScalarForensic
         * erforderlich wegen visueller Fähigkeiten, SOTA
     * SSCD ResNet50 - 3-4h bei 2TiB a 512*512
     * dinov2 - ca. *10, aber leistungsfähiger
+    * beide Modelle können gleichzeitig in einem Lauf verwendet werden
