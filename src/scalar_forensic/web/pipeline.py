@@ -5,8 +5,11 @@ Imports from the existing backend — no modifications to those modules.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Generator
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
@@ -306,7 +309,8 @@ def get_available_modes(settings: Settings) -> list[str]:
     try:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
         existing = {c.name for c in client.get_collections().collections}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not reach Qdrant at %s: %s", settings.qdrant_url, exc)
         return []
 
     modes: list[str] = ["exact"]  # exact works as long as any collection exists

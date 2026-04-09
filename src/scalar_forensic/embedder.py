@@ -314,6 +314,7 @@ class RemoteEmbedder:
             h = hashlib.sha256()
             h.update(self.endpoint.encode())
             h.update(self.model_name.encode())
+            h.update(str(self._embedding_dim).encode())
             self._model_hash = h.hexdigest()
         return self._model_hash
 
@@ -343,13 +344,33 @@ class RemoteEmbedder:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read())
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode(errors="replace")
+            body = exc.read(4096).decode(errors="replace")
             raise RuntimeError(f"Embedding endpoint returned HTTP {exc.code}: {body}") from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Embedding endpoint connection failed: {exc.reason}") from exc
 
-        items = sorted(data["data"], key=lambda x: x["index"])
-        return [item["embedding"] for item in items]
+        raw_data = data.get("data")
+        if not isinstance(raw_data, list):
+            excerpt = str(data)[:200]
+            raise RuntimeError(f"Embedding response missing 'data' list: {excerpt}")
+        items = sorted(raw_data, key=lambda x: x["index"])
+        expected = len(images)
+        if len(items) != expected:
+            raise RuntimeError(
+                f"Embedding response returned {len(items)} items for {expected} inputs"
+            )
+        indices = {item["index"] for item in items}
+        if indices != set(range(expected)):
+            raise RuntimeError(
+                f"Embedding response indices {sorted(indices)} do not cover 0..{expected - 1}"
+            )
+        embeddings = [item["embedding"] for item in items]
+        for i, emb in enumerate(embeddings):
+            if len(emb) != self._embedding_dim:
+                raise RuntimeError(
+                    f"Embedding [{i}] has length {len(emb)}, expected {self._embedding_dim}"
+                )
+        return embeddings
 
 
 # ---------------------------------------------------------------------------
