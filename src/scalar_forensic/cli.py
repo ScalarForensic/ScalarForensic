@@ -107,7 +107,8 @@ def index(
         if settings.embedding_endpoint:
             if not settings.embedding_model:
                 typer.echo(
-                    "[ERROR] SFN_EMBEDDING_MODEL must be set when SFN_EMBEDDING_ENDPOINT is configured.",
+                    "[ERROR] SFN_EMBEDDING_MODEL must be set when"
+                    " SFN_EMBEDDING_ENDPOINT is configured.",
                     err=True,
                 )
                 raise typer.Exit(1)
