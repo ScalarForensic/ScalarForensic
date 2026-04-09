@@ -208,4 +208,6 @@ __marimo__/
 
 
 data/
+models/
 qdrant
+analysis_test/

@@ -27,7 +27,7 @@ All settings live in `.env`. Copy `.env.example` to get started — every key is
 | `SFN_COLLECTION_DINO` | `sfn-dinov2` | Collection name for DINOv2 vectors |
 | `SFN_COLLECTION_SSCD` | `sfn-sscd` | Collection name for SSCD vectors |
 | `SFN_MODEL_DINO` | `facebook/dinov2-large` | DINOv2 model identifier |
-| `SFN_MODEL_SSCD` | `sscd_disc_mixup.torchscript.pt` | Path to SSCD checkpoint |
+| `SFN_MODEL_SSCD` | `models/sscd_disc_mixup.torchscript.pt` | Path to SSCD checkpoint |
 | `SFN_NORMALIZE_SIZE` | `512` | DINOv2 resize dimension (N×N px) |
 | `SFN_BATCH_SIZE` | `32` | Images per embedding batch |
 | `SFN_DEVICE` | `auto` | Compute device: `auto` \| `cuda` \| `cpu` \| `mps` |
@@ -36,6 +36,17 @@ All settings live in `.env`. Copy `.env.example` to get started — every key is
 | `SFN_EXTRACT_EXIF` | `false` | Store EXIF presence flags in the database |
 
 ## Usage
+
+### Web UI (Phase 2)
+
+```bash
+uv sync --group web
+uv run sfn-web          # → http://localhost:8080
+```
+
+Upload images or folders, select query modes (Exact / Altered / Semantic), and explore results with interactive threshold and result-count sliders. Hit images are loaded on demand from the server filesystem.
+
+### Indexing CLI (Phase 1)
 
 ```bash
 uv run sfn <image-dir> --sscd
@@ -61,11 +72,19 @@ Both flags can be specified together. Images are read and hashed once; each mode
 SSCD is not on HuggingFace — download the checkpoint manually:
 
 ```bash
-wget https://dl.fbaipublicfiles.com/sscd-copy-detection/sscd_disc_mixup.torchscript.pt
+mkdir -p models
+wget -P models https://dl.fbaipublicfiles.com/sscd-copy-detection/sscd_disc_mixup.torchscript.pt
 ```
 
-Place it in the project directory or set `SFN_MODEL_SSCD=/path/to/sscd_disc_mixup.torchscript.pt` in `.env`.  
-DINOv2 downloads automatically on first run.
+The default path is `models/sscd_disc_mixup.torchscript.pt` relative to where you run the command. Override with `SFN_MODEL_SSCD=/absolute/path` in `.env`.
+
+DINOv2 downloads automatically on first run into the HuggingFace cache. For offline use, snapshot it first:
+
+```bash
+python -c "from transformers import AutoModel; AutoModel.from_pretrained('facebook/dinov2-large', cache_dir='models/dinov2-large')"
+```
+
+Then set `SFN_MODEL_DINO=models/dinov2-large` in `.env`.
 
 ### Supported image formats
 
@@ -97,3 +116,23 @@ Set `SFN_EXTRACT_EXIF=true` to store two boolean fields on every indexed point:
 |-------|---------|
 | `exif` | Whether the image contains any EXIF data |
 | `exif_geo_data` | Whether the image contains GPS/geolocation data |
+
+---
+
+## Web UI query modes
+
+| Mode | Logic | Requires |
+|------|-------|---------|
+| **Exact** | SHA-256 hash match — byte-identical file | Any indexed collection |
+| **Altered** | SSCD vector search — cropped, recolored, or lightly modified copies | `sfn-sscd` collection |
+| **Semantic** | DINOv2 vector search — same scene, subject, or style | `sfn-dinov2` collection |
+
+Modes are automatically disabled in the UI if the corresponding collection has not been indexed yet.
+
+## Roadmap
+
+- **Offline / air-gapped deployment** — bundle both models (`models/sscd_disc_mixup.torchscript.pt` + `models/dinov2-large/`) and a pre-populated uv package cache so the entire project folder can be copied to an offline machine and run with `uv sync --offline`
+
+## Third-party licenses
+
+Bundled assets and their licenses are listed in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md). All are compatible with GPL-3.

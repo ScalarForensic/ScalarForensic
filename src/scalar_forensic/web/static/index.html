@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ScalarForensic</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/alpine.js"></script>
+</head>
+<body>
+<div id="app" x-data="sfn()" x-init="init()" x-cloak>
+
+  <!-- ── Header ── -->
+  <header>
+    <div class="header-logo">Scalar<span>Forensic</span></div>
+    <div class="mode-toggles">
+      <template x-for="mode in ['exact','altered','semantic']" :key="mode">
+        <button class="mode-btn"
+          :class="{
+            'active-exact':   mode === 'exact'    && selectedModes.includes('exact'),
+            'active-altered': mode === 'altered'  && selectedModes.includes('altered'),
+            'active-dino':    mode === 'semantic' && selectedModes.includes('semantic'),
+          }"
+          :disabled="!availableModes.includes(mode)"
+          @click="toggleMode(mode)"
+          :title="!availableModes.includes(mode) ? 'Collection not indexed yet' : ''">
+          <span class="dot"></span>
+          <span x-text="mode === 'exact' ? 'Exact' : mode === 'altered' ? 'Altered' : 'Semantic'"></span>
+        </button>
+      </template>
+    </div>
+  </header>
+
+  <!-- ── Upload ── -->
+  <div class="upload-section" x-show="phase === 'upload'">
+    <div class="drop-zone" :class="{'drag-over': dragOver}"
+         @dragover.prevent="dragOver = true"
+         @dragleave.prevent="dragOver = false"
+         @drop.prevent="onDrop($event)">
+      <div class="drop-zone-label">Drop images or folders here</div>
+      <div class="drop-zone-btns">
+        <button class="btn-secondary" @click.stop="$refs.folderInput.click()">📁 Select Folder</button>
+        <button class="btn-secondary" @click.stop="$refs.fileInput.click()">🖼 Select Files</button>
+      </div>
+      <div class="file-count-badge" x-show="pendingFiles.length > 0">
+        <span x-text="pendingFiles.length"></span> file<span x-show="pendingFiles.length !== 1">s</span> queued
+      </div>
+      <input type="file" multiple accept="image/*" style="display:none" x-ref="fileInput"
+             @change="addFiles($event.target.files); $event.target.value=''">
+      <input type="file" multiple style="display:none" x-ref="folderInput" webkitdirectory
+             @change="addFiles($event.target.files); $event.target.value=''">
+    </div>
+    <div class="upload-actions">
+      <button class="btn-secondary" @click.stop="pendingFiles = []" x-show="pendingFiles.length > 0">Clear</button>
+      <button class="btn-primary"
+        :disabled="pendingFiles.length === 0 || selectedModes.length === 0"
+        @click="startAnalysis()">▶ Analyze</button>
+    </div>
+  </div>
+
+  <!-- ── Progress ── -->
+  <div class="upload-section" x-show="phase === 'analyzing'" style="padding-top:12px">
+    <div class="progress-track">
+      <div class="progress-fill" :style="`width: ${progressPct}%`"></div>
+    </div>
+    <div class="progress-label">
+      <span x-text="`${progress.current} / ${progress.total}`"></span>
+      <span x-text="progress.filename" style="max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right"></span>
+    </div>
+  </div>
+
+  <!-- ── Stats bar ── -->
+  <div class="stats-bar" x-show="phase === 'results'">
+    <div class="stat"><span class="stat-value" x-text="results.length"></span><span class="stat-label">Files</span></div>
+    <div class="stat"><span class="stat-value" x-text="matchedFiles.length"></span><span class="stat-label">Matched</span></div>
+    <div class="stat"><span class="stat-value" x-text="results.reduce((s,r)=>s+r.hits.length,0)"></span><span class="stat-label">Total hits</span></div>
+    <div style="flex:1"></div>
+    <button class="btn-secondary" @click="resetToUpload()">← New search</button>
+  </div>
+
+  <!-- ── 4-panel results layout ── -->
+  <div class="results-layout" x-show="phase === 'results'">
+
+    <!-- Panel 1: Controls + file lists + folder tree -->
+    <div class="left-panel">
+
+      <div class="panel-header">Query Controls</div>
+      <div class="sliders">
+        <div class="slider-row">
+          <div class="slider-label">
+            <span>Max hits</span>
+            <span class="slider-value" x-text="limit"></span>
+          </div>
+          <input type="range" min="1" max="50" step="1" x-model.number="limit" @input="debouncedQuery()">
+        </div>
+        <div class="slider-row">
+          <div class="slider-label">
+            <span>Altered threshold</span>
+            <span class="slider-value altered-val" x-text="thresholdAltered.toFixed(2)"></span>
+          </div>
+          <input type="range" min="0" max="1" step="0.01" x-model.number="thresholdAltered" @input="debouncedQuery()" class="range-altered">
+        </div>
+        <div class="slider-row">
+          <div class="slider-label">
+            <span>Semantic threshold</span>
+            <span class="slider-value semantic-val" x-text="thresholdSemantic.toFixed(2)"></span>
+          </div>
+          <input type="range" min="0" max="1" step="0.01" x-model.number="thresholdSemantic" @input="debouncedQuery()" class="range-semantic">
+        </div>
+      </div>
+
+      <div class="panel-header section-header">
+        Matched <span class="count-chip" x-text="matchedFiles.length"></span>
+      </div>
+      <div class="file-list matched-list">
+        <template x-for="(r, idx) in matchedFiles" :key="r.file_id">
+          <div class="file-item" :class="{selected: selectedFileId===r.file_id}"
+               :style="`animation-delay:${idx*20}ms`"
+               @click="selectFile(r.file_id)">
+            <span class="file-name" :title="r.filename" x-text="shortName(r.filename)"></span>
+            <span class="hit-count" x-text="r.hits.length"></span>
+          </div>
+        </template>
+      </div>
+
+      <div class="panel-header section-header">
+        Not Matched <span class="count-chip muted-chip" x-text="unmatchedFiles.length"></span>
+      </div>
+      <div class="file-list unmatched-list">
+        <template x-for="r in unmatchedFiles" :key="r.file_id">
+          <div class="file-item no-hits" :class="{selected: selectedFileId===r.file_id}"
+               @click="selectFile(r.file_id)">
+            <span class="file-name" :title="r.filename" x-text="shortName(r.filename)"></span>
+            <span class="hit-count zero">0</span>
+          </div>
+        </template>
+        <div x-show="unmatchedFiles.length===0" class="empty-list-msg">—</div>
+      </div>
+
+      <div class="panel-header section-header">Folders</div>
+      <div class="folder-tree">
+        <template x-for="f in folderTree" :key="f.name">
+          <div class="folder-node">
+            <span class="folder-icon">▸</span>
+            <span class="folder-name" x-text="f.name"></span>
+            <span class="folder-count" x-text="f.count"></span>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- Panel 2: Query image -->
+    <div class="image-panel">
+      <div class="panel-header">Query Image</div>
+
+      <template x-if="!selectedFileId">
+        <div class="placeholder">Select a file</div>
+      </template>
+
+      <template x-if="selectedFileId">
+        <div class="image-panel-inner">
+          <div class="image-box">
+            <img :src="`/api/query-image/${sessionId}/${selectedFileId}`"
+                 :alt="selectedFile?.filename">
+          </div>
+          <div class="image-subs">
+            <div class="sub-row"
+                 :class="{'sub-match': matchMeta && shortName(selectedFile?.filename??'') === selectedHit?.path?.split('/').pop()}">
+              <span class="sub-label">File</span>
+              <span class="sub-val" x-text="shortName(selectedFile?.filename??'')"></span>
+            </div>
+            <div class="sub-row">
+              <span class="sub-label">Path</span>
+              <span class="sub-val mono" x-text="folderOf(selectedFile?.filename??'') || '—'"></span>
+            </div>
+            <div class="sub-row" x-show="queryMeta?.hash"
+                 :class="{'sub-match': queryMeta?.hash && matchMeta?.hash && queryMeta.hash === matchMeta.hash}">
+              <span class="sub-label">Hash</span>
+              <span class="sub-val mono" x-text="(queryMeta?.hash??'').slice(0,16)+'…'"></span>
+            </div>
+            <div class="sub-row">
+              <span class="sub-label">Meta</span>
+              <span x-show="queryMeta?.exif_geo_data" class="meta-tag">GPS</span>
+              <span x-show="queryMeta?.exif && !queryMeta?.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
+              <span x-show="queryMeta && !queryMeta?.exif" class="muted-text">none</span>
+            </div>
+            <div class="sub-row" x-show="queryMeta?.width"
+                 :class="{'sub-match': queryMeta?.width && matchMeta?.width && queryMeta.width === matchMeta.width && queryMeta.height === matchMeta.height}">
+              <span class="sub-label">Dims</span>
+              <span class="sub-val" x-text="`${queryMeta?.width}×${queryMeta?.height}`"></span>
+            </div>
+          </div>
+          <div class="meta-box" x-show="_metaItemsWithMatch(queryMeta, matchMeta).length > 0">
+            <div class="meta-box-hdr">EXIF / File Info</div>
+            <div class="meta-grid">
+              <template x-for="item in _metaItemsWithMatch(queryMeta, matchMeta)" :key="item.label">
+                <div class="meta-item" :class="{'meta-match': item.match, 'meta-partial': item.partial}">
+                  <span class="meta-k" x-text="item.label"></span>
+                  <span class="meta-v" x-text="item.value"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- Panel 3: Best match -->
+    <div class="image-panel">
+      <div class="panel-header">
+        Best Match
+        <template x-if="selectedHit">
+          <div class="header-pills">
+            <template x-for="p in hitPills(selectedHit.scores)" :key="p.mode">
+              <div class="pill-group">
+                <span class="badge" :class="`badge-${p.mode}`"
+                      x-text="p.mode.toUpperCase()"></span>
+                <span class="pill-score" x-text="p.score>=1?'1.000':p.score.toFixed(3)"></span>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+
+      <template x-if="!selectedHit">
+        <div class="placeholder">No hits</div>
+      </template>
+
+      <template x-if="selectedHit">
+        <div class="image-panel-inner">
+          <div class="image-box">
+            <img :src="`/api/hit-image?path=${encodeURIComponent(selectedHit.path)}`"
+                 :alt="selectedHit.path"
+                 @error="$el.style.opacity='0.2'">
+          </div>
+          <div class="image-subs">
+            <div class="sub-row"
+                 :class="{'sub-match': queryMeta && selectedHit.path.split('/').pop() === shortName(selectedFile?.filename??'')}">
+              <span class="sub-label">File</span>
+              <span class="sub-val" x-text="selectedHit.path.split('/').pop()"></span>
+            </div>
+            <div class="sub-row">
+              <span class="sub-label">Path</span>
+              <span class="sub-val mono" x-text="selectedHit.path.split('/').slice(0,-1).join('/')"></span>
+            </div>
+            <div class="sub-row" x-show="matchMeta?.hash"
+                 :class="{'sub-match': queryMeta?.hash && matchMeta?.hash && queryMeta.hash === matchMeta.hash}">
+              <span class="sub-label">Hash</span>
+              <span class="sub-val mono" x-text="(matchMeta?.hash??'').slice(0,16)+'…'"></span>
+            </div>
+            <div class="sub-row">
+              <span class="sub-label">Meta</span>
+              <span x-show="selectedHit.exif_geo_data" class="meta-tag">GPS</span>
+              <span x-show="selectedHit.exif && !selectedHit.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
+              <span x-show="!selectedHit.exif" class="muted-text">none</span>
+            </div>
+            <div class="sub-row" x-show="matchMeta?.width"
+                 :class="{'sub-match': queryMeta?.width && matchMeta?.width && queryMeta.width === matchMeta.width && queryMeta.height === matchMeta.height}">
+              <span class="sub-label">Dims</span>
+              <span class="sub-val" x-text="`${matchMeta?.width}×${matchMeta?.height}`"></span>
+            </div>
+          </div>
+          <div class="meta-box" x-show="_metaItemsWithMatch(matchMeta, queryMeta).length > 0">
+            <div class="meta-box-hdr">EXIF / File Info</div>
+            <div class="meta-grid">
+              <template x-for="item in _metaItemsWithMatch(matchMeta, queryMeta)" :key="item.label">
+                <div class="meta-item" :class="{'meta-match': item.match, 'meta-partial': item.partial}">
+                  <span class="meta-k" x-text="item.label"></span>
+                  <span class="meta-v" x-text="item.value"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- Panel 4: Hits list -->
+    <div class="right-panel">
+      <div class="panel-header">
+        Hits
+        <template x-if="selectedFile">
+          <span class="count-chip" x-text="selectedFile.hits.length"></span>
+        </template>
+      </div>
+
+      <div x-show="!selectedFileId" class="no-hits-msg">No file selected</div>
+      <div x-show="selectedFileId && selectedFile?.hits.length===0" class="no-hits-msg">No hits</div>
+
+      <div class="hits-list" x-show="selectedFile?.hits.length > 0">
+        <template x-for="hit in (selectedFile?.hits??[])" :key="hit.path">
+          <div class="hit-card" :class="{selected: hit.path===selectedHit?.path}"
+               @click="selectHit(hit)">
+            <img class="hit-thumb"
+                 :src="`/api/hit-image?path=${encodeURIComponent(hit.path)}`"
+                 :alt="hit.path" loading="lazy"
+                 @error="$el.style.opacity='0.2'">
+            <div class="hit-info">
+              <div class="hit-pills">
+                <template x-for="p in hitPills(hit.scores)" :key="p.mode">
+                  <div class="pill-group">
+                    <span class="badge" :class="`badge-${p.mode}`" x-text="p.mode.toUpperCase()"></span>
+                    <span class="pill-score" x-text="p.score>=1?'1.000':p.score.toFixed(3)"></span>
+                  </div>
+                </template>
+              </div>
+              <div class="hit-filename" x-text="hit.path.split('/').pop()"></div>
+              <div class="hit-dirpath" x-text="hit.path.split('/').slice(0,-1).join('/')"></div>
+              <div class="hit-meta-row">
+                <span x-show="hit.exif_geo_data" class="meta-tag">GPS</span>
+                <span x-show="hit.exif && !hit.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+  </div><!-- /results-layout -->
+
+</div><!-- /app -->
+
+<script>
+function sfn() {
+  return {
+    phase: 'upload',
+    pendingFiles: [],
+    dragOver: false,
+    selectedModes: [],
+    availableModes: [],
+    progress: { current: 0, total: 0, filename: '' },
+    sessionId: null,
+    results: [],
+    selectedFileId: null,
+    selectedHitPath: null,
+    thresholdAltered: 0.75,
+    thresholdSemantic: 0.80,
+    limit: 10,
+    queryMeta: null,
+    matchMeta: null,
+    _queryTimer: null,
+
+    // ── Computed ──────────────────────────────────────────────────────────
+    get progressPct() {
+      return this.progress.total === 0 ? 0 : Math.round(this.progress.current / this.progress.total * 100);
+    },
+    get selectedFile() {
+      return this.results.find(r => r.file_id === this.selectedFileId) ?? null;
+    },
+    get matchedFiles() { return this.results.filter(r => r.hits.length > 0); },
+    get unmatchedFiles() { return this.results.filter(r => r.hits.length === 0); },
+    get selectedHit() {
+      const hits = this.selectedFile?.hits ?? [];
+      if (this.selectedHitPath) {
+        const h = hits.find(h => h.path === this.selectedHitPath);
+        if (h) return h;
+      }
+      return hits[0] ?? null;
+    },
+    get folderTree() {
+      const map = new Map();
+      for (const r of this.results) {
+        const parts = r.filename.replace(/\\/g, '/').split('/');
+        const folder = parts.length > 1 ? parts.slice(0, -1).join('/') : '(root)';
+        map.set(folder, (map.get(folder) ?? 0) + 1);
+      }
+      return [...map.entries()].map(([name, count]) => ({ name, count }));
+    },
+    // ── Helpers ───────────────────────────────────────────────────────────
+    hitPills(scores) {
+      const order = ['exact', 'altered', 'semantic'];
+      return Object.entries(scores)
+        .sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]))
+        .map(([mode, score]) => ({ mode, score }));
+    },
+
+    _metaItemsWithMatch(meta, other) {
+      if (!meta) return [];
+      const eq  = (a, b) => a != null && b != null && String(a).trim() === String(b).trim();
+      const num = (a, b, tol = 0) => a != null && b != null && Math.abs(Number(a) - Number(b)) <= tol;
+      const items = [];
+
+      if (meta.size_bytes) {
+        const rel = other?.size_bytes ? Math.abs(meta.size_bytes - other.size_bytes) / Math.max(meta.size_bytes, other.size_bytes) : 1;
+        items.push({ label: 'Size', value: this._fmtSize(meta.size_bytes),
+          match: rel === 0, partial: rel > 0 && rel < 0.05 });
+      }
+      if (meta.width && meta.height) items.push({
+        label: 'Dims', value: `${meta.width}×${meta.height}`,
+        match: num(meta.width, other?.width) && num(meta.height, other?.height),
+        partial: false,
+      });
+      if (meta.format) items.push({
+        label: 'Format', value: meta.format,
+        match: eq(meta.format, other?.format), partial: false,
+      });
+      if (meta.make || meta.model) {
+        const makeMatch  = eq(meta.make,  other?.make);
+        const modelMatch = eq(meta.model, other?.model);
+        items.push({ label: 'Camera', value: [meta.make, meta.model].filter(Boolean).join(' '),
+          match: makeMatch && modelMatch, partial: makeMatch && !modelMatch });
+      }
+      if (meta.datetime) {
+        const dateA = meta.datetime.split(' ')[0];
+        const dateB = other?.datetime?.split(' ')[0];
+        const timeA = meta.datetime.split(' ')[1];
+        const timeB = other?.datetime?.split(' ')[1];
+        items.push({ label: 'Date', value: meta.datetime,
+          match: eq(dateA, dateB) && eq(timeA, timeB),
+          partial: eq(dateA, dateB) && !eq(timeA, timeB) });
+      }
+      if (meta.gps_lat !== undefined) items.push({
+        label: 'GPS', value: `${meta.gps_lat.toFixed(5)}, ${meta.gps_lon.toFixed(5)}`,
+        match:   num(meta.gps_lat, other?.gps_lat, 0.0001) && num(meta.gps_lon, other?.gps_lon, 0.0001),
+        partial: num(meta.gps_lat, other?.gps_lat, 0.01)   && num(meta.gps_lon, other?.gps_lon, 0.01),
+      });
+      if (meta.software) items.push({
+        label: 'Software', value: meta.software,
+        match: eq(meta.software, other?.software), partial: false,
+      });
+      if (items.length === 0 && meta.exif === false) items.push({ label: 'EXIF', value: 'None', match: false, partial: false });
+      return items;
+    },
+
+    _fmtSize(b) {
+      if (b >= 1e6) return `${(b / 1e6).toFixed(1)} MB`;
+      if (b >= 1e3) return `${Math.round(b / 1e3)} KB`;
+      return `${b} B`;
+    },
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────
+    async init() {
+      try {
+        const d = await fetch('/api/collections').then(r => r.json());
+        this.availableModes = d.modes;
+        this.selectedModes = [...d.modes];
+      } catch {
+        this.availableModes = ['exact'];
+        this.selectedModes = ['exact'];
+      }
+    },
+
+    toggleMode(mode) {
+      if (this.selectedModes.includes(mode)) {
+        this.selectedModes = this.selectedModes.filter(m => m !== mode);
+      } else {
+        this.selectedModes.push(mode);
+      }
+      if (this.phase === 'results') this.runQuery();
+    },
+
+    addFiles(fileList) {
+      const exts = new Set(['.jpg','.jpeg','.png','.bmp','.tiff','.tif','.webp',
+                             '.gif','.jp2','.ico','.psd','.heic','.heif']);
+      for (const f of fileList) {
+        const ext = f.name.toLowerCase().slice(f.name.lastIndexOf('.'));
+        if (exts.has(ext) && !this.pendingFiles.some(p => p.name === f.name && p.size === f.size)) {
+          this.pendingFiles.push(f);
+        }
+      }
+    },
+
+    onDrop(e) {
+      this.dragOver = false;
+      this.addFiles(e.dataTransfer.files);
+    },
+
+    // ── Analysis ──────────────────────────────────────────────────────────
+    async startAnalysis() {
+      if (!this.pendingFiles.length || !this.selectedModes.length) return;
+      this.phase = 'analyzing';
+      this.progress = { current: 0, total: this.pendingFiles.length, filename: '' };
+
+      const fd = new FormData();
+      for (const f of this.pendingFiles) fd.append('files', f, f.webkitRelativePath || f.name);
+      fd.append('modes', this.selectedModes.join(','));
+
+      const resp = await fetch('/api/analyze', { method: 'POST', body: fd });
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          let evt;
+          try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+          if (['progress','file_done','error'].includes(evt.type)) {
+            this.progress = { current: evt.current, total: evt.total, filename: evt.filename };
+          }
+          if (evt.type === 'done') {
+            this.sessionId = evt.session_id;
+            await this.runQuery();
+            this.phase = 'results';
+            const first = this.matchedFiles[0] ?? this.results[0];
+            if (first) this.selectFile(first.file_id);
+          }
+        }
+      }
+    },
+
+    // ── Query ─────────────────────────────────────────────────────────────
+    async runQuery() {
+      if (!this.sessionId) return;
+      const fd = new FormData();
+      fd.append('session_id', this.sessionId);
+      fd.append('modes', this.selectedModes.join(','));
+      fd.append('threshold_altered', this.thresholdAltered);
+      fd.append('threshold_semantic', this.thresholdSemantic);
+      fd.append('limit', this.limit);
+      try {
+        const d = await fetch('/api/query', { method: 'POST', body: fd }).then(r => r.json());
+        this.results = d.results;
+        // Re-sync selected hit after re-query
+        if (this.selectedFileId) {
+          const f = this.results.find(r => r.file_id === this.selectedFileId);
+          if (f && this.selectedHitPath && !f.hits.find(h => h.path === this.selectedHitPath)) {
+            this.selectedHitPath = null;
+          }
+          await this._loadMatchMeta();
+        }
+      } catch { /* keep old */ }
+    },
+
+    debouncedQuery() {
+      clearTimeout(this._queryTimer);
+      this._queryTimer = setTimeout(() => this.runQuery(), 300);
+    },
+
+    // ── Selection ─────────────────────────────────────────────────────────
+    async selectFile(fileId) {
+      this.selectedFileId = fileId;
+      this.selectedHitPath = null;
+      this.queryMeta = null;
+      this.matchMeta = null;
+      await Promise.all([this._loadQueryMeta(), this._loadMatchMeta()]);
+    },
+
+    async selectHit(hit) {
+      this.selectedHitPath = hit.path;
+      this.matchMeta = null;
+      await this._loadMatchMetaFor(hit.path);
+    },
+
+    // ── Metadata loading ──────────────────────────────────────────────────
+    async _loadQueryMeta() {
+      if (!this.sessionId || !this.selectedFileId) return;
+      try {
+        this.queryMeta = await fetch(`/api/query-metadata/${this.sessionId}/${this.selectedFileId}`).then(r => r.json());
+      } catch { this.queryMeta = null; }
+    },
+
+    async _loadMatchMeta() {
+      const hit = this.selectedHit;
+      if (hit) await this._loadMatchMetaFor(hit.path);
+      else this.matchMeta = null;
+    },
+
+    async _loadMatchMetaFor(path) {
+      try {
+        this.matchMeta = await fetch(`/api/metadata?path=${encodeURIComponent(path)}`).then(r => r.json());
+      } catch { this.matchMeta = null; }
+    },
+
+    // ── Reset ─────────────────────────────────────────────────────────────
+    resetToUpload() {
+      this.phase = 'upload';
+      this.pendingFiles = [];
+      this.results = [];
+      this.selectedFileId = null;
+      this.selectedHitPath = null;
+      this.sessionId = null;
+      this.queryMeta = null;
+      this.matchMeta = null;
+    },
+
+    // ── Formatters ────────────────────────────────────────────────────────
+    shortName(filename) {
+      return filename.replace(/\\/g, '/').split('/').pop();
+    },
+    folderOf(filename) {
+      const parts = filename.replace(/\\/g, '/').split('/');
+      return parts.length > 1 ? parts.slice(0, -1).join('/') : '';
+    },
+  };
+}
+</script>
+</body>
+</html>

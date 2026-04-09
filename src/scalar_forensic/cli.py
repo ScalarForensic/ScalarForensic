@@ -1,5 +1,6 @@
 """CLI entry point for ScalarForensic."""
 
+from concurrent.futures import ThreadPoolExecutor
 from itertools import batched
 from pathlib import Path
 from time import perf_counter
@@ -14,6 +15,7 @@ from scalar_forensic.embedder import (
     get_library_versions,
     hash_bytes,
     load_embedder,
+    preprocess_batch,
 )
 from scalar_forensic.indexer import Indexer
 from scalar_forensic.scanner import _HEIF_AVAILABLE, scan_images
@@ -112,10 +114,13 @@ def index(
         except FileNotFoundError as exc:
             typer.echo(f"[ERROR] {exc}", err=True)
             raise typer.Exit(1)
+        fp16 = embedder.device == "cuda"
         typer.echo(
             f"  backend={type(embedder).__name__}  dim={embedder.embedding_dim}"
-            f"  device={embedder.device}"
+            f"  device={embedder.device}  fp16={fp16}  compiled=True"
         )
+        if fp16:
+            typer.echo("  (first batch will be slow — torch.compile warm-up)")
 
         typer.echo(f"Connecting to Qdrant  collection={collection!r} ...")
         try:
@@ -147,6 +152,7 @@ def index(
 
     for batch_paths in batched(scan_images(resolved_input), settings.batch_size):
         batch_num += 1
+        batch_wall_t0 = perf_counter()
 
         # --- Read (shared) ---
         t0 = perf_counter()
@@ -188,32 +194,39 @@ def index(
 
         data_by_path = {p: data for p, data in raw}
 
-        # --- Per-model loop ---
+        # --- Shared pre-processing: open RGB + cap short side to 331 px (threaded) ---
+        t0 = perf_counter()
+        unique_paths_list = [p for p, _ in unique_pairs]
+        pre_images = preprocess_batch([data_by_path[p] for p in unique_paths_list])
+        pre_s = perf_counter() - t0
+        pre_by_path = dict(zip(unique_paths_list, pre_images))
+
+        # --- Per-model loop: normalize + embed, collect upsert jobs ---
+        model_segments: list[str] = []
+        upsert_jobs: list = []
+
         for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
             to_embed = _apply_dedup(unique_pairs, indexer, settings)
             n_skipped = duplicate_hashes_in_batch + (len(unique_pairs) - len(to_embed))
             skipped_counts[spec_idx] += n_skipped
 
+            backend = type(embedder).__name__
+
             if not to_embed:
-                typer.echo(
-                    f"  batch {batch_num} [{type(embedder).__name__}]: "
-                    f"{len(path_hash_pairs)} skipped ({n_skipped} already indexed / duplicate)"
-                )
+                model_segments.append(f"{backend} all skipped ({n_skipped})")
                 continue
 
             paths, hashes = zip(*to_embed)
             n = len(paths)
-            embed_data = [data_by_path[p] for p in paths]
+            model_pil = [pre_by_path[p] for p in paths]
 
             # --- Normalize ---
             t0 = perf_counter()
             try:
-                images = embedder.normalize_batch_bytes(embed_data)
+                norm_images = embedder.normalize_batch_bytes(model_pil)
             except Exception as exc:  # noqa: BLE001
                 typer.echo(
-                    f"[ERROR] Normalization failed for batch of {n}"
-                    f" [{type(embedder).__name__}]: {exc}",
-                    err=True,
+                    f"[ERROR] Normalization failed for batch of {n} [{backend}]: {exc}", err=True
                 )
                 failed_count += n
                 continue
@@ -222,45 +235,66 @@ def index(
             # --- Embed ---
             t0 = perf_counter()
             try:
-                embeddings = embedder.embed_images(images)
+                embeddings = embedder.embed_images(norm_images)
             except Exception as exc:  # noqa: BLE001
                 typer.echo(
-                    f"[ERROR] Embedding failed for batch of {n} [{type(embedder).__name__}]: {exc}",
-                    err=True,
+                    f"[ERROR] Embedding failed for batch of {n} [{backend}]: {exc}", err=True
                 )
                 failed_count += n
                 continue
             embed_s = perf_counter() - t0
 
-            # --- Upsert ---
+            indexed_counts[spec_idx] += n
+            model_segments.append(
+                f"{backend} norm {norm_s:.2f}s"
+                f"  embed {embed_s:.2f}s ({_fmt_rate(n, embed_s, 'img')})"
+                f"  +{n}"
+            )
+
+            # Collect upsert work — executed in parallel after all models embed.
             shared_metadata = {
                 "model_name": embedder.model_name,
                 "model_hash": model_hash,
                 "embedding_dim": embedder.embedding_dim,
                 "normalize_size": embedder.normalize_size,
+                "inference_dtype": embedder.inference_dtype,
                 "library_versions": get_library_versions(),
             }
             exif_for_batch: dict[Path, dict] | None = None
             if exif_data is not None:
                 exif_for_batch = {p: dict(exif_data[p]) for p in paths}
 
-            t0 = perf_counter()
-            indexer.upsert_batch(
-                list(paths), list(hashes), embeddings, shared_metadata, exif_for_batch
-            )
-            upsert_s = perf_counter() - t0
+            def _make_upsert(idx, ps, hs, embs, meta, exif):
+                def _job():
+                    idx.upsert_batch(ps, hs, embs, meta, exif)
 
-            indexed_counts[spec_idx] += n
-            backend = type(embedder).__name__
-            typer.echo(
-                f"  batch {batch_num} [{backend}]: {n} imgs  {batch_bytes / 1e6:.1f} MB"
-                f"  |  read {read_s:.2f}s ({_fmt_mbps(batch_bytes, read_s)})"
-                f"  hash {hash_s:.2f}s"
-                f"  normalize {norm_s:.2f}s ({_fmt_rate(n, norm_s, 'img')})"
-                f"  embed {embed_s:.2f}s ({_fmt_rate(n, embed_s, 'img')})"
-                f"  upsert {upsert_s:.2f}s"
-                f"  |  total indexed={indexed_counts[spec_idx]}"
+                return _job
+
+            upsert_jobs.append(
+                _make_upsert(
+                    indexer, list(paths), list(hashes), embeddings, shared_metadata, exif_for_batch
+                )
             )
+
+        # --- Parallel upserts ---
+        upsert_wall_s = 0.0
+        if upsert_jobs:
+            t0 = perf_counter()
+            with ThreadPoolExecutor(max_workers=len(upsert_jobs)) as pool:
+                list(pool.map(lambda j: j(), upsert_jobs))
+            upsert_wall_s = perf_counter() - t0
+
+        if model_segments:
+            wall_s = perf_counter() - batch_wall_t0
+            n_imgs = len(path_hash_pairs)
+            upsert_str = f"  |  upsert {upsert_wall_s:.2f}s" if upsert_jobs else ""
+            shared = (
+                f"  batch {batch_num} [{n_imgs} imgs  {batch_bytes / 1e6:.1f} MB"
+                f"  {_fmt_rate(n_imgs, wall_s, 'img')} total]"
+                f"  read {read_s:.2f}s ({_fmt_mbps(batch_bytes, read_s)})"
+                f"  hash {hash_s:.2f}s  pre {pre_s:.2f}s"
+            )
+            typer.echo(shared + "  |  " + "  |  ".join(model_segments) + upsert_str)
 
     typer.echo("\nDone.")
     for spec_idx, (embedder, _, _) in enumerate(specs):

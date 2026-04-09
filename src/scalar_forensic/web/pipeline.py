@@ -1,0 +1,310 @@
+"""Analysis and query pipeline for the web frontend.
+
+Imports from the existing backend — no modifications to those modules.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Generator
+from dataclasses import dataclass, field
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+from scalar_forensic.config import Settings
+from scalar_forensic.embedder import AnyEmbedder, hash_bytes, load_embedder, preprocess_batch
+from scalar_forensic.web.session import FileEntry, Session
+
+# ---------------------------------------------------------------------------
+# Embedder cache — models are expensive to load; keep them alive per process
+# ---------------------------------------------------------------------------
+
+_embedder_cache: dict[str, AnyEmbedder] = {}
+
+
+def _get_embedder(key: str, settings: Settings) -> AnyEmbedder:
+    if key not in _embedder_cache:
+        if key == "sscd":
+            _embedder_cache[key] = load_embedder(
+                model=settings.model_sscd,
+                use_sscd=True,
+                device=settings.device,
+                normalize_size=settings.normalize_size,
+            )
+        else:
+            _embedder_cache[key] = load_embedder(
+                model=settings.model_dino,
+                use_sscd=False,
+                device=settings.device,
+                normalize_size=settings.normalize_size,
+            )
+    return _embedder_cache[key]
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: Analysis
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ProgressEvent:
+    type: str  # "progress" | "file_done" | "error" | "done"
+    current: int = 0
+    total: int = 0
+    filename: str = ""
+    file_id: str = ""
+    message: str = ""
+    session_id: str = ""
+
+
+def analyze_session(
+    session: Session,
+    modes: list[str],
+    settings: Settings,
+) -> Generator[ProgressEvent]:
+    """Hash and embed every file in the session. Yields progress events."""
+    need_sscd = "altered" in modes
+    need_dino = "semantic" in modes
+
+    embedders: dict[str, AnyEmbedder] = {}
+    if need_sscd:
+        try:
+            embedders["sscd"] = _get_embedder("sscd", settings)
+        except Exception as exc:  # noqa: BLE001
+            yield ProgressEvent(type="error", message=f"SSCD model load failed: {exc}")
+    if need_dino:
+        try:
+            embedders["dino"] = _get_embedder("dino", settings)
+        except Exception as exc:  # noqa: BLE001
+            yield ProgressEvent(type="error", message=f"DINOv2 model load failed: {exc}")
+
+    total = len(session.files)
+    for i, entry in enumerate(session.files):
+        yield ProgressEvent(
+            type="progress",
+            current=i,
+            total=total,
+            filename=entry.filename,
+            file_id=entry.file_id,
+        )
+        try:
+            _analyze_file(entry, embedders)
+            yield ProgressEvent(
+                type="file_done",
+                current=i + 1,
+                total=total,
+                filename=entry.filename,
+                file_id=entry.file_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            entry.error = str(exc)
+            yield ProgressEvent(
+                type="error",
+                current=i + 1,
+                total=total,
+                filename=entry.filename,
+                file_id=entry.file_id,
+                message=str(exc),
+            )
+
+    yield ProgressEvent(type="done", total=total, session_id=session.session_id)
+
+
+def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
+    data = entry.temp_path.read_bytes()
+    entry.file_hash = hash_bytes(data)
+    if not embedders:
+        return
+    pre_images = preprocess_batch([data])
+    for key, embedder in embedders.items():
+        norm_images = embedder.normalize_batch_bytes(pre_images)
+        emb = embedder.embed_images(norm_images)[0]
+        if key == "sscd":
+            entry.sscd_embedding = emb
+        else:
+            entry.dino_embedding = emb
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Query
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Hit:
+    path: str
+    scores: dict  # mode → score, e.g. {"exact": 1.0, "altered": 0.97, "semantic": 0.93}
+    exif: bool | None = None
+    exif_geo_data: bool | None = None
+
+    def best_score(self) -> float:
+        return max(self.scores.values(), default=0.0)
+
+
+@dataclass
+class FileResult:
+    file_id: str
+    filename: str
+    hits: list[Hit] = field(default_factory=list)
+
+
+def query_session(
+    session: Session,
+    modes: list[str],
+    threshold_altered: float,
+    threshold_semantic: float,
+    limit: int,
+    settings: Settings,
+) -> list[FileResult]:
+    """Query Qdrant for every file in the session using stored embeddings.
+
+    Fast — no re-embedding. Called on every slider change.
+    """
+    client = QdrantClient(url=settings.qdrant_url)
+    results: list[FileResult] = []
+
+    for entry in session.files:
+        if entry.error:
+            results.append(FileResult(file_id=entry.file_id, filename=entry.filename))
+            continue
+
+        raw_hits: list[Hit] = []
+
+        if "exact" in modes and entry.file_hash:
+            raw_hits.extend(_query_exact(client, entry.file_hash, settings))
+
+        if "altered" in modes and entry.sscd_embedding:
+            raw_hits.extend(
+                _query_vector(
+                    client,
+                    collection=settings.collection_sscd,
+                    vector=entry.sscd_embedding,
+                    mode="altered",
+                    threshold=threshold_altered,
+                    limit=limit,
+                    exclude_hash=entry.file_hash,
+                )
+            )
+
+        if "semantic" in modes and entry.dino_embedding:
+            raw_hits.extend(
+                _query_vector(
+                    client,
+                    collection=settings.collection_dino,
+                    vector=entry.dino_embedding,
+                    mode="semantic",
+                    threshold=threshold_semantic,
+                    limit=limit,
+                    exclude_hash=entry.file_hash,
+                )
+            )
+
+        # Deduplicate by path — merge scores from different modes for the same image
+        seen: dict[str, Hit] = {}
+        for hit in raw_hits:
+            if hit.path not in seen:
+                seen[hit.path] = hit
+            else:
+                seen[hit.path].scores.update(hit.scores)
+                if hit.exif is not None and seen[hit.path].exif is None:
+                    seen[hit.path].exif = hit.exif
+                    seen[hit.path].exif_geo_data = hit.exif_geo_data
+
+        results.append(
+            FileResult(
+                file_id=entry.file_id,
+                filename=entry.filename,
+                hits=sorted(seen.values(), key=lambda h: h.best_score(), reverse=True)[:limit],
+            )
+        )
+
+    return results
+
+
+def _query_exact(client: QdrantClient, image_hash: str, settings: Settings) -> list[Hit]:
+    """Return exact hash matches from whichever collections exist."""
+    hits: list[Hit] = []
+    for collection in (settings.collection_sscd, settings.collection_dino):
+        try:
+            records, _ = client.scroll(
+                collection_name=collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="image_hash", match=MatchValue(value=image_hash))]
+                ),
+                limit=50,
+                with_payload=["image_path", "exif", "exif_geo_data"],
+                with_vectors=False,
+            )
+            for r in records:
+                path = r.payload.get("image_path", "")
+                if not any(h.path == path for h in hits):
+                    hits.append(
+                        Hit(
+                            path=path,
+                            scores={"exact": 1.0},
+                            exif=r.payload.get("exif"),
+                            exif_geo_data=r.payload.get("exif_geo_data"),
+                        )
+                    )
+        except Exception:  # noqa: BLE001
+            pass
+    return hits
+
+
+def _query_vector(
+    client: QdrantClient,
+    collection: str,
+    vector: list[float],
+    mode: str,
+    threshold: float,
+    limit: int,
+    exclude_hash: str | None,
+) -> list[Hit]:
+    try:
+        query_filter = None
+        if exclude_hash:
+            query_filter = Filter(
+                must_not=[FieldCondition(key="image_hash", match=MatchValue(value=exclude_hash))]
+            )
+        result = client.query_points(
+            collection_name=collection,
+            query=vector,
+            score_threshold=threshold,
+            limit=limit,
+            with_payload=["image_path", "exif", "exif_geo_data"],
+            query_filter=query_filter,
+        )
+        return [
+            Hit(
+                path=r.payload.get("image_path", ""),
+                scores={mode: round(r.score, 4)},
+                exif=r.payload.get("exif"),
+                exif_geo_data=r.payload.get("exif_geo_data"),
+            )
+            for r in result.points
+        ]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Collection availability
+# ---------------------------------------------------------------------------
+
+
+def get_available_modes(settings: Settings) -> list[str]:
+    """Return which query modes are usable based on existing Qdrant collections."""
+    try:
+        client = QdrantClient(url=settings.qdrant_url)
+        existing = {c.name for c in client.get_collections().collections}
+    except Exception:  # noqa: BLE001
+        return []
+
+    modes: list[str] = ["exact"]  # exact works as long as any collection exists
+    if not existing:
+        return []
+    if settings.collection_sscd in existing:
+        modes.append("altered")
+    if settings.collection_dino in existing:
+        modes.append("semantic")
+    return modes
