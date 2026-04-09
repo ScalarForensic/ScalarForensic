@@ -129,6 +129,24 @@ Set `SFN_EXTRACT_EXIF=true` to store two boolean fields on every indexed point:
 
 Modes are automatically disabled in the UI if the corresponding collection has not been indexed yet.
 
+## Test data / quick-start sample
+
+The `test/` folder contains two scripts to set up a local sample dataset. The downloaded images and generated search files are gitignored — only the scripts are committed.
+
+```bash
+# 1. Download and unzip the Unsplash sample dataset (~200 MB) into data/
+bash test/download_data.sh
+
+# 2. Copy 10 random images to test/searchfiles/ and print the full setup guide
+uv run python test/prepare_searchfiles.py
+
+# optional: choose a different count or seed
+uv run python test/prepare_searchfiles.py --count 20 --seed 7
+```
+
+`prepare_searchfiles.py` prints step-by-step instructions at the end:
+install deps → download SSCD model → start Qdrant → index → start web server → visit `localhost:8080` → upload from `test/searchfiles/`.
+
 ## Roadmap
 
 - **Offline / air-gapped deployment** — bundle both models (`models/sscd_disc_mixup.torchscript.pt` + `models/dinov2-large/`) and a pre-populated uv package cache so the entire project folder can be copied to an offline machine and run with `uv sync --offline`
