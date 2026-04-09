@@ -114,7 +114,7 @@ def _open_rgb(data: bytes) -> Image.Image:
 
 
 def _cap_short_side(img: Image.Image) -> Image.Image:
-    """Scale down preserving aspect ratio if the short side exceeds _SHARED_CAP; leave smaller images untouched."""
+    """Scale down if the short side exceeds _SHARED_CAP; leave smaller images untouched."""
     w, h = img.size
     short = min(w, h)
     if short <= _SHARED_CAP:
@@ -124,7 +124,7 @@ def _cap_short_side(img: Image.Image) -> Image.Image:
 
 
 def preprocess_batch(image_data: list[bytes]) -> list[Image.Image]:
-    """Shared pre-step: open RGB and cap short side to _SHARED_CAP px, parallelised over CPU cores."""
+    """Shared pre-step: open RGB, cap short side to _SHARED_CAP px, parallelised over CPU cores."""
     def _process(data: bytes) -> Image.Image:
         return _cap_short_side(_open_rgb(data))
 

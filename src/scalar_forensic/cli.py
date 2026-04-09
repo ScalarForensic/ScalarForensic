@@ -270,7 +270,9 @@ def index(
                 return _job
 
             upsert_jobs.append(
-                _make_upsert(indexer, list(paths), list(hashes), embeddings, shared_metadata, exif_for_batch)
+                _make_upsert(
+                    indexer, list(paths), list(hashes), embeddings, shared_metadata, exif_for_batch
+                )
             )
 
         # --- Parallel upserts ---
