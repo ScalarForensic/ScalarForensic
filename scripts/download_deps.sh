@@ -42,6 +42,9 @@ mkdir -p "${DEST}"
 # so it correctly resolves torch/torchvision from the pytorch-cu128 index.
 uv pip download -r requirements.txt -d "${DEST}"
 
+# Include the build backend so `uv pip install -e .` works fully offline.
+uv pip download hatchling -d "${DEST}"
+
 echo ""
 echo "Done. Files to transfer to the offline machine:"
 echo "  ${DEST}/          ($(ls "${DEST}" | wc -l) wheels)"

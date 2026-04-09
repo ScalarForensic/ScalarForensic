@@ -77,7 +77,7 @@ uv run python scripts/download_models.py --sscd   # SSCD only
 uv run python scripts/download_models.py --dino   # DINOv2 only
 ```
 
-This places the files at the default paths (`models/sscd_disc_mixup.torchscript.pt` and `models/dinov2-large/`) so no `.env` changes are needed.
+This places the files at the default paths (`models/sscd_disc_mixup.torchscript.pt` and `models/dinov2-large/`). For offline use, set `SFN_MODEL_DINO=models/dinov2-large` in `.env` so the app loads the local snapshot instead of fetching remotely (SSCD is always loaded from disk and needs no change).
 
 **Manual alternative — SSCD:**
 
@@ -93,7 +93,7 @@ DINOv2 downloads automatically on first run into the HuggingFace cache. To snaps
 ```bash
 python -c "
 from huggingface_hub import snapshot_download
-snapshot_download('facebook/dinov2-large', local_dir='models/dinov2-large')
+snapshot_download('facebook/dinov2-large', local_dir='models/dinov2-large', local_dir_use_symlinks=False)
 "
 ```
 
@@ -172,7 +172,7 @@ Both models and all Python dependencies can be pre-downloaded and bundled with t
 uv run python scripts/download_models.py
 ```
 
-Models land at `models/sscd_disc_mixup.torchscript.pt` and `models/dinov2-large/` — the default paths, so no `.env` changes are needed.
+Models land at `models/sscd_disc_mixup.torchscript.pt` and `models/dinov2-large/`. Set `SFN_MODEL_DINO=models/dinov2-large` in `.env` so the app loads the local DINOv2 snapshot instead of fetching it remotely.
 
 **2. Download Python wheels:**
 
@@ -193,8 +193,8 @@ bash scripts/download_deps.sh --web --heif # all optional groups
 **3. Save the Qdrant Docker image:**
 
 ```bash
-docker pull qdrant/qdrant
-docker save qdrant/qdrant | gzip > qdrant.tar.gz
+docker pull qdrant/qdrant:v1.17.1
+docker save qdrant/qdrant:v1.17.1 | gzip > qdrant.tar.gz
 ```
 
 **4. Transfer** the entire project folder to the offline machine, including:
@@ -222,7 +222,7 @@ uv pip install --no-deps -e .
 
 ```bash
 docker load < qdrant.tar.gz
-docker run -p 6333:6333 qdrant/qdrant
+docker run -p 6333:6333 qdrant/qdrant:v1.17.1
 ```
 
 **7. Run:**

@@ -2,7 +2,10 @@
 """Pre-download both models for airgapped / offline deployment.
 
 Run once on an internet-connected machine, then copy the entire project
-(including models/) to the offline system and run with uv sync --offline.
+(including models/) to the offline system and install with:
+
+    uv pip install --no-index --find-links vendor/ -r requirements.txt
+    uv pip install --no-deps -e .
 
     uv run python scripts/download_models.py [--sscd] [--dino] [--all]
 
@@ -19,6 +22,10 @@ SSCD_DEST = Path("models/sscd_disc_mixup.torchscript.pt")
 
 DINO_MODEL_ID = "facebook/dinov2-large"
 DINO_DEST = Path("models/dinov2-large")
+# Pin to a specific commit hash for reproducible offline bundles, e.g.:
+#   DINO_REVISION = "fc526a6"
+# None uses the current default branch (non-reproducible across time).
+DINO_REVISION: str | None = None
 
 
 def _progress(block_num: int, block_size: int, total_size: int) -> None:
@@ -35,13 +42,28 @@ def download_sscd() -> None:
     if SSCD_DEST.exists():
         print(f"SSCD: already present at {SSCD_DEST} — skipping.")
         return
+    tmp = SSCD_DEST.with_suffix(".tmp")
     print(f"Downloading SSCD checkpoint → {SSCD_DEST} ...")
-    urllib.request.urlretrieve(SSCD_URL, SSCD_DEST, reporthook=_progress)
+    try:
+        urllib.request.urlretrieve(SSCD_URL, tmp, reporthook=_progress)
+        tmp.rename(SSCD_DEST)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
     print(f"\nSSCD: saved ({SSCD_DEST.stat().st_size / 1e6:.1f} MB)")
 
 
+def _dino_is_complete() -> bool:
+    """Return True only when config.json and at least one weight file are present."""
+    if not DINO_DEST.exists():
+        return False
+    if not (DINO_DEST / "config.json").exists():
+        return False
+    return bool(list(DINO_DEST.glob("*.safetensors")) or list(DINO_DEST.glob("*.bin")))
+
+
 def download_dino() -> None:
-    if DINO_DEST.exists() and any(DINO_DEST.iterdir()):
+    if _dino_is_complete():
         print(f"DINOv2: already present at {DINO_DEST} — skipping.")
         return
     try:
@@ -53,7 +75,13 @@ def download_dino() -> None:
     DINO_DEST.mkdir(parents=True, exist_ok=True)
     print(f"Downloading DINOv2 snapshot ({DINO_MODEL_ID}) → {DINO_DEST} ...")
     print("  (this is ~1.2 GB; progress is shown per-file by huggingface_hub)")
-    snapshot_download(DINO_MODEL_ID, local_dir=str(DINO_DEST))
+    snapshot_download(
+        DINO_MODEL_ID,
+        revision=DINO_REVISION,
+        local_dir=str(DINO_DEST),
+        local_dir_use_symlinks=False,
+        resume_download=True,
+    )
     print(f"DINOv2: saved to {DINO_DEST}")
 
 
