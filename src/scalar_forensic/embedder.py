@@ -164,9 +164,13 @@ class DINOv2Embedder:
     @property
     def model_hash(self) -> str:
         if self._model_hash is None:
-            from huggingface_hub import snapshot_download
+            local = Path(self.model_name)
+            if local.is_dir():
+                snapshot_path = local
+            else:
+                from huggingface_hub import snapshot_download
 
-            snapshot_path = Path(snapshot_download(self.model_name, local_files_only=True))
+                snapshot_path = Path(snapshot_download(self.model_name, local_files_only=True))
             h = hashlib.sha256()
             for file in sorted(snapshot_path.rglob("*")):
                 if not file.is_file():
