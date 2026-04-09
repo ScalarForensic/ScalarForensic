@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Pre-download both models for airgapped / offline deployment.
 
-Run once on an internet-connected machine, then copy the entire project
-(including models/) to the offline system and install with:
-
-    uv pip install --no-index --find-links vendor/ -r requirements.txt
-    uv pip install --no-deps -e .
+Run once on an internet-connected machine:
 
     uv run python scripts/download_models.py [--sscd] [--dino] [--all]
 
 With no flags, both models are downloaded (equivalent to --all).
+
+For vendoring Python dependencies, run scripts/download_deps.sh first.
+Then copy the entire project (including models/ and vendor/) to the offline
+system and install with:
+
+    uv pip install --no-index --find-links vendor/ -r requirements.txt
+    uv pip install --no-deps -e .
 """
 
 import argparse
