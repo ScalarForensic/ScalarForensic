@@ -129,6 +129,10 @@ Set `SFN_EXTRACT_EXIF=true` to store two boolean fields on every indexed point:
 
 Modes are automatically disabled in the UI if the corresponding collection has not been indexed yet.
 
+## Roadmap
+
+- **Offline / air-gapped deployment** — bundle both models (`models/sscd_disc_mixup.torchscript.pt` + `models/dinov2-large/`) and a pre-populated uv package cache so the entire project folder can be copied to an offline machine and run with `uv sync --offline`
+
 ## Third-party licenses
 
 Bundled assets and their licenses are listed in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md). All are compatible with GPL-3.
