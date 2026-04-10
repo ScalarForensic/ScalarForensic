@@ -367,7 +367,7 @@ def index(
         pre_results = preprocess_batch([data_by_path[p] for p in unique_paths_list])
 
         pre_by_path: dict[Path, Image.Image] = {}
-        for p, result in zip(unique_paths_list, pre_results):
+        for p, result in zip(unique_paths_list, pre_results, strict=True):
             if isinstance(result, Exception):
                 typer.echo(
                     f"[WARN] Preprocessing failed for {p.name}: {result}", err=True
