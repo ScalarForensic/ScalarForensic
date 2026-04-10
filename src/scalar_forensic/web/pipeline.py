@@ -178,6 +178,16 @@ class QueryProvenance:
     timestamp: str  # ISO 8601 UTC, e.g. "2026-04-10T14:32:00.123456+00:00"
 
 
+def _cap_hits(hits: list[Hit], limit: int) -> list[Hit]:
+    """Dedup by path (keep best score), sort deterministically, then cap to `limit`."""
+    seen: dict[str, Hit] = {}
+    for h in hits:
+        existing = seen.get(h.path)
+        if existing is None or h.best_score() > existing.best_score():
+            seen[h.path] = h
+    return sorted(seen.values(), key=lambda h: (-h.best_score(), h.path))[:limit]
+
+
 def query_session(
     session: Session,
     modes: list[str],
@@ -205,11 +215,11 @@ def query_session(
             continue
 
         file_result = FileResult(file_id=entry.file_id, filename=entry.filename)
-        raw_hits: list[Hit] = []
+        all_hits: list[Hit] = []
 
         if "exact" in modes and entry.file_hash:
             exact_hits, errs = _query_exact(client, entry.file_hash, entry.file_hash_md5, settings)
-            raw_hits.extend(exact_hits)
+            all_hits.extend(_cap_hits(exact_hits, limit))
             file_result.errors.extend(errs)
 
         if "altered" in modes and entry.sscd_embedding:
@@ -220,9 +230,8 @@ def query_session(
                 mode="altered",
                 threshold=threshold_altered,
                 limit=limit,
-                exclude_hash=entry.file_hash,
             )
-            raw_hits.extend(hits)
+            all_hits.extend(_cap_hits(hits, limit))
             file_result.errors.extend(errs)
 
         if "semantic" in modes and entry.dino_embedding:
@@ -233,31 +242,13 @@ def query_session(
                 mode="semantic",
                 threshold=threshold_semantic,
                 limit=limit,
-                exclude_hash=entry.file_hash,
             )
-            raw_hits.extend(hits)
+            all_hits.extend(_cap_hits(hits, limit))
             file_result.errors.extend(errs)
 
-        # Deduplicate by path — merge scores from different modes into a new Hit (no mutation)
-        seen: dict[str, Hit] = {}
-        for hit in raw_hits:
-            if hit.path not in seen:
-                seen[hit.path] = hit
-            else:
-                existing = seen[hit.path]
-                seen[hit.path] = Hit(
-                    path=existing.path,
-                    scores={**existing.scores, **hit.scores},
-                    exif=existing.exif if existing.exif is not None else hit.exif,
-                    exif_geo_data=(
-                        existing.exif_geo_data
-                        if existing.exif_geo_data is not None
-                        else hit.exif_geo_data
-                    ),
-                )
-
-        # Sort deterministically: best score descending, then path ascending for tie-breaking
-        file_result.hits = sorted(seen.values(), key=lambda h: (-h.best_score(), h.path))[:limit]
+        # Sort combined list deterministically: best score descending, then path for tie-breaking
+        # No global limit — each mode independently contributed up to `limit` hits
+        file_result.hits = sorted(all_hits, key=lambda h: (-h.best_score(), h.path))
         results.append(file_result)
 
     return results
@@ -334,21 +325,14 @@ def _query_vector(
     mode: str,
     threshold: float,
     limit: int,
-    exclude_hash: str | None,
 ) -> tuple[list[Hit], list[str]]:
     try:
-        query_filter = None
-        if exclude_hash:
-            query_filter = Filter(
-                must_not=[FieldCondition(key="image_hash", match=MatchValue(value=exclude_hash))]
-            )
         result = client.query_points(
             collection_name=collection,
             query=vector,
             score_threshold=threshold,
             limit=limit,
             with_payload=["image_path", "exif", "exif_geo_data"],
-            query_filter=query_filter,
         )
         return [
             Hit(
