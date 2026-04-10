@@ -24,19 +24,19 @@
 set -euo pipefail
 
 DEST="vendor"
-GROUPS=()
+UV_GROUPS=()
 
 for arg in "$@"; do
     case "$arg" in
-        --web)  GROUPS+=("--group" "web") ;;
-        --heif) GROUPS+=("--group" "heif") ;;
+        --web)  UV_GROUPS+=("--group" "web") ;;
+        --heif) UV_GROUPS+=("--group" "heif") ;;
         --dest=*) DEST="${arg#--dest=}" ;;
         *) echo "Unknown option: $arg" >&2; exit 1 ;;
     esac
 done
 
 echo "==> Exporting locked dependency list ..."
-uv export --frozen --no-emit-project "${GROUPS[@]}" -o requirements.txt
+uv export --frozen --no-emit-project "${UV_GROUPS[@]}" -o requirements.txt
 echo "    Written: requirements.txt"
 
 echo "==> Downloading wheels → ${DEST}/ ..."
