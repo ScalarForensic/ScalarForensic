@@ -102,17 +102,18 @@ def _print_summary(
     specs: list,
     indexed_counts: list[int],
     skipped_counts: list[int],
+    failed_counts: list[int],
 ) -> None:
     counts = Counter(r.status for r in records.values())
     total = len(records)
     n_image = total - counts[_S_UNSUPPORTED]
 
-    # Per-model breakdown (existing behaviour)
+    # Per-model breakdown
     typer.echo("\nDone.")
     for spec_idx, (embedder, _, _) in enumerate(specs):
         typer.echo(
             f"  [{type(embedder).__name__}]  indexed={indexed_counts[spec_idx]}"
-            f"  skipped={skipped_counts[spec_idx]}"
+            f"  skipped={skipped_counts[spec_idx]}  failed={failed_counts[spec_idx]}"
         )
 
     # Overall file summary table
@@ -295,7 +296,7 @@ def index(
     # ── Per-model counters ────────────────────────────────────────────────────
     indexed_counts = [0] * len(specs)
     skipped_counts = [0] * len(specs)
-    failed_count = 0
+    failed_counts = [0] * len(specs)
 
     total_read_s = total_hash_s = 0.0
     total_bytes = 0
@@ -316,7 +317,6 @@ def index(
                 batch_bytes += len(data)
             except OSError as exc:
                 typer.echo(f"[WARN] Cannot read {p}: {exc}", err=True)
-                failed_count += 1
                 records[p].status = _S_FAIL_READ
                 records[p].reason = f"read error: {exc}"
         read_s = perf_counter() - t0
@@ -371,7 +371,6 @@ def index(
                 if records[p].status == "pending":
                     records[p].status = _S_FAIL_PRE
                     records[p].reason = f"preprocessing error: {exc}"
-            failed_count += len(unique_paths_list)
             continue
         pre_s = perf_counter() - t0
         pre_by_path = dict(zip(unique_paths_list, pre_images))
@@ -410,7 +409,7 @@ def index(
                 typer.echo(
                     f"[ERROR] Normalization failed for batch of {n} [{backend}]: {exc}", err=True
                 )
-                failed_count += n
+                failed_counts[spec_idx] += n
                 for p in paths:
                     if records[p].status != _S_INDEXED:
                         records[p].status = _S_FAIL_EMB
@@ -426,7 +425,7 @@ def index(
                 typer.echo(
                     f"[ERROR] Embedding failed for batch of {n} [{backend}]: {exc}", err=True
                 )
-                failed_count += n
+                failed_counts[spec_idx] += n
                 for p in paths:
                     if records[p].status != _S_INDEXED:
                         records[p].status = _S_FAIL_EMB
@@ -502,7 +501,7 @@ def index(
     _write_csv(records, csv_path)
 
     # ── Print summary table ───────────────────────────────────────────────────
-    _print_summary(records, resolved_input, csv_path, specs, indexed_counts, skipped_counts)
+    _print_summary(records, resolved_input, csv_path, specs, indexed_counts, skipped_counts, failed_counts)
 
 
 def main() -> None:

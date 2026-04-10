@@ -18,8 +18,16 @@
 FROM python:3.12-slim
 
 # libgomp1: OpenMP runtime required by PyTorch CPU and GPU operations.
+# gcc: required by torch.compile / Triton to JIT-compile GPU kernels.
+#      Without it, torch.compile raises "Failed to find C compiler" at the first
+#      forward pass and silently falls back (or errors) for every batch.
+# libdrm-amdgpu1 + symlink: suppresses the ROCm runtime warning
+#      "/opt/amdgpu/share/libdrm/amdgpu.ids: No such file or directory" that
+#      appears during model loading when the AMD GPU device IDs file is missing.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 \
+    && apt-get install -y --no-install-recommends libgomp1 gcc libdrm-amdgpu1 \
+    && mkdir -p /opt/amdgpu/share/libdrm \
+    && ln -s /usr/share/libdrm/amdgpu.ids /opt/amdgpu/share/libdrm/amdgpu.ids \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

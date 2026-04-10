@@ -333,12 +333,21 @@ docker load < scalarforensic-<tag>.tar.gz
 
 ```bash
 cp .env.example .env
-# Set SFN_IMAGES_DIR to the host path containing the images to index.
-# This must be set BEFORE running `docker compose up` — it controls which
-# host directory is mounted into the container as /images.
-export SFN_IMAGES_DIR=/path/to/evidence/images
-# Alternatively, add SFN_IMAGES_DIR=/path/to/evidence/images to your .env file.
 ```
+
+Open `.env` and set `SFN_IMAGES_DIR` to the host path containing the images to
+index.  Docker Compose reads this from `.env` for volume binding — setting it
+here ensures it applies to **both** `docker compose up` and `docker compose run`
+without having to export it in the shell each time:
+
+```ini
+SFN_IMAGES_DIR=/path/to/evidence/images
+```
+
+> **Why `.env` and not `export`?** Docker Compose re-evaluates the compose file
+> on every `up` and `run` call.  A variable exported only in the shell is
+> invisible to later `docker compose run` invocations in a new terminal or
+> script.  Putting it in `.env` makes it persistent for all compose commands.
 
 **3. Start Qdrant and the web UI:**
 
@@ -348,12 +357,12 @@ docker compose up -d
 # SCALARFORENSIC_IMAGE=scalarforensic:1.0 docker compose up -d
 ```
 
-If you forgot to set `SFN_IMAGES_DIR` before starting the stack, stop it first,
-then set the variable and start it again:
+If you need to change `SFN_IMAGES_DIR` after the stack is running, update `.env`
+then restart:
 
 ```bash
 docker compose down
-export SFN_IMAGES_DIR=/path/to/evidence/images
+# edit .env: SFN_IMAGES_DIR=/new/path
 docker compose up -d
 ```
 
