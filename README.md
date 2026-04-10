@@ -60,7 +60,7 @@ Modes are automatically disabled in the UI if the corresponding collection has n
 
 **EXIF metadata extraction** (`SFN_EXTRACT_EXIF=true`): stores two boolean fields on every indexed point — `exif` (any EXIF data present) and `exif_geo_data` (GPS coordinates present).
 
-**Offline / airgapped deployment:** models and all Python wheels can be pre-downloaded and bundled so the entire stack runs without internet access. See [INSTALL.md § Offline deployment](INSTALL.md#offline--airgapped-deployment).
+**Offline / airgapped by default:** the HuggingFace SDK is blocked from making any network requests at runtime. Connections to Qdrant and any configured remote embedder endpoint are the only outward traffic. Pass `--allow-online` (or set `SFN_ALLOW_ONLINE=true`) for first-time model downloads; omit it for all subsequent runs. Models and Python wheels can also be pre-bundled for fully airgapped deployment. See [INSTALL.md § Network policy](INSTALL.md#network-policy) and [INSTALL.md § Offline deployment](INSTALL.md#offline--airgapped-deployment).
 
 **GPU acceleration:** NVIDIA CUDA (default) and AMD ROCm are both supported, including RDNA 4 (RX 9070 / 9070 XT) natively on ROCm 6.4. See [INSTALL.md § GPU setup](INSTALL.md#gpu--hardware-acceleration).
 
@@ -77,10 +77,10 @@ cp .env.example .env
 # Start Qdrant
 docker run -p 6333:6333 qdrant/qdrant
 
-# Download models (one-time)
+# Download models once (requires internet — set SFN_MODEL_DINO=models/dinov2-large in .env afterwards)
 uv run python scripts/download_models.py
 
-# Index a folder
+# Index a folder (offline by default — no flag needed after models are local)
 uv run sfn <image-dir> --dino --sscd
 
 # Start the web UI

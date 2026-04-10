@@ -102,8 +102,13 @@ there. Environment variables already set in the shell take precedence over the f
 | `SFN_INPUT_DIR` | _(none)_ | Default input folder (can be passed as CLI argument instead) |
 | `SFN_DUPLICATE_CHECK_MODE` | `hash` | Dedup strategy: `hash` \| `filepath` \| `both` |
 | `SFN_EXTRACT_EXIF` | `false` | Store EXIF presence flags in the database |
+| `SFN_ALLOW_ONLINE` | `false` | Allow HuggingFace Hub connections (for first-time model downloads only) |
 
 ## Model setup (one-time)
+
+ScalarForensic runs **offline by default** — the HuggingFace SDK is blocked from making
+any network requests at runtime (see [Network policy](#network-policy) below).  This means
+models must be downloaded explicitly before first use.
 
 Use the download script to fetch both models in one step:
 
@@ -114,9 +119,9 @@ uv run python scripts/download_models.py --dino   # DINOv2 only
 ```
 
 This places the files at the default paths (`models/sscd_disc_mixup.torchscript.pt` and
-`models/dinov2-large/`). For offline use, set `SFN_MODEL_DINO=models/dinov2-large` in
-`.env` so the app loads the local snapshot instead of fetching remotely (SSCD is always
-loaded from disk and needs no change).
+`models/dinov2-large/`). After downloading DINOv2, set `SFN_MODEL_DINO=models/dinov2-large`
+in `.env` so the app loads the local snapshot. SSCD is always loaded from a local file and
+needs no change.
 
 **Manual alternative — SSCD:**
 
@@ -127,9 +132,6 @@ wget -P models https://dl.fbaipublicfiles.com/sscd-copy-detection/sscd_disc_mixu
 
 **Manual alternative — DINOv2:**
 
-DINOv2 downloads automatically on first run into the HuggingFace cache. To snapshot it
-for offline use:
-
 ```bash
 python -c "
 from huggingface_hub import snapshot_download
@@ -138,6 +140,35 @@ snapshot_download('facebook/dinov2-large', local_dir='models/dinov2-large', loca
 ```
 
 Then set `SFN_MODEL_DINO=models/dinov2-large` in `.env`.
+
+## Network policy
+
+ScalarForensic is designed for **airgapped / offline environments**.  By default:
+
+- `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` are set at process startup, preventing
+  the HuggingFace SDK from making any network connections.
+- Connections to `SFN_QDRANT_URL` and `SFN_EMBEDDING_ENDPOINT` are always allowed — these
+  are explicit user-configured endpoints, not internet traffic.
+- If `SFN_MODEL_DINO` is still set to a HuggingFace Hub ID (e.g. `facebook/dinov2-large`)
+  and no local snapshot exists, the app will **refuse to start** with a clear error message
+  pointing to the download script.
+
+To allow internet connections for a first-time model download, use the `--allow-online`
+flag or set `SFN_ALLOW_ONLINE=true`:
+
+```bash
+# CLI indexer
+sfn --allow-online /path/to/images --dino --sscd
+
+# Web UI
+sfn-web --allow-online
+
+# Via environment variable (persists for the session)
+SFN_ALLOW_ONLINE=true sfn-web
+```
+
+Once models are cached locally and `SFN_MODEL_DINO` points to a local directory, remove
+`--allow-online` and leave `SFN_ALLOW_ONLINE=false` (or unset) for all subsequent runs.
 
 ## HEIC/HEIF support
 
@@ -184,8 +215,8 @@ uv run python scripts/download_models.py
 ```
 
 Models land at `models/sscd_disc_mixup.torchscript.pt` and `models/dinov2-large/`. Set
-`SFN_MODEL_DINO=models/dinov2-large` in `.env` so the app loads the local DINOv2 snapshot
-instead of fetching it remotely.
+`SFN_MODEL_DINO=models/dinov2-large` in `.env` so the app loads the local DINOv2 snapshot.
+Leave `SFN_ALLOW_ONLINE=false` (or unset) — the app enforces offline mode by default.
 
 **2. Download Python wheels:**
 
@@ -247,5 +278,6 @@ docker run -p 6333:6333 qdrant/qdrant:v1.17.1
 
 ```bash
 source .venv/bin/activate
-sfn <image-dir> --dino --sscd
+sfn <image-dir> --dino --sscd   # offline by default — no flag needed
+sfn-web                          # same
 ```

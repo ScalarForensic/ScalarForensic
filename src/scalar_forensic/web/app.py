@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
+import os
+import sys
 import tempfile
 import uuid
 from datetime import UTC, datetime
@@ -222,4 +225,38 @@ async def hit_metadata(path: str) -> JSONResponse:
 
 
 def start() -> None:
+    parser = argparse.ArgumentParser(
+        prog="sfn-web",
+        description="ScalarForensic web UI",
+    )
+    parser.add_argument(
+        "--allow-online",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow outward internet connections (e.g. to HuggingFace Hub for first-time "
+            "model downloads). Offline by default — see SFN_ALLOW_ONLINE in .env."
+        ),
+    )
+    args = parser.parse_args()
+
+    # Write back to os.environ before constructing Settings so that every
+    # per-request Settings() instance created by FastAPI handlers also sees
+    # allow_online=True — mutating the object here would have no effect on them.
+    if args.allow_online:
+        os.environ["SFN_ALLOW_ONLINE"] = "true"
+
+    settings = Settings()
+
+    # Apply HuggingFace offline guard before any model loading occurs.
+    # Qdrant / remote-embedder connections are unaffected.
+    settings.apply_network_policy()
+
+    # Pre-flight: always check DINOv2 — available modes aren't known until Qdrant
+    # is queried, so we conservatively validate all potentially-used model configs.
+    err = settings.offline_model_error(need_dino=True)
+    if err:
+        print(f"[ERROR] {err}", file=sys.stderr)
+        sys.exit(1)
+
     uvicorn.run("scalar_forensic.web.app:app", host="0.0.0.0", port=8080, reload=False)

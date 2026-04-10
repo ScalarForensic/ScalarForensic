@@ -56,6 +56,7 @@ def _get_embedder(key: str, settings: Settings) -> AnyEmbedder:
             remote_endpoint=settings.embedding_endpoint,
             remote_api_key=settings.embedding_api_key,
             embedding_dim=settings.embedding_dim,
+            local_files_only=not settings.allow_online,
         )
     return _embedder_cache[key]
 
