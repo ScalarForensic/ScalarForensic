@@ -473,7 +473,7 @@ function sfn() {
       } catch {
         this.availableModes = ['exact'];
         this.selectedModes = ['exact'];
-        this.serverError = 'Unable to reach Qdrant. Exact mode only.';
+        this.serverError = 'Backend unreachable — only exact hash matching is available.';
       }
     },
 

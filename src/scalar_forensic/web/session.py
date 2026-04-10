@@ -1,9 +1,12 @@
 """In-memory session store for the web query pipeline."""
 
 import asyncio
+import logging
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -36,19 +39,24 @@ async def create_session() -> Session:
     """
     global _current_session_id
 
+    stale_paths: list[Path] = []
+
     async with _session_lock:
-        # Clean up previous session temp files
+        # Collect paths while holding the lock, then delete after releasing it
+        # so filesystem I/O doesn't block other requests waiting on the lock.
         if _current_session_id and _current_session_id in _store:
             old = _store.pop(_current_session_id)
-            for entry in old.files:
-                try:
-                    entry.temp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            stale_paths = [e.temp_path for e in old.files]
 
         session = Session(session_id=str(uuid.uuid4()))
         _store[session.session_id] = session
         _current_session_id = session.session_id
+
+    for path in stale_paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Failed to delete temp file %s", path)
 
     return session
 
