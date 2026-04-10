@@ -20,6 +20,13 @@ from transformers import AutoImageProcessor, AutoModel
 _SSCD_INPUT_SIZE = 288
 # Short-side cap applied once before both models: SSCD needs 331 px, DINOv2 needs 256 px.
 _SHARED_CAP = 331
+
+# Forensic images — high-resolution camera scans, panoramas, satellite imagery — routinely
+# exceed PIL's default 89.5 MP decompression-bomb guard.  That guard protects against
+# adversarial uploads; in a forensic pipeline the source files are from trusted media, so
+# disable it.  Memory exhaustion from genuinely oversized files is still caught by the
+# per-image exception handler in preprocess_batch.
+Image.MAX_IMAGE_PIXELS = None
 _IMAGENET_MEAN = [0.485, 0.456, 0.406]
 _IMAGENET_STD = [0.229, 0.224, 0.225]
 
@@ -134,14 +141,28 @@ def _cap_short_side(img: Image.Image) -> Image.Image:
     return img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
 
 
-def preprocess_batch(image_data: list[bytes]) -> list[Image.Image]:
-    """Shared pre-step: open RGB, cap short side to _SHARED_CAP px, parallelised over CPU cores."""
+def preprocess_batch(image_data: list[bytes]) -> list[Image.Image | Exception]:
+    """Open RGB, cap short side to _SHARED_CAP px; parallelised over CPU cores.
+
+    Returns one entry per input image: an ``Image.Image`` on success or the
+    raised ``Exception`` on failure.  Individual futures are used instead of
+    ``pool.map()`` so that a single corrupt or oversized file does not abort
+    the rest of the batch — callers should check each result with
+    ``isinstance(result, Exception)``.
+    """
 
     def _process(data: bytes) -> Image.Image:
         return _cap_short_side(_open_rgb(data))
 
     with ThreadPoolExecutor() as pool:
-        return list(pool.map(_process, image_data))
+        futures = [pool.submit(_process, data) for data in image_data]
+        results: list[Image.Image | Exception] = []
+        for fut in futures:
+            try:
+                results.append(fut.result())
+            except Exception as exc:  # noqa: BLE001
+                results.append(exc)
+        return results
 
 
 # ---------------------------------------------------------------------------

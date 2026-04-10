@@ -136,7 +136,11 @@ def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
     entry.file_hash_md5 = hash_bytes_md5(data)
     if not embedders:
         return
-    pre_images = preprocess_batch([data])
+    pre_results = preprocess_batch([data])
+    result = pre_results[0]
+    if isinstance(result, Exception):
+        raise result
+    pre_images = [result]
     for key, embedder in embedders.items():
         norm_images = embedder.normalize_batch_bytes(pre_images)
         emb = embedder.embed_images(norm_images)[0]

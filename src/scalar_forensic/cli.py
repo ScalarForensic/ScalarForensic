@@ -11,6 +11,7 @@ from pathlib import Path
 from time import perf_counter
 
 import typer
+from PIL import Image
 
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import (
@@ -363,17 +364,28 @@ def index(
         # ── Shared pre-processing ─────────────────────────────────────────────
         t0 = perf_counter()
         unique_paths_list = [p for p, _ in unique_pairs]
-        try:
-            pre_images = preprocess_batch([data_by_path[p] for p in unique_paths_list])
-        except Exception as exc:  # noqa: BLE001
-            typer.echo(f"[ERROR] Preprocessing failed for batch {batch_num}: {exc}", err=True)
-            for p in unique_paths_list:
+        pre_results = preprocess_batch([data_by_path[p] for p in unique_paths_list])
+
+        pre_by_path: dict[Path, Image.Image] = {}
+        for p, result in zip(unique_paths_list, pre_results):
+            if isinstance(result, Exception):
+                typer.echo(
+                    f"[WARN] Preprocessing failed for {p.name}: {result}", err=True
+                )
                 if records[p].status == "pending":
                     records[p].status = _S_FAIL_PRE
-                    records[p].reason = f"preprocessing error: {exc}"
-            continue
+                    records[p].reason = f"preprocessing error: {result}"
+            else:
+                pre_by_path[p] = result
         pre_s = perf_counter() - t0
-        pre_by_path = dict(zip(unique_paths_list, pre_images))
+
+        if not pre_by_path:
+            continue
+
+        # Narrow unique_pairs to successfully preprocessed images so the
+        # per-model dedup check and status updates only touch the images that
+        # are actually going to be embedded.
+        unique_pairs = [(p, h) for p, h in unique_pairs if p in pre_by_path]
 
         # ── Per-model loop: normalize + embed, collect upsert jobs ────────────
         model_segments: list[str] = []
