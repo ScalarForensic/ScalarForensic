@@ -308,7 +308,7 @@
       <template x-if="selectedFile?.errors?.length > 0">
         <div class="query-error-banner">
           <strong>Query error</strong>
-          <template x-for="e in selectedFile.errors" :key="e">
+          <template x-for="(e, idx) in selectedFile.errors" :key="idx">
             <div class="query-error-detail" x-text="e"></div>
           </template>
         </div>

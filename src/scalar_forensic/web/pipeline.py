@@ -178,7 +178,13 @@ def query_session(
 
     for entry in session.files:
         if entry.error:
-            results.append(FileResult(file_id=entry.file_id, filename=entry.filename))
+            results.append(
+                FileResult(
+                    file_id=entry.file_id,
+                    filename=entry.filename,
+                    errors=[f"analysis failed: {entry.error}"],
+                )
+            )
             continue
 
         file_result = FileResult(file_id=entry.file_id, filename=entry.filename)
