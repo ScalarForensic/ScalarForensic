@@ -67,11 +67,13 @@ done
 
 uv run pip download -r requirements.txt -d "${DEST}" \
     --python-version "${PY_VERSION}" --implementation cp \
+    --only-binary=:all: \
     "${EXTRA_INDEX_ARGS[@]}"
 
 # Include the build backend so `uv pip install -e .` works fully offline.
 uv run pip download hatchling -d "${DEST}" \
-    --python-version "${PY_VERSION}" --implementation cp
+    --python-version "${PY_VERSION}" --implementation cp \
+    --only-binary=:all:
 
 echo ""
 echo "Done. Files to transfer to the offline machine:"
