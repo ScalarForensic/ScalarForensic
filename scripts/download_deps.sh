@@ -16,11 +16,10 @@
 #   bash scripts/download_deps.sh --web        # include web-UI group
 #   bash scripts/download_deps.sh --heif       # include HEIF/HEIC group
 #   bash scripts/download_deps.sh --web --heif # all optional groups
+#   bash scripts/download_deps.sh --dest=pkg   # write wheels to pkg/ instead of vendor/
 #
-# On the offline machine, install with:
-#   uv venv
-#   uv pip install --no-index --find-links vendor/ -r requirements.txt
-#   uv pip install --no-index --find-links vendor/ --no-deps -e .
+# The offline install commands are printed at the end of the script using the
+# actual destination path chosen at runtime (vendor/ by default, or --dest value).
 
 set -euo pipefail
 
