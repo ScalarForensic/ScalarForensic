@@ -7,7 +7,7 @@
 #
 # IMPORTANT: wheels are platform- and Python-version-specific.
 # Run this script on a machine with the same OS, CPU architecture, and
-# Python version as the airgapped target (e.g. linux/x86_64, Python 3.11).
+# Python version as the airgapped target (e.g. linux/x86_64, Python 3.12).
 # Downloading on macOS or a different Python version and transferring to a
 # Linux/x86_64 target will result in install failures on the offline machine.
 #
@@ -20,7 +20,7 @@
 # On the offline machine, install with:
 #   uv venv
 #   uv pip install --no-index --find-links vendor/ -r requirements.txt
-#   uv pip install --no-deps -e .
+#   uv pip install --no-index --find-links vendor/ --no-deps -e .
 
 set -euo pipefail
 
@@ -41,11 +41,11 @@ uv export --frozen --no-emit-project "${GROUPS[@]}" -o requirements.txt
 echo "    Written: requirements.txt"
 
 echo "==> Downloading wheels → ${DEST}/ ..."
-echo "    (torch and torchvision are fetched from the PyTorch CUDA index — this may take a while)"
+echo "    (torch and torchvision are fetched from the configured PyTorch index — this may take a while)"
 mkdir -p "${DEST}"
 
 # uv pip download reads the index configuration from pyproject.toml,
-# so it correctly resolves torch/torchvision from the pytorch-cu128 index.
+# so it correctly resolves torch/torchvision from whichever PyTorch index is active.
 uv pip download -r requirements.txt -d "${DEST}"
 
 # Include the build backend so `uv pip install -e .` works fully offline.
@@ -60,4 +60,4 @@ echo ""
 echo "On the offline machine:"
 echo "  uv venv"
 echo "  uv pip install --no-index --find-links ${DEST}/ -r requirements.txt"
-echo "  uv pip install --no-deps -e ."
+echo "  uv pip install --no-index --find-links ${DEST}/ --no-deps -e ."

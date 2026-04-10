@@ -264,7 +264,7 @@ docker save qdrant/qdrant:v1.17.1 | gzip > qdrant.tar.gz
 ```bash
 uv venv
 uv pip install --no-index --find-links vendor/ -r requirements.txt
-uv pip install --no-deps -e .
+uv pip install --no-index --find-links vendor/ --no-deps -e .
 ```
 
 **6. Load and start Qdrant:**
