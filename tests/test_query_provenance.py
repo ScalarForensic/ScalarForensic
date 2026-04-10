@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 from scalar_forensic.web.pipeline import QueryProvenance
-
 
 # ---------------------------------------------------------------------------
 # QueryProvenance dataclass
@@ -31,7 +30,7 @@ def test_query_provenance_fields():
 
 
 def test_query_provenance_timestamp_format():
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     p = QueryProvenance(
         modes=["exact"],
         threshold_altered=0.75,
@@ -52,7 +51,8 @@ def test_query_provenance_dict():
         timestamp="2026-04-10T00:00:00+00:00",
     )
     d = p.__dict__
-    assert set(d.keys()) == {"modes", "threshold_altered", "threshold_semantic", "limit", "timestamp"}
+    expected_keys = {"modes", "threshold_altered", "threshold_semantic", "limit", "timestamp"}
+    assert set(d.keys()) == expected_keys
     assert isinstance(d["modes"], list)
     assert isinstance(d["threshold_altered"], float)
     assert isinstance(d["threshold_semantic"], float)
@@ -104,7 +104,8 @@ def test_api_query_returns_provenance():
     body = resp.json()
     assert "provenance" in body
     prov = body["provenance"]
-    assert set(prov.keys()) == {"modes", "threshold_altered", "threshold_semantic", "limit", "timestamp"}
+    expected_keys = {"modes", "threshold_altered", "threshold_semantic", "limit", "timestamp"}
+    assert set(prov.keys()) == expected_keys
 
 
 def test_api_query_provenance_modes_match():
@@ -161,4 +162,4 @@ def test_api_query_provenance_timestamp_is_utc():
 
     ts = resp.json()["provenance"]["timestamp"]
     parsed = datetime.fromisoformat(ts)
-    assert parsed.tzinfo is not None, "timestamp must carry UTC offset"
+    assert parsed.utcoffset() == timedelta(0), "timestamp must be UTC (zero offset)"

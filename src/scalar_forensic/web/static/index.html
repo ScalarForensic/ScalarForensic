@@ -636,18 +636,26 @@ function sfn() {
     },
 
     // ── Provenance ────────────────────────────────────────────────────────
-    copyProvenance() {
-      if (this.provenance)
-        navigator.clipboard.writeText(JSON.stringify(this.provenance, null, 2));
+    async copyProvenance() {
+      if (!this.provenance) return;
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(this.provenance, null, 2));
+      } catch {
+        // clipboard access denied or unavailable (non-HTTPS / blocked permission)
+      }
     },
 
     applyProvenance() {
       let p;
       try { p = JSON.parse(this.pasteBuffer); } catch { return; }
-      if (Array.isArray(p.modes))                      this.selectedModes     = p.modes;
-      if (typeof p.threshold_altered === 'number')     this.thresholdAltered  = p.threshold_altered;
-      if (typeof p.threshold_semantic === 'number')    this.thresholdSemantic = p.threshold_semantic;
-      if (typeof p.limit === 'number')                 this.limit             = p.limit;
+      if (Array.isArray(p.modes))
+        this.selectedModes = p.modes.filter(m => this.availableModes.includes(m));
+      if (typeof p.threshold_altered === 'number')
+        this.thresholdAltered = Math.min(1, Math.max(0, p.threshold_altered));
+      if (typeof p.threshold_semantic === 'number')
+        this.thresholdSemantic = Math.min(1, Math.max(0, p.threshold_semantic));
+      if (typeof p.limit === 'number')
+        this.limit = Math.min(50, Math.max(1, Math.round(p.limit)));
       this.showPasteArea = false;
       this.pasteBuffer   = '';
       this.runQuery();

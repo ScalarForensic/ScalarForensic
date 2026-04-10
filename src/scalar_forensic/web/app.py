@@ -6,7 +6,7 @@ import hashlib
 import json
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import uvicorn
@@ -99,8 +99,8 @@ async def query(
     session_id: str = Form(...),
     modes: str = Form(default="exact,altered,semantic"),
     threshold_altered: float = Form(default=0.75),
-    threshold_semantic: float = Form(default=0.80),
-    limit: int = Form(default=10),
+    threshold_semantic: float = Form(default=0.55),
+    limit: int = Form(default=10, ge=1, le=50),
 ) -> JSONResponse:
     session = get_session(session_id)
     if session is None:
@@ -116,7 +116,7 @@ async def query(
         threshold_altered=threshold_altered,
         threshold_semantic=threshold_semantic,
         limit=limit,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
     )
 
     return JSONResponse(
