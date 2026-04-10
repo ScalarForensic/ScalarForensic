@@ -42,6 +42,11 @@ def hash_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def hash_bytes_md5(data: bytes) -> str:
+    """Return MD5 hex digest of already-loaded bytes."""
+    return hashlib.md5(data).hexdigest()  # noqa: S324
+
+
 class ExifInfo(TypedDict):
     exif: bool
     exif_geo_data: bool

@@ -14,7 +14,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from scalar_forensic.config import Settings
-from scalar_forensic.embedder import AnyEmbedder, hash_bytes, load_embedder, preprocess_batch
+from scalar_forensic.embedder import AnyEmbedder, hash_bytes, hash_bytes_md5, load_embedder, preprocess_batch
 from scalar_forensic.web.session import FileEntry, Session
 
 logger = logging.getLogger(__name__)
@@ -126,6 +126,7 @@ def analyze_session(
 def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
     data = entry.temp_path.read_bytes()
     entry.file_hash = hash_bytes(data)
+    entry.file_hash_md5 = hash_bytes_md5(data)
     if not embedders:
         return
     pre_images = preprocess_batch([data])
@@ -201,7 +202,7 @@ def query_session(
         raw_hits: list[Hit] = []
 
         if "exact" in modes and entry.file_hash:
-            exact_hits, errs = _query_exact(client, entry.file_hash, settings)
+            exact_hits, errs = _query_exact(client, entry.file_hash, entry.file_hash_md5, settings)
             raw_hits.extend(exact_hits)
             file_result.errors.extend(errs)
 
@@ -257,11 +258,15 @@ def query_session(
 
 
 def _query_exact(
-    client: QdrantClient, image_hash: str, settings: Settings
+    client: QdrantClient,
+    image_hash: str,
+    image_hash_md5: str | None,
+    settings: Settings,
 ) -> tuple[list[Hit], list[str]]:
-    """Return exact hash matches from whichever collections exist."""
+    """Return exact SHA-256 hash matches and detect MD5 collisions."""
     hits: list[Hit] = []
     errors: list[str] = []
+    collision_paths: set[str] = set()
     for collection in (settings.collection_sscd, settings.collection_dino):
         try:
             records, _ = client.scroll(
@@ -284,6 +289,32 @@ def _query_exact(
                             exif_geo_data=r.payload.get("exif_geo_data"),
                         )
                     )
+
+            # Collision detection: find images with same MD5 but different SHA-256
+            if image_hash_md5:
+                md5_records, _ = client.scroll(
+                    collection_name=collection,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="image_hash_md5", match=MatchValue(value=image_hash_md5)
+                            )
+                        ]
+                    ),
+                    limit=50,
+                    with_payload=["image_path", "image_hash"],
+                    with_vectors=False,
+                )
+                for r in md5_records:
+                    stored_sha256 = r.payload.get("image_hash", "")
+                    if stored_sha256 and stored_sha256 != image_hash:
+                        path = r.payload.get("image_path", "")
+                        if path not in collision_paths:
+                            collision_paths.add(path)
+                            errors.append(
+                                f"MD5 collision: '{path}' has the same MD5 ({image_hash_md5}) "
+                                f"but a different SHA-256 ({stored_sha256[:16]}…)"
+                            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Exact query failed on %s: %s", collection, exc)
             errors.append(f"exact query failed: {type(exc).__name__}")

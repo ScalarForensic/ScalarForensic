@@ -545,7 +545,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   text-transform: uppercase;
   color: var(--muted);
   flex-shrink: 0;
-  width: 36px;
+  min-width: 48px;
 }
 
 .sub-val {
@@ -557,6 +557,14 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   text-overflow: ellipsis;
 }
 .sub-val.mono { font-family: var(--mono); font-size: 10px; }
+.sub-val.hash {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  word-break: break-all;
+  font-family: var(--mono);
+  font-size: 10px;
+}
 
 .muted-text { font-size: 11px; color: var(--muted); }
 

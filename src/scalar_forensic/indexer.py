@@ -60,6 +60,12 @@ class Indexer:
                 field_name="image_path",
                 field_schema=PayloadSchemaType.KEYWORD,
             )
+        if "image_hash_md5" not in schema:
+            self.client.create_payload_index(
+                collection_name=self.collection,
+                field_name="image_hash_md5",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
 
     def get_indexed_hashes(self, hashes: list[str]) -> set[str]:
         """Return the subset of hashes that are already in the collection."""
@@ -98,12 +104,17 @@ class Indexer:
         embeddings: list[list[float]],
         shared_metadata: dict,
         exif_payloads: dict[Path, dict] | None = None,
+        image_hashes_md5: list[str] | None = None,
     ) -> None:
         """Upsert vectors with full forensic metadata payload."""
         if not len(image_paths) == len(image_hashes) == len(embeddings):
             raise ValueError(
                 f"Batch length mismatch: paths={len(image_paths)}, "
                 f"hashes={len(image_hashes)}, embeddings={len(embeddings)}"
+            )
+        if image_hashes_md5 is not None and len(image_hashes_md5) != len(image_hashes):
+            raise ValueError(
+                f"MD5 hash list length mismatch: sha256={len(image_hashes)}, md5={len(image_hashes_md5)}"
             )
         indexed_at = datetime.now(UTC).isoformat()
         points = [
@@ -113,6 +124,7 @@ class Indexer:
                 payload={
                     # Forensic identifiers
                     "image_hash": image_hash,
+                    **({"image_hash_md5": image_hashes_md5[i]} if image_hashes_md5 else {}),
                     "image_path": str(image_path.resolve()),
                     "indexed_at": indexed_at,
                     # Model & library provenance
@@ -125,6 +137,8 @@ class Indexer:
                     **(exif_payloads.get(image_path, {}) if exif_payloads else {}),
                 },
             )
-            for image_path, image_hash, embedding in zip(image_paths, image_hashes, embeddings)
+            for i, (image_path, image_hash, embedding) in enumerate(
+                zip(image_paths, image_hashes, embeddings)
+            )
         ]
         self.client.upsert(collection_name=self.collection, points=points)

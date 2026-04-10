@@ -193,7 +193,8 @@ async def query_metadata(session_id: str, file_id: str) -> JSONResponse:
     data = entry.temp_path.read_bytes()
     meta = extract_exif_detailed(data)
     meta["filename"] = entry.filename
-    meta["hash"] = entry.file_hash or hashlib.sha256(data).hexdigest()
+    meta["hash_sha256"] = entry.file_hash or hashlib.sha256(data).hexdigest()
+    meta["hash_md5"] = entry.file_hash_md5 or hashlib.md5(data).hexdigest()  # noqa: S324
     return JSONResponse(meta)
 
 
@@ -210,7 +211,8 @@ async def hit_metadata(path: str) -> JSONResponse:
     meta = extract_exif_detailed(data)
     meta["filename"] = p.name
     meta["path"] = str(p)
-    meta["hash"] = hashlib.sha256(data).hexdigest()
+    meta["hash_sha256"] = hashlib.sha256(data).hexdigest()
+    meta["hash_md5"] = hashlib.md5(data).hexdigest()  # noqa: S324
     return JSONResponse(meta)
 
 
