@@ -223,7 +223,8 @@ def query_session(
             )
             seen_altered: dict[str, Hit] = {}
             for h in hits:
-                if h.path not in seen_altered:
+                existing = seen_altered.get(h.path)
+                if existing is None or h.best_score() > existing.best_score():
                     seen_altered[h.path] = h
             all_hits.extend(
                 sorted(seen_altered.values(), key=lambda h: (-h.best_score(), h.path))[:limit]
@@ -241,7 +242,8 @@ def query_session(
             )
             seen_semantic: dict[str, Hit] = {}
             for h in hits:
-                if h.path not in seen_semantic:
+                existing = seen_semantic.get(h.path)
+                if existing is None or h.best_score() > existing.best_score():
                     seen_semantic[h.path] = h
             all_hits.extend(
                 sorted(seen_semantic.values(), key=lambda h: (-h.best_score(), h.path))[:limit]

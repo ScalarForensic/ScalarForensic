@@ -231,6 +231,35 @@ def test_altered_and_semantic_same_path_yields_two_rows():
 
 
 # ---------------------------------------------------------------------------
+# Per-mode dedup keeps highest-scoring hit, not first occurrence
+# ---------------------------------------------------------------------------
+
+
+def test_per_mode_dedup_keeps_highest_score():
+    """If Qdrant returns the same path twice within one mode, keep the best score."""
+    session = _make_session([_make_entry(dino=True)])
+    settings = _mock_settings()
+
+    # Qdrant returns PATH_A twice: lower score first, higher score second
+    dup_hits = [
+        Hit(path=PATH_A, scores={"semantic": 0.70}),
+        Hit(path=PATH_A, scores={"semantic": 0.95}),
+        Hit(path=PATH_B, scores={"semantic": 0.80}),
+    ]
+
+    with (
+        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline._query_vector", return_value=(dup_hits, [])),
+    ):
+        results = query_session(session, ["semantic"], 0.75, 0.55, 10, settings)
+
+    hits = results[0].hits
+    path_a_hits = [h for h in hits if h.path == PATH_A]
+    assert len(path_a_hits) == 1, "duplicate path within same mode must be deduped to one row"
+    assert path_a_hits[0].scores["semantic"] == 0.95, "must keep highest-scoring hit, not first"
+
+
+# ---------------------------------------------------------------------------
 # Combined sort: Exact hits (score 1.0) rank above vector hits
 # ---------------------------------------------------------------------------
 
