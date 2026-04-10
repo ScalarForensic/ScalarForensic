@@ -82,12 +82,16 @@ def _apply_dedup(
 
 
 def _write_csv(records: dict[Path, "_FileRecord"], csv_path: Path) -> None:
-    with csv_path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(["path", "processed", "reason", "md5", "sha256"])
-        for rec in sorted(records.values(), key=lambda r: str(r.path)):
-            processed = "yes" if rec.status == _S_INDEXED else "no"
-            writer.writerow([str(rec.path), processed, rec.reason, rec.md5, rec.sha256])
+    try:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with csv_path.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["path", "processed", "reason", "md5", "sha256"])
+            for rec in sorted(records.values(), key=lambda r: str(r.path)):
+                processed = "yes" if rec.status == _S_INDEXED else "no"
+                writer.writerow([str(rec.path), processed, rec.reason, rec.md5, rec.sha256])
+    except OSError as exc:
+        typer.echo(f"[ERROR] Could not write CSV report to {csv_path}: {exc}", err=True)
 
 
 def _print_summary(
@@ -261,8 +265,7 @@ def index(
 
     n_unsupported = len(records) - len(image_paths)
     typer.echo(
-        f"  {len(records):,} files found"
-        f"  ({len(image_paths):,} image, {n_unsupported:,} non-image)"
+        f"  {len(records):,} files found  ({len(image_paths):,} image, {n_unsupported:,} non-image)"
     )
 
     # ── Per-model counters ────────────────────────────────────────────────────
@@ -339,9 +342,7 @@ def index(
         try:
             pre_images = preprocess_batch([data_by_path[p] for p in unique_paths_list])
         except Exception as exc:  # noqa: BLE001
-            typer.echo(
-                f"[ERROR] Preprocessing failed for batch {batch_num}: {exc}", err=True
-            )
+            typer.echo(f"[ERROR] Preprocessing failed for batch {batch_num}: {exc}", err=True)
             for p in unique_paths_list:
                 if records[p].status == "pending":
                     records[p].status = _S_FAIL_PRE
