@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Python 3.12 (pinned — see [GPU setup](#gpu--hardware-acceleration) for why)
+- Python 3.12 (required — see [why](#why-python-312-is-required))
 - [uv](https://github.com/astral-sh/uv)
 - Qdrant: `docker run -p 6333:6333 qdrant/qdrant`
 
@@ -11,10 +11,14 @@
 ```bash
 git clone https://github.com/ScalarForensic/ScalarForensic
 cd ScalarForensic
-uv sync
-cp .env.example .env   # edit to match your environment
+uv sync --group web   # add --group dev to include test/lint tools
+cp .env.example .env  # edit to match your environment
 # Note: a Qdrant service must be running at SFN_QDRANT_URL before starting the app.
 ```
+
+`uv sync` alone only installs the base CLI dependencies. The `--group web` flag is
+required to get FastAPI, Uvicorn, and python-multipart for `sfn-web`. Use `--group heif`
+to add HEIC/HEIF support (see [below](#heicheif-support)).
 
 ## GPU / hardware acceleration
 
@@ -58,13 +62,16 @@ the CUDA interface for ROCm.
             --reinstall-package pytorch-triton-rocm
    ```
 
-**Why Python 3.12 is pinned (ROCm only):**
+**Why Python 3.12 is required:**
 
-PyTorch ships `pytorch-triton-rocm` with a plain `linux_x86_64` wheel tag instead of the
-`manylinux` tag uv expects. uv's index resolver rejects it as platform-incompatible. The
-workaround pins it as a direct project dependency with a hard-coded wheel URL so uv skips
-tag validation — and direct URL sources in uv only work for packages listed in project
-dependencies, which requires a fixed Python version to select the right `cpXYZ` wheel.
+`pyproject.toml` enforces `requires-python = "==3.12.*"` for all users. The pin exists
+because of the ROCm workaround: PyTorch ships `pytorch-triton-rocm` with a plain
+`linux_x86_64` wheel tag instead of the `manylinux` tag uv expects. The workaround pins
+it as a direct project dependency with a hard-coded wheel URL so uv skips tag validation
+— but direct URL sources in uv only apply to packages explicitly listed in
+`[project.dependencies]`, which requires a fixed Python version to resolve the correct
+`cpXYZ` wheel filename. CUDA users are unaffected in practice; the constraint may be
+relaxed once uv gains better support for non-standard wheel tags.
 
 **Upgrading PyTorch or switching ROCm versions:**
 
