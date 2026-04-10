@@ -43,12 +43,24 @@ echo "==> Downloading wheels → ${DEST}/ ..."
 echo "    (torch and torchvision are fetched from the configured PyTorch index — this may take a while)"
 mkdir -p "${DEST}"
 
-# uv pip download reads the index configuration from pyproject.toml,
-# so it correctly resolves torch/torchvision from whichever PyTorch index is active.
-uv pip download -r requirements.txt -d "${DEST}"
+# uv pip download was removed in uv ≥ 0.5; fall back to pip (via uv run) and
+# explicitly pass any extra indexes declared in [[tool.uv.index]] so that
+# torch/torchvision are resolved from whichever PyTorch index is currently active.
+EXTRA_INDEX_ARGS=()
+while IFS= read -r url; do
+    EXTRA_INDEX_ARGS+=("--extra-index-url" "$url")
+done < <(uv run python -c "
+import tomllib, sys
+with open('pyproject.toml', 'rb') as f:
+    data = tomllib.load(f)
+for idx in data.get('tool', {}).get('uv', {}).get('index', []):
+    print(idx['url'])
+")
+
+uv run pip download -r requirements.txt -d "${DEST}" "${EXTRA_INDEX_ARGS[@]}"
 
 # Include the build backend so `uv pip install -e .` works fully offline.
-uv pip download hatchling -d "${DEST}"
+uv run pip download hatchling -d "${DEST}"
 
 echo ""
 echo "Done. Files to transfer to the offline machine:"
