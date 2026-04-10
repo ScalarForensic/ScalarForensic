@@ -3,16 +3,20 @@
 # Before first use, load the image (produced by scripts/build_airgap_image.sh):
 #   docker load < scalarforensic-<tag>.tar.gz
 #
-# Configure the image directory:
+# Configure the image directory (MUST be set before `docker compose up`):
 #   Set SFN_IMAGES_DIR in your shell or add it to .env:
 #     export SFN_IMAGES_DIR=/path/to/evidence/images
 #   (Default: ./data — relative to the project folder.)
+#   Changing this after the stack is running requires `docker compose down` first.
 #
 # Start the stack:
 #   docker compose up -d
 #
-# Index images:
-#   docker compose run --rm sfn-web sfn /images --dino --sscd
+# Index images (uses the directory mounted as /images above):
+#   docker compose run --rm sfn-web sfn --dino --sscd
+#
+# To index a different directory without restarting the stack:
+#   docker compose run --rm -v /other/path:/images:ro sfn-web sfn /images --dino --sscd
 #
 # Web UI:
 #   http://localhost:8080
@@ -66,7 +70,7 @@ services:
       - /dev/dri:/dev/dri
     group_add:
       - video
-      - render
+#      - render
 
 volumes:
   # Qdrant vector data — persists across container restarts and image updates.

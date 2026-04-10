@@ -329,16 +329,16 @@ dependency layers.
 docker load < scalarforensic-<tag>.tar.gz
 ```
 
-**2. Create your config file:**
+**2. Create your config file and set your image directory:**
 
 ```bash
 cp .env.example .env
-# Set SFN_IMAGES_DIR to the host path containing the images to index:
+# Set SFN_IMAGES_DIR to the host path containing the images to index.
+# This must be set BEFORE running `docker compose up` — it controls which
+# host directory is mounted into the container as /images.
 export SFN_IMAGES_DIR=/path/to/evidence/images
+# Alternatively, add SFN_IMAGES_DIR=/path/to/evidence/images to your .env file.
 ```
-
-`SFN_IMAGES_DIR` controls which host directory is mounted into the container as
-`/images`. Set it in your shell before running Compose, or add it to `.env`.
 
 **3. Start Qdrant and the web UI:**
 
@@ -348,12 +348,30 @@ docker compose up -d
 # SCALARFORENSIC_IMAGE=scalarforensic:1.0 docker compose up -d
 ```
 
+If you forgot to set `SFN_IMAGES_DIR` before starting the stack, stop it first,
+then set the variable and start it again:
+
+```bash
+docker compose down
+export SFN_IMAGES_DIR=/path/to/evidence/images
+docker compose up -d
+```
+
 **4. Index images:**
 
 ```bash
 docker compose run --rm sfn-web sfn --dino --sscd
 # /images is the default input dir inside the container (set by docker-compose.yml).
 # Pass a subdirectory if needed: sfn /images/case-001 --dino --sscd
+```
+
+If you need to index a directory that differs from the one the stack was started
+with (e.g. a second evidence drive), override the volume for that one run:
+
+```bash
+docker compose run --rm \
+  -v /path/to/other/images:/images:ro \
+  sfn-web sfn /images --dino --sscd
 ```
 
 CSV reports are written to `/app/` inside the container by default. To save them
