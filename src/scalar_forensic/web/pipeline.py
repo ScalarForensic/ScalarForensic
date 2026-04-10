@@ -228,15 +228,13 @@ def query_session(
                     exif=existing.exif if existing.exif is not None else hit.exif,
                     exif_geo_data=(
                         existing.exif_geo_data
-                        if existing.exif is not None
+                        if existing.exif_geo_data is not None
                         else hit.exif_geo_data
                     ),
                 )
 
         # Sort deterministically: best score descending, then path ascending for tie-breaking
-        file_result.hits = sorted(
-            seen.values(), key=lambda h: (-h.best_score(), h.path)
-        )[:limit]
+        file_result.hits = sorted(seen.values(), key=lambda h: (-h.best_score(), h.path))[:limit]
         results.append(file_result)
 
     return results
@@ -272,7 +270,7 @@ def _query_exact(
                     )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Exact query failed on %s: %s", collection, exc)
-            errors.append(f"exact/{collection}: {exc}")
+            errors.append(f"exact query failed: {type(exc).__name__}")
     return hits, errors
 
 
@@ -310,7 +308,7 @@ def _query_vector(
         ], []
     except Exception as exc:  # noqa: BLE001
         logger.warning("Vector query failed on %s (%s): %s", collection, mode, exc)
-        return [], [f"{mode}/{collection}: {exc}"]
+        return [], [f"{mode} query failed: {type(exc).__name__}"]
 
 
 # ---------------------------------------------------------------------------

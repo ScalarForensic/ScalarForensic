@@ -376,8 +376,8 @@ function sfn() {
     get selectedFile() {
       return this.results.find(r => r.file_id === this.selectedFileId) ?? null;
     },
-    get matchedFiles() { return this.results.filter(r => r.hits.length > 0); },
-    get errorFiles() { return this.results.filter(r => r.hits.length === 0 && r.errors?.length > 0); },
+    get matchedFiles() { return this.results.filter(r => r.hits.length > 0 && !(r.errors?.length > 0)); },
+    get errorFiles() { return this.results.filter(r => r.errors?.length > 0); },
     get unmatchedFiles() { return this.results.filter(r => r.hits.length === 0 && !(r.errors?.length > 0)); },
     get selectedHit() {
       const hits = this.selectedFile?.hits ?? [];
@@ -545,8 +545,13 @@ function sfn() {
       fd.append('limit', this.limit);
       this.queryError = '';
       try {
-        const d = await fetch('/api/query', { method: 'POST', body: fd }).then(r => r.json());
-        this.results = d.results;
+        const resp = await fetch('/api/query', { method: 'POST', body: fd });
+        if (!resp.ok) {
+          this.queryError = `Query failed (HTTP ${resp.status}) — check Qdrant connection`;
+          return;
+        }
+        const d = await resp.json();
+        this.results = Array.isArray(d.results) ? d.results : [];
         // Re-sync selected hit after re-query
         if (this.selectedFileId) {
           const f = this.results.find(r => r.file_id === this.selectedFileId);
@@ -610,6 +615,7 @@ function sfn() {
       this.sessionId = null;
       this.queryMeta = null;
       this.matchMeta = null;
+      this.queryError = '';
     },
 
     // ── Formatters ────────────────────────────────────────────────────────
