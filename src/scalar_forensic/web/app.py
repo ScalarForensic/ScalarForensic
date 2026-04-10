@@ -6,6 +6,7 @@ import hashlib
 import json
 import tempfile
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import uvicorn
@@ -16,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import extract_exif_detailed
 from scalar_forensic.web.pipeline import (
+    QueryProvenance,
     analyze_session,
     get_available_modes,
     query_session,
@@ -96,9 +98,9 @@ async def analyze(
 async def query(
     session_id: str = Form(...),
     modes: str = Form(default="exact,altered,semantic"),
-    threshold_altered: float = Form(default=0.75),
-    threshold_semantic: float = Form(default=0.80),
-    limit: int = Form(default=10),
+    threshold_altered: float = Form(default=0.75, ge=0.0, le=1.0),
+    threshold_semantic: float = Form(default=0.55, ge=0.0, le=1.0),
+    limit: int = Form(default=10, ge=1, le=50),
 ) -> JSONResponse:
     session = get_session(session_id)
     if session is None:
@@ -109,9 +111,17 @@ async def query(
     results = query_session(
         session, mode_list, threshold_altered, threshold_semantic, limit, settings
     )
+    provenance = QueryProvenance(
+        modes=mode_list,
+        threshold_altered=threshold_altered,
+        threshold_semantic=threshold_semantic,
+        limit=limit,
+        timestamp=datetime.now(UTC).isoformat(),
+    )
 
     return JSONResponse(
         {
+            "provenance": provenance.__dict__,
             "results": [
                 {
                     "file_id": r.file_id,
@@ -128,7 +138,7 @@ async def query(
                     ],
                 }
                 for r in results
-            ]
+            ],
         }
     )
 

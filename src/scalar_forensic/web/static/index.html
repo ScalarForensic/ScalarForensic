@@ -93,24 +93,42 @@
       <div class="sliders">
         <div class="slider-row">
           <div class="slider-label">
-            <span>Max hits</span>
+            <span title="Maximum number of hits returned per uploaded file">Top K (max results per file)</span>
             <span class="slider-value" x-text="limit"></span>
           </div>
           <input type="range" min="1" max="50" step="1" x-model.number="limit" @input="debouncedQuery()">
         </div>
         <div class="slider-row">
           <div class="slider-label">
-            <span>Altered threshold</span>
+            <span title="Minimum SSCD cosine similarity to include a hit (detects edited/cropped copies)">SSCD similarity threshold</span>
             <span class="slider-value altered-val" x-text="thresholdAltered.toFixed(2)"></span>
           </div>
           <input type="range" min="0" max="1" step="0.01" x-model.number="thresholdAltered" @input="debouncedQuery()" class="range-altered">
         </div>
         <div class="slider-row">
           <div class="slider-label">
-            <span>Semantic threshold</span>
+            <span title="Minimum DINOv2 cosine similarity to include a hit (detects visually similar images)">DINOv2 similarity threshold</span>
             <span class="slider-value semantic-val" x-text="thresholdSemantic.toFixed(2)"></span>
           </div>
           <input type="range" min="0" max="1" step="0.01" x-model.number="thresholdSemantic" @input="debouncedQuery()" class="range-semantic">
+        </div>
+      </div>
+
+      <div class="panel-header section-header">
+        Query Provenance
+        <button class="btn-tiny" @click="showProvenance = !showProvenance"
+                x-text="showProvenance ? '▴ Hide' : '▾ Show'"></button>
+      </div>
+      <div x-show="showProvenance" class="provenance-box">
+        <pre class="provenance-json" x-text="provenance ? JSON.stringify(provenance, null, 2) : '—'"></pre>
+        <div class="provenance-actions">
+          <button class="btn-tiny" @click="copyProvenance()" x-show="provenance">Copy JSON</button>
+          <button class="btn-tiny" @click="showPasteArea = !showPasteArea">Paste &amp; Apply</button>
+        </div>
+        <div x-show="showPasteArea" class="provenance-paste">
+          <textarea class="provenance-textarea" x-model="pasteBuffer"
+                    placeholder="Paste provenance JSON here…"></textarea>
+          <button class="btn-secondary" @click="applyProvenance()">Apply</button>
         </div>
       </div>
 
@@ -365,12 +383,16 @@ function sfn() {
     selectedFileId: null,
     selectedHitPath: null,
     thresholdAltered: 0.75,
-    thresholdSemantic: 0.80,
+    thresholdSemantic: 0.55,
     limit: 10,
     queryMeta: null,
     matchMeta: null,
     queryError: '',
     _queryTimer: null,
+    provenance: null,
+    showProvenance: false,
+    showPasteArea: false,
+    pasteBuffer: '',
 
     // ── Computed ──────────────────────────────────────────────────────────
     get progressPct() {
@@ -551,6 +573,7 @@ function sfn() {
       fd.append('threshold_semantic', this.thresholdSemantic);
       fd.append('limit', this.limit);
       this.queryError = '';
+      this.provenance = null;
       try {
         const resp = await fetch('/api/query', { method: 'POST', body: fd });
         if (!resp.ok) {
@@ -559,6 +582,7 @@ function sfn() {
         }
         const d = await resp.json();
         this.results = Array.isArray(d.results) ? d.results : [];
+        this.provenance = d.provenance ?? null;
         // Re-sync selected hit after re-query
         if (this.selectedFileId) {
           const f = this.results.find(r => r.file_id === this.selectedFileId);
@@ -612,6 +636,32 @@ function sfn() {
       } catch { this.matchMeta = null; }
     },
 
+    // ── Provenance ────────────────────────────────────────────────────────
+    async copyProvenance() {
+      if (!this.provenance) return;
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(this.provenance, null, 2));
+      } catch {
+        // clipboard access denied or unavailable (non-HTTPS / blocked permission)
+      }
+    },
+
+    applyProvenance() {
+      let p;
+      try { p = JSON.parse(this.pasteBuffer); } catch { return; }
+      if (Array.isArray(p.modes))
+        this.selectedModes = p.modes.filter(m => this.availableModes.includes(m));
+      if (typeof p.threshold_altered === 'number')
+        this.thresholdAltered = Math.min(1, Math.max(0, p.threshold_altered));
+      if (typeof p.threshold_semantic === 'number')
+        this.thresholdSemantic = Math.min(1, Math.max(0, p.threshold_semantic));
+      if (typeof p.limit === 'number')
+        this.limit = Math.min(50, Math.max(1, Math.round(p.limit)));
+      this.showPasteArea = false;
+      this.pasteBuffer   = '';
+      this.runQuery();
+    },
+
     // ── Reset ─────────────────────────────────────────────────────────────
     resetToUpload() {
       this.phase = 'upload';
@@ -623,6 +673,10 @@ function sfn() {
       this.queryMeta = null;
       this.matchMeta = null;
       this.queryError = '';
+      this.provenance = null;
+      this.showProvenance = false;
+      this.showPasteArea = false;
+      this.pasteBuffer = '';
     },
 
     // ── Formatters ────────────────────────────────────────────────────────

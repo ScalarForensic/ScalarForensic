@@ -162,6 +162,15 @@ class FileResult:
     errors: list[str] = field(default_factory=list)
 
 
+@dataclass
+class QueryProvenance:
+    modes: list[str]
+    threshold_altered: float
+    threshold_semantic: float
+    limit: int
+    timestamp: str  # ISO 8601 UTC, e.g. "2026-04-10T14:32:00.123456+00:00"
+
+
 def query_session(
     session: Session,
     modes: list[str],
