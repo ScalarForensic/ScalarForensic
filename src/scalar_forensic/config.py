@@ -126,10 +126,11 @@ class Settings:
             return (
                 f"DINOv2 model not found: SFN_MODEL_DINO={self.model_dino!r}\n"
                 "  Online access is disabled (default). To fix:\n"
-                "  - Download the model once (requires internet):\n"
+                "  - Download the model once (requires internet), then update .env:\n"
                 "      uv run python scripts/download_models.py --dino\n"
-                "    Then set SFN_MODEL_DINO=models/dinov2-large in .env\n"
-                "  - Or allow a one-time download:\n"
-                "      sfn --allow-online  /  sfn-web --allow-online"
+                "      # then set SFN_MODEL_DINO=models/dinov2-large in .env\n"
+                "  - Or allow a one-time download via the flag:\n"
+                "      sfn --allow-online <image-dir> --dino\n"
+                "      sfn-web --allow-online"
             )
         return None

@@ -168,7 +168,7 @@ def index(
 
     settings = Settings()
 
-    # Apply HuggingFace offline guard as early as possible — before any model code runs.
+    # Apply HuggingFace offline guard before any model loading occurs.
     settings.apply_network_policy()
 
     env_source = str(settings._env_file) if settings._env_file else "(no .env, using defaults)"

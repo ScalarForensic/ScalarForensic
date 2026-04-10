@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import os
 import json
+import os
 import sys
 import tempfile
 import uuid
@@ -248,8 +248,8 @@ def start() -> None:
 
     settings = Settings()
 
-    # Apply HuggingFace offline guard as early as possible — before uvicorn imports
-    # any model code.  Qdrant / remote-embedder connections are unaffected.
+    # Apply HuggingFace offline guard before any model loading occurs.
+    # Qdrant / remote-embedder connections are unaffected.
     settings.apply_network_policy()
 
     # Pre-flight: always check DINOv2 — available modes aren't known until Qdrant
