@@ -351,7 +351,6 @@ def index(
         for p, h in path_hash_pairs:
             unique_path_by_hash.setdefault(h, p)
         unique_pairs = [(p, h) for h, p in unique_path_by_hash.items()]
-        duplicate_hashes_in_batch = len(path_hash_pairs) - len(unique_pairs)
 
         winner_paths = {p for p, _ in unique_pairs}
         for p, _ in path_hash_pairs:
