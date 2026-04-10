@@ -10,6 +10,8 @@
 <body>
 <div id="app" x-data="sfn()" x-init="init()" x-cloak>
 
+  <div class="error-banner" x-show="serverError" x-text="serverError"></div>
+
   <!-- ── Header ── -->
   <header>
     <div class="header-logo">Scalar<span>Forensic</span></div>
@@ -356,6 +358,7 @@ function sfn() {
     dragOver: false,
     selectedModes: [],
     availableModes: [],
+    serverError: '',
     progress: { current: 0, total: 0, filename: '' },
     sessionId: null,
     results: [],
@@ -464,9 +467,13 @@ function sfn() {
         const d = await fetch('/api/collections').then(r => r.json());
         this.availableModes = d.modes;
         this.selectedModes = [...d.modes];
+        if (d.error) {
+          this.serverError = d.error;
+        }
       } catch {
         this.availableModes = ['exact'];
         this.selectedModes = ['exact'];
+        this.serverError = 'Backend unreachable — only exact hash matching is available.';
       }
     },
 

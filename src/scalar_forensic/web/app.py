@@ -49,8 +49,11 @@ async def index() -> FileResponse:
 @app.get("/api/collections")
 async def collections() -> JSONResponse:
     settings = Settings()
-    modes = get_available_modes(settings)
-    return JSONResponse({"modes": modes})
+    modes, error = await get_available_modes(settings)
+    payload: dict = {"modes": modes}
+    if error:
+        payload["error"] = f"Qdrant unavailable: {error}"
+    return JSONResponse(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +69,7 @@ async def analyze(
     settings = Settings()
     mode_list = [m.strip() for m in modes.split(",") if m.strip()]
 
-    session = create_session()
+    session = await create_session()
     tmp_dir = Path(tempfile.mkdtemp(prefix="sfn_"))
 
     for upload in files:

@@ -17,6 +17,7 @@ git clone https://github.com/ScalarForensic/ScalarForensic
 cd ScalarForensic
 uv sync
 cp .env.example .env   # edit to match your environment
+# Note: a Qdrant service must be running at SFN_QDRANT_URL before starting the app.
 ```
 
 ## GPU / hardware acceleration

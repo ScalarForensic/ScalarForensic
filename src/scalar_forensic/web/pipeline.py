@@ -5,6 +5,7 @@ Imports from the existing backend — no modifications to those modules.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Generator
 from dataclasses import dataclass, field
@@ -322,20 +323,40 @@ def _query_vector(
 # ---------------------------------------------------------------------------
 
 
-def get_available_modes(settings: Settings) -> list[str]:
-    """Return which query modes are usable based on existing Qdrant collections."""
-    try:
-        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-        existing = {c.name for c in client.get_collections().collections}
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Could not reach Qdrant at %s: %s", settings.qdrant_url, exc)
-        return []
+async def get_available_modes(settings: Settings) -> tuple[list[str], str | None]:
+    """Return which query modes are usable based on existing Qdrant collections.
+
+    Retries up to 4 times (initial + 3 retries) with exponential backoff (1s/2s/4s)
+    so transient startup delays don't immediately surface as errors.
+    Returns a tuple of (modes, error_message); error_message is None on success.
+    """
+    _delays = [1, 2, 4]
+    last_exc: Exception | None = None
+
+    for attempt in range(4):
+        if attempt > 0:
+            await asyncio.sleep(_delays[attempt - 1])
+        try:
+            client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+            existing = {c.name for c in client.get_collections().collections}
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            logger.warning(
+                "Qdrant connection attempt %d/4 failed at %s: %s",
+                attempt + 1,
+                settings.qdrant_url,
+                exc,
+            )
+    else:
+        return [], str(last_exc)
+
+    if not existing:
+        return [], None
 
     modes: list[str] = ["exact"]  # exact works as long as any collection exists
-    if not existing:
-        return []
     if settings.collection_sscd in existing:
         modes.append("altered")
     if settings.collection_dino in existing:
         modes.append("semantic")
-    return modes
+    return modes, None
