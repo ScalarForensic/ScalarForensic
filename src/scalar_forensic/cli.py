@@ -397,13 +397,21 @@ def index(
         # are actually going to be embedded.
         unique_pairs = [(p, h) for p, h in unique_pairs if p in pre_by_path]
 
+        # Recompute the in-batch duplicate skip count after preprocessing-failure
+        # propagation: some records originally marked _S_SKIP_DUP may have been
+        # reclassified to _S_FAIL_PRE above, so using the old duplicate_hashes_in_batch
+        # count would inflate the per-model skipped_counts.
+        duplicate_skips_in_batch = sum(
+            1 for p, _ in path_hash_pairs if records[p].status == _S_SKIP_DUP
+        )
+
         # ── Per-model loop: normalize + embed, collect upsert jobs ────────────
         model_segments: list[str] = []
         upsert_jobs: list = []
 
         for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
             to_embed = _apply_dedup(unique_pairs, indexer, settings)
-            n_skipped = duplicate_hashes_in_batch + (len(unique_pairs) - len(to_embed))
+            n_skipped = duplicate_skips_in_batch + (len(unique_pairs) - len(to_embed))
             skipped_counts[spec_idx] += n_skipped
 
             # Mark already-indexed files for this model (don't overwrite "indexed").

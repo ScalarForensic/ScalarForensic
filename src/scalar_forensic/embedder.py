@@ -39,8 +39,10 @@ def _configure_max_image_pixels_from_env() -> None:
     For backward compatibility, the legacy SCALAR_FORENSIC_MAX_IMAGE_PIXELS key
     is also accepted when SFN_MAX_IMAGE_PIXELS is unset.
     """
+    source_env = _MAX_IMAGE_PIXELS_ENV
     raw_value = os.getenv(_MAX_IMAGE_PIXELS_ENV)
     if raw_value is None:
+        source_env = _LEGACY_MAX_IMAGE_PIXELS_ENV
         raw_value = os.getenv(_LEGACY_MAX_IMAGE_PIXELS_ENV)
     if raw_value is None:
         return
@@ -54,10 +56,13 @@ def _configure_max_image_pixels_from_env() -> None:
         max_pixels = int(value)
     except ValueError:
         raise ValueError(
-            f"{_MAX_IMAGE_PIXELS_ENV} must be a positive integer or 'none'; got {raw_value!r}"
+            f"{source_env} must be a positive integer or one of 'none', 'disable', 'disabled';"
+            f" got {raw_value!r}"
         ) from None
     if max_pixels <= 0:
-        raise ValueError(f"{_MAX_IMAGE_PIXELS_ENV} must be a positive integer or 'none'")
+        raise ValueError(
+            f"{source_env} must be a positive integer or one of 'none', 'disable', 'disabled'"
+        )
     Image.MAX_IMAGE_PIXELS = max_pixels
 
 

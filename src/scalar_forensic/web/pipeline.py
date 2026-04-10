@@ -139,7 +139,7 @@ def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
     pre_results = preprocess_batch([data])
     result = pre_results[0]
     if isinstance(result, Exception):
-        raise result
+        raise result.with_traceback(result.__traceback__)
     pre_images = [result]
     for key, embedder in embedders.items():
         norm_images = embedder.normalize_batch_bytes(pre_images)
