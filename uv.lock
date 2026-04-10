@@ -715,9 +715,13 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "fastapi" },
+    { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "python-multipart" },
     { name = "ruff" },
+    { name = "uvicorn" },
 ]
 heif = [
     { name = "pillow-heif" },
@@ -743,9 +747,13 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "fastapi", specifier = ">=0.111" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-cov", specifier = ">=6.0" },
+    { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "ruff", specifier = ">=0.11" },
+    { name = "uvicorn", specifier = ">=0.29" },
 ]
 heif = [{ name = "pillow-heif", specifier = ">=0.13" }]
 web = [

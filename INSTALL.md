@@ -1,0 +1,244 @@
+# Installation
+
+## Requirements
+
+- Python 3.12 (pinned — see [GPU setup](#gpu--hardware-acceleration) for why)
+- [uv](https://github.com/astral-sh/uv)
+- Qdrant: `docker run -p 6333:6333 qdrant/qdrant`
+
+## Setup
+
+```bash
+git clone https://github.com/ScalarForensic/ScalarForensic
+cd ScalarForensic
+uv sync
+cp .env.example .env   # edit to match your environment
+# Note: a Qdrant service must be running at SFN_QDRANT_URL before starting the app.
+```
+
+## GPU / hardware acceleration
+
+The repo ships pre-configured for **NVIDIA CUDA 12.8**. The AMD ROCm index is present
+but commented out — swap the active blocks in `pyproject.toml` to switch backends.
+
+### NVIDIA CUDA (default)
+
+No extra steps. Run `uv sync` and everything installs from the CUDA index automatically.
+
+To switch CUDA versions, change the `pytorch-cu128` index URL (e.g. `cu124`) and
+update the matching `[tool.uv.sources]` references, then run:
+
+```bash
+uv sync --reinstall-package torch --reinstall-package torchvision
+```
+
+### AMD ROCm
+
+**System requirements:** ROCm 6.4 installed system-wide (`rocm-smi --showdriverversion`).
+
+**Supported GPU families (ROCm 6.4):**
+
+| Family | GFX | Cards |
+|--------|-----|-------|
+| RDNA 2 | gfx1030 / 1031 / 1032 | RX 6000 series |
+| RDNA 3 | gfx1100 / 1101 / 1102 | RX 7000 series |
+| RDNA 4 | gfx1201 | RX 9070 / 9070 XT (natively supported, no `HSA_OVERRIDE_GFX_VERSION` needed) |
+
+In `SFN_DEVICE`, both `auto` and `cuda` resolve to the ROCm/HIP backend — PyTorch uses
+the CUDA interface for ROCm.
+
+**Switching to ROCm:**
+
+1. In `pyproject.toml`, comment out the `pytorch-cu128` index block and uncomment `pytorch-rocm64`.
+2. In `[tool.uv.sources]`, comment out the CUDA `torch`/`torchvision` lines and uncomment the ROCm ones (including `pytorch-triton-rocm`).
+3. In `[project.dependencies]`, uncomment the `pytorch-triton-rocm==...` line.
+4. Run:
+   ```bash
+   uv sync --reinstall-package torch --reinstall-package torchvision \
+            --reinstall-package pytorch-triton-rocm
+   ```
+
+**Why Python 3.12 is pinned (ROCm only):**
+
+PyTorch ships `pytorch-triton-rocm` with a plain `linux_x86_64` wheel tag instead of the
+`manylinux` tag uv expects. uv's index resolver rejects it as platform-incompatible. The
+workaround pins it as a direct project dependency with a hard-coded wheel URL so uv skips
+tag validation — and direct URL sources in uv only work for packages listed in project
+dependencies, which requires a fixed Python version to select the right `cpXYZ` wheel.
+
+**Upgrading PyTorch or switching ROCm versions:**
+
+1. Pick the target index — available versions are listed at `https://download.pytorch.org/whl/torch/`.
+2. In `pyproject.toml`, update `[[tool.uv.index]]` to point at the new ROCm index (e.g. `rocm7.2`) and update the `[tool.uv.sources]` `index` references to match.
+3. Find the `pytorch-triton-rocm` version that the new torch requires (visible in the wheel's `.metadata` file at `https://download.pytorch.org/whl/<rocm-index>/torch-<version>+rocm<X.Y>-cpXYZ-cpXYZ-linux_x86_64.whl.metadata`).
+4. Update the `pytorch-triton-rocm==X.Y.Z` pin in `[project.dependencies]` and the direct URL in `[tool.uv.sources]`. The URL pattern is:
+   ```
+   https://download-r2.pytorch.org/whl/pytorch_triton_rocm-X.Y.Z-cpABC-cpABC-linux_x86_64.whl
+   ```
+5. Run `uv sync --reinstall-package torch --reinstall-package torchvision --reinstall-package pytorch-triton-rocm`.
+
+## Configuration
+
+All settings live in `.env`. Copy `.env.example` to get started — every key is documented
+there. Environment variables already set in the shell take precedence over the file.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SFN_QDRANT_URL` | `http://localhost:6333` | Qdrant server URL |
+| `SFN_COLLECTION_DINO` | `sfn-dinov2` | Collection name for DINOv2 vectors |
+| `SFN_COLLECTION_SSCD` | `sfn-sscd` | Collection name for SSCD vectors |
+| `SFN_MODEL_DINO` | `facebook/dinov2-large` | DINOv2 model identifier |
+| `SFN_MODEL_SSCD` | `models/sscd_disc_mixup.torchscript.pt` | Path to SSCD checkpoint |
+| `SFN_NORMALIZE_SIZE` | `512` | DINOv2 resize dimension (N×N px) |
+| `SFN_BATCH_SIZE` | `32` | Images per embedding batch |
+| `SFN_DEVICE` | `auto` | Compute device: `auto` \| `cuda` \| `cpu` \| `mps` |
+| `SFN_INPUT_DIR` | _(none)_ | Default input folder (can be passed as CLI argument instead) |
+| `SFN_DUPLICATE_CHECK_MODE` | `hash` | Dedup strategy: `hash` \| `filepath` \| `both` |
+| `SFN_EXTRACT_EXIF` | `false` | Store EXIF presence flags in the database |
+
+## Model setup (one-time)
+
+Use the download script to fetch both models in one step:
+
+```bash
+uv run python scripts/download_models.py          # both models
+uv run python scripts/download_models.py --sscd   # SSCD only
+uv run python scripts/download_models.py --dino   # DINOv2 only
+```
+
+This places the files at the default paths (`models/sscd_disc_mixup.torchscript.pt` and
+`models/dinov2-large/`). For offline use, set `SFN_MODEL_DINO=models/dinov2-large` in
+`.env` so the app loads the local snapshot instead of fetching remotely (SSCD is always
+loaded from disk and needs no change).
+
+**Manual alternative — SSCD:**
+
+```bash
+mkdir -p models
+wget -P models https://dl.fbaipublicfiles.com/sscd-copy-detection/sscd_disc_mixup.torchscript.pt
+```
+
+**Manual alternative — DINOv2:**
+
+DINOv2 downloads automatically on first run into the HuggingFace cache. To snapshot it
+for offline use:
+
+```bash
+python -c "
+from huggingface_hub import snapshot_download
+snapshot_download('facebook/dinov2-large', local_dir='models/dinov2-large', local_dir_use_symlinks=False)
+"
+```
+
+Then set `SFN_MODEL_DINO=models/dinov2-large` in `.env`.
+
+## HEIC/HEIF support
+
+HEIC/HEIF (iPhone photos etc.) is an optional extension:
+
+```bash
+uv sync --group heif   # installs pillow-heif
+```
+
+Once installed, `.heic` and `.heif` files are picked up automatically with no further
+configuration.
+
+## Test data / quick-start sample
+
+The `test/` folder contains two scripts to set up a local sample dataset. The downloaded
+images and generated search files are gitignored — only the scripts are committed.
+
+```bash
+# 1. Download and unzip the Unsplash sample dataset (~200 MB) into data/
+bash test/download_data.sh
+
+# 2. Copy 10 random images to test/searchfiles/ and print the full setup guide
+uv run python test/prepare_searchfiles.py
+
+# optional: choose a different count or seed
+uv run python test/prepare_searchfiles.py --count 20 --seed 7
+```
+
+`prepare_searchfiles.py` prints step-by-step instructions at the end:
+install deps → download SSCD model → start Qdrant → index → start web server →
+visit `localhost:8080` → upload from `test/searchfiles/`.
+
+## Offline / airgapped deployment
+
+Both models and all Python dependencies can be pre-downloaded and bundled with the project
+so the entire folder runs without internet access.
+
+### On the internet-connected machine
+
+**1. Download models:**
+
+```bash
+uv run python scripts/download_models.py
+```
+
+Models land at `models/sscd_disc_mixup.torchscript.pt` and `models/dinov2-large/`. Set
+`SFN_MODEL_DINO=models/dinov2-large` in `.env` so the app loads the local DINOv2 snapshot
+instead of fetching it remotely.
+
+**2. Download Python wheels:**
+
+```bash
+bash scripts/download_deps.sh
+```
+
+This runs `uv export --frozen` to capture the locked dependency list, then downloads all
+wheels into `vendor/` using `uv pip download`. Because it goes through uv, the custom
+PyTorch index configured in `pyproject.toml` is respected automatically.
+
+> **Platform requirement:** wheels are specific to OS, CPU architecture, and Python
+> version. Run this script on a machine that matches the airgapped target (e.g.
+> `linux/x86_64`, Python 3.12). Downloading on macOS or a different Python version and
+> transferring to a Linux target will cause install failures on the offline machine.
+
+For optional groups add flags:
+
+```bash
+bash scripts/download_deps.sh --web        # include web-UI dependencies
+bash scripts/download_deps.sh --heif       # include HEIF/HEIC support
+bash scripts/download_deps.sh --web --heif # all optional groups
+```
+
+**3. Save the Qdrant Docker image:**
+
+```bash
+docker pull qdrant/qdrant:v1.17.1
+docker save qdrant/qdrant:v1.17.1 | gzip > qdrant.tar.gz
+```
+
+**4. Transfer** the entire project folder to the offline machine, including:
+
+| Path | Contents |
+|------|----------|
+| `models/` | SSCD checkpoint + DINOv2 snapshot |
+| `vendor/` | Python wheels |
+| `requirements.txt` | Locked dependency list (written by the script) |
+| `qdrant.tar.gz` | Qdrant Docker image |
+
+### On the airgapped machine
+
+**5. Install Python dependencies from the local wheelhouse:**
+
+```bash
+uv venv
+uv pip install --no-index --find-links vendor/ -r requirements.txt
+uv pip install --no-deps -e .
+```
+
+**6. Load and start Qdrant:**
+
+```bash
+docker load < qdrant.tar.gz
+docker run -p 6333:6333 qdrant/qdrant:v1.17.1
+```
+
+**7. Run:**
+
+```bash
+source .venv/bin/activate
+sfn <image-dir> --dino --sscd
+```

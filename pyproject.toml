@@ -13,10 +13,10 @@ dependencies = [
     "transformers>=4.40",
     "Pillow>=10.0",
     "python-dotenv>=1.0",
-    # PyTorch ships this with a plain linux_x86_64 wheel tag (not manylinux), so
-    # uv's index resolver rejects it as platform-incompatible.  Pin it as a direct
-    # dependency with a URL source so uv installs it without tag validation.
-    "pytorch-triton-rocm==3.5.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # AMD ROCm only: pytorch-triton-rocm must be pinned as a direct dependency with a
+    # hard-coded wheel URL to work around uv's wheel-tag validation.  Uncomment this
+    # line when switching to a ROCm index — see INSTALL.md for full instructions.
+    # "pytorch-triton-rocm==3.5.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 [project.scripts]
@@ -41,41 +41,45 @@ web = [
 ]
 
 # --- PyTorch backend selection ---
-# Uncomment ONE of the index blocks below and update [tool.uv.sources] to match.
-# See README § "GPU / hardware acceleration" for full switching instructions.
+# Activate ONE index block below and update [tool.uv.sources] to match.
+# See INSTALL.md § "GPU / hardware acceleration" for full switching instructions.
 
-# NVIDIA CUDA
-#[[tool.uv.index]]
-#name = "pytorch-cu128"
-#url = "https://download.pytorch.org/whl/cu128"
-#explicit = true
-
-# AMD ROCm 6.4 (active) — torch 2.9.1, supports gfx1201 (RDNA 4) natively.
-# Other available ROCm indexes: rocm6.2, rocm6.3, rocm7.2 (torch 2.11).
-# To switch: change the URL and name here, update [tool.uv.sources] below, and
-# update the pytorch-triton-rocm pin in [project.dependencies] + the direct URL
-# in [tool.uv.sources].  Then run:
-#   uv sync --reinstall-package torch --reinstall-package torchvision \
-#            --reinstall-package pytorch-triton-rocm
+# NVIDIA CUDA 12.8 (active default)
 [[tool.uv.index]]
-name = "pytorch-rocm64"
-url = "https://download.pytorch.org/whl/rocm6.4"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
+# AMD ROCm 6.4 — torch 2.9.1, supports gfx1201 (RDNA 4) natively.
+# Other available indexes: rocm6.2, rocm6.3, rocm7.2 (torch 2.11).
+# To switch to ROCm:
+#   1. Comment out the pytorch-cu128 block above and uncomment this one.
+#   2. In [tool.uv.sources] below, swap the active torch/torchvision index and
+#      uncomment the pytorch-triton-rocm entry.
+#   3. Uncomment the pytorch-triton-rocm pin in [project.dependencies].
+#   4. Run: uv sync --reinstall-package torch --reinstall-package torchvision \
+#                   --reinstall-package pytorch-triton-rocm
+#[[tool.uv.index]]
+#name = "pytorch-rocm64"
+#url = "https://download.pytorch.org/whl/rocm6.4"
+#explicit = true
+
 [tool.uv.sources]
-torch = [{ index = "pytorch-rocm64" }]
-torchvision = [{ index = "pytorch-rocm64" }]
-# pytorch-triton-rocm is a transitive dependency of torch.  PyTorch ships it
-# with a plain linux_x86_64 wheel tag (not manylinux), which uv's index resolver
-# rejects as platform-incompatible.  Pinning it as a direct project dependency
-# with a hard-coded CDN URL tells uv to install the wheel without tag checks.
-# The matching pin in [project.dependencies] is what makes this source entry
-# apply (uv only honours [tool.uv.sources] for direct project dependencies).
-# When upgrading torch, check the new triton-rocm version in the torch wheel
-# metadata and update both the version pin below and the URL here.
-pytorch-triton-rocm = [
-    { url = "https://download-r2.pytorch.org/whl/pytorch_triton_rocm-3.5.1-cp312-cp312-linux_x86_64.whl", marker = "python_version == '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
+
+# AMD ROCm sources — swap in when using the ROCm index above.
+# pytorch-triton-rocm is a transitive dependency of torch on ROCm.  PyTorch ships
+# it with a plain linux_x86_64 wheel tag (not manylinux), which uv's index resolver
+# rejects as platform-incompatible.  The hard-coded URL below bypasses tag checks.
+# The matching pin in [project.dependencies] is required for this source to apply.
+# When upgrading torch, check the triton-rocm version in the torch wheel metadata
+# and update both the version pin and the URL accordingly.
+#torch = [{ index = "pytorch-rocm64" }]
+#torchvision = [{ index = "pytorch-rocm64" }]
+#pytorch-triton-rocm = [
+#    { url = "https://download-r2.pytorch.org/whl/pytorch_triton_rocm-3.5.1-cp312-cp312-linux_x86_64.whl", marker = "python_version == '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
+#]
 
 [build-system]
 requires = ["hatchling"]

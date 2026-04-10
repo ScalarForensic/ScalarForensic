@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ScalarForensic</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="stylesheet" href="/static/style.css">
   <script defer src="/static/alpine.js"></script>
 </head>
@@ -14,7 +15,7 @@
 
   <!-- ── Header ── -->
   <header>
-    <div class="header-logo">Scalar<span>Forensic</span></div>
+    <img class="header-logo" src="/static/logo.svg" alt="ScalarForensic" height="30">
     <div class="mode-toggles">
       <template x-for="mode in ['exact','altered','semantic']" :key="mode">
         <button class="mode-btn"
