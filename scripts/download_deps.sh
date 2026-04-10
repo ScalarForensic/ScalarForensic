@@ -46,21 +46,32 @@ mkdir -p "${DEST}"
 # uv pip download was removed in uv ≥ 0.5; fall back to pip (via uv run) and
 # explicitly pass any extra indexes declared in [[tool.uv.index]] so that
 # torch/torchvision are resolved from whichever PyTorch index is currently active.
-EXTRA_INDEX_ARGS=()
-while IFS= read -r url; do
-    EXTRA_INDEX_ARGS+=("--extra-index-url" "$url")
-done < <(uv run python -c "
-import tomllib, sys
+#
+# We also pin --python-version to the version declared in requires-python so that
+# pip downloads wheels matching the hashes in the uv-exported requirements.txt
+# (pip defaults to the running interpreter, which may differ from the locked version).
+read -r PY_VERSION EXTRA_INDEX_URLS <<< "$(uv run python -c "
+import tomllib, re
 with open('pyproject.toml', 'rb') as f:
     data = tomllib.load(f)
-for idx in data.get('tool', {}).get('uv', {}).get('index', []):
-    print(idx['url'])
-")
+rp = data['project']['requires-python']
+py = re.search(r'(\d+\.\d+)', rp).group(1)
+urls = ' '.join(idx['url'] for idx in data.get('tool', {}).get('uv', {}).get('index', []))
+print(py, urls)
+")"
 
-uv run pip download -r requirements.txt -d "${DEST}" "${EXTRA_INDEX_ARGS[@]}"
+EXTRA_INDEX_ARGS=()
+for url in ${EXTRA_INDEX_URLS}; do
+    EXTRA_INDEX_ARGS+=("--extra-index-url" "$url")
+done
+
+uv run pip download -r requirements.txt -d "${DEST}" \
+    --python-version "${PY_VERSION}" --implementation cp \
+    "${EXTRA_INDEX_ARGS[@]}"
 
 # Include the build backend so `uv pip install -e .` works fully offline.
-uv run pip download hatchling -d "${DEST}"
+uv run pip download hatchling -d "${DEST}" \
+    --python-version "${PY_VERSION}" --implementation cp
 
 echo ""
 echo "Done. Files to transfer to the offline machine:"
