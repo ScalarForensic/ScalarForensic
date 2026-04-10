@@ -5,6 +5,7 @@ Large-scale image vector indexer for forensic use. Embeds images into a Qdrant v
 <img width="1720" height="1261" alt="ScalarForensic web UI" src="https://github.com/user-attachments/assets/7694c828-e479-46c8-bb0c-1679102f58c0" />
 
 **→ [Installation & setup guide](INSTALL.md)**
+**→ [Performance assessment](docs/performance.md)**
 
 ---
 
