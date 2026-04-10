@@ -6,6 +6,7 @@ import hashlib
 import json
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
@@ -16,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import extract_exif_detailed
 from scalar_forensic.web.pipeline import (
+    QueryProvenance,
     analyze_session,
     get_available_modes,
     query_session,
@@ -109,9 +111,17 @@ async def query(
     results = query_session(
         session, mode_list, threshold_altered, threshold_semantic, limit, settings
     )
+    provenance = QueryProvenance(
+        modes=mode_list,
+        threshold_altered=threshold_altered,
+        threshold_semantic=threshold_semantic,
+        limit=limit,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
 
     return JSONResponse(
         {
+            "provenance": provenance.__dict__,
             "results": [
                 {
                     "file_id": r.file_id,

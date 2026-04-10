@@ -952,3 +952,56 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   opacity: 0.8;
   word-break: break-all;
 }
+
+/* ── Provenance panel ── */
+.provenance-box {
+  padding: 8px 10px;
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+}
+.provenance-json {
+  font-family: 'JetBrainsMono', monospace;
+  font-size: 10px;
+  color: var(--text2);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 180px;
+  overflow-y: auto;
+  margin: 0 0 6px;
+}
+.provenance-actions {
+  display: flex;
+  gap: 6px;
+}
+.provenance-paste {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.provenance-textarea {
+  width: 100%;
+  min-height: 60px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border2);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 11px;
+  font-family: 'JetBrainsMono', monospace;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.btn-tiny {
+  font-size: 10px;
+  padding: 2px 6px;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  color: var(--text2);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.btn-tiny:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
