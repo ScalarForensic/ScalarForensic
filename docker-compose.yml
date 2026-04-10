@@ -30,7 +30,8 @@ services:
       - "6333:6333"
 
   sfn-web:
-    image: scalarforensic:latest
+    # Override when using a non-latest tag: SCALARFORENSIC_IMAGE=scalarforensic:1.0
+    image: ${SCALARFORENSIC_IMAGE:-scalarforensic:latest}
     restart: unless-stopped
     depends_on:
       - qdrant

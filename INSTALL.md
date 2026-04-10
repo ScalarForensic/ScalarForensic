@@ -284,10 +284,12 @@ sfn-web                          # same
 
 ### Docker bundle (single-file transfer)
 
-If Docker is available on both machines, the entire environment — Python
-interpreter, all wheels, and both models — can be baked into a single Docker
-image and saved as one gzip'd tarball. This replaces the seven steps above with
-two: `docker load` and `docker compose up`.
+If Docker is available on both machines, the ScalarForensic environment —
+Python interpreter, all wheels, and both models — can be baked into a Docker
+image. The build script also pulls [Qdrant](https://qdrant.tech) (the vector
+database backend, a separate application) and saves both images together into
+one gzip'd tarball. A single `docker load` followed by `docker compose up`
+replaces the seven steps above.
 
 **When to prefer this over the wheel-based approach:**
 
@@ -315,7 +317,7 @@ dependency layers.
 
 | File | Purpose |
 |------|---------|
-| `scalarforensic-<tag>.tar.gz` | Docker image (everything bundled) |
+| `scalarforensic-<tag>.tar.gz` | Both Docker images: ScalarForensic + Qdrant |
 | `docker-compose.yml` | Service definitions |
 | `.env.example` | Config template |
 
@@ -342,6 +344,8 @@ export SFN_IMAGES_DIR=/path/to/evidence/images
 
 ```bash
 docker compose up -d
+# If you built with --tag 1.0 (not latest), prefix with the image name:
+# SCALARFORENSIC_IMAGE=scalarforensic:1.0 docker compose up -d
 ```
 
 **4. Index images:**
