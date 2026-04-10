@@ -347,8 +347,8 @@
       <div x-show="selectedFileId && selectedFile?.hits.length===0 && !(selectedFile?.errors?.length > 0)" class="no-hits-msg">No hits</div>
 
       <div class="hits-list" x-show="selectedFile?.hits.length > 0">
-        <template x-for="hit in (selectedFile?.hits??[])" :key="hit.path">
-          <div class="hit-card" :class="{selected: hit.path===selectedHit?.path}"
+        <template x-for="hit in (selectedFile?.hits??[])" :key="hit.path + '::' + Object.keys(hit.scores)[0]">
+          <div class="hit-card" :class="{selected: (hit.path + '::' + Object.keys(hit.scores)[0]) === selectedHitKey}"
                @click="selectHit(hit)">
             <img class="hit-thumb"
                  :src="`/api/hit-image?path=${encodeURIComponent(hit.path)}`"
@@ -392,7 +392,7 @@ function sfn() {
     sessionId: null,
     results: [],
     selectedFileId: null,
-    selectedHitPath: null,
+    selectedHitKey: null,
     thresholdAltered: 0.75,
     thresholdSemantic: 0.55,
     limit: 10,
@@ -417,8 +417,10 @@ function sfn() {
     get unmatchedFiles() { return this.results.filter(r => r.hits.length === 0 && !(r.errors?.length > 0)); },
     get selectedHit() {
       const hits = this.selectedFile?.hits ?? [];
-      if (this.selectedHitPath) {
-        const h = hits.find(h => h.path === this.selectedHitPath);
+      if (this.selectedHitKey) {
+        const h = hits.find(
+          h => (h.path + '::' + Object.keys(h.scores)[0]) === this.selectedHitKey
+        );
         if (h) return h;
       }
       return hits[0] ?? null;
@@ -597,8 +599,9 @@ function sfn() {
         // Re-sync selected hit after re-query
         if (this.selectedFileId) {
           const f = this.results.find(r => r.file_id === this.selectedFileId);
-          if (f && this.selectedHitPath && !f.hits.find(h => h.path === this.selectedHitPath)) {
-            this.selectedHitPath = null;
+          if (f && this.selectedHitKey &&
+              !f.hits.find(h => (h.path + '::' + Object.keys(h.scores)[0]) === this.selectedHitKey)) {
+            this.selectedHitKey = null;
           }
           await this._loadMatchMeta();
         }
@@ -615,14 +618,14 @@ function sfn() {
     // ── Selection ─────────────────────────────────────────────────────────
     async selectFile(fileId) {
       this.selectedFileId = fileId;
-      this.selectedHitPath = null;
+      this.selectedHitKey = null;
       this.queryMeta = null;
       this.matchMeta = null;
       await Promise.all([this._loadQueryMeta(), this._loadMatchMeta()]);
     },
 
     async selectHit(hit) {
-      this.selectedHitPath = hit.path;
+      this.selectedHitKey = hit.path + '::' + Object.keys(hit.scores)[0];
       this.matchMeta = null;
       await this._loadMatchMetaFor(hit.path);
     },
@@ -679,7 +682,7 @@ function sfn() {
       this.pendingFiles = [];
       this.results = [];
       this.selectedFileId = null;
-      this.selectedHitPath = null;
+      this.selectedHitKey = null;
       this.sessionId = null;
       this.queryMeta = null;
       this.matchMeta = null;
