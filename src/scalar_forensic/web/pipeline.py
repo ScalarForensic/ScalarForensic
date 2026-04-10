@@ -178,6 +178,16 @@ class QueryProvenance:
     timestamp: str  # ISO 8601 UTC, e.g. "2026-04-10T14:32:00.123456+00:00"
 
 
+def _cap_hits(hits: list[Hit], limit: int) -> list[Hit]:
+    """Dedup by path (keep best score), sort deterministically, then cap to `limit`."""
+    seen: dict[str, Hit] = {}
+    for h in hits:
+        existing = seen.get(h.path)
+        if existing is None or h.best_score() > existing.best_score():
+            seen[h.path] = h
+    return sorted(seen.values(), key=lambda h: (-h.best_score(), h.path))[:limit]
+
+
 def query_session(
     session: Session,
     modes: list[str],
@@ -209,7 +219,7 @@ def query_session(
 
         if "exact" in modes and entry.file_hash:
             exact_hits, errs = _query_exact(client, entry.file_hash, entry.file_hash_md5, settings)
-            all_hits.extend(exact_hits[:limit])
+            all_hits.extend(_cap_hits(exact_hits, limit))
             file_result.errors.extend(errs)
 
         if "altered" in modes and entry.sscd_embedding:
@@ -221,14 +231,7 @@ def query_session(
                 threshold=threshold_altered,
                 limit=limit,
             )
-            seen_altered: dict[str, Hit] = {}
-            for h in hits:
-                existing = seen_altered.get(h.path)
-                if existing is None or h.best_score() > existing.best_score():
-                    seen_altered[h.path] = h
-            all_hits.extend(
-                sorted(seen_altered.values(), key=lambda h: (-h.best_score(), h.path))[:limit]
-            )
+            all_hits.extend(_cap_hits(hits, limit))
             file_result.errors.extend(errs)
 
         if "semantic" in modes and entry.dino_embedding:
@@ -240,14 +243,7 @@ def query_session(
                 threshold=threshold_semantic,
                 limit=limit,
             )
-            seen_semantic: dict[str, Hit] = {}
-            for h in hits:
-                existing = seen_semantic.get(h.path)
-                if existing is None or h.best_score() > existing.best_score():
-                    seen_semantic[h.path] = h
-            all_hits.extend(
-                sorted(seen_semantic.values(), key=lambda h: (-h.best_score(), h.path))[:limit]
-            )
+            all_hits.extend(_cap_hits(hits, limit))
             file_result.errors.extend(errs)
 
         # Sort combined list deterministically: best score descending, then path for tie-breaking

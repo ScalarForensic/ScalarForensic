@@ -347,8 +347,8 @@
       <div x-show="selectedFileId && selectedFile?.hits.length===0 && !(selectedFile?.errors?.length > 0)" class="no-hits-msg">No hits</div>
 
       <div class="hits-list" x-show="selectedFile?.hits.length > 0">
-        <template x-for="hit in (selectedFile?.hits??[])" :key="hit.path + '::' + Object.keys(hit.scores)[0]">
-          <div class="hit-card" :class="{selected: (hit.path + '::' + Object.keys(hit.scores)[0]) === selectedHitKey}"
+        <template x-for="hit in (selectedFile?.hits??[])" :key="hitKey(hit)">
+          <div class="hit-card" :class="{selected: hitKey(hit) === selectedHitKey}"
                @click="selectHit(hit)">
             <img class="hit-thumb"
                  :src="`/api/hit-image?path=${encodeURIComponent(hit.path)}`"
@@ -418,9 +418,7 @@ function sfn() {
     get selectedHit() {
       const hits = this.selectedFile?.hits ?? [];
       if (this.selectedHitKey) {
-        const h = hits.find(
-          h => (h.path + '::' + Object.keys(h.scores)[0]) === this.selectedHitKey
-        );
+        const h = hits.find(h => this.hitKey(h) === this.selectedHitKey);
         if (h) return h;
       }
       return hits[0] ?? null;
@@ -435,6 +433,7 @@ function sfn() {
       return [...map.entries()].map(([name, count]) => ({ name, count }));
     },
     // ── Helpers ───────────────────────────────────────────────────────────
+    hitKey(hit) { return hit.path + '::' + Object.keys(hit.scores)[0]; },
     hitPills(scores) {
       const order = ['exact', 'altered', 'semantic'];
       return Object.entries(scores)
@@ -600,7 +599,7 @@ function sfn() {
         if (this.selectedFileId) {
           const f = this.results.find(r => r.file_id === this.selectedFileId);
           if (f && this.selectedHitKey &&
-              !f.hits.find(h => (h.path + '::' + Object.keys(h.scores)[0]) === this.selectedHitKey)) {
+              !f.hits.find(h => this.hitKey(h) === this.selectedHitKey)) {
             this.selectedHitKey = null;
           }
           await this._loadMatchMeta();
@@ -625,7 +624,7 @@ function sfn() {
     },
 
     async selectHit(hit) {
-      this.selectedHitKey = hit.path + '::' + Object.keys(hit.scores)[0];
+      this.selectedHitKey = this.hitKey(hit);
       this.matchMeta = null;
       await this._loadMatchMetaFor(hit.path);
     },
