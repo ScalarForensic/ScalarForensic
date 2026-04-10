@@ -900,3 +900,43 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   font-family: var(--mono);
   font-size: 11px;
 }
+
+/* ── Query error indicators ── */
+.error-chip {
+  background: rgba(220,50,50,0.15);
+  color: #e05555;
+}
+
+.error-badge {
+  background: rgba(220,50,50,0.15);
+  color: #e05555;
+  font-weight: 700;
+}
+
+.query-error-toast {
+  margin: 0 16px 8px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  background: rgba(220,50,50,0.12);
+  border: 1px solid rgba(220,50,50,0.3);
+  color: #e05555;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.query-error-banner {
+  margin: 8px 12px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  background: rgba(220,50,50,0.10);
+  border: 1px solid rgba(220,50,50,0.25);
+  color: #e05555;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.query-error-detail {
+  margin-top: 4px;
+  opacity: 0.8;
+  word-break: break-all;
+}

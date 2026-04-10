@@ -78,6 +78,9 @@
     <button class="btn-secondary" @click="resetToUpload()">← New search</button>
   </div>
 
+  <!-- ── Query error toast ── -->
+  <div class="query-error-toast" x-show="queryError" x-text="queryError"></div>
+
   <!-- ── 4-panel results layout ── -->
   <div class="results-layout" x-show="phase === 'results'">
 
@@ -136,6 +139,23 @@
         </template>
         <div x-show="unmatchedFiles.length===0" class="empty-list-msg">—</div>
       </div>
+
+      <template x-if="errorFiles.length > 0">
+        <div>
+          <div class="panel-header section-header">
+            Query Errors <span class="count-chip error-chip" x-text="errorFiles.length"></span>
+          </div>
+          <div class="file-list error-list">
+            <template x-for="r in errorFiles" :key="r.file_id">
+              <div class="file-item no-hits" :class="{selected: selectedFileId===r.file_id}"
+                   @click="selectFile(r.file_id)">
+                <span class="file-name" :title="r.filename" x-text="shortName(r.filename)"></span>
+                <span class="hit-count zero error-badge">!</span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
 
       <div class="panel-header section-header">Folders</div>
       <div class="folder-tree">
@@ -285,7 +305,15 @@
       </div>
 
       <div x-show="!selectedFileId" class="no-hits-msg">No file selected</div>
-      <div x-show="selectedFileId && selectedFile?.hits.length===0" class="no-hits-msg">No hits</div>
+      <template x-if="selectedFile?.errors?.length > 0">
+        <div class="query-error-banner">
+          <strong>Query error</strong>
+          <template x-for="e in selectedFile.errors" :key="e">
+            <div class="query-error-detail" x-text="e"></div>
+          </template>
+        </div>
+      </template>
+      <div x-show="selectedFileId && selectedFile?.hits.length===0 && !(selectedFile?.errors?.length > 0)" class="no-hits-msg">No hits</div>
 
       <div class="hits-list" x-show="selectedFile?.hits.length > 0">
         <template x-for="hit in (selectedFile?.hits??[])" :key="hit.path">
@@ -338,6 +366,7 @@ function sfn() {
     limit: 10,
     queryMeta: null,
     matchMeta: null,
+    queryError: '',
     _queryTimer: null,
 
     // ── Computed ──────────────────────────────────────────────────────────
@@ -348,7 +377,8 @@ function sfn() {
       return this.results.find(r => r.file_id === this.selectedFileId) ?? null;
     },
     get matchedFiles() { return this.results.filter(r => r.hits.length > 0); },
-    get unmatchedFiles() { return this.results.filter(r => r.hits.length === 0); },
+    get errorFiles() { return this.results.filter(r => r.hits.length === 0 && r.errors?.length > 0); },
+    get unmatchedFiles() { return this.results.filter(r => r.hits.length === 0 && !(r.errors?.length > 0)); },
     get selectedHit() {
       const hits = this.selectedFile?.hits ?? [];
       if (this.selectedHitPath) {
@@ -513,6 +543,7 @@ function sfn() {
       fd.append('threshold_altered', this.thresholdAltered);
       fd.append('threshold_semantic', this.thresholdSemantic);
       fd.append('limit', this.limit);
+      this.queryError = '';
       try {
         const d = await fetch('/api/query', { method: 'POST', body: fd }).then(r => r.json());
         this.results = d.results;
@@ -524,7 +555,9 @@ function sfn() {
           }
           await this._loadMatchMeta();
         }
-      } catch { /* keep old */ }
+      } catch (e) {
+        this.queryError = e?.message || 'Query failed — check Qdrant connection';
+      }
     },
 
     debouncedQuery() {

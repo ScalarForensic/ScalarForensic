@@ -113,6 +113,7 @@ async def query(
                 {
                     "file_id": r.file_id,
                     "filename": r.filename,
+                    "errors": r.errors,
                     "hits": [
                         {
                             "path": h.path,

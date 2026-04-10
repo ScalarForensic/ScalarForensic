@@ -158,6 +158,7 @@ class FileResult:
     file_id: str
     filename: str
     hits: list[Hit] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
 
 def query_session(
@@ -180,62 +181,73 @@ def query_session(
             results.append(FileResult(file_id=entry.file_id, filename=entry.filename))
             continue
 
+        file_result = FileResult(file_id=entry.file_id, filename=entry.filename)
         raw_hits: list[Hit] = []
 
         if "exact" in modes and entry.file_hash:
-            raw_hits.extend(_query_exact(client, entry.file_hash, settings))
+            exact_hits, errs = _query_exact(client, entry.file_hash, settings)
+            raw_hits.extend(exact_hits)
+            file_result.errors.extend(errs)
 
         if "altered" in modes and entry.sscd_embedding:
-            raw_hits.extend(
-                _query_vector(
-                    client,
-                    collection=settings.collection_sscd,
-                    vector=entry.sscd_embedding,
-                    mode="altered",
-                    threshold=threshold_altered,
-                    limit=limit,
-                    exclude_hash=entry.file_hash,
-                )
+            hits, errs = _query_vector(
+                client,
+                collection=settings.collection_sscd,
+                vector=entry.sscd_embedding,
+                mode="altered",
+                threshold=threshold_altered,
+                limit=limit,
+                exclude_hash=entry.file_hash,
             )
+            raw_hits.extend(hits)
+            file_result.errors.extend(errs)
 
         if "semantic" in modes and entry.dino_embedding:
-            raw_hits.extend(
-                _query_vector(
-                    client,
-                    collection=settings.collection_dino,
-                    vector=entry.dino_embedding,
-                    mode="semantic",
-                    threshold=threshold_semantic,
-                    limit=limit,
-                    exclude_hash=entry.file_hash,
-                )
+            hits, errs = _query_vector(
+                client,
+                collection=settings.collection_dino,
+                vector=entry.dino_embedding,
+                mode="semantic",
+                threshold=threshold_semantic,
+                limit=limit,
+                exclude_hash=entry.file_hash,
             )
+            raw_hits.extend(hits)
+            file_result.errors.extend(errs)
 
-        # Deduplicate by path — merge scores from different modes for the same image
+        # Deduplicate by path — merge scores from different modes into a new Hit (no mutation)
         seen: dict[str, Hit] = {}
         for hit in raw_hits:
             if hit.path not in seen:
                 seen[hit.path] = hit
             else:
-                seen[hit.path].scores.update(hit.scores)
-                if hit.exif is not None and seen[hit.path].exif is None:
-                    seen[hit.path].exif = hit.exif
-                    seen[hit.path].exif_geo_data = hit.exif_geo_data
+                existing = seen[hit.path]
+                seen[hit.path] = Hit(
+                    path=existing.path,
+                    scores={**existing.scores, **hit.scores},
+                    exif=existing.exif if existing.exif is not None else hit.exif,
+                    exif_geo_data=(
+                        existing.exif_geo_data
+                        if existing.exif is not None
+                        else hit.exif_geo_data
+                    ),
+                )
 
-        results.append(
-            FileResult(
-                file_id=entry.file_id,
-                filename=entry.filename,
-                hits=sorted(seen.values(), key=lambda h: h.best_score(), reverse=True)[:limit],
-            )
-        )
+        # Sort deterministically: best score descending, then path ascending for tie-breaking
+        file_result.hits = sorted(
+            seen.values(), key=lambda h: (-h.best_score(), h.path)
+        )[:limit]
+        results.append(file_result)
 
     return results
 
 
-def _query_exact(client: QdrantClient, image_hash: str, settings: Settings) -> list[Hit]:
+def _query_exact(
+    client: QdrantClient, image_hash: str, settings: Settings
+) -> tuple[list[Hit], list[str]]:
     """Return exact hash matches from whichever collections exist."""
     hits: list[Hit] = []
+    errors: list[str] = []
     for collection in (settings.collection_sscd, settings.collection_dino):
         try:
             records, _ = client.scroll(
@@ -258,9 +270,10 @@ def _query_exact(client: QdrantClient, image_hash: str, settings: Settings) -> l
                             exif_geo_data=r.payload.get("exif_geo_data"),
                         )
                     )
-        except Exception:  # noqa: BLE001
-            pass
-    return hits
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Exact query failed on %s: %s", collection, exc)
+            errors.append(f"exact/{collection}: {exc}")
+    return hits, errors
 
 
 def _query_vector(
@@ -271,7 +284,7 @@ def _query_vector(
     threshold: float,
     limit: int,
     exclude_hash: str | None,
-) -> list[Hit]:
+) -> tuple[list[Hit], list[str]]:
     try:
         query_filter = None
         if exclude_hash:
@@ -289,14 +302,15 @@ def _query_vector(
         return [
             Hit(
                 path=r.payload.get("image_path", ""),
-                scores={mode: round(r.score, 4)},
+                scores={mode: r.score},
                 exif=r.payload.get("exif"),
                 exif_geo_data=r.payload.get("exif_geo_data"),
             )
             for r in result.points
-        ]
-    except Exception:  # noqa: BLE001
-        return []
+        ], []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Vector query failed on %s (%s): %s", collection, mode, exc)
+        return [], [f"{mode}/{collection}: {exc}"]
 
 
 # ---------------------------------------------------------------------------
