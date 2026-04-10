@@ -2,6 +2,8 @@
 
 Large-scale image vector indexer for forensic use. Embeds images into a Qdrant vector database for similarity search and deduplication.
 
+<img width="1720" height="1261" alt="image" src="https://github.com/user-attachments/assets/7694c828-e479-46c8-bb0c-1679102f58c0" />
+
 ## Requirements
 
 - Python 3.12 (pinned — see [GPU setup](#gpu--hardware-acceleration) for why)
