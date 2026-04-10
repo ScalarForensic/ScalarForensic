@@ -501,7 +501,9 @@ def index(
     _write_csv(records, csv_path)
 
     # ── Print summary table ───────────────────────────────────────────────────
-    _print_summary(records, resolved_input, csv_path, specs, indexed_counts, skipped_counts, failed_counts)
+    _print_summary(
+        records, resolved_input, csv_path, specs, indexed_counts, skipped_counts, failed_counts
+    )
 
 
 def main() -> None:
