@@ -150,9 +150,23 @@ def index(
         "--report",
         help="CSV report output path (default: sfn_ingestion_<timestamp>.csv in cwd)",
     ),
+    allow_online: bool = typer.Option(
+        False,
+        "--allow-online",
+        help=(
+            "Allow outward internet connections (e.g. to HuggingFace Hub for first-time "
+            "model downloads). Offline by default — see SFN_ALLOW_ONLINE in .env."
+        ),
+    ),
 ) -> None:
     """Embed all images under INPUT_DIR and store vectors in Qdrant."""
     settings = Settings()
+
+    if allow_online:
+        settings.allow_online = True
+
+    # Apply HuggingFace offline guard as early as possible — before any model code runs.
+    settings.apply_network_policy()
 
     env_source = str(settings._env_file) if settings._env_file else "(no .env, using defaults)"
     heif_status = "enabled (pillow-heif)" if _HEIF_AVAILABLE else "disabled (install pillow-heif)"
@@ -176,6 +190,12 @@ def index(
 
     if not dino and not sscd:
         typer.echo("[ERROR] Specify at least one of --dino or --sscd.", err=True)
+        raise typer.Exit(1)
+
+    # Pre-flight: fail fast if a HuggingFace Hub model ID is configured while offline.
+    err = settings.offline_model_error(need_dino=dino)
+    if err:
+        typer.echo(f"[ERROR] {err}", err=True)
         raise typer.Exit(1)
 
     # Resolve the CSV report path early so the user knows where it will land.
@@ -219,6 +239,7 @@ def index(
                 remote_endpoint=settings.embedding_endpoint,
                 remote_api_key=settings.embedding_api_key,
                 embedding_dim=settings.embedding_dim,
+                local_files_only=not settings.allow_online,
             )
         except (FileNotFoundError, ValueError) as exc:
             typer.echo(f"[ERROR] {exc}", err=True)

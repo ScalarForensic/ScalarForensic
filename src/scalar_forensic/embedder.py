@@ -150,13 +150,23 @@ def preprocess_batch(image_data: list[bytes]) -> list[Image.Image]:
 
 
 class DINOv2Embedder:
-    def __init__(self, model_name: str, device: str = "auto", normalize_size: int = 512) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        device: str = "auto",
+        normalize_size: int = 512,
+        local_files_only: bool = False,
+    ) -> None:
         self.model_name = model_name
         self.normalize_size = normalize_size
         self.device = _resolve_device(device)
-        self.processor = AutoImageProcessor.from_pretrained(model_name)
+        self.processor = AutoImageProcessor.from_pretrained(
+            model_name, local_files_only=local_files_only
+        )
         dtype = torch.float16 if self.device == "cuda" else torch.float32
-        self.model = AutoModel.from_pretrained(model_name, dtype=dtype).to(self.device)
+        self.model = AutoModel.from_pretrained(
+            model_name, dtype=dtype, local_files_only=local_files_only
+        ).to(self.device)
         self.model.eval()
         if self.device == "cuda":
             self.model = torch.compile(self.model)
@@ -398,12 +408,16 @@ def load_embedder(
     remote_endpoint: str | None = None,
     remote_api_key: str | None = None,
     embedding_dim: int = 0,
+    local_files_only: bool = False,
 ) -> AnyEmbedder:
     """Load the embedder for the selected backend.
 
     When *remote_endpoint* is set the remote OpenAI-compatible endpoint is used
     and *use_sscd* / *device* are ignored.  *embedding_dim* must be > 0 in that
     case (set ``SFN_EMBEDDING_DIM`` to the dimension the remote model produces).
+
+    *local_files_only* is forwarded to :class:`DINOv2Embedder` and prevents the
+    HuggingFace SDK from fetching model files or metadata from the Hub.
     """
     if remote_endpoint is not None:
         if embedding_dim <= 0:
@@ -420,4 +434,9 @@ def load_embedder(
         )
     if use_sscd:
         return SSCDEmbedder(model_name=model, device=device)
-    return DINOv2Embedder(model_name=model, device=device, normalize_size=normalize_size)
+    return DINOv2Embedder(
+        model_name=model,
+        device=device,
+        normalize_size=normalize_size,
+        local_files_only=local_files_only,
+    )

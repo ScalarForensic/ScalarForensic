@@ -106,7 +106,6 @@ header {
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
-  overflow: hidden;
   z-index: 10;
 }
 
