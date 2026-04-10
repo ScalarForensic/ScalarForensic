@@ -573,6 +573,7 @@ function sfn() {
       fd.append('threshold_semantic', this.thresholdSemantic);
       fd.append('limit', this.limit);
       this.queryError = '';
+      this.provenance = null;
       try {
         const resp = await fetch('/api/query', { method: 'POST', body: fd });
         if (!resp.ok) {
