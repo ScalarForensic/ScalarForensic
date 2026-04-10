@@ -15,6 +15,7 @@ class FileEntry:
     filename: str  # original name, may include relative path from webkitdirectory
     temp_path: Path
     file_hash: str | None = None
+    file_hash_md5: str | None = None
     sscd_embedding: list[float] | None = None
     dino_embedding: list[float] | None = None
     error: str | None = None

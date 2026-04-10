@@ -14,6 +14,7 @@ from scalar_forensic.embedder import (
     extract_exif,
     get_library_versions,
     hash_bytes,
+    hash_bytes_md5,
     load_embedder,
     preprocess_batch,
 )
@@ -196,7 +197,9 @@ def index(
 
         # --- Hash (shared) ---
         t0 = perf_counter()
-        path_hash_pairs = [(p, hash_bytes(data)) for p, data in raw]
+        path_hash_pairs_full = [(p, hash_bytes(data), hash_bytes_md5(data)) for p, data in raw]
+        path_hash_pairs = [(p, sha) for p, sha, _ in path_hash_pairs_full]
+        md5_by_sha256 = {sha: md5 for _, sha, md5 in path_hash_pairs_full}
         hash_s = perf_counter() - t0
         total_hash_s += hash_s
 
@@ -285,15 +288,23 @@ def index(
             if exif_data is not None:
                 exif_for_batch = {p: dict(exif_data[p]) for p in paths}
 
-            def _make_upsert(idx, ps, hs, embs, meta, exif):
+            hashes_md5 = [md5_by_sha256[h] for h in hashes]
+
+            def _make_upsert(idx, ps, hs, hs_md5, embs, meta, exif):
                 def _job():
-                    idx.upsert_batch(ps, hs, embs, meta, exif)
+                    idx.upsert_batch(ps, hs, embs, meta, exif, hs_md5)
 
                 return _job
 
             upsert_jobs.append(
                 _make_upsert(
-                    indexer, list(paths), list(hashes), embeddings, shared_metadata, exif_for_batch
+                    indexer,
+                    list(paths),
+                    list(hashes),
+                    hashes_md5,
+                    embeddings,
+                    shared_metadata,
+                    exif_for_batch,
                 )
             )
 
