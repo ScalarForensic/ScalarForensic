@@ -281,3 +281,108 @@ source .venv/bin/activate
 sfn <image-dir> --dino --sscd   # offline by default — no flag needed
 sfn-web                          # same
 ```
+
+### Docker bundle (single-file transfer)
+
+If Docker is available on both machines, the entire environment — Python
+interpreter, all wheels, and both models — can be baked into a single Docker
+image and saved as one gzip'd tarball. This replaces the seven steps above with
+two: `docker load` and `docker compose up`.
+
+**When to prefer this over the wheel-based approach:**
+
+- You want a single file to hand off, with no dependency on uv or Python being
+  installed on the airgapped machine.
+- You want Qdrant and the app to start together with one command and persist
+  data automatically across restarts.
+- You need to deploy to multiple airgapped machines from the same artifact.
+
+#### On the internet-connected machine
+
+Run the all-in-one build script:
+
+```bash
+bash scripts/build_airgap_image.sh            # tag: latest
+bash scripts/build_airgap_image.sh --tag 1.0  # pin a version
+```
+
+This downloads models and wheels (if not already present), builds the Docker
+image, and saves it as `scalarforensic-<tag>.tar.gz`. The build takes a while
+the first time; subsequent code-only rebuilds reuse the cached model and
+dependency layers.
+
+**Transfer** to the offline machine:
+
+| File | Purpose |
+|------|---------|
+| `scalarforensic-<tag>.tar.gz` | Docker image (everything bundled) |
+| `docker-compose.yml` | Service definitions |
+| `.env.example` | Config template |
+
+#### On the airgapped machine
+
+**1. Load the image:**
+
+```bash
+docker load < scalarforensic-<tag>.tar.gz
+```
+
+**2. Create your config file:**
+
+```bash
+cp .env.example .env
+# Set SFN_IMAGES_DIR to the host path containing the images to index:
+export SFN_IMAGES_DIR=/path/to/evidence/images
+```
+
+`SFN_IMAGES_DIR` controls which host directory is mounted into the container as
+`/images`. Set it in your shell before running Compose, or add it to `.env`.
+
+**3. Start Qdrant and the web UI:**
+
+```bash
+docker compose up -d
+```
+
+**4. Index images:**
+
+```bash
+docker compose run --rm sfn-web sfn --dino --sscd
+# /images is the default input dir inside the container (set by docker-compose.yml).
+# Pass a subdirectory if needed: sfn /images/case-001 --dino --sscd
+```
+
+CSV reports are written to `/app/` inside the container by default. To save them
+on the host, redirect the path:
+
+```bash
+docker compose run --rm sfn-web sfn --dino --sscd --report /images/report.csv
+```
+
+**5. Open the web UI:**
+
+```
+http://localhost:8080
+```
+
+**GPU passthrough:**
+
+Uncomment the relevant block in `docker-compose.yml`:
+
+- **NVIDIA** — requires `nvidia-container-toolkit` on the host; uncomment the
+  `deploy.resources.reservations.devices` block.
+- **AMD ROCm** — uncomment the `devices` (`/dev/kfd`, `/dev/dri`) and
+  `group_add` blocks.
+
+Without GPU passthrough the app runs on CPU, which is significantly slower but
+fully functional.
+
+**Qdrant data persistence:**
+
+Qdrant's storage is kept in the named Docker volume `qdrant_data`. It survives
+`docker compose down` and image updates. To wipe it:
+
+```bash
+docker volume rm scalarforensic_qdrant_data
+# Note: use the project-prefixed name shown by `docker volume ls`
+```

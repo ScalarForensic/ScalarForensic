@@ -1,0 +1,72 @@
+# ScalarForensic — Docker Compose stack for airgapped / offline deployment.
+#
+# Before first use, load the image (produced by scripts/build_airgap_image.sh):
+#   docker load < scalarforensic-<tag>.tar.gz
+#
+# Configure the image directory:
+#   Set SFN_IMAGES_DIR in your shell or add it to .env:
+#     export SFN_IMAGES_DIR=/path/to/evidence/images
+#   (Default: ./data — relative to the project folder.)
+#
+# Start the stack:
+#   docker compose up -d
+#
+# Index images:
+#   docker compose run --rm sfn-web sfn /images --dino --sscd
+#
+# Web UI:
+#   http://localhost:8080
+
+services:
+
+  qdrant:
+    image: qdrant/qdrant:v1.17.1
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    # Expose Qdrant's REST API for direct access if needed.
+    # Remove or restrict this in production to avoid unintended exposure.
+    ports:
+      - "6333:6333"
+
+  sfn-web:
+    image: scalarforensic:latest
+    restart: unless-stopped
+    depends_on:
+      - qdrant
+    ports:
+      - "8080:8080"
+    volumes:
+      # Application config — copy .env.example → .env and edit before first run.
+      - ./.env:/app/.env:ro
+      # Image directory — set SFN_IMAGES_DIR in your shell or .env file.
+      # Inside the container this is always /images regardless of the host path.
+      - ${SFN_IMAGES_DIR:-./data}:/images:ro
+    environment:
+      # Route Qdrant traffic to the sidecar service (overrides .env).
+      - SFN_QDRANT_URL=http://qdrant:6333
+      # Default input dir for the CLI indexer (used when no argument is given).
+      - SFN_INPUT_DIR=/images
+
+    # ── NVIDIA GPU (requires nvidia-container-toolkit on the host) ────────────
+    # Uncomment to enable CUDA acceleration:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+    # ── AMD ROCm GPU ──────────────────────────────────────────────────────────
+    # Uncomment to pass through the ROCm device nodes:
+    # devices:
+    #   - /dev/kfd:/dev/kfd
+    #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - video
+    #   - render
+
+volumes:
+  # Qdrant vector data — persists across container restarts and image updates.
+  qdrant_data:

@@ -1,0 +1,33 @@
+# Version control
+.git/
+.gitignore
+
+# Python artifacts
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local config and secrets (always mounted from the host, never baked in)
+.env
+
+# Test data and generated output
+data/
+test/searchfiles/
+analysis_test/
+report.csv
+*.csv
+
+# Previously saved Docker tarballs
+*.tar.gz
+
+# Editor / OS
+.vscode/
+.idea/
+*.bak
+.DS_Store

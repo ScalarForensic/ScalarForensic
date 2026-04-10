@@ -8,6 +8,8 @@ Large-scale image vector indexer for forensic use. Embeds images into a Qdrant v
 
 **→ [Installation & setup guide](INSTALL.md)**
 
+**→ [Docker bundle for airgapped deployment](INSTALL.md#docker-bundle-single-file-transfer)**
+
 **→ [Performance assessment](docs/performance.md)**
 
 ---
