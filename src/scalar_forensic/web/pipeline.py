@@ -14,7 +14,13 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from scalar_forensic.config import Settings
-from scalar_forensic.embedder import AnyEmbedder, hash_bytes, hash_bytes_md5, load_embedder, preprocess_batch
+from scalar_forensic.embedder import (
+    AnyEmbedder,
+    hash_bytes,
+    hash_bytes_md5,
+    load_embedder,
+    preprocess_batch,
+)
 from scalar_forensic.web.session import FileEntry, Session
 
 logger = logging.getLogger(__name__)
@@ -313,7 +319,7 @@ def _query_exact(
                             collision_paths.add(path)
                             errors.append(
                                 f"MD5 collision: '{path}' has the same MD5 ({image_hash_md5}) "
-                                f"but a different SHA-256 ({stored_sha256[:16]}…)"
+                                f"but a different SHA-256 ({stored_sha256})"
                             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Exact query failed on %s: %s", collection, exc)

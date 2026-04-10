@@ -114,7 +114,8 @@ class Indexer:
             )
         if image_hashes_md5 is not None and len(image_hashes_md5) != len(image_hashes):
             raise ValueError(
-                f"MD5 hash list length mismatch: sha256={len(image_hashes)}, md5={len(image_hashes_md5)}"
+                f"MD5 hash list length mismatch: "
+                f"sha256={len(image_hashes)}, md5={len(image_hashes_md5)}"
             )
         indexed_at = datetime.now(UTC).isoformat()
         points = [
