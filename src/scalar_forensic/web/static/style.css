@@ -960,7 +960,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   border-top: 1px solid var(--border);
 }
 .provenance-json {
-  font-family: 'JetBrainsMono', monospace;
+  font-family: var(--mono);
   font-size: 10px;
   color: var(--text2);
   white-space: pre-wrap;
@@ -988,7 +988,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   border-radius: 4px;
   padding: 4px 6px;
   font-size: 11px;
-  font-family: 'JetBrainsMono', monospace;
+  font-family: var(--mono);
   resize: vertical;
   box-sizing: border-box;
 }

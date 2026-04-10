@@ -25,9 +25,11 @@ sfn-web = "scalar_forensic.web.app:start"
 
 [dependency-groups]
 dev = [
+    { include-group = "web" },
     "pytest>=8.0",
     "pytest-cov>=6.0",
     "ruff>=0.11",
+    "httpx>=0.27",
 ]
 heif = [
     "pillow-heif>=0.13",

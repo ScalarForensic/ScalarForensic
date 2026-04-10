@@ -98,8 +98,8 @@ async def analyze(
 async def query(
     session_id: str = Form(...),
     modes: str = Form(default="exact,altered,semantic"),
-    threshold_altered: float = Form(default=0.75),
-    threshold_semantic: float = Form(default=0.55),
+    threshold_altered: float = Form(default=0.75, ge=0.0, le=1.0),
+    threshold_semantic: float = Form(default=0.55, ge=0.0, le=1.0),
     limit: int = Form(default=10, ge=1, le=50),
 ) -> JSONResponse:
     session = get_session(session_id)
