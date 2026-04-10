@@ -1,0 +1,1 @@
+Any contributions welcome, AI is welcome also. But make sure you review what your AI does. Please make sure your contributions are small enough to be considered, contributions which completely change the project logic or visuals are rejected. Any contribution bundling external dependencies at runtime are rejected.
