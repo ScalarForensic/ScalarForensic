@@ -42,7 +42,7 @@ COPY models/ /app/models/
 COPY src/ /app/src/
 COPY pyproject.toml /app/
 RUN pip install --no-cache-dir --no-index --find-links /tmp/vendor/ \
-        --no-deps -e . \
+        --no-deps . \
     && rm -rf /tmp/vendor/ /tmp/requirements.txt
 
 # Fallback config used when no .env is mounted from the host at runtime.

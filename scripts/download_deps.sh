@@ -70,7 +70,7 @@ uv run pip download -r requirements.txt -d "${DEST}" \
     --only-binary=:all: \
     "${EXTRA_INDEX_ARGS[@]}"
 
-# Include the build backend so `uv pip install -e .` works fully offline.
+# Include the build backend so `pip install --no-deps .` works fully offline.
 uv run pip download hatchling -d "${DEST}" \
     --python-version "${PY_VERSION}" --implementation cp \
     --only-binary=:all:
@@ -84,4 +84,4 @@ echo ""
 echo "On the offline machine:"
 echo "  uv venv"
 echo "  uv pip install --no-index --find-links \"${DEST}/\" -r requirements.txt"
-echo "  uv pip install --no-index --find-links \"${DEST}/\" --no-deps -e ."
+echo "  uv pip install --no-index --find-links \"${DEST}/\" --no-deps ."
