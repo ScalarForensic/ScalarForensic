@@ -138,7 +138,7 @@ async def query(
                     ],
                 }
                 for r in results
-            ]
+            ],
         }
     )
 
