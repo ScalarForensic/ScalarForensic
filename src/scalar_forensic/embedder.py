@@ -5,6 +5,7 @@ import hashlib
 import importlib.metadata
 import io
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -20,6 +21,53 @@ from transformers import AutoImageProcessor, AutoModel
 _SSCD_INPUT_SIZE = 288
 # Short-side cap applied once before both models: SSCD needs 331 px, DINOv2 needs 256 px.
 _SHARED_CAP = 331
+
+_MAX_IMAGE_PIXELS_ENV = "SFN_MAX_IMAGE_PIXELS"
+_LEGACY_MAX_IMAGE_PIXELS_ENV = "SCALAR_FORENSIC_MAX_IMAGE_PIXELS"
+
+
+def _configure_max_image_pixels_from_env() -> None:
+    """Configure Pillow's decompression-bomb guard from an explicit env override.
+
+    By default, leave Pillow's built-in MAX_IMAGE_PIXELS limit unchanged so web
+    and other untrusted-image paths retain decompression-bomb protection.
+    Set SFN_MAX_IMAGE_PIXELS to:
+      - a positive integer to allow a larger finite pixel count; or
+      - "none" / "disable" / "disabled" to turn the guard off explicitly for
+        trusted ingestion runs.
+
+    For backward compatibility, the legacy SCALAR_FORENSIC_MAX_IMAGE_PIXELS key
+    is also accepted when SFN_MAX_IMAGE_PIXELS is unset.
+    """
+    source_env = _MAX_IMAGE_PIXELS_ENV
+    raw_value = os.getenv(_MAX_IMAGE_PIXELS_ENV)
+    if raw_value is None:
+        source_env = _LEGACY_MAX_IMAGE_PIXELS_ENV
+        raw_value = os.getenv(_LEGACY_MAX_IMAGE_PIXELS_ENV)
+    if raw_value is None:
+        return
+    value = raw_value.strip()
+    if not value:
+        return
+    if value.lower() in {"none", "disable", "disabled"}:
+        Image.MAX_IMAGE_PIXELS = None
+        return
+    try:
+        max_pixels = int(value)
+    except ValueError:
+        raise ValueError(
+            f"{source_env} must be a positive integer or one of 'none', 'disable', 'disabled';"
+            f" got {raw_value!r}"
+        ) from None
+    if max_pixels <= 0:
+        raise ValueError(
+            f"{source_env} must be a positive integer or one of 'none', 'disable', 'disabled'"
+        )
+    Image.MAX_IMAGE_PIXELS = max_pixels
+
+
+_configure_max_image_pixels_from_env()
+
 _IMAGENET_MEAN = [0.485, 0.456, 0.406]
 _IMAGENET_STD = [0.229, 0.224, 0.225]
 
@@ -134,14 +182,28 @@ def _cap_short_side(img: Image.Image) -> Image.Image:
     return img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
 
 
-def preprocess_batch(image_data: list[bytes]) -> list[Image.Image]:
-    """Shared pre-step: open RGB, cap short side to _SHARED_CAP px, parallelised over CPU cores."""
+def preprocess_batch(image_data: list[bytes]) -> list[Image.Image | Exception]:
+    """Open RGB, cap short side to _SHARED_CAP px; parallelised over CPU cores.
+
+    Returns one entry per input image: an ``Image.Image`` on success or the
+    raised ``Exception`` on failure.  Individual futures are used instead of
+    ``pool.map()`` so that a single corrupt or oversized file does not abort
+    the rest of the batch — callers should check each result with
+    ``isinstance(result, Exception)``.
+    """
 
     def _process(data: bytes) -> Image.Image:
         return _cap_short_side(_open_rgb(data))
 
     with ThreadPoolExecutor() as pool:
-        return list(pool.map(_process, image_data))
+        futures = [pool.submit(_process, data) for data in image_data]
+        results: list[Image.Image | Exception] = []
+        for fut in futures:
+            try:
+                results.append(fut.result())
+            except Exception as exc:  # noqa: BLE001
+                results.append(exc)
+        return results
 
 
 # ---------------------------------------------------------------------------
