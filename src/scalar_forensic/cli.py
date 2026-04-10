@@ -1,6 +1,10 @@
 """CLI entry point for ScalarForensic."""
 
+import csv
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from datetime import datetime
 from itertools import batched
 from pathlib import Path
 from time import perf_counter
@@ -19,7 +23,25 @@ from scalar_forensic.embedder import (
     preprocess_batch,
 )
 from scalar_forensic.indexer import Indexer
-from scalar_forensic.scanner import _HEIF_AVAILABLE, scan_images
+from scalar_forensic.scanner import _HEIF_AVAILABLE, scan_all_files
+
+# ── file-level status codes ──────────────────────────────────────────────────
+_S_INDEXED = "indexed"
+_S_SKIP_DUP = "skipped_dup_batch"
+_S_SKIP_IDX = "skipped_indexed"
+_S_FAIL_READ = "failed_read"
+_S_FAIL_PRE = "failed_preprocessing"
+_S_FAIL_EMB = "failed_embedding"
+_S_UNSUPPORTED = "unsupported"
+
+
+@dataclass
+class _FileRecord:
+    path: Path
+    status: str = "pending"
+    reason: str = ""
+    md5: str = ""
+    sha256: str = ""
 
 
 def _fmt_rate(count: int, seconds: float, unit: str) -> str:
@@ -59,12 +81,71 @@ def _apply_dedup(
     ]
 
 
+def _write_csv(records: dict[Path, "_FileRecord"], csv_path: Path) -> None:
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["path", "processed", "reason", "md5", "sha256"])
+        for rec in sorted(records.values(), key=lambda r: str(r.path)):
+            processed = "yes" if rec.status == _S_INDEXED else "no"
+            writer.writerow([str(rec.path), processed, rec.reason, rec.md5, rec.sha256])
+
+
+def _print_summary(
+    records: dict[Path, "_FileRecord"],
+    resolved_input: Path,
+    csv_path: Path,
+    specs: list,
+    indexed_counts: list[int],
+    skipped_counts: list[int],
+) -> None:
+    counts = Counter(r.status for r in records.values())
+    total = len(records)
+    n_image = total - counts[_S_UNSUPPORTED]
+
+    # Per-model breakdown (existing behaviour)
+    typer.echo("\nDone.")
+    for spec_idx, (embedder, _, _) in enumerate(specs):
+        typer.echo(
+            f"  [{type(embedder).__name__}]  indexed={indexed_counts[spec_idx]}"
+            f"  skipped={skipped_counts[spec_idx]}"
+        )
+
+    # Overall file summary table
+    sep = "─" * 52
+    typer.echo(f"\nIngestion summary  ({resolved_input})")
+    typer.echo(sep)
+    rows = [
+        ("Total files found", total),
+        ("  image files", n_image),
+        ("  non-image files (unsupported)", counts[_S_UNSUPPORTED]),
+        ("", None),
+        ("Indexed (new)", counts[_S_INDEXED]),
+        ("Skipped — already indexed", counts[_S_SKIP_IDX]),
+        ("Skipped — duplicate in batch", counts[_S_SKIP_DUP]),
+        ("Failed  — read error", counts[_S_FAIL_READ]),
+        ("Failed  — preprocessing", counts[_S_FAIL_PRE]),
+        ("Failed  — embedding", counts[_S_FAIL_EMB]),
+    ]
+    for label, value in rows:
+        if value is None:
+            typer.echo("")
+        else:
+            typer.echo(f"  {label:<36} {value:>6,}")
+    typer.echo(sep)
+    typer.echo(f"  CSV report → {csv_path}")
+
+
 def index(
     input_dir: Path | None = typer.Argument(
         default=None, help="Root directory of images (overrides SFN_INPUT_DIR)"
     ),
     dino: bool = typer.Option(False, "--dino", help="Use DINOv2 backend (1024-dim semantic)"),
     sscd: bool = typer.Option(False, "--sscd", help="Use SSCD backend (512-dim copy-detection)"),
+    report: Path | None = typer.Option(
+        None,
+        "--report",
+        help="CSV report output path (default: sfn_ingestion_<timestamp>.csv in cwd)",
+    ),
 ) -> None:
     """Embed all images under INPUT_DIR and store vectors in Qdrant."""
     settings = Settings()
@@ -92,6 +173,9 @@ def index(
     if not dino and not sscd:
         typer.echo("[ERROR] Specify at least one of --dino or --sscd.", err=True)
         raise typer.Exit(1)
+
+    # Resolve the CSV report path early so the user knows where it will land.
+    csv_path = report or Path(f"sfn_ingestion_{datetime.now():%Y%m%d_%H%M%S}.csv")
 
     # Build list of (use_sscd, model_name, collection_name) for each requested backend.
     models_to_run: list[tuple[bool, str, str]] = []
@@ -161,9 +245,27 @@ def index(
 
         specs.append((embedder, indexer, model_hash))
 
-    typer.echo(f"Scanning images in {resolved_input} ...")
+    # ── Pre-scan: collect all files and classify image vs. non-image ─────────
+    typer.echo(f"Scanning {resolved_input} ...")
+    records: dict[Path, _FileRecord] = {}
+    image_paths: list[Path] = []
+    for path, is_image in scan_all_files(resolved_input):
+        rec = _FileRecord(path=path)
+        records[path] = rec
+        if is_image:
+            image_paths.append(path)
+        else:
+            ext = path.suffix.lower() or "(no extension)"
+            rec.status = _S_UNSUPPORTED
+            rec.reason = f"unsupported extension: {ext}"
 
-    # Per-model counters; index mirrors specs list.
+    n_unsupported = len(records) - len(image_paths)
+    typer.echo(
+        f"  {len(records):,} files found"
+        f"  ({len(image_paths):,} image, {n_unsupported:,} non-image)"
+    )
+
+    # ── Per-model counters ────────────────────────────────────────────────────
     indexed_counts = [0] * len(specs)
     skipped_counts = [0] * len(specs)
     failed_count = 0
@@ -172,11 +274,11 @@ def index(
     total_bytes = 0
     batch_num = 0
 
-    for batch_paths in batched(scan_images(resolved_input), settings.batch_size):
+    for batch_paths in batched(iter(image_paths), settings.batch_size):
         batch_num += 1
         batch_wall_t0 = perf_counter()
 
-        # --- Read (shared) ---
+        # ── Read (shared) ────────────────────────────────────────────────────
         t0 = perf_counter()
         raw: list[tuple[Path, bytes]] = []
         batch_bytes = 0
@@ -188,6 +290,8 @@ def index(
             except OSError as exc:
                 typer.echo(f"[WARN] Cannot read {p}: {exc}", err=True)
                 failed_count += 1
+                records[p].status = _S_FAIL_READ
+                records[p].reason = f"read error: {exc}"
         read_s = perf_counter() - t0
         total_read_s += read_s
         total_bytes += batch_bytes
@@ -195,7 +299,7 @@ def index(
         if not raw:
             continue
 
-        # --- Hash (shared) ---
+        # ── Hash (shared) ────────────────────────────────────────────────────
         t0 = perf_counter()
         path_hash_pairs_full = [(p, hash_bytes(data), hash_bytes_md5(data)) for p, data in raw]
         path_hash_pairs = [(p, sha) for p, sha, _ in path_hash_pairs_full]
@@ -203,29 +307,51 @@ def index(
         hash_s = perf_counter() - t0
         total_hash_s += hash_s
 
-        # --- EXIF (shared, once per batch if enabled) ---
+        # Populate hash fields for every successfully-read file.
+        for p, sha, md5 in path_hash_pairs_full:
+            records[p].sha256 = sha
+            records[p].md5 = md5
+
+        # ── EXIF (shared, once per batch if enabled) ─────────────────────────
         exif_data: dict[Path, ExifInfo] | None = None
         if settings.extract_exif:
             data_by_path_for_exif = {p: data for p, data in raw}
             exif_data = {p: extract_exif(data_by_path_for_exif[p]) for p, _ in path_hash_pairs}
 
-        # --- Within-batch hash dedup (shared — avoids embedding identical content twice) ---
+        # ── Within-batch hash dedup ───────────────────────────────────────────
         unique_path_by_hash: dict[str, Path] = {}
         for p, h in path_hash_pairs:
             unique_path_by_hash.setdefault(h, p)
         unique_pairs = [(p, h) for h, p in unique_path_by_hash.items()]
         duplicate_hashes_in_batch = len(path_hash_pairs) - len(unique_pairs)
 
+        winner_paths = {p for p, _ in unique_pairs}
+        for p, _ in path_hash_pairs:
+            if p not in winner_paths and records[p].status == "pending":
+                records[p].status = _S_SKIP_DUP
+                records[p].reason = "duplicate in batch (same SHA-256)"
+
         data_by_path = {p: data for p, data in raw}
 
-        # --- Shared pre-processing: open RGB + cap short side to 331 px (threaded) ---
+        # ── Shared pre-processing ─────────────────────────────────────────────
         t0 = perf_counter()
         unique_paths_list = [p for p, _ in unique_pairs]
-        pre_images = preprocess_batch([data_by_path[p] for p in unique_paths_list])
+        try:
+            pre_images = preprocess_batch([data_by_path[p] for p in unique_paths_list])
+        except Exception as exc:  # noqa: BLE001
+            typer.echo(
+                f"[ERROR] Preprocessing failed for batch {batch_num}: {exc}", err=True
+            )
+            for p in unique_paths_list:
+                if records[p].status == "pending":
+                    records[p].status = _S_FAIL_PRE
+                    records[p].reason = f"preprocessing error: {exc}"
+            failed_count += len(unique_paths_list)
+            continue
         pre_s = perf_counter() - t0
         pre_by_path = dict(zip(unique_paths_list, pre_images))
 
-        # --- Per-model loop: normalize + embed, collect upsert jobs ---
+        # ── Per-model loop: normalize + embed, collect upsert jobs ────────────
         model_segments: list[str] = []
         upsert_jobs: list = []
 
@@ -233,6 +359,13 @@ def index(
             to_embed = _apply_dedup(unique_pairs, indexer, settings)
             n_skipped = duplicate_hashes_in_batch + (len(unique_pairs) - len(to_embed))
             skipped_counts[spec_idx] += n_skipped
+
+            # Mark already-indexed files for this model (don't overwrite "indexed").
+            to_embed_set = {p for p, _ in to_embed}
+            for p, _ in unique_pairs:
+                if p not in to_embed_set and records[p].status != _S_INDEXED:
+                    records[p].status = _S_SKIP_IDX
+                    records[p].reason = "already indexed in Qdrant"
 
             backend = type(embedder).__name__
 
@@ -244,7 +377,7 @@ def index(
             n = len(paths)
             model_pil = [pre_by_path[p] for p in paths]
 
-            # --- Normalize ---
+            # ── Normalize ────────────────────────────────────────────────────
             t0 = perf_counter()
             try:
                 norm_images = embedder.normalize_batch_bytes(model_pil)
@@ -253,10 +386,14 @@ def index(
                     f"[ERROR] Normalization failed for batch of {n} [{backend}]: {exc}", err=True
                 )
                 failed_count += n
+                for p in paths:
+                    if records[p].status != _S_INDEXED:
+                        records[p].status = _S_FAIL_EMB
+                        records[p].reason = f"normalization error: {exc}"
                 continue
             norm_s = perf_counter() - t0
 
-            # --- Embed ---
+            # ── Embed ─────────────────────────────────────────────────────────
             t0 = perf_counter()
             try:
                 embeddings = embedder.embed_images(norm_images)
@@ -265,10 +402,18 @@ def index(
                     f"[ERROR] Embedding failed for batch of {n} [{backend}]: {exc}", err=True
                 )
                 failed_count += n
+                for p in paths:
+                    if records[p].status != _S_INDEXED:
+                        records[p].status = _S_FAIL_EMB
+                        records[p].reason = f"embedding error: {exc}"
                 continue
             embed_s = perf_counter() - t0
 
             indexed_counts[spec_idx] += n
+            for p in paths:
+                records[p].status = _S_INDEXED
+                records[p].reason = ""
+
             model_segments.append(
                 f"{backend} norm {norm_s:.2f}s"
                 f"  embed {embed_s:.2f}s ({_fmt_rate(n, embed_s, 'img')})"
@@ -308,7 +453,7 @@ def index(
                 )
             )
 
-        # --- Parallel upserts ---
+        # ── Parallel upserts ──────────────────────────────────────────────────
         upsert_wall_s = 0.0
         if upsert_jobs:
             t0 = perf_counter()
@@ -328,14 +473,11 @@ def index(
             )
             typer.echo(shared + "  |  " + "  |  ".join(model_segments) + upsert_str)
 
-    typer.echo("\nDone.")
-    for spec_idx, (embedder, _, _) in enumerate(specs):
-        typer.echo(
-            f"  [{type(embedder).__name__}]  indexed={indexed_counts[spec_idx]}"
-            f"  skipped={skipped_counts[spec_idx]}"
-        )
-    if failed_count:
-        typer.echo(f"  failed={failed_count}")
+    # ── Write CSV report ──────────────────────────────────────────────────────
+    _write_csv(records, csv_path)
+
+    # ── Print summary table ───────────────────────────────────────────────────
+    _print_summary(records, resolved_input, csv_path, specs, indexed_counts, skipped_counts)
 
 
 def main() -> None:

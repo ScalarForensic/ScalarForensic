@@ -43,3 +43,14 @@ def scan_images(root: Path) -> Iterator[Path]:
     for path in root.rglob("*"):
         if path.is_file() and path.suffix.lower() in extensions:
             yield path
+
+
+def scan_all_files(root: Path) -> Iterator[tuple[Path, bool]]:
+    """Recursively yield *(path, is_image)* for every regular file under *root*.
+
+    ``is_image`` is True when the file extension is in the supported set.
+    """
+    extensions = IMAGE_EXTENSIONS | (_HEIF_EXTENSIONS if _HEIF_AVAILABLE else frozenset())
+    for path in root.rglob("*"):
+        if path.is_file():
+            yield path, path.suffix.lower() in extensions
