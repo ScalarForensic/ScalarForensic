@@ -1,6 +1,7 @@
 """CLI entry point for ScalarForensic."""
 
 import csv
+import os
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -160,10 +161,12 @@ def index(
     ),
 ) -> None:
     """Embed all images under INPUT_DIR and store vectors in Qdrant."""
-    settings = Settings()
-
+    # Write back to os.environ so Settings() reads the correct value,
+    # and any subprocess inherits the flag without an explicit argument.
     if allow_online:
-        settings.allow_online = True
+        os.environ["SFN_ALLOW_ONLINE"] = "true"
+
+    settings = Settings()
 
     # Apply HuggingFace offline guard as early as possible — before any model code runs.
     settings.apply_network_policy()

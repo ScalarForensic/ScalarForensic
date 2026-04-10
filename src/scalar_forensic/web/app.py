@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import json
 import sys
 import tempfile
@@ -239,10 +240,13 @@ def start() -> None:
     )
     args = parser.parse_args()
 
-    settings = Settings()
-
+    # Write back to os.environ before constructing Settings so that every
+    # per-request Settings() instance created by FastAPI handlers also sees
+    # allow_online=True — mutating the object here would have no effect on them.
     if args.allow_online:
-        settings.allow_online = True
+        os.environ["SFN_ALLOW_ONLINE"] = "true"
+
+    settings = Settings()
 
     # Apply HuggingFace offline guard as early as possible — before uvicorn imports
     # any model code.  Qdrant / remote-embedder connections are unaffected.

@@ -8,21 +8,6 @@ from dotenv import load_dotenv
 _VALID_DEDUP_MODES = frozenset({"hash", "filepath", "both"})
 
 
-def _is_hf_hub_id(model_name: str) -> bool:
-    """True when *model_name* looks like a HuggingFace Hub ID rather than a local path.
-
-    Hub IDs have the form ``org/model-name`` (exactly one slash, no leading dot).
-    Local paths either exist on disk, are absolute, or start with ``./`` / ``../``.
-    """
-    p = Path(model_name)
-    # is_absolute() is a pure string check — run it before exists() to avoid I/O
-    # for Hub IDs like "facebook/dinov2-large" which can never be absolute.
-    if p.is_absolute() or p.exists():
-        return False
-    parts = model_name.split("/")
-    return len(parts) == 2 and not model_name.startswith(".")
-
-
 class Settings:
     """All SFN_* runtime settings.
 
@@ -102,39 +87,49 @@ class Settings:
     def apply_network_policy(self) -> None:
         """Enforce the network policy for HuggingFace libraries.
 
-        When *allow_online* is False (the default), sets ``HF_HUB_OFFLINE=1``
-        and ``TRANSFORMERS_OFFLINE=1`` so the HuggingFace SDK never attempts
-        any network request.  Call this as early as possible — before any model
-        loading code runs.
+        When *allow_online* is False (the default), unconditionally sets
+        ``HF_HUB_OFFLINE=1`` and ``TRANSFORMERS_OFFLINE=1`` so the HuggingFace
+        SDK never attempts any network request — even if those variables were
+        already present in the shell environment with a different value.
+
+        When *allow_online* is True, removes those variables so that
+        ``--allow-online`` reliably enables downloads even if the shell had them
+        set to a blocking value.
 
         Configured endpoints (Qdrant, remote embedder) are unaffected: those use
         ``urllib`` / ``qdrant-client`` directly and do not consult these variables.
         """
-        if not self.allow_online:
-            os.environ.setdefault("HF_HUB_OFFLINE", "1")
-            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+        if self.allow_online:
+            os.environ.pop("HF_HUB_OFFLINE", None)
+            os.environ.pop("TRANSFORMERS_OFFLINE", None)
+        else:
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
     def offline_model_error(self, *, need_dino: bool = False) -> str | None:
-        """Return a user-facing error string if a model requires online access, else None.
+        """Return a user-facing error string if a model is not locally accessible, else None.
 
         Called before model loading to fail fast with an actionable message.
         Returns None when *allow_online* is True or a remote embedder endpoint is
         configured (remote embedder replaces local models entirely).
+
+        The check is path existence, not a Hub-ID heuristic — a non-existent
+        relative path like ``models/dinov2-large`` and a Hub ID like
+        ``facebook/dinov2-large`` both require the same remediation steps.
 
         SSCD is always loaded from a local TorchScript file and never contacts
         HuggingFace Hub, so it is not checked here.
         """
         if self.allow_online or self.embedding_endpoint:
             return None
-        if need_dino and _is_hf_hub_id(self.model_dino):
+        if need_dino and not Path(self.model_dino).exists():
             return (
-                f"SFN_MODEL_DINO={self.model_dino!r} is a HuggingFace Hub ID, "
-                "but online access is disabled (default).\n"
-                "  To fix, download the model once (requires internet):\n"
-                "    uv run python scripts/download_models.py --dino\n"
-                "  Then point to the local snapshot in .env:\n"
-                "    SFN_MODEL_DINO=models/dinov2-large\n"
-                "  To temporarily allow a one-time download instead:\n"
-                "    sfn --allow-online  /  sfn-web --allow-online"
+                f"DINOv2 model not found: SFN_MODEL_DINO={self.model_dino!r}\n"
+                "  Online access is disabled (default). To fix:\n"
+                "  - Download the model once (requires internet):\n"
+                "      uv run python scripts/download_models.py --dino\n"
+                "    Then set SFN_MODEL_DINO=models/dinov2-large in .env\n"
+                "  - Or allow a one-time download:\n"
+                "      sfn --allow-online  /  sfn-web --allow-online"
             )
         return None
