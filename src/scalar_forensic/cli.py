@@ -114,7 +114,7 @@ def _print_summary(
     for spec_idx, (embedder, _, _) in enumerate(specs):
         typer.echo(
             f"  [{type(embedder).__name__}]  indexed={indexed_counts[spec_idx]}"
-            f"  skipped={skipped_counts[spec_idx]}  failed={failed_counts[spec_idx]}"
+            f"  skipped={skipped_counts[spec_idx]}  embed_failed={failed_counts[spec_idx]}"
         )
 
     # Overall file summary table
@@ -369,14 +369,24 @@ def index(
         pre_by_path: dict[Path, Image.Image] = {}
         for p, result in zip(unique_paths_list, pre_results, strict=True):
             if isinstance(result, Exception):
-                typer.echo(
-                    f"[WARN] Preprocessing failed for {p.name}: {result}", err=True
-                )
+                typer.echo(f"[WARN] Preprocessing failed for {p.name}: {result}", err=True)
                 if records[p].status == "pending":
                     records[p].status = _S_FAIL_PRE
                     records[p].reason = f"preprocessing error: {result}"
             else:
                 pre_by_path[p] = result
+
+        # Propagate preprocessing failure to batch-duplicates of a failed winner.
+        # Those duplicates were marked _S_SKIP_DUP earlier; update them so the
+        # final report accurately reflects that their hash-winner couldn't be processed.
+        failed_pre_hashes = {h for p, h in unique_pairs if p not in pre_by_path}
+        if failed_pre_hashes:
+            for p, h in path_hash_pairs:
+                if h in failed_pre_hashes and records[p].status in ("pending", _S_SKIP_DUP):
+                    records[p].status = _S_FAIL_PRE
+                    if not records[p].reason:
+                        records[p].reason = "duplicate of image that failed preprocessing"
+
         pre_s = perf_counter() - t0
 
         if not pre_by_path:
