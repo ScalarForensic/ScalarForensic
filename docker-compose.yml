@@ -43,11 +43,11 @@ services:
       # Image directory — set SFN_IMAGES_DIR in your shell or .env file.
       # Inside the container this is always /images regardless of the host path.
       - ${SFN_IMAGES_DIR:-./data}:/images:ro
-    environment:
+    # environment:
       # Route Qdrant traffic to the sidecar service (overrides .env).
-      - SFN_QDRANT_URL=http://qdrant:6333
+      #- SFN_QDRANT_URL=http://qdrant:6333
       # Default input dir for the CLI indexer (used when no argument is given).
-      - SFN_INPUT_DIR=/images
+      #- SFN_INPUT_DIR=/images
 
     # ── NVIDIA GPU (requires nvidia-container-toolkit on the host) ────────────
     # Uncomment to enable CUDA acceleration:
@@ -61,12 +61,12 @@ services:
 
     # ── AMD ROCm GPU ──────────────────────────────────────────────────────────
     # Uncomment to pass through the ROCm device nodes:
-    # devices:
-    #   - /dev/kfd:/dev/kfd
-    #   - /dev/dri:/dev/dri
-    # group_add:
-    #   - video
-    #   - render
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
 
 volumes:
   # Qdrant vector data — persists across container restarts and image updates.
