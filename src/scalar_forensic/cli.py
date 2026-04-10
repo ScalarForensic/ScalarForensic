@@ -3,7 +3,7 @@
 import csv
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from itertools import batched
 from pathlib import Path
