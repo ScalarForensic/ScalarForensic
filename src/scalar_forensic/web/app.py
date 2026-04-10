@@ -49,8 +49,11 @@ async def index() -> FileResponse:
 @app.get("/api/collections")
 async def collections() -> JSONResponse:
     settings = Settings()
-    modes = get_available_modes(settings)
-    return JSONResponse({"modes": modes})
+    modes, error = get_available_modes(settings)
+    payload = {"modes": modes}
+    if error:
+        payload["error"] = f"Qdrant unavailable: {error}"
+    return JSONResponse(payload)
 
 
 # ---------------------------------------------------------------------------

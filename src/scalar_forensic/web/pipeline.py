@@ -304,20 +304,21 @@ def _query_vector(
 # ---------------------------------------------------------------------------
 
 
-def get_available_modes(settings: Settings) -> list[str]:
+def get_available_modes(settings: Settings) -> tuple[list[str], str | None]:
     """Return which query modes are usable based on existing Qdrant collections."""
     try:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
         existing = {c.name for c in client.get_collections().collections}
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not reach Qdrant at %s: %s", settings.qdrant_url, exc)
-        return []
+        return [], str(exc)
+
+    if not existing:
+        return [], None
 
     modes: list[str] = ["exact"]  # exact works as long as any collection exists
-    if not existing:
-        return []
     if settings.collection_sscd in existing:
         modes.append("altered")
     if settings.collection_dino in existing:
         modes.append("semantic")
-    return modes
+    return modes, None
