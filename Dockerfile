@@ -40,7 +40,7 @@ COPY models/ /app/models/
 # ── Layer 3: Application source ───────────────────────────────────────────────
 # Invalidated only on code changes; the pip install step runs quickly.
 COPY src/ /app/src/
-COPY pyproject.toml /app/
+COPY pyproject.toml LICENSE /app/
 RUN pip install --no-cache-dir --no-index --find-links /tmp/vendor/ \
         --no-deps . \
     && rm -rf /tmp/vendor/ /tmp/requirements.txt
