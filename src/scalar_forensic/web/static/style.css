@@ -126,16 +126,10 @@ header::after {
 }
 
 .header-logo {
-  font-family: var(--display);
-  font-weight: 700;
-  font-size: 20px;
-  letter-spacing: 0.12em;
-  color: var(--text);
-  text-transform: uppercase;
-}
-
-.header-logo span {
-  color: var(--accent);
+  display: block;
+  height: 30px;
+  width: auto;
+  flex-shrink: 0;
 }
 
 .mode-toggles {

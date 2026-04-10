@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 232 40" role="img" aria-label="ScalarForensic">
+  <defs>
+    <radialGradient id="lensGradL" cx="38%" cy="32%" r="65%">
+      <stop offset="0%" stop-color="#1e2430"/>
+      <stop offset="100%" stop-color="#0d0f12"/>
+    </radialGradient>
+    <clipPath id="lensClipL">
+      <circle cx="17" cy="16" r="10.5"/>
+    </clipPath>
+  </defs>
+
+  <!-- Icon mark (scaled-down version of the favicon) -->
+  <g transform="translate(2, 4)">
+    <!-- Lens fill -->
+    <circle cx="17" cy="16" r="10.5" fill="url(#lensGradL)"/>
+
+    <!-- Faint grid -->
+    <g clip-path="url(#lensClipL)" opacity="0.09">
+      <line x1="6"  y1="10" x2="28" y2="10" stroke="#dde3ec" stroke-width="0.5"/>
+      <line x1="6"  y1="13" x2="28" y2="13" stroke="#dde3ec" stroke-width="0.5"/>
+      <line x1="6"  y1="16" x2="28" y2="16" stroke="#dde3ec" stroke-width="0.5"/>
+      <line x1="6"  y1="19" x2="28" y2="19" stroke="#dde3ec" stroke-width="0.5"/>
+      <line x1="6"  y1="22" x2="28" y2="22" stroke="#dde3ec" stroke-width="0.5"/>
+      <line x1="11" y1="5"  x2="11" y2="27" stroke="#dde3ec" stroke-width="0.5"/>
+      <line x1="14" y1="5"  x2="14" y2="27" stroke="#dde3ec" stroke-width="0.5"/>
+      <line x1="17" y1="5"  x2="17" y2="27" stroke="#dde3ec" stroke-width="0.5"/>
+      <line x1="20" y1="5"  x2="20" y2="27" stroke="#dde3ec" stroke-width="0.5"/>
+      <line x1="23" y1="5"  x2="23" y2="27" stroke="#dde3ec" stroke-width="0.5"/>
+    </g>
+
+    <!-- Similarity edges -->
+    <g clip-path="url(#lensClipL)">
+      <line x1="12" y1="19" x2="13.5" y2="13" stroke="#e89320" stroke-width="0.8" stroke-opacity="0.5"/>
+      <line x1="12" y1="19" x2="17.5" y2="10.5" stroke="#e89320" stroke-width="0.6" stroke-opacity="0.28"/>
+      <line x1="13.5" y1="13" x2="17.5" y2="10.5" stroke="#dde3ec" stroke-width="0.6" stroke-opacity="0.32"/>
+      <line x1="17.5" y1="10.5" x2="22.5" y2="16" stroke="#4a9ee0" stroke-width="0.7" stroke-opacity="0.42"/>
+      <line x1="22.5" y1="16" x2="19.5" y2="21" stroke="#4a9ee0" stroke-width="0.6" stroke-opacity="0.35"/>
+    </g>
+
+    <!-- Dots -->
+    <circle cx="12"   cy="19"   r="1.75" fill="#e89320"/>
+    <circle cx="13.5" cy="13"   r="1.1"  fill="#e89320" opacity="0.5"/>
+    <circle cx="17.5" cy="10.5" r="1.5"  fill="#dde3ec" opacity="0.88"/>
+    <circle cx="22.5" cy="16"   r="1.5"  fill="#4a9ee0" opacity="0.92"/>
+    <circle cx="19.5" cy="21"   r="1.0"  fill="#4a9ee0" opacity="0.48"/>
+
+    <!-- Lens ring -->
+    <circle cx="17" cy="16" r="10.5" fill="none" stroke="#e89320" stroke-width="1.4"/>
+
+    <!-- Handle -->
+    <line x1="24.5" y1="23.5" x2="33" y2="32.5"
+          stroke="#8a94a6" stroke-width="3.2" stroke-linecap="round"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text y="27"
+        font-family="'Arial Narrow','Helvetica Neue Condensed','Helvetica Neue','Arial',sans-serif"
+        font-weight="700"
+        font-size="21"
+        letter-spacing="2">
+    <tspan x="44" fill="#dde3ec">SCALAR</tspan><tspan fill="#e89320">FORENSIC</tspan>
+  </text>
+</svg>
