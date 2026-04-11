@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import uuid
@@ -104,6 +105,7 @@ async def query(
     threshold_altered: float = Form(default=0.75, ge=0.0, le=1.0),
     threshold_semantic: float = Form(default=0.55, ge=0.0, le=1.0),
     limit: int = Form(default=10, ge=1, le=50),
+    unify: str = Form(default="true"),
 ) -> JSONResponse:
     session = get_session(session_id)
     if session is None:
@@ -112,7 +114,8 @@ async def query(
     settings = Settings()
     mode_list = [m.strip() for m in modes.split(",") if m.strip()]
     results = query_session(
-        session, mode_list, threshold_altered, threshold_semantic, limit, settings
+        session, mode_list, threshold_altered, threshold_semantic, limit, settings,
+        unify=unify.lower() != "false",
     )
     provenance = QueryProvenance(
         modes=mode_list,
@@ -136,6 +139,7 @@ async def query(
                             "scores": h.scores,
                             "exif": h.exif,
                             "exif_geo_data": h.exif_geo_data,
+                            "image_hash": h.image_hash,
                         }
                         for h in r.hits
                     ],
@@ -160,6 +164,24 @@ async def query_image(session_id: str, file_id: str) -> FileResponse:
     if entry is None or not entry.temp_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(entry.temp_path, filename=Path(entry.filename).name)
+
+
+@app.get("/api/thumbnail/{sha256}")
+async def thumbnail(sha256: str) -> FileResponse:
+    """Serve a pre-generated thumbnail by SHA-256 hash.
+
+    Thumbnails are written during `sfn index` when SFN_THUMBNAIL_DIR is configured.
+    Returns 404 when thumbnail dir is not configured or the file is not yet generated.
+    """
+    if not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise HTTPException(status_code=400, detail="Invalid hash")
+    settings = Settings()
+    if settings.thumbnail_dir is None:
+        raise HTTPException(status_code=404, detail="Thumbnail directory not configured")
+    thumb_path = settings.thumbnail_dir / f"{sha256}.jpg"
+    if not thumb_path.exists():
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    return FileResponse(thumb_path, media_type="image/jpeg")
 
 
 @app.get("/api/hit-image")

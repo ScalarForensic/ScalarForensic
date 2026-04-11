@@ -85,11 +85,13 @@ def test_query_vector_has_no_exclude_hash_parameter():
 
 
 # ---------------------------------------------------------------------------
-# Two separate rows when same image matches Exact and Semantic
+# Same path from multiple modes is merged into one unified row
 # ---------------------------------------------------------------------------
 
 
-def test_same_image_both_modes_yields_two_rows():
+def test_same_image_both_modes_yields_one_merged_row():
+    """When the same path appears in exact and semantic results, scores are merged
+    into a single Hit so the UI can show all scores in one row."""
     session = _make_session([_make_entry(dino=True)])
     settings = _mock_settings()
 
@@ -108,16 +110,14 @@ def test_same_image_both_modes_yields_two_rows():
 
     assert len(results) == 1
     hits = results[0].hits
-    assert len(hits) == 2, f"expected 2 rows for same path in two modes, got {hits}"
+    assert len(hits) == 1, f"expected 1 merged row for same path in two modes, got {hits}"
 
-    modes_present = {list(h.scores.keys())[0] for h in hits}
-    assert modes_present == {"exact", "semantic"}
-
-    exact_row = next(h for h in hits if "exact" in h.scores)
-    semantic_row = next(h for h in hits if "semantic" in h.scores)
-    assert exact_row.path == PATH_A
-    assert semantic_row.path == PATH_A
-    assert semantic_row.scores["semantic"] == 1.0
+    hit = hits[0]
+    assert hit.path == PATH_A
+    assert "exact" in hit.scores
+    assert "semantic" in hit.scores
+    assert hit.scores["exact"] == 1.0
+    assert hit.scores["semantic"] == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -207,11 +207,13 @@ def test_per_mode_limit_respected():
 
 
 # ---------------------------------------------------------------------------
-# Altered mode produces independent rows from Semantic for same path
+# Altered + Semantic for same path merges into one row with both scores
 # ---------------------------------------------------------------------------
 
 
-def test_altered_and_semantic_same_path_yields_two_rows():
+def test_altered_and_semantic_same_path_yields_one_merged_row():
+    """When altered and semantic both match the same path, they are merged into
+    a single Hit with both scores so the UI can display a unified row."""
     session = _make_session([_make_entry(dino=True, sscd=True)])
     settings = _mock_settings()
 
@@ -225,9 +227,12 @@ def test_altered_and_semantic_same_path_yields_two_rows():
         results = query_session(session, ["altered", "semantic"], 0.75, 0.55, 10, settings)
 
     hits = results[0].hits
-    assert len(hits) == 2
-    modes = {list(h.scores.keys())[0] for h in hits}
-    assert modes == {"altered", "semantic"}
+    assert len(hits) == 1, f"expected 1 merged row, got {hits}"
+    hit = hits[0]
+    assert "altered" in hit.scores
+    assert "semantic" in hit.scores
+    assert hit.scores["altered"] == 0.92
+    assert hit.scores["semantic"] == 0.92
 
 
 # ---------------------------------------------------------------------------

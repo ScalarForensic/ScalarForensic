@@ -161,6 +161,7 @@ class Hit:
     scores: dict  # mode → score, e.g. {"exact": 1.0, "altered": 0.97, "semantic": 0.93}
     exif: bool | None = None
     exif_geo_data: bool | None = None
+    image_hash: str | None = None  # SHA-256, used to request /api/thumbnail/{hash}
 
     def best_score(self) -> float:
         return max(self.scores.values(), default=0.0)
@@ -183,14 +184,34 @@ class QueryProvenance:
     timestamp: str  # ISO 8601 UTC, e.g. "2026-04-10T14:32:00.123456+00:00"
 
 
-def _cap_hits(hits: list[Hit], limit: int) -> list[Hit]:
-    """Dedup by path (keep best score), sort deterministically, then cap to `limit`."""
-    seen: dict[str, Hit] = {}
-    for h in hits:
-        existing = seen.get(h.path)
-        if existing is None or h.best_score() > existing.best_score():
-            seen[h.path] = h
-    return sorted(seen.values(), key=lambda h: (-h.best_score(), h.path))[:limit]
+_MODE_PRIORITY: dict[str, int] = {"exact": 0, "altered": 1, "semantic": 2}
+
+
+def _hit_sort_key(h: Hit) -> tuple:
+    """Unified sort: exact first, then best non-exact score desc, then path."""
+    has_exact = "exact" in h.scores
+    non_exact_scores = [v for k, v in h.scores.items() if k != "exact"]
+    best_non_exact = max(non_exact_scores, default=0.0)
+    return (0 if has_exact else 1, -best_non_exact, h.path)
+
+
+def _unmerged_sort_key(h: Hit) -> tuple:
+    """Unmerged sort: group by mode (exact → altered → semantic), then score desc, then path."""
+    mode = next(iter(h.scores), "")
+    priority = _MODE_PRIORITY.get(mode, 99)
+    score = next(iter(h.scores.values()), 0.0)
+    return (priority, -score, h.path)
+
+
+def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
+    """Merge a hit into the accumulator, combining scores from multiple modes."""
+    if h.path in dest:
+        dest[h.path].scores.update(h.scores)
+        # Keep the image_hash if we now have one
+        if h.image_hash and not dest[h.path].image_hash:
+            dest[h.path].image_hash = h.image_hash
+    else:
+        dest[h.path] = h
 
 
 def query_session(
@@ -200,10 +221,16 @@ def query_session(
     threshold_semantic: float,
     limit: int,
     settings: Settings,
+    unify: bool = True,
 ) -> list[FileResult]:
     """Query Qdrant for every file in the session using stored embeddings.
 
     Fast — no re-embedding. Called on every slider change.
+
+    When *unify* is True (default) hits from different modes are merged by path
+    so each DB image produces one result row with all applicable scores.
+    When *unify* is False each mode contributes its own rows independently,
+    so the same image may appear multiple times with different scores.
     """
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
     results: list[FileResult] = []
@@ -220,11 +247,16 @@ def query_session(
             continue
 
         file_result = FileResult(file_id=entry.file_id, filename=entry.filename)
-        all_hits: list[Hit] = []
+        merged: dict[str, Hit] = {}
+        unmerged: list[Hit] = []
 
         if "exact" in modes and entry.file_hash:
             exact_hits, errs = _query_exact(client, entry.file_hash, entry.file_hash_md5, settings)
-            all_hits.extend(_cap_hits(exact_hits, limit))
+            for h in exact_hits:
+                if unify:
+                    _merge_hit(h, merged)
+                else:
+                    unmerged.append(h)
             file_result.errors.extend(errs)
 
         if "altered" in modes and entry.sscd_embedding:
@@ -236,7 +268,11 @@ def query_session(
                 threshold=threshold_altered,
                 limit=limit,
             )
-            all_hits.extend(_cap_hits(hits, limit))
+            for h in hits:
+                if unify:
+                    _merge_hit(h, merged)
+                else:
+                    unmerged.append(h)
             file_result.errors.extend(errs)
 
         if "semantic" in modes and entry.dino_embedding:
@@ -248,12 +284,17 @@ def query_session(
                 threshold=threshold_semantic,
                 limit=limit,
             )
-            all_hits.extend(_cap_hits(hits, limit))
+            for h in hits:
+                if unify:
+                    _merge_hit(h, merged)
+                else:
+                    unmerged.append(h)
             file_result.errors.extend(errs)
 
-        # Sort combined list deterministically: best score descending, then path for tie-breaking
-        # No global limit — each mode independently contributed up to `limit` hits
-        file_result.hits = sorted(all_hits, key=lambda h: (-h.best_score(), h.path))
+        if unify:
+            file_result.hits = sorted(merged.values(), key=_hit_sort_key)[:limit]
+        else:
+            file_result.hits = sorted(unmerged, key=_unmerged_sort_key)
         results.append(file_result)
 
     return results
@@ -277,7 +318,7 @@ def _query_exact(
                     must=[FieldCondition(key="image_hash", match=MatchValue(value=image_hash))]
                 ),
                 limit=50,
-                with_payload=["image_path", "exif", "exif_geo_data"],
+                with_payload=["image_path", "image_hash", "exif", "exif_geo_data"],
                 with_vectors=False,
             )
             for r in records:
@@ -289,6 +330,7 @@ def _query_exact(
                             scores={"exact": 1.0},
                             exif=r.payload.get("exif"),
                             exif_geo_data=r.payload.get("exif_geo_data"),
+                            image_hash=r.payload.get("image_hash"),
                         )
                     )
 
@@ -337,7 +379,7 @@ def _query_vector(
             query=vector,
             score_threshold=threshold,
             limit=limit,
-            with_payload=["image_path", "exif", "exif_geo_data"],
+            with_payload=["image_path", "image_hash", "exif", "exif_geo_data"],
         )
         return [
             Hit(
@@ -345,6 +387,7 @@ def _query_vector(
                 scores={mode: r.score},
                 exif=r.payload.get("exif"),
                 exif_geo_data=r.payload.get("exif_geo_data"),
+                image_hash=r.payload.get("image_hash"),
             )
             for r in result.points
         ], []

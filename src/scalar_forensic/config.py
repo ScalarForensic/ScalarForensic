@@ -36,6 +36,12 @@ class Settings:
         self.duplicate_check_mode: str = self._parse_dedup_mode()
         self.extract_exif: bool = self._parse_bool("SFN_EXTRACT_EXIF", default=False)
 
+        # --- Thumbnail cache ---
+        # When set, 128×128 JPEG thumbnails are written during indexing and
+        # served at /api/thumbnail/{sha256} by sfn-web.
+        self.thumbnail_dir: Path | None = self._parse_optional_path("SFN_THUMBNAIL_DIR")
+        self.thumbnail_size: int = self._parse_int("SFN_THUMBNAIL_SIZE", 128)
+
         # --- Network policy ---
         # Default: offline — no outward connections to HuggingFace or any other service.
         # Set to true (or pass --allow-online) only for first-time model downloads.

@@ -11,25 +11,56 @@
 <body>
 <div id="app" x-data="sfn()" x-init="init()" x-cloak>
 
+  <!-- ── Error banner ── -->
   <div class="error-banner" x-show="serverError" x-text="serverError"></div>
+
+  <!-- ── Lightbox ── -->
+  <div class="lightbox" x-show="lightboxSrc" @click.self="closeLightbox()" @keydown.escape.window="closeLightbox()">
+    <div class="lightbox-controls">
+      <button class="lightbox-btn" @click="lightboxZoom = Math.min(5, lightboxZoom + 0.25)" title="Zoom in">+</button>
+      <button class="lightbox-btn" @click="lightboxZoom = Math.max(0.1, lightboxZoom - 0.25)" title="Zoom out">−</button>
+      <button class="lightbox-btn" @click="lightboxZoom = 1" title="Reset zoom">⊡</button>
+      <button class="lightbox-btn" @click="closeLightbox()" title="Close">✕</button>
+    </div>
+    <div class="lightbox-img-wrap" @click.stop>
+      <img :src="lightboxSrc" :style="`transform: scale(${lightboxZoom})`" alt="Full size image">
+    </div>
+  </div>
 
   <!-- ── Header ── -->
   <header>
     <img class="header-logo" src="/static/logo.svg" alt="ScalarForensic" height="30">
-    <div class="mode-toggles">
+
+    <!-- Pre-analysis: mode toggles -->
+    <div class="mode-toggles" x-show="phase === 'upload'">
       <template x-for="mode in ['exact','altered','semantic']" :key="mode">
         <button class="mode-btn"
           :class="{
-            'active-exact':   mode === 'exact'    && selectedModes.includes('exact'),
-            'active-altered': mode === 'altered'  && selectedModes.includes('altered'),
-            'active-dino':    mode === 'semantic' && selectedModes.includes('semantic'),
+            'active-exact':    mode === 'exact'    && selectedModes.includes('exact'),
+            'active-altered':  mode === 'altered'  && selectedModes.includes('altered'),
+            'active-dino':     mode === 'semantic' && selectedModes.includes('semantic'),
+            'mode-mandatory':  mode === 'exact',
           }"
-          :disabled="!availableModes.includes(mode)"
+          :disabled="!availableModes.includes(mode) && mode !== 'exact'"
           @click="toggleMode(mode)"
-          :title="!availableModes.includes(mode) ? 'Collection not indexed yet' : ''">
+          :title="mode === 'exact' ? 'Always active — required for analysis' : (!availableModes.includes(mode) ? 'Collection not indexed yet' : '')">
           <span class="dot"></span>
           <span x-text="mode === 'exact' ? 'Exact' : mode === 'altered' ? 'Altered' : 'Semantic'"></span>
         </button>
+      </template>
+    </div>
+
+    <!-- Post-analysis: non-interactive run pills -->
+    <div class="analysis-pills" x-show="phase !== 'upload'">
+      <template x-for="mode in analysisRunModes" :key="mode">
+        <span class="analysis-pill"
+          :class="{
+            'analysis-pill-exact':    mode === 'exact',
+            'analysis-pill-altered':  mode === 'altered',
+            'analysis-pill-semantic': mode === 'semantic',
+          }"
+          x-text="mode === 'exact' ? 'Exact' : mode === 'altered' ? 'Altered' : 'Semantic'">
+        </span>
       </template>
     </div>
   </header>
@@ -46,7 +77,7 @@
         <button class="btn-secondary" @click.stop="$refs.fileInput.click()">🖼 Select Files</button>
       </div>
       <div class="file-count-badge" x-show="pendingFiles.length > 0">
-        <span x-text="pendingFiles.length"></span> file<span x-show="pendingFiles.length !== 1">s</span> queued
+        <span x-text="pendingFiles.length"></span> image<span x-show="pendingFiles.length !== 1">s</span> queued
       </div>
       <input type="file" multiple accept="image/*" style="display:none" x-ref="fileInput"
              @change="addFiles($event.target.files); $event.target.value=''">
@@ -87,28 +118,28 @@
   <!-- ── 4-panel results layout ── -->
   <div class="results-layout" x-show="phase === 'results'">
 
-    <!-- Panel 1: Controls + file lists + folder tree -->
+    <!-- Panel 1: Controls + file lists -->
     <div class="left-panel">
 
       <div class="panel-header">Query Controls</div>
       <div class="sliders">
         <div class="slider-row">
           <div class="slider-label">
-            <span title="Maximum number of hits returned per uploaded file">Top K (max results per file)</span>
+            <span title="Maximum hits returned per uploaded file">Top K</span>
             <span class="slider-value" x-text="limit"></span>
           </div>
           <input type="range" min="1" max="50" step="1" x-model.number="limit" @input="debouncedQuery()">
         </div>
-        <div class="slider-row">
+        <div class="slider-row" x-show="analysisRunModes.includes('altered')">
           <div class="slider-label">
-            <span title="Minimum SSCD cosine similarity to include a hit (detects edited/cropped copies)">SSCD similarity threshold</span>
+            <span title="Minimum SSCD similarity (copy detection)">SSCD threshold</span>
             <span class="slider-value altered-val" x-text="thresholdAltered.toFixed(2)"></span>
           </div>
           <input type="range" min="0" max="1" step="0.01" x-model.number="thresholdAltered" @input="debouncedQuery()" class="range-altered">
         </div>
-        <div class="slider-row">
+        <div class="slider-row" x-show="analysisRunModes.includes('semantic')">
           <div class="slider-label">
-            <span title="Minimum DINOv2 cosine similarity to include a hit (detects visually similar images)">DINOv2 similarity threshold</span>
+            <span title="Minimum DINOv2 similarity (semantic search)">DINOv2 threshold</span>
             <span class="slider-value semantic-val" x-text="thresholdSemantic.toFixed(2)"></span>
           </div>
           <input type="range" min="0" max="1" step="0.01" x-model.number="thresholdSemantic" @input="debouncedQuery()" class="range-semantic">
@@ -137,36 +168,40 @@
         Matched <span class="count-chip" x-text="matchedFiles.length"></span>
       </div>
       <div class="file-list matched-list">
-        <template x-for="(r, idx) in matchedFiles" :key="r.file_id">
+        <template x-for="(r, idx) in matchedFiles.slice(0, LIST_CAP)" :key="r.file_id">
           <div class="file-item" :class="{selected: selectedFileId===r.file_id}"
-               :style="`animation-delay:${idx*20}ms`"
+               :style="`animation-delay:${idx*15}ms`"
                @click="selectFile(r.file_id)">
             <span class="file-name" :title="r.filename" x-text="shortName(r.filename)"></span>
             <span class="hit-count" x-text="r.hits.length"></span>
           </div>
         </template>
+        <div class="list-overflow-msg" x-show="matchedFiles.length > LIST_CAP"
+             x-text="`… and ${matchedFiles.length - LIST_CAP} more`"></div>
       </div>
 
       <div class="panel-header section-header">
         Not Matched <span class="count-chip muted-chip" x-text="unmatchedFiles.length"></span>
       </div>
       <div class="file-list unmatched-list">
-        <template x-for="r in unmatchedFiles" :key="r.file_id">
+        <template x-for="r in unmatchedFiles.slice(0, LIST_CAP)" :key="r.file_id">
           <div class="file-item no-hits" :class="{selected: selectedFileId===r.file_id}"
                @click="selectFile(r.file_id)">
             <span class="file-name" :title="r.filename" x-text="shortName(r.filename)"></span>
             <span class="hit-count zero">0</span>
           </div>
         </template>
-        <div x-show="unmatchedFiles.length===0" class="empty-list-msg">—</div>
+        <div class="list-overflow-msg" x-show="unmatchedFiles.length > LIST_CAP"
+             x-text="`… and ${unmatchedFiles.length - LIST_CAP} more`"></div>
+        <div x-show="unmatchedFiles.length === 0" class="empty-list-msg">—</div>
       </div>
 
       <template x-if="errorFiles.length > 0">
         <div>
           <div class="panel-header section-header">
-            Query Errors <span class="count-chip error-chip" x-text="errorFiles.length"></span>
+            Errors <span class="count-chip error-chip" x-text="errorFiles.length"></span>
           </div>
-          <div class="file-list error-list">
+          <div class="file-list" style="max-height:10vh;overflow-y:auto">
             <template x-for="r in errorFiles" :key="r.file_id">
               <div class="file-item no-hits" :class="{selected: selectedFileId===r.file_id}"
                    @click="selectFile(r.file_id)">
@@ -178,16 +213,6 @@
         </div>
       </template>
 
-      <div class="panel-header section-header">Folders</div>
-      <div class="folder-tree">
-        <template x-for="f in folderTree" :key="f.name">
-          <div class="folder-node">
-            <span class="folder-icon">▸</span>
-            <span class="folder-name" x-text="f.name"></span>
-            <span class="folder-count" x-text="f.count"></span>
-          </div>
-        </template>
-      </div>
     </div>
 
     <!-- Panel 2: Query image -->
@@ -201,45 +226,52 @@
       <template x-if="selectedFileId">
         <div class="image-panel-inner">
           <div class="image-box">
-            <img :src="`/api/query-image/${sessionId}/${selectedFileId}`"
-                 :alt="selectedFile?.filename">
+            <img x-show="querySrc"
+                 :src="querySrc"
+                 :style="`transform: scale(${queryZoom})`"
+                 @click="openLightbox(querySrc)"
+                 alt="Query image">
+            <div class="image-zoom-btns">
+              <button class="zoom-btn" @click.stop="queryZoom = Math.min(4, queryZoom + 0.25)" title="Zoom in">+</button>
+              <button class="zoom-btn" @click.stop="queryZoom = Math.max(0.2, queryZoom - 0.25)" title="Zoom out">−</button>
+              <button class="zoom-btn" @click.stop="queryZoom = 1" title="Reset" style="font-size:10px">⊡</button>
+            </div>
           </div>
           <div class="image-subs">
-            <div class="sub-row"
-                 :class="{'sub-match': matchMeta && shortName(selectedFile?.filename??'') === selectedHit?.path?.split('/').pop()}">
+            <div class="sub-row">
               <span class="sub-label">File</span>
-              <span class="sub-val" x-text="shortName(selectedFile?.filename??'')"></span>
+              <span class="sub-val" x-text="shortName(selectedFile?.filename ?? '')"></span>
             </div>
             <div class="sub-row">
               <span class="sub-label">Path</span>
-              <span class="sub-val mono" x-text="folderOf(selectedFile?.filename??'') || '—'"></span>
+              <span class="sub-val mono" x-text="folderOf(selectedFile?.filename ?? '') || '(root)'"></span>
             </div>
-            <div class="sub-row" x-show="queryMeta?.hash_sha256"
+            <div class="sub-row"
                  :class="{'sub-match': queryMeta?.hash_sha256 && matchMeta?.hash_sha256 && queryMeta.hash_sha256 === matchMeta.hash_sha256}">
               <span class="sub-label">SHA-256</span>
-              <span class="sub-val hash" x-text="queryMeta?.hash_sha256??''"></span>
+              <span class="sub-val hash" x-text="queryMeta?.hash_sha256 || '—'"></span>
             </div>
-            <div class="sub-row" x-show="queryMeta?.hash_md5"
+            <div class="sub-row"
                  :class="{'sub-match': queryMeta?.hash_md5 && matchMeta?.hash_md5 && queryMeta.hash_md5 === matchMeta.hash_md5}">
               <span class="sub-label">MD5</span>
-              <span class="sub-val hash" x-text="queryMeta?.hash_md5??''"></span>
+              <span class="sub-val hash" x-text="queryMeta?.hash_md5 || '—'"></span>
+            </div>
+            <div class="sub-row"
+                 :class="{'sub-match': queryMeta?.width && matchMeta?.width && queryMeta.width === matchMeta.width && queryMeta.height === matchMeta.height}">
+              <span class="sub-label">Dims</span>
+              <span class="sub-val" x-text="queryMeta?.width ? `${queryMeta.width}×${queryMeta.height}` : '—'"></span>
             </div>
             <div class="sub-row">
               <span class="sub-label">Meta</span>
               <span x-show="queryMeta?.exif_geo_data" class="meta-tag">GPS</span>
               <span x-show="queryMeta?.exif && !queryMeta?.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
-              <span x-show="queryMeta && !queryMeta?.exif" class="muted-text">none</span>
-            </div>
-            <div class="sub-row" x-show="queryMeta?.width"
-                 :class="{'sub-match': queryMeta?.width && matchMeta?.width && queryMeta.width === matchMeta.width && queryMeta.height === matchMeta.height}">
-              <span class="sub-label">Dims</span>
-              <span class="sub-val" x-text="`${queryMeta?.width}×${queryMeta?.height}`"></span>
+              <span x-show="!queryMeta || (!queryMeta.exif && !queryMeta.exif_geo_data)" class="muted-text">—</span>
             </div>
           </div>
-          <div class="meta-box" x-show="_metaItemsWithMatch(queryMeta, matchMeta).length > 0">
+          <div class="meta-box" x-show="_metaItems(queryMeta, matchMeta).length > 0">
             <div class="meta-box-hdr">EXIF / File Info</div>
             <div class="meta-grid">
-              <template x-for="item in _metaItemsWithMatch(queryMeta, matchMeta)" :key="item.label">
+              <template x-for="item in _metaItems(queryMeta, matchMeta)" :key="item.label">
                 <div class="meta-item" :class="{'meta-match': item.match, 'meta-partial': item.partial}">
                   <span class="meta-k" x-text="item.label"></span>
                   <span class="meta-v" x-text="item.value"></span>
@@ -257,11 +289,10 @@
         Best Match
         <template x-if="selectedHit">
           <div class="header-pills">
-            <template x-for="p in hitPills(selectedHit.scores)" :key="p.mode">
+            <template x-for="[mode, score] in Object.entries(selectedHit.scores)" :key="mode">
               <div class="pill-group">
-                <span class="badge" :class="`badge-${p.mode}`"
-                      x-text="p.mode.toUpperCase()"></span>
-                <span class="pill-score" x-text="p.score>=1?'1.000':p.score.toFixed(3)"></span>
+                <span class="badge" :class="`badge-${mode}`" x-text="mode.toUpperCase()"></span>
+                <span class="pill-score" x-text="score >= 1 ? '1.000' : score.toFixed(3)"></span>
               </div>
             </template>
           </div>
@@ -275,46 +306,54 @@
       <template x-if="selectedHit">
         <div class="image-panel-inner">
           <div class="image-box">
-            <img :src="`/api/hit-image?path=${encodeURIComponent(selectedHit.path)}`"
-                 :alt="selectedHit.path"
-                 @error="$el.style.opacity='0.2'">
+            <img x-show="matchSrc"
+                 :src="matchSrc"
+                 :style="`transform: scale(${matchZoom})`"
+                 @click="openLightbox(matchSrc)"
+                 @error="$el.style.opacity='0.2'"
+                 alt="Best match">
+            <div class="image-zoom-btns">
+              <button class="zoom-btn" @click.stop="matchZoom = Math.min(4, matchZoom + 0.25)" title="Zoom in">+</button>
+              <button class="zoom-btn" @click.stop="matchZoom = Math.max(0.2, matchZoom - 0.25)" title="Zoom out">−</button>
+              <button class="zoom-btn" @click.stop="matchZoom = 1" title="Reset" style="font-size:10px">⊡</button>
+            </div>
           </div>
           <div class="image-subs">
             <div class="sub-row"
-                 :class="{'sub-match': queryMeta && selectedHit.path.split('/').pop() === shortName(selectedFile?.filename??'')}">
+                 :class="{'sub-match': selectedHit && queryMeta && shortName(selectedFile?.filename??'') === selectedHit.path.split('/').pop()}">
               <span class="sub-label">File</span>
-              <span class="sub-val" x-text="selectedHit.path.split('/').pop()"></span>
+              <span class="sub-val" x-text="selectedHit?.path.split('/').pop() ?? '—'"></span>
             </div>
             <div class="sub-row">
               <span class="sub-label">Path</span>
-              <span class="sub-val mono" x-text="selectedHit.path.split('/').slice(0,-1).join('/')"></span>
+              <span class="sub-val mono" x-text="selectedHit?.path.split('/').slice(0,-1).join('/') || '—'"></span>
             </div>
-            <div class="sub-row" x-show="matchMeta?.hash_sha256"
+            <div class="sub-row"
                  :class="{'sub-match': queryMeta?.hash_sha256 && matchMeta?.hash_sha256 && queryMeta.hash_sha256 === matchMeta.hash_sha256}">
               <span class="sub-label">SHA-256</span>
-              <span class="sub-val hash" x-text="matchMeta?.hash_sha256??''"></span>
+              <span class="sub-val hash" x-text="matchMeta?.hash_sha256 || '—'"></span>
             </div>
-            <div class="sub-row" x-show="matchMeta?.hash_md5"
+            <div class="sub-row"
                  :class="{'sub-match': queryMeta?.hash_md5 && matchMeta?.hash_md5 && queryMeta.hash_md5 === matchMeta.hash_md5}">
               <span class="sub-label">MD5</span>
-              <span class="sub-val hash" x-text="matchMeta?.hash_md5??''"></span>
+              <span class="sub-val hash" x-text="matchMeta?.hash_md5 || '—'"></span>
+            </div>
+            <div class="sub-row"
+                 :class="{'sub-match': queryMeta?.width && matchMeta?.width && queryMeta.width === matchMeta.width && queryMeta.height === matchMeta.height}">
+              <span class="sub-label">Dims</span>
+              <span class="sub-val" x-text="matchMeta?.width ? `${matchMeta.width}×${matchMeta.height}` : '—'"></span>
             </div>
             <div class="sub-row">
               <span class="sub-label">Meta</span>
-              <span x-show="selectedHit.exif_geo_data" class="meta-tag">GPS</span>
-              <span x-show="selectedHit.exif && !selectedHit.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
-              <span x-show="!selectedHit.exif" class="muted-text">none</span>
-            </div>
-            <div class="sub-row" x-show="matchMeta?.width"
-                 :class="{'sub-match': queryMeta?.width && matchMeta?.width && queryMeta.width === matchMeta.width && queryMeta.height === matchMeta.height}">
-              <span class="sub-label">Dims</span>
-              <span class="sub-val" x-text="`${matchMeta?.width}×${matchMeta?.height}`"></span>
+              <span x-show="selectedHit?.exif_geo_data" class="meta-tag">GPS</span>
+              <span x-show="selectedHit?.exif && !selectedHit?.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
+              <span x-show="!selectedHit || (!selectedHit.exif && !selectedHit.exif_geo_data)" class="muted-text">—</span>
             </div>
           </div>
-          <div class="meta-box" x-show="_metaItemsWithMatch(matchMeta, queryMeta).length > 0">
+          <div class="meta-box" x-show="_metaItems(matchMeta, queryMeta).length > 0">
             <div class="meta-box-hdr">EXIF / File Info</div>
             <div class="meta-grid">
-              <template x-for="item in _metaItemsWithMatch(matchMeta, queryMeta)" :key="item.label">
+              <template x-for="item in _metaItems(matchMeta, queryMeta)" :key="item.label">
                 <div class="meta-item" :class="{'meta-match': item.match, 'meta-partial': item.partial}">
                   <span class="meta-k" x-text="item.label"></span>
                   <span class="meta-v" x-text="item.value"></span>
@@ -326,16 +365,36 @@
       </template>
     </div>
 
-    <!-- Panel 4: Hits list -->
+    <!-- Panel 4: Hits -->
     <div class="right-panel">
       <div class="panel-header">
         Hits
         <template x-if="selectedFile">
-          <span class="count-chip" x-text="selectedFile.hits.length"></span>
+          <span class="count-chip" x-text="filteredHits.length"></span>
         </template>
       </div>
 
+      <!-- Filter pills -->
+      <div class="hits-filters"
+           x-show="analysisRunModes.includes('altered') || analysisRunModes.includes('semantic')">
+        <template x-if="analysisRunModes.includes('altered')">
+          <button class="hit-filter-pill hit-filter-pill-altered"
+                  :class="{off: !hitsFilterAltered}"
+                  @click="hitsFilterAltered = !hitsFilterAltered">ALTERED</button>
+        </template>
+        <template x-if="analysisRunModes.includes('semantic')">
+          <button class="hit-filter-pill hit-filter-pill-semantic"
+                  :class="{off: !hitsFilterSemantic}"
+                  @click="hitsFilterSemantic = !hitsFilterSemantic">SEMANTIC</button>
+        </template>
+        <button class="hit-filter-pill hit-filter-pill-unify"
+                :class="{off: !hitsUnified}"
+                @click="hitsUnified = !hitsUnified; selectedHitKey = null; runQuery()"
+                title="Merge hits with the same path across all modes into one row">UNIFIED</button>
+      </div>
+
       <div x-show="!selectedFileId" class="no-hits-msg">No file selected</div>
+
       <template x-if="selectedFile?.errors?.length > 0">
         <div class="query-error-banner">
           <strong>Query error</strong>
@@ -344,24 +403,42 @@
           </template>
         </div>
       </template>
-      <div x-show="selectedFileId && selectedFile?.hits.length===0 && !(selectedFile?.errors?.length > 0)" class="no-hits-msg">No hits</div>
 
-      <div class="hits-list" x-show="selectedFile?.hits.length > 0">
-        <template x-for="hit in (selectedFile?.hits??[])" :key="hitKey(hit)">
+      <div x-show="selectedFileId && filteredHits.length === 0 && !(selectedFile?.errors?.length > 0)"
+           class="no-hits-msg">No hits</div>
+
+      <div class="hits-list" x-show="filteredHits.length > 0">
+        <template x-for="hit in filteredHits" :key="hitKey(hit)">
           <div class="hit-card" :class="{selected: hitKey(hit) === selectedHitKey}"
                @click="selectHit(hit)">
             <img class="hit-thumb"
-                 :src="`/api/hit-image?path=${encodeURIComponent(hit.path)}`"
-                 :alt="hit.path" loading="lazy"
-                 @error="$el.style.opacity='0.2'">
-            <div class="hit-info">
-              <div class="hit-pills">
-                <template x-for="p in hitPills(hit.scores)" :key="p.mode">
-                  <div class="pill-group">
-                    <span class="badge" :class="`badge-${p.mode}`" x-text="p.mode.toUpperCase()"></span>
-                    <span class="pill-score" x-text="p.score>=1?'1.000':p.score.toFixed(3)"></span>
-                  </div>
-                </template>
+                 :src="hit.image_hash ? `/api/thumbnail/${hit.image_hash}` : ''"
+                 @error="$el.src = ''"
+                 loading="lazy"
+                 alt="">
+            <div class="hit-body">
+              <div class="hit-scores">
+                <!-- Fixed slot 1: always reserved; hidden when not an exact match -->
+                <div class="pill-group" :style="'exact' in hit.scores ? '' : 'visibility:hidden'">
+                  <span class="badge badge-exact">EXACT</span>
+                  <span class="pill-score pill-score-exact">✓</span>
+                </div>
+                <!-- Fixed slot 2: reserved when altered mode was run -->
+                <div class="pill-group"
+                     x-show="analysisRunModes.includes('altered')"
+                     :style="'altered' in hit.scores && hitsFilterAltered ? '' : 'visibility:hidden'">
+                  <span class="badge badge-altered">ALTER</span>
+                  <span class="pill-score pill-score-altered"
+                        x-text="'altered' in hit.scores ? hit.scores.altered.toFixed(3) : ''"></span>
+                </div>
+                <!-- Fixed slot 3: reserved when semantic mode was run -->
+                <div class="pill-group"
+                     x-show="analysisRunModes.includes('semantic')"
+                     :style="'semantic' in hit.scores && hitsFilterSemantic ? '' : 'visibility:hidden'">
+                  <span class="badge badge-semantic">SEMAN</span>
+                  <span class="pill-score pill-score-semantic"
+                        x-text="'semantic' in hit.scores ? hit.scores.semantic.toFixed(3) : ''"></span>
+                </div>
               </div>
               <div class="hit-filename" x-text="hit.path.split('/').pop()"></div>
               <div class="hit-dirpath" x-text="hit.path.split('/').slice(0,-1).join('/')"></div>
@@ -382,11 +459,16 @@
 <script>
 function sfn() {
   return {
+    // ── Constants ──────────────────────────────────────────────────────────
+    LIST_CAP: 200,
+
+    // ── State ─────────────────────────────────────────────────────────────
     phase: 'upload',
     pendingFiles: [],
     dragOver: false,
     selectedModes: [],
     availableModes: [],
+    analysisRunModes: [],      // modes actually used in the last analysis
     serverError: '',
     progress: { current: 0, total: 0, filename: '' },
     sessionId: null,
@@ -396,71 +478,112 @@ function sfn() {
     thresholdAltered: 0.75,
     thresholdSemantic: 0.55,
     limit: 10,
+
+    // Image sources with TTL management
+    querySrc: null,
+    matchSrc: null,
+    _queryImgTimer: null,
+    _matchImgTimer: null,
+
+    // In-panel zoom
+    queryZoom: 1.0,
+    matchZoom: 1.0,
+
+    // Lightbox
+    lightboxSrc: null,
+    lightboxZoom: 1.0,
+
+    // Metadata
     queryMeta: null,
     matchMeta: null,
     queryError: '',
     _queryTimer: null,
+
+    // Provenance
     provenance: null,
     showProvenance: false,
     showPasteArea: false,
     pasteBuffer: '',
 
+    // Hits filtering
+    hitsFilterAltered: true,
+    hitsFilterSemantic: true,
+    hitsUnified: true,
+
     // ── Computed ──────────────────────────────────────────────────────────
     get progressPct() {
-      return this.progress.total === 0 ? 0 : Math.round(this.progress.current / this.progress.total * 100);
+      return this.progress.total === 0 ? 0
+        : Math.round(this.progress.current / this.progress.total * 100);
     },
     get selectedFile() {
       return this.results.find(r => r.file_id === this.selectedFileId) ?? null;
     },
-    get matchedFiles() { return this.results.filter(r => r.hits.length > 0 && !(r.errors?.length > 0)); },
-    get errorFiles() { return this.results.filter(r => r.errors?.length > 0); },
-    get unmatchedFiles() { return this.results.filter(r => r.hits.length === 0 && !(r.errors?.length > 0)); },
+    get matchedFiles() {
+      return this.results.filter(r => r.hits.length > 0 && !(r.errors?.length > 0));
+    },
+    get errorFiles() {
+      return this.results.filter(r => r.errors?.length > 0);
+    },
+    get unmatchedFiles() {
+      return this.results.filter(r => r.hits.length === 0 && !(r.errors?.length > 0));
+    },
     get selectedHit() {
-      const hits = this.selectedFile?.hits ?? [];
+      const hits = this.filteredHits;
       if (this.selectedHitKey) {
         const h = hits.find(h => this.hitKey(h) === this.selectedHitKey);
         if (h) return h;
       }
       return hits[0] ?? null;
     },
-    get folderTree() {
-      const map = new Map();
-      for (const r of this.results) {
-        const parts = r.filename.replace(/\\/g, '/').split('/');
-        const folder = parts.length > 1 ? parts.slice(0, -1).join('/') : '(root)';
-        map.set(folder, (map.get(folder) ?? 0) + 1);
-      }
-      return [...map.entries()].map(([name, count]) => ({ name, count }));
-    },
-    // ── Helpers ───────────────────────────────────────────────────────────
-    hitKey(hit) { return hit.path + '::' + Object.keys(hit.scores)[0]; },
-    hitPills(scores) {
-      const order = ['exact', 'altered', 'semantic'];
-      return Object.entries(scores)
-        .sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]))
-        .map(([mode, score]) => ({ mode, score }));
+    get filteredHits() {
+      if (!this.selectedFile) return [];
+      return this.selectedFile.hits.filter(h => {
+        // Keep if any active-mode score is present
+        if ('exact' in h.scores) return true;
+        if ('altered' in h.scores && this.hitsFilterAltered) return true;
+        if ('semantic' in h.scores && this.hitsFilterSemantic) return true;
+        return false;
+      });
     },
 
-    _metaItemsWithMatch(meta, other) {
+    // ── Helpers ───────────────────────────────────────────────────────────
+    hitKey(hit) {
+      // Stable key derived from the hit itself — works for both unified and unmerged.
+      // Unified hits have multiple score keys (e.g. "exact,altered"); unmerged hits have one.
+      return hit.path + '\x00' + Object.keys(hit.scores).sort().join(',');
+    },
+    shortName(filename) {
+      return filename.replace(/\\/g, '/').split('/').pop();
+    },
+    folderOf(filename) {
+      const parts = filename.replace(/\\/g, '/').split('/');
+      return parts.length > 1 ? parts.slice(0, -1).join('/') : '';
+    },
+    openLightbox(src) {
+      if (!src) return;
+      this.lightboxSrc = src;
+      this.lightboxZoom = 1.0;
+    },
+    closeLightbox() {
+      this.lightboxSrc = null;
+    },
+
+    _metaItems(meta, other) {
       if (!meta) return [];
       const eq  = (a, b) => a != null && b != null && String(a).trim() === String(b).trim();
       const num = (a, b, tol = 0) => a != null && b != null && Math.abs(Number(a) - Number(b)) <= tol;
       const items = [];
 
-      if (meta.size_bytes) {
-        const rel = other?.size_bytes ? Math.abs(meta.size_bytes - other.size_bytes) / Math.max(meta.size_bytes, other.size_bytes) : 1;
+      if (meta.size_bytes != null) {
+        const rel = other?.size_bytes != null
+          ? Math.abs(meta.size_bytes - other.size_bytes) / Math.max(meta.size_bytes, other.size_bytes)
+          : 1;
         items.push({ label: 'Size', value: this._fmtSize(meta.size_bytes),
           match: rel === 0, partial: rel > 0 && rel < 0.05 });
       }
-      if (meta.width && meta.height) items.push({
-        label: 'Dims', value: `${meta.width}×${meta.height}`,
-        match: num(meta.width, other?.width) && num(meta.height, other?.height),
-        partial: false,
-      });
-      if (meta.format) items.push({
-        label: 'Format', value: meta.format,
-        match: eq(meta.format, other?.format), partial: false,
-      });
+      if (meta.format)
+        items.push({ label: 'Format', value: meta.format,
+          match: eq(meta.format, other?.format), partial: false });
       if (meta.make || meta.model) {
         const makeMatch  = eq(meta.make,  other?.make);
         const modelMatch = eq(meta.model, other?.model);
@@ -468,24 +591,21 @@ function sfn() {
           match: makeMatch && modelMatch, partial: makeMatch && !modelMatch });
       }
       if (meta.datetime) {
-        const dateA = meta.datetime.split(' ')[0];
-        const dateB = other?.datetime?.split(' ')[0];
-        const timeA = meta.datetime.split(' ')[1];
-        const timeB = other?.datetime?.split(' ')[1];
+        const [dateA, timeA] = (meta.datetime ?? '').split(' ');
+        const [dateB, timeB] = (other?.datetime ?? '').split(' ');
         items.push({ label: 'Date', value: meta.datetime,
           match: eq(dateA, dateB) && eq(timeA, timeB),
           partial: eq(dateA, dateB) && !eq(timeA, timeB) });
       }
-      if (meta.gps_lat !== undefined) items.push({
-        label: 'GPS', value: `${meta.gps_lat.toFixed(5)}, ${meta.gps_lon.toFixed(5)}`,
-        match:   num(meta.gps_lat, other?.gps_lat, 0.0001) && num(meta.gps_lon, other?.gps_lon, 0.0001),
-        partial: num(meta.gps_lat, other?.gps_lat, 0.01)   && num(meta.gps_lon, other?.gps_lon, 0.01),
-      });
-      if (meta.software) items.push({
-        label: 'Software', value: meta.software,
-        match: eq(meta.software, other?.software), partial: false,
-      });
-      if (items.length === 0 && meta.exif === false) items.push({ label: 'EXIF', value: 'None', match: false, partial: false });
+      if (meta.gps_lat !== undefined && meta.gps_lat !== null)
+        items.push({
+          label: 'GPS', value: `${meta.gps_lat.toFixed(5)}, ${meta.gps_lon.toFixed(5)}`,
+          match:   num(meta.gps_lat, other?.gps_lat, 0.0001) && num(meta.gps_lon, other?.gps_lon, 0.0001),
+          partial: num(meta.gps_lat, other?.gps_lat, 0.01)   && num(meta.gps_lon, other?.gps_lon, 0.01),
+        });
+      if (meta.software)
+        items.push({ label: 'Software', value: meta.software,
+          match: eq(meta.software, other?.software), partial: false });
       return items;
     },
 
@@ -500,10 +620,9 @@ function sfn() {
       try {
         const d = await fetch('/api/collections').then(r => r.json());
         this.availableModes = d.modes;
-        this.selectedModes = [...d.modes];
-        if (d.error) {
-          this.serverError = d.error;
-        }
+        // EXACT is always selected; add other available modes
+        this.selectedModes = ['exact', ...d.modes.filter(m => m !== 'exact')];
+        if (d.error) this.serverError = d.error;
       } catch {
         this.availableModes = ['exact'];
         this.selectedModes = ['exact'];
@@ -512,6 +631,7 @@ function sfn() {
     },
 
     toggleMode(mode) {
+      if (mode === 'exact') return; // mandatory, cannot deselect
       if (this.selectedModes.includes(mode)) {
         this.selectedModes = this.selectedModes.filter(m => m !== mode);
       } else {
@@ -524,10 +644,10 @@ function sfn() {
       const exts = new Set(['.jpg','.jpeg','.png','.bmp','.tiff','.tif','.webp',
                              '.gif','.jp2','.ico','.psd','.heic','.heif']);
       for (const f of fileList) {
-        const ext = f.name.toLowerCase().slice(f.name.lastIndexOf('.'));
-        if (exts.has(ext) && !this.pendingFiles.some(p => p.name === f.name && p.size === f.size)) {
+        const dot = f.name.lastIndexOf('.');
+        const ext = dot >= 0 ? f.name.slice(dot).toLowerCase() : '';
+        if (exts.has(ext) && !this.pendingFiles.some(p => p.name === f.name && p.size === f.size))
           this.pendingFiles.push(f);
-        }
       }
     },
 
@@ -539,12 +659,16 @@ function sfn() {
     // ── Analysis ──────────────────────────────────────────────────────────
     async startAnalysis() {
       if (!this.pendingFiles.length || !this.selectedModes.length) return;
+      this.analysisRunModes = [...this.selectedModes];
       this.phase = 'analyzing';
       this.progress = { current: 0, total: this.pendingFiles.length, filename: '' };
 
       const fd = new FormData();
       for (const f of this.pendingFiles) fd.append('files', f, f.webkitRelativePath || f.name);
       fd.append('modes', this.selectedModes.join(','));
+
+      // Release file objects — server now holds temp copies
+      this.pendingFiles = [];
 
       const resp = await fetch('/api/analyze', { method: 'POST', body: fd });
       const reader = resp.body.getReader();
@@ -561,9 +685,8 @@ function sfn() {
           if (!line.startsWith('data: ')) continue;
           let evt;
           try { evt = JSON.parse(line.slice(6)); } catch { continue; }
-          if (['progress','file_done','error'].includes(evt.type)) {
+          if (['progress','file_done','error'].includes(evt.type))
             this.progress = { current: evt.current, total: evt.total, filename: evt.filename };
-          }
           if (evt.type === 'done') {
             this.sessionId = evt.session_id;
             await this.runQuery();
@@ -580,10 +703,11 @@ function sfn() {
       if (!this.sessionId) return;
       const fd = new FormData();
       fd.append('session_id', this.sessionId);
-      fd.append('modes', this.selectedModes.join(','));
+      fd.append('modes', this.analysisRunModes.join(','));
       fd.append('threshold_altered', this.thresholdAltered);
       fd.append('threshold_semantic', this.thresholdSemantic);
       fd.append('limit', this.limit);
+      fd.append('unify', this.hitsUnified ? 'true' : 'false');
       this.queryError = '';
       this.provenance = null;
       try {
@@ -595,13 +719,13 @@ function sfn() {
         const d = await resp.json();
         this.results = Array.isArray(d.results) ? d.results : [];
         this.provenance = d.provenance ?? null;
+
         // Re-sync selected hit after re-query
         if (this.selectedFileId) {
           const f = this.results.find(r => r.file_id === this.selectedFileId);
           if (f && this.selectedHitKey &&
-              !f.hits.find(h => this.hitKey(h) === this.selectedHitKey)) {
+              !f.hits.find(h => this.hitKey(h) === this.selectedHitKey))
             this.selectedHitKey = null;
-          }
           await this._loadMatchMeta();
         }
       } catch (e) {
@@ -616,16 +740,34 @@ function sfn() {
 
     // ── Selection ─────────────────────────────────────────────────────────
     async selectFile(fileId) {
+      clearTimeout(this._matchImgTimer);
+
       this.selectedFileId = fileId;
       this.selectedHitKey = null;
       this.queryMeta = null;
       this.matchMeta = null;
+      this.queryZoom = 1.0;
+      this.matchZoom = 1.0;
+      this.querySrc = this.sessionId ? `/api/query-image/${this.sessionId}/${fileId}` : null;
+
+      // Auto-select best hit: set matchSrc immediately, or clear it if no hits.
+      const bestHit = this.selectedHit; // filteredHits[0] since selectedHitKey is null
+      if (bestHit) {
+        this.selectedHitKey = this.hitKey(bestHit);
+        this.matchSrc = `/api/hit-image?path=${encodeURIComponent(bestHit.path)}`;
+      } else {
+        this.matchSrc = null;
+      }
+
       await Promise.all([this._loadQueryMeta(), this._loadMatchMeta()]);
     },
 
     async selectHit(hit) {
+      clearTimeout(this._matchImgTimer);
       this.selectedHitKey = this.hitKey(hit);
+      this.matchZoom = 1.0;
       this.matchMeta = null;
+      this.matchSrc = `/api/hit-image?path=${encodeURIComponent(hit.path)}`;
       await this._loadMatchMetaFor(hit.path);
     },
 
@@ -633,7 +775,9 @@ function sfn() {
     async _loadQueryMeta() {
       if (!this.sessionId || !this.selectedFileId) return;
       try {
-        this.queryMeta = await fetch(`/api/query-metadata/${this.sessionId}/${this.selectedFileId}`).then(r => r.json());
+        this.queryMeta = await fetch(
+          `/api/query-metadata/${this.sessionId}/${this.selectedFileId}`
+        ).then(r => r.json());
       } catch { this.queryMeta = null; }
     },
 
@@ -645,25 +789,24 @@ function sfn() {
 
     async _loadMatchMetaFor(path) {
       try {
-        this.matchMeta = await fetch(`/api/metadata?path=${encodeURIComponent(path)}`).then(r => r.json());
+        this.matchMeta = await fetch(
+          `/api/metadata?path=${encodeURIComponent(path)}`
+        ).then(r => r.json());
       } catch { this.matchMeta = null; }
     },
 
     // ── Provenance ────────────────────────────────────────────────────────
     async copyProvenance() {
       if (!this.provenance) return;
-      try {
-        await navigator.clipboard.writeText(JSON.stringify(this.provenance, null, 2));
-      } catch {
-        // clipboard access denied or unavailable (non-HTTPS / blocked permission)
-      }
+      try { await navigator.clipboard.writeText(JSON.stringify(this.provenance, null, 2)); }
+      catch { /* clipboard unavailable */ }
     },
 
     applyProvenance() {
       let p;
       try { p = JSON.parse(this.pasteBuffer); } catch { return; }
       if (Array.isArray(p.modes))
-        this.selectedModes = p.modes.filter(m => this.availableModes.includes(m));
+        this.analysisRunModes = p.modes; // note: doesn't re-run analysis, just updates display
       if (typeof p.threshold_altered === 'number')
         this.thresholdAltered = Math.min(1, Math.max(0, p.threshold_altered));
       if (typeof p.threshold_semantic === 'number')
@@ -671,18 +814,23 @@ function sfn() {
       if (typeof p.limit === 'number')
         this.limit = Math.min(50, Math.max(1, Math.round(p.limit)));
       this.showPasteArea = false;
-      this.pasteBuffer   = '';
+      this.pasteBuffer = '';
       this.runQuery();
     },
 
     // ── Reset ─────────────────────────────────────────────────────────────
     resetToUpload() {
+      clearTimeout(this._queryTimer);
+      clearTimeout(this._matchImgTimer);
+      clearTimeout(this._queryImgTimer);
       this.phase = 'upload';
       this.pendingFiles = [];
       this.results = [];
       this.selectedFileId = null;
       this.selectedHitKey = null;
       this.sessionId = null;
+      this.querySrc = null;
+      this.matchSrc = null;
       this.queryMeta = null;
       this.matchMeta = null;
       this.queryError = '';
@@ -690,15 +838,13 @@ function sfn() {
       this.showProvenance = false;
       this.showPasteArea = false;
       this.pasteBuffer = '';
-    },
-
-    // ── Formatters ────────────────────────────────────────────────────────
-    shortName(filename) {
-      return filename.replace(/\\/g, '/').split('/').pop();
-    },
-    folderOf(filename) {
-      const parts = filename.replace(/\\/g, '/').split('/');
-      return parts.length > 1 ? parts.slice(0, -1).join('/') : '';
+      this.analysisRunModes = [];
+      this.queryZoom = 1.0;
+      this.matchZoom = 1.0;
+      this.lightboxSrc = null;
+      this.hitsFilterAltered = true;
+      this.hitsFilterSemantic = true;
+      this.hitsUnified = true;
     },
   };
 }
