@@ -114,7 +114,12 @@ async def query(
     settings = Settings()
     mode_list = [m.strip() for m in modes.split(",") if m.strip()]
     results = query_session(
-        session, mode_list, threshold_altered, threshold_semantic, limit, settings,
+        session,
+        mode_list,
+        threshold_altered,
+        threshold_semantic,
+        limit,
+        settings,
         unify=unify.lower() != "false",
     )
     provenance = QueryProvenance(
