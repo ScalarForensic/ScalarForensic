@@ -425,41 +425,44 @@
   </header>
 
   <!-- ── Upload ── -->
-  <div class="upload-section" x-show="phase === 'upload'">
+  <div class="upload-section" x-show="phase === 'upload' || phase === 'analyzing'">
     <canvas id="vec-canvas" aria-hidden="true"></canvas>
     <div class="drop-zone" :class="{'drag-over': dragOver, 'idle': dropZoneIdle}"
          @dragover.prevent="dragOver = true"
          @dragleave.prevent="dragOver = false"
          @drop.prevent="onDrop($event)">
-      <div class="drop-zone-label">Drop images or folders here</div>
-      <div class="drop-zone-btns">
-        <button class="btn-secondary" @click.stop="$refs.folderInput.click()">📁 Select Folder</button>
-        <button class="btn-secondary" @click.stop="$refs.fileInput.click()">🖼 Select Files</button>
+
+      <!-- ── Progress overlay (replaces drop-zone content while analyzing) ── -->
+      <div class="drop-zone-progress" x-show="phase === 'analyzing'">
+        <div class="drop-zone-progress-label" x-text="`Analyzing… ${progress.current} / ${progress.total}`"></div>
+        <div class="progress-track" style="width:100%">
+          <div class="progress-fill" :style="`width: ${progressPct}%`"></div>
+        </div>
+        <div class="drop-zone-progress-filename"
+             x-text="progress.filename"></div>
       </div>
-      <div class="file-count-badge" x-show="pendingFiles.length > 0">
-        <span x-text="pendingFiles.length"></span> image<span x-show="pendingFiles.length !== 1">s</span> queued
+
+      <div x-show="phase !== 'analyzing'">
+        <div class="drop-zone-label">Drop images or folders here</div>
+        <div class="drop-zone-btns">
+          <button class="btn-secondary" @click.stop="$refs.folderInput.click()">📁 Select Folder</button>
+          <button class="btn-secondary" @click.stop="$refs.fileInput.click()">🖼 Select Files</button>
+        </div>
+        <div class="file-count-badge" x-show="pendingFiles.length > 0">
+          <span x-text="pendingFiles.length"></span> image<span x-show="pendingFiles.length !== 1">s</span> queued
+        </div>
+        <div class="upload-actions">
+          <button class="btn-secondary" @click.stop="pendingFiles = []" x-show="pendingFiles.length > 0">Clear</button>
+          <button class="btn-primary"
+            :disabled="pendingFiles.length === 0 || selectedModes.length === 0"
+            @click="startAnalysis()">▶ Analyze</button>
+        </div>
       </div>
-      <div class="upload-actions">
-        <button class="btn-secondary" @click.stop="pendingFiles = []" x-show="pendingFiles.length > 0">Clear</button>
-        <button class="btn-primary"
-          :disabled="pendingFiles.length === 0 || selectedModes.length === 0"
-          @click="startAnalysis()">▶ Analyze</button>
-      </div>
+
       <input type="file" multiple accept="image/*" style="display:none" x-ref="fileInput"
              @change="addFiles($event.target.files); $event.target.value=''">
       <input type="file" multiple style="display:none" x-ref="folderInput" webkitdirectory
              @change="addFiles($event.target.files); $event.target.value=''">
-    </div>
-  </div>
-
-  <!-- ── Progress ── -->
-  <div class="upload-section" x-show="phase === 'analyzing'" style="padding-top:12px">
-    <div class="progress-track">
-      <div class="progress-fill" :style="`width: ${progressPct}%`"></div>
-    </div>
-    <div class="progress-label">
-      <span x-text="`${progress.current} / ${progress.total}`"></span>
-      <span x-text="progress.filename" style="max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right"></span>
     </div>
   </div>
 
