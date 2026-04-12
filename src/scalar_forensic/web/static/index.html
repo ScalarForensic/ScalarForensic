@@ -427,7 +427,7 @@
   <!-- ── Upload ── -->
   <div class="upload-section" x-show="phase === 'upload'">
     <canvas id="vec-canvas" aria-hidden="true"></canvas>
-    <div class="drop-zone" :class="{'drag-over': dragOver}"
+    <div class="drop-zone" :class="{'drag-over': dragOver, 'idle': dropZoneIdle}"
          @dragover.prevent="dragOver = true"
          @dragleave.prevent="dragOver = false"
          @drop.prevent="onDrop($event)">
@@ -893,6 +893,8 @@ function sfn() {
     phase: 'upload',
     pendingFiles: [],
     dragOver: false,
+    dropZoneIdle: false,
+    _idleTimer: null,
     selectedModes: [],
     availableModes: [],
     analysisRunModes: [],      // modes actually used in the last analysis
@@ -1077,6 +1079,20 @@ function sfn() {
         this.selectedModes = ['exact'];
         this.serverError = 'Backend unreachable — only exact hash matching is available.';
       }
+      // Screensaver: fade drop-zone out after 5 s of no pointer/keyboard activity
+      const IDLE_MS = 5000;
+      const resetIdle = () => {
+        this.dropZoneIdle = false;
+        clearTimeout(this._idleTimer);
+        this._idleTimer = setTimeout(() => { this.dropZoneIdle = true; }, IDLE_MS);
+      };
+      document.addEventListener('mousemove', resetIdle, { passive: true });
+      document.addEventListener('mousedown', resetIdle, { passive: true });
+      document.addEventListener('keydown',   resetIdle, { passive: true });
+      document.addEventListener('touchstart', resetIdle, { passive: true });
+      document.addEventListener('touchmove',  resetIdle, { passive: true });
+      resetIdle(); // start the initial countdown
+
       // Fire-and-forget: populate 3-D background visualization (decorative, non-blocking)
       this.points3dAbortController = new AbortController();
       const _ctrl = this.points3dAbortController;
@@ -1523,7 +1539,8 @@ function initVectorViz(data) {
   let theta  = 0.7;    // azimuth  (rotation around Y)
   let phi    = 1.15;   // polar    (0 = north pole, π = south pole)
   const PHI_MIN = 0.05, PHI_MAX = Math.PI - 0.05;
-  const R_MIN   = 0.5,  R_MAX   = 8.0;
+  let   zoomFactor = 1.0;
+  const Z_MIN = 0.25,   Z_MAX = 4.0;
 
   // ── Perspective projection ──────────────────────────────────────────────
   // Rotate world so the camera lands at (0, 0, radius), then apply perspective.
@@ -1539,7 +1556,7 @@ function initVectorViz(data) {
     // 3. Perspective (camera at z=radius, looking toward -Z)
     const d = radius - z2;
     if (d < 0.01) return null;
-    const unit = Math.min(W, H) * 0.38;
+    const unit = Math.min(W, H) * 0.52 * zoomFactor;
     const s = (radius * unit) / d;
     return { sx: x1 * s + W * 0.5, sy: -y2 * s + H * 0.5, depth: z2, s };
   }
@@ -1568,20 +1585,36 @@ function initVectorViz(data) {
     ctx.stroke();
   }
 
-  // ── Draw a point cloud (all points batched into one path per colour) ───
-  function drawCloud(pts, fillStyle) {
-    const W = canvas.width, H = canvas.height;
-    const unit = Math.min(W, H) * 0.38;
-    ctx.beginPath();
-    ctx.fillStyle = fillStyle;
+  // ── Draw a point cloud with per-point depth-based opacity ────────────────
+  // Points closer to the camera (higher depth / z2) are brighter; far points
+  // fade toward near-invisible, giving the cloud real volumetric depth.
+  function drawCloud(pts, cr, cg, cb) {
+    const unit = Math.min(canvas.width, canvas.height) * 0.52 * zoomFactor;
     for (let i = 0; i < pts.length; i++) {
       const q = project(pts[i][0], pts[i][1], pts[i][2]);
       if (!q) continue;
-      const r = Math.max(1.0, q.s / unit * 2.2);
-      ctx.moveTo(q.sx + r, q.sy);
+      // q.depth = z2 in camera space. For unit-sphere data it spans ≈ -1..+1.
+      const t     = Math.max(0, Math.min(1, (q.depth + 1.15) / 2.3));
+      const alpha = (0.12 + t * 0.78).toFixed(3); // 0.12 (far) → 0.90 (near)
+      const r     = Math.max(1.0, q.s / unit * 2.2);
+      ctx.beginPath();
+      ctx.fillStyle = `rgba(${cr},${cg},${cb},${alpha})`;
       ctx.arc(q.sx, q.sy, r, 0, Math.PI * 2);
+      ctx.fill();
     }
-    ctx.fill();
+  }
+
+  // ── Radial gradient background — dark centre, subtle glow at edges ───────
+  // Darker in the middle means true black on OLED (pixels literally off).
+  function drawBackground() {
+    const W = canvas.width, H = canvas.height;
+    const cx = W / 2, cy = H / 2;
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.hypot(cx, cy));
+    grad.addColorStop(0,    '#000000');
+    grad.addColorStop(0.45, '#03060e');
+    grad.addColorStop(1,    '#0b1222');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
   }
 
   // ── Sync canvas pixel buffer to its CSS-displayed size ─────────────────
@@ -1627,6 +1660,92 @@ function initVectorViz(data) {
   }
   pickAxis(0); // initialise first axis immediately
 
+  // ── Spark (glowing dino↔sscd pair) system ─────────────────────────────
+  const SPARK_FADE_IN   = 0.6;   // s to reach full brightness
+  const SPARK_FADE_OUT  = 1.2;   // s to fade back to nothing
+  const SPARK_HOLD_MIN  = 0.8;   // s at full brightness (min)
+  const SPARK_HOLD_MAX  = 2.5;   // s at full brightness (max)
+  const SPARK_GAP_MIN   = 1.5;   // s between spawn bursts (min)
+  const SPARK_GAP_MAX   = 5.0;   // s between spawn bursts (max)
+  const smooth = x => x * x * (3 - 2 * x); // smoothstep for nicer easing
+
+  let sparks      = [];    // { di, si, born, duration }
+  let nextSpawnT  = 1.0;   // time of first burst
+
+  function spawnSparks(t) {
+    if (!dino.length || !sscd.length) return;
+    const count = 1 + Math.floor(Math.random() * 20);
+    for (let i = 0; i < count; i++) {
+      const hold = SPARK_HOLD_MIN + Math.random() * (SPARK_HOLD_MAX - SPARK_HOLD_MIN);
+      sparks.push({
+        di:       Math.floor(Math.random() * dino.length),
+        si:       Math.floor(Math.random() * sscd.length),
+        born:     t,
+        duration: SPARK_FADE_IN + hold + SPARK_FADE_OUT,
+      });
+    }
+    nextSpawnT = t + SPARK_GAP_MIN + Math.random() * (SPARK_GAP_MAX - SPARK_GAP_MIN);
+  }
+
+  function drawSparks(t) {
+    sparks = sparks.filter(sp => t - sp.born < sp.duration);
+    if (!sparks.length) return;
+
+    const unit = Math.min(canvas.width, canvas.height) * 0.52 * zoomFactor;
+    ctx.save();
+    for (const sp of sparks) {
+      const age  = t - sp.born;
+      const a    = smooth(Math.min(1, age / SPARK_FADE_IN))
+                 * smooth(Math.min(1, (sp.duration - age) / SPARK_FADE_OUT));
+      if (a <= 0) continue;
+
+      const pD = project(dino[sp.di][0], dino[sp.di][1], dino[sp.di][2]);
+      const pS = project(sscd[sp.si][0], sscd[sp.si][1], sscd[sp.si][2]);
+      if (!pD || !pS) continue;
+
+      // Connecting line
+      ctx.beginPath();
+      ctx.strokeStyle = `rgba(60,230,100,${(a * 0.45).toFixed(3)})`;
+      ctx.lineWidth   = 1;
+      ctx.shadowColor = `rgba(60,230,100,${(a * 0.7).toFixed(3)})`;
+      ctx.shadowBlur  = 8;
+      ctx.moveTo(pD.sx, pD.sy);
+      ctx.lineTo(pS.sx, pS.sy);
+      ctx.stroke();
+
+      // Travelling pulse — bright dot gliding from dino → sscd
+      const pulseT = smooth(Math.min(1, age / sp.duration));
+      const pulseX = pD.sx + (pS.sx - pD.sx) * pulseT;
+      const pulseY = pD.sy + (pS.sy - pD.sy) * pulseT;
+      ctx.beginPath();
+      ctx.fillStyle   = `rgba(215,255,235,${(a * 0.98).toFixed(3)})`;
+      ctx.shadowColor = `rgba(120,255,170,${a.toFixed(3)})`;
+      ctx.shadowBlur  = 20;
+      ctx.arc(pulseX, pulseY, 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Glowing dot at dino point
+      const rD = Math.max(2, pD.s / unit * 2.2) * 2.2;
+      ctx.beginPath();
+      ctx.fillStyle   = `rgba(80,255,120,${(a * 0.95).toFixed(3)})`;
+      ctx.shadowColor = `rgba(80,255,120,${a.toFixed(3)})`;
+      ctx.shadowBlur  = 14;
+      ctx.arc(pD.sx, pD.sy, rD, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Glowing dot at sscd point
+      const rS = Math.max(2, pS.s / unit * 2.2) * 2.2;
+      ctx.beginPath();
+      ctx.fillStyle   = `rgba(80,255,120,${(a * 0.95).toFixed(3)})`;
+      ctx.shadowColor = `rgba(80,255,120,${a.toFixed(3)})`;
+      ctx.shadowBlur  = 14;
+      ctx.arc(pS.sx, pS.sy, rS, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+
   // ── Mouse / wheel interaction ──────────────────────────────────────────
   let dragging = false, lastX = 0, lastY = 0;
   const touch  = t => { lastActT = t; };
@@ -1647,7 +1766,7 @@ function initVectorViz(data) {
     e.preventDefault();
     const t = (performance.now() - t0) / 1000;
     touch(t);
-    radius = Math.max(R_MIN, Math.min(R_MAX, radius + e.deltaY * 0.003));
+    zoomFactor = Math.max(Z_MIN, Math.min(Z_MAX, zoomFactor * (1 - e.deltaY * 0.001)));
   };
   canvas.addEventListener('mousedown', onDown);
   window.addEventListener('mouseup',   onUp);
@@ -1682,10 +1801,13 @@ function initVectorViz(data) {
       if (phi <= PHI_MIN || phi >= PHI_MAX) spinVPhi *= -1;
     }
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawBackground();
     drawAxes();
-    if (sscd.length) drawCloud(sscd, 'rgba(232,147,32,0.65)');
-    if (dino.length) drawCloud(dino, 'rgba(74,158,224,0.65)');
+    if (sscd.length) drawCloud(sscd, 232, 147,  32);
+    if (dino.length) drawCloud(dino,  74, 158, 224);
+
+    if (t >= nextSpawnT) spawnSparks(t);
+    drawSparks(t);
   }
   animate();
 
