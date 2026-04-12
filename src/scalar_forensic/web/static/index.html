@@ -1693,20 +1693,21 @@ function initVectorViz(data) {
   // Pre-baked glow sprite — rendered once into an offscreen canvas.
   // drawImage + globalAlpha is far cheaper than ctx.shadowBlur per frame.
   const GLOW_SZ = 64;
-  const glowSprite = (() => {
+  function makeGlowSprite(c0, c1, c2, c3) {
     const oc = document.createElement('canvas');
     oc.width = oc.height = GLOW_SZ;
     const og = oc.getContext('2d');
     const h  = GLOW_SZ / 2;
     const g  = og.createRadialGradient(h, h, 0, h, h, h);
-    g.addColorStop(0,    'rgba(220,255,240,1.0)');
-    g.addColorStop(0.2,  'rgba(80,255,120,0.85)');
-    g.addColorStop(0.55, 'rgba(60,230,100,0.3)');
-    g.addColorStop(1,    'rgba(60,230,100,0)');
-    og.fillStyle = g;
-    og.fillRect(0, 0, GLOW_SZ, GLOW_SZ);
+    g.addColorStop(0,    c0); g.addColorStop(0.2,  c1);
+    g.addColorStop(0.55, c2); g.addColorStop(1,    c3);
+    og.fillStyle = g; og.fillRect(0, 0, GLOW_SZ, GLOW_SZ);
     return oc;
-  })();
+  }
+  const glowSprite    = makeGlowSprite('rgba(220,255,240,1.0)', 'rgba(80,255,120,0.85)',
+                                        'rgba(60,230,100,0.3)',  'rgba(60,230,100,0)');
+  const redGlowSprite = makeGlowSprite('rgba(255,220,200,1.0)', 'rgba(255,70,50,0.85)',
+                                        'rgba(200,30,20,0.3)',   'rgba(180,20,10,0)');
 
   let sparks      = [];    // { di, si, born, duration }
   let nextSpawnT  = 1.0;   // time of first burst
@@ -1782,6 +1783,105 @@ function initVectorViz(data) {
     ctx.restore();
   }
 
+  // ── Traverser (query flythrough) ──────────────────────────────────────────
+  // Represents a single image vector flying through the embedding space.
+  // Fires 1-5 red beams to nearby cloud points mid-flight, which each
+  // inject a green spark so the existing connector animation takes over.
+  const TRAV_FADE_IN  = 0.5;
+  const TRAV_FADE_OUT = 1.0;
+  const TRAV_DUR_MIN  = 4.0;    // s — minimum traversal time
+  const TRAV_DUR_MAX  = 8.0;    // s — maximum traversal time
+  const TRAV_GAP_MIN  = 5.0;    // s — minimum gap between traversers
+  const TRAV_GAP_MAX  = 30.0;   // s — maximum gap between traversers
+  const BEAM_DUR      = 0.55;   // s — how long each red connection line lingers
+
+  let traversers     = [];
+  let nextTraverserT = 3 + Math.random() * 10; // first one appears 3-13 s after load
+
+  function spawnTraverser(t) {
+    if (!dino.length && !sscd.length) return;
+    // Random unit direction
+    const th = Math.random() * Math.PI * 2;
+    const ph = Math.acos(2 * Math.random() - 1);
+    const dx = Math.sin(ph) * Math.cos(th);
+    const dy = Math.sin(ph) * Math.sin(th);
+    const dz = Math.cos(ph);
+    // Random offset so the path doesn't always pass through the origin
+    const offR = Math.random() * 0.45;
+    const oth  = Math.random() * Math.PI * 2;
+    const oph  = Math.acos(2 * Math.random() - 1);
+    const ox   = offR * Math.sin(oph) * Math.cos(oth);
+    const oy   = offR * Math.sin(oph) * Math.sin(oth);
+    const oz   = offR * Math.cos(oph);
+    const reach    = 1.6;
+    const duration = TRAV_DUR_MIN + Math.random() * (TRAV_DUR_MAX - TRAV_DUR_MIN);
+    traversers.push({
+      sx: ox - dx * reach, sy: oy - dy * reach, sz: oz - dz * reach,
+      ex: ox + dx * reach, ey: oy + dy * reach, ez: oz + dz * reach,
+      born: t, duration,
+      triggerAt: 0.25 + Math.random() * 0.5, // fire connections at 25-75 % through
+      triggered: false,
+      beams: [],
+    });
+    nextTraverserT = t + TRAV_GAP_MIN + Math.random() * (TRAV_GAP_MAX - TRAV_GAP_MIN);
+  }
+
+  function drawTraversers(t) {
+    traversers = traversers.filter(tr => t - tr.born < tr.duration);
+    if (!traversers.length) return;
+    ctx.save();
+    ctx.lineWidth = 1;
+    for (const tr of traversers) {
+      const age      = t - tr.born;
+      const progress = age / tr.duration;
+      const a        = smooth(Math.min(1, age / TRAV_FADE_IN))
+                     * smooth(Math.min(1, (tr.duration - age) / TRAV_FADE_OUT));
+      if (a <= 0) continue;
+      // Current 3-D position along the path
+      const cx = tr.sx + (tr.ex - tr.sx) * progress;
+      const cy = tr.sy + (tr.ey - tr.sy) * progress;
+      const cz = tr.sz + (tr.ez - tr.sz) * progress;
+      const p  = project(cx, cy, cz);
+      if (!p) continue;
+      // Fire connections once — injects beams and green sparks
+      if (!tr.triggered && progress >= tr.triggerAt) {
+        tr.triggered = true;
+        const hasBoth = dino.length > 0 && sscd.length > 0;
+        const count   = 1 + Math.floor(Math.random() * 5);
+        for (let i = 0; i < count; i++) {
+          const useDino = hasBoth ? Math.random() < 0.5 : dino.length > 0;
+          const di = Math.floor(Math.random() * Math.max(1, dino.length));
+          const si = Math.floor(Math.random() * Math.max(1, sscd.length));
+          tr.beams.push({ pt: useDino ? dino[di] : sscd[si], born: t, duration: BEAM_DUR });
+          // Hand off to the green spark system for the connector animation
+          const hold = SPARK_HOLD_MIN + Math.random() * (SPARK_HOLD_MAX - SPARK_HOLD_MIN);
+          sparks.push({ di, si, born: t, duration: SPARK_FADE_IN + hold + SPARK_FADE_OUT });
+        }
+      }
+      // Red beams from traverser to hit cloud points
+      for (const beam of tr.beams) {
+        const ba = smooth(Math.max(0, 1 - (t - beam.born) / beam.duration));
+        if (ba <= 0) continue;
+        const bp = project(beam.pt[0], beam.pt[1], beam.pt[2]);
+        if (!bp) continue;
+        ctx.beginPath();
+        ctx.strokeStyle = `rgba(255,90,60,${(ba * a * 0.75).toFixed(3)})`;
+        ctx.moveTo(p.sx, p.sy);
+        ctx.lineTo(bp.sx, bp.sy);
+        ctx.stroke();
+      }
+      // Red glow halo + crisp centre dot
+      ctx.globalAlpha = a;
+      ctx.drawImage(redGlowSprite, p.sx - 22, p.sy - 22, 44, 44);
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.fillStyle = `rgba(255,90,70,${(a * 0.95).toFixed(3)})`;
+      ctx.arc(p.sx, p.sy, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
   // ── Mouse / wheel interaction ──────────────────────────────────────────
   let dragging = false, lastX = 0, lastY = 0;
   const touch  = t => { lastActT = t; };
@@ -1842,8 +1942,10 @@ function initVectorViz(data) {
     if (sscd.length) drawCloud(sscd, 232, 147,  32);
     if (dino.length) drawCloud(dino,  74, 158, 224);
 
-    if (t >= nextSpawnT) spawnSparks(t);
+    if (t >= nextSpawnT)     spawnSparks(t);
+    if (t >= nextTraverserT) spawnTraverser(t);
     drawSparks(t);
+    drawTraversers(t);
   }
   animate();
 
