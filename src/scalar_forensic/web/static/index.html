@@ -1686,8 +1686,6 @@ function initVectorViz(data) {
   const SPARK_FADE_OUT  = 1.2;   // s to fade back to nothing
   const SPARK_HOLD_MIN  = 0.8;   // s at full brightness (min)
   const SPARK_HOLD_MAX  = 2.5;   // s at full brightness (max)
-  const SPARK_GAP_MIN   = 4.0;   // s between spawn bursts (min)
-  const SPARK_GAP_MAX   = 20.0;  // s between spawn bursts (max — wide for jitter)
   const smooth = x => x * x * (3 - 2 * x); // smoothstep for nicer easing
 
   // Pre-baked glow sprite — rendered once into an offscreen canvas.
@@ -1709,25 +1707,7 @@ function initVectorViz(data) {
   const redGlowSprite = makeGlowSprite('rgba(255,220,200,1.0)', 'rgba(255,70,50,0.85)',
                                         'rgba(200,30,20,0.3)',   'rgba(180,20,10,0)');
 
-  let sparks      = [];    // { di, si, born, duration }
-  let nextSpawnT  = 1.0;   // time of first burst
-
-  function spawnSparks(t) {
-    if (!dino.length || !sscd.length) return;
-    // Skewed toward 1-3 connections, occasionally a larger burst
-    const count = Math.max(1, Math.ceil(Math.random() * Math.random() * 12));
-    for (let i = 0; i < count; i++) {
-      const hold = SPARK_HOLD_MIN + Math.random() * (SPARK_HOLD_MAX - SPARK_HOLD_MIN);
-      sparks.push({
-        di:       Math.floor(Math.random() * dino.length),
-        si:       Math.floor(Math.random() * sscd.length),
-        born:     t,
-        duration: SPARK_FADE_IN + hold + SPARK_FADE_OUT,
-      });
-    }
-    // Squared random biases toward shorter gaps while still allowing long silences
-    nextSpawnT = t + SPARK_GAP_MIN + Math.pow(Math.random(), 0.6) * (SPARK_GAP_MAX - SPARK_GAP_MIN);
-  }
+  let sparks = [];   // { di, si, born, duration } — populated by traverser hits
 
   function drawSparks(t) {
     sparks = sparks.filter(sp => t - sp.born < sp.duration);
@@ -1944,7 +1924,6 @@ function initVectorViz(data) {
     if (sscd.length) drawCloud(sscd, 232, 147,  32);
     if (dino.length) drawCloud(dino,  74, 158, 224);
 
-    if (t >= nextSpawnT)     spawnSparks(t);
     if (t >= nextTraverserT) spawnTraverser(t);
     drawSparks(t);
     drawTraversers(t);
