@@ -46,3 +46,62 @@ Here is the breakdown of the theoretical complexity by processing stage:
 The theoretical pipeline complexity is **$O(N + M \cdot (S + P + \log V + D))$**. 
 
 However, because image dimensions ($P$) are capped, embedding sizes ($D$) are constant, and the database lookup time ($\log V$) is negligible compared to inference, the performance scales strictly linearly. For example, if processing 2,000 images takes ~2 minutes, processing 20,000 images of similar composition will predictably take ~20 minutes.
+
+## Real-Life-Dataset
+
+In the below example, we chose to analyze the "unsplash lite" dataset for reference with 25K free-to-use images with above specified hardware. 
+The dataset took ~36 minutes.
+
+These are the raw results:
+
+```bash
+user01@machine ~/P/ScalarForensic (main)> time uv run sfn /mnt/bulk_storage/sample_images/unsplash_vectors_test_batch/ --dino --sscd
+Config: .env
+HEIF/HEIC support: disabled (install pillow-heif)
+Dedup mode: hash  |  EXIF extraction: True
+Loading SSCD model 'models/sscd_disc_mixup.torchscript.pt' on device='auto' ...
+  backend=SSCDEmbedder  dim=512  device=cuda  fp16=True  compiled=True
+  (first batch will be slow — torch.compile warm-up)
+Connecting to Qdrant  collection='sfn-sscd' ...
+Computing model hash (may take a moment) ...
+  model_hash=9f26bd4c848cc19b...
+Loading DINOv2 model 'models/dinov2-large' on device='auto' ...
+Loading weights: 100%|███████████| 439/439 [00:00<00:00, 1268.37it/s]
+  backend=DINOv2Embedder  dim=1024  device=cuda  fp16=True  compiled=True
+  (first batch will be slow — torch.compile warm-up)
+Connecting to Qdrant  collection='sfn-dinov2' ...
+Computing model hash (may take a moment) ...
+  model_hash=9a8b78837fb01923...
+Scanning /mnt/bulk_storage/sample_images/unsplash_vectors_test_batch ...
+  24,997 files found  (24,997 image, 0 non-image)
+  batch 1 [32 imgs  96.6 MB  5.1 img/s total]  read 0.14s (705.7 MB/s)  hash 0.17s  pre 1.90s  |  SSCDEmbedder norm 0.00s  embed 0.54s (59.4 img/s)  +32  |  DINOv2Embedder norm 0.00s  embed 3.48s (9.2 img/s)  +32  |  upsert 0.07s
+  batch 2 [32 imgs  76.9 MB  12.5 img/s total]  read 0.12s (663.2 MB/s)  hash 0.13s  pre 1.52s  |  SSCDEmbedder norm 0.02s  embed 0.51s (63.3 img/s)  +32  |  DINOv2Embedder norm 0.00s  embed 0.18s (174.9 img/s)  +32  |  upsert 0.07s
+  batch 3 [32 imgs  86.2 MB  12.3 img/s total]  read 0.12s (717.7 MB/s)  hash 0.15s  pre 1.77s  |  SSCDEmbedder norm 0.01s  embed 0.29s (109.3 img/s)  +32  |  DINOv2Embedder norm 0.00s  embed 0.18s (176.7 img/s)  +32  |  upsert 0.05s
+  [TRUNCATED]
+  batch 779 [32 imgs  99.0 MB  10.8 img/s total]  read 0.13s (739.1 MB/s)  hash 0.17s  pre 1.92s  |  SSCDEmbedder norm 0.00s  embed 0.45s (71.8 img/s)  +32  |  DINOv2Embedder norm 0.00s  embed 0.23s (142.1 img/s)  +32  |  upsert 0.05s
+  batch 780 [32 imgs  109.3 MB  12.0 img/s total]  read 0.14s (763.1 MB/s)  hash 0.19s  pre 1.68s  |  SSCDEmbedder norm 0.01s  embed 0.37s (83.3 img/s)  +31  |  DINOv2Embedder norm 0.00s  embed 0.22s (143.6 img/s)  +31  |  upsert 0.05s
+  batch 781 [32 imgs  107.5 MB  11.1 img/s total]  read 0.15s (728.1 MB/s)  hash 0.19s  pre 1.89s  |  SSCDEmbedder norm 0.00s  embed 0.36s (88.7 img/s)  +32  |  DINOv2Embedder norm 0.00s  embed 0.21s (151.7 img/s)  +32  |  upsert 0.06s
+  batch 782 [5 imgs  50.3 MB  1.7 img/s total]  read 0.06s (865.9 MB/s)  hash 0.09s  pre 2.63s  |  SSCDEmbedder norm 0.01s  embed 0.06s (84.5 img/s)  +5  |  DINOv2Embedder norm 0.00s  embed 0.04s (120.3 img/s)  +5  |  upsert 0.02s
+
+Done.
+  [SSCDEmbedder]  indexed=24959  skipped=37  embed_failed=0
+  [DINOv2Embedder]  indexed=24959  skipped=37  embed_failed=0
+
+Ingestion summary  (/mnt/bulk_storage/sample_images/unsplash_vectors_test_batch)
+────────────────────────────────────────────────────
+  Total files found                    24,997
+    image files                        24,997
+    non-image files (unsupported)           0
+
+  Indexed (new)                        24,959
+  Skipped — already indexed                37
+  Skipped — duplicate in batch              0
+  Failed  — read error                      0
+  Failed  — preprocessing                   1
+  Failed  — embedding                       0
+────────────────────────────────────────────────────
+  CSV report → sfn_ingestion_20260412_165320.csv
+
+________________________________________________________
+Executed in   36.52 mins    fish           external
+```
