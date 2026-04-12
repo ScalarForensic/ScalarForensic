@@ -19,7 +19,7 @@ from pathlib import Path
 import torch
 import uvicorn
 from fastapi import FastAPI, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from qdrant_client import QdrantClient
 
@@ -420,7 +420,6 @@ async def viz_standalone() -> HTMLResponse:
     Suitable for use as a KDE web-page wallpaper or browser-based screensaver
     by pointing the client at ``http://localhost:8080/viz``.
     """
-    from fastapi.responses import HTMLResponse
     return HTMLResponse(_render_viz_html(_points3d_cache or {"sscd": [], "dino": []}))
 
 

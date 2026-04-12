@@ -306,9 +306,11 @@ function initVectorViz(data) {
           const di = Math.floor(Math.random() * Math.max(1, dino.length));
           const si = Math.floor(Math.random() * Math.max(1, sscd.length));
           tr.beams.push({ pt: useDino ? dino[di] : sscd[si], born: t, duration: BEAM_DUR });
-          // Hand off to the green spark system for the connector animation
-          const hold = SPARK_HOLD_MIN + Math.random() * (SPARK_HOLD_MAX - SPARK_HOLD_MIN);
-          sparks.push({ di, si, born: t, duration: SPARK_FADE_IN + hold + SPARK_FADE_OUT });
+          // Green spark connector requires both collections to have valid points
+          if (hasBoth) {
+            const hold = SPARK_HOLD_MIN + Math.random() * (SPARK_HOLD_MAX - SPARK_HOLD_MIN);
+            sparks.push({ di, si, born: t, duration: SPARK_FADE_IN + hold + SPARK_FADE_OUT });
+          }
         }
       }
       // Red beams from traverser to hit cloud points

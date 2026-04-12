@@ -1081,16 +1081,7 @@ function sfn() {
         this.serverError = 'Backend unreachable — only exact hash matching is available.';
       }
       // Screensaver: fade drop-zone out after 5 s of no pointer/keyboard/drag activity
-      const IDLE_MS = 5000;
-      const resetIdle = () => {
-        this.dropZoneIdle = false;
-        clearTimeout(this._idleTimer);
-        this._idleTimer = setTimeout(() => { this.dropZoneIdle = true; }, IDLE_MS);
-      };
-      this._resetIdle = resetIdle;
-      const IDLE_EVENTS = ['mousemove','mousedown','keydown','touchstart','touchmove','dragenter','dragover'];
-      for (const ev of IDLE_EVENTS) document.addEventListener(ev, resetIdle, { passive: true });
-      resetIdle(); // start the initial countdown
+      this._startIdleScreensaver();
 
       // Fire-and-forget: populate 3-D background visualization (decorative, non-blocking)
       this.points3dAbortController = new AbortController();
@@ -1131,10 +1122,21 @@ function sfn() {
       this.addFiles(e.dataTransfer.files);
     },
 
-    // ── Analysis ──────────────────────────────────────────────────────────
-    async startAnalysis() {
-      if (!this.pendingFiles.length || !this.selectedModes.length) return;
-      // Tear down idle screensaver — stop timer and remove all listeners
+    // ── Idle screensaver ───────────────────────────────────────────────────
+    _startIdleScreensaver() {
+      const IDLE_MS = 5000;
+      const IDLE_EVENTS = ['mousemove','mousedown','keydown','touchstart','touchmove','dragenter','dragover'];
+      const resetIdle = () => {
+        this.dropZoneIdle = false;
+        clearTimeout(this._idleTimer);
+        this._idleTimer = setTimeout(() => { this.dropZoneIdle = true; }, IDLE_MS);
+      };
+      this._resetIdle = resetIdle;
+      for (const ev of IDLE_EVENTS) document.addEventListener(ev, resetIdle, { passive: true });
+      resetIdle(); // start the initial countdown
+    },
+
+    _stopIdleScreensaver() {
       clearTimeout(this._idleTimer);
       this.dropZoneIdle = false;
       if (this._resetIdle) {
@@ -1142,6 +1144,13 @@ function sfn() {
         for (const ev of IDLE_EVENTS) document.removeEventListener(ev, this._resetIdle);
         this._resetIdle = null;
       }
+    },
+
+    // ── Analysis ──────────────────────────────────────────────────────────
+    async startAnalysis() {
+      if (!this.pendingFiles.length || !this.selectedModes.length) return;
+      // Tear down idle screensaver — stop timer and remove all listeners
+      this._stopIdleScreensaver();
       // Abort any in-flight points3d fetch and stop the background viz
       if (this.points3dAbortController) this.points3dAbortController.abort();
       const _vc = document.getElementById('vec-canvas');
@@ -1526,6 +1535,8 @@ function sfn() {
       this.$nextTick(() => {
         if (this._points3dData) initVectorViz(this._points3dData);
       });
+      // Re-initialize idle screensaver for this upload session
+      this._startIdleScreensaver();
     },
   };
 }
