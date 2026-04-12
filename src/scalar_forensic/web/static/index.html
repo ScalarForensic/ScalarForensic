@@ -71,7 +71,7 @@
               <template x-for="(count, i) in semanticStats.histogram" :key="i">
                 <div class="stats-hist-bar"
                      :style="`height: ${Math.max(2, Math.round(count / Math.max(...semanticStats.histogram) * 60))}px`"
-                     :class="{'stats-hist-bar-threshold': i === Math.min(19, Math.floor(Math.max(0, Math.min(1, (thresholdSemantic + 1) / 2)) * 20))}">
+                     :class="{'stats-hist-bar-threshold': i === Math.min(19, Math.floor(Math.max(0, Math.min(1, thresholdSemantic)) * 20))}">
                 </div>
               </template>
             </div>
@@ -807,16 +807,16 @@
         <template x-if="analysisRunModes.includes('altered')">
           <button class="hit-filter-pill hit-filter-pill-altered"
                   :class="{off: !hitsFilterAltered}"
-                  @click="hitsFilterAltered = !hitsFilterAltered">ALTERED</button>
+                  @click="hitsFilterAltered = !hitsFilterAltered; selectedHitKey = null; matchSrc = null">ALTERED</button>
         </template>
         <template x-if="analysisRunModes.includes('semantic')">
           <button class="hit-filter-pill hit-filter-pill-semantic"
                   :class="{off: !hitsFilterSemantic}"
-                  @click="hitsFilterSemantic = !hitsFilterSemantic">SEMANTIC</button>
+                  @click="hitsFilterSemantic = !hitsFilterSemantic; selectedHitKey = null; matchSrc = null">SEMANTIC</button>
         </template>
         <button class="hit-filter-pill hit-filter-pill-unify"
                 :class="{off: !hitsUnified}"
-                @click="hitsUnified = !hitsUnified; selectedHitKey = null; runQuery()"
+                @click="hitsUnified = !hitsUnified; selectedHitKey = null; matchSrc = null; runQuery()"
                 title="Merge hits with the same path across all modes into one row">UNIFIED</button>
       </div>
 

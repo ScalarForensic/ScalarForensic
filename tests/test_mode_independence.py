@@ -295,10 +295,6 @@ def test_exact_hits_rank_first_in_combined_sort():
 # ---------------------------------------------------------------------------
 
 
-def _altered_hit(path: str, score: float = 0.90) -> Hit:
-    return Hit(path=path, scores={"altered": score})
-
-
 def test_unify_false_same_path_yields_separate_rows():
     """With unify=False the same path from altered and semantic appears as two rows."""
     session = _make_session([_make_entry(dino=True, sscd=True)])

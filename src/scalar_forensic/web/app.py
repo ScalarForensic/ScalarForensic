@@ -135,7 +135,7 @@ async def query(
     threshold_altered: float = Form(default=0.75, ge=0.0, le=1.0),
     threshold_semantic: float = Form(default=0.55, ge=0.0, le=1.0),
     limit: int = Form(default=10, ge=1, le=50),
-    unify: str = Form(default="true"),
+    unify: bool = Form(default=True),
 ) -> JSONResponse:
     session = get_session(session_id)
     if session is None:
@@ -150,7 +150,7 @@ async def query(
         threshold_semantic,
         limit,
         settings,
-        unify=unify.lower() != "false",
+        unify=unify,
     )
     provenance = QueryProvenance(
         modes=mode_list,
