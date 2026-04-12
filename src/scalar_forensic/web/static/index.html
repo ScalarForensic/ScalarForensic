@@ -427,7 +427,7 @@
   <!-- ── Upload ── -->
   <div class="upload-section" x-show="phase === 'upload' || phase === 'analyzing'">
     <canvas id="vec-canvas" aria-hidden="true"></canvas>
-    <div class="drop-zone" :class="{'drag-over': dragOver, 'idle': dropZoneIdle}"
+    <div class="drop-zone" :class="{'drag-over': dragOver, 'idle': dropZoneIdle, 'analyzing': phase === 'analyzing'}"
          @dragover.prevent="dragOver = true"
          @dragleave.prevent="dragOver = false"
          @drop.prevent="onDrop($event)">

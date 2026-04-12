@@ -237,6 +237,10 @@ header::after {
   transition: border-color 0.2s, background-color 0.2s, opacity 2.5s ease;
 }
 
+.drop-zone.analyzing {
+  pointer-events: none;
+}
+
 .drop-zone.drag-over {
   border-color: var(--accent);
   background-color: rgba(232,147,32,0.04);
@@ -362,14 +366,6 @@ header::after {
   50%       { box-shadow: 0 0 14px rgba(232,147,32,1); }
 }
 
-.progress-label {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 5px;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--muted);
-}
 
 /* ── Results layout: 4 panels ── */
 .results-layout {
