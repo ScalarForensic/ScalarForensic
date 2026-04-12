@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -17,7 +18,7 @@ from pathlib import Path
 
 import torch
 import uvicorn
-from fastapi import FastAPI, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from qdrant_client import QdrantClient
@@ -39,7 +40,30 @@ _IMAGE_EXTENSIONS = frozenset(
     {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp", ".gif", ".jp2", ".ico", ".psd"}
 )
 
-app = FastAPI(title="ScalarForensic", docs_url=None, redoc_url=None)
+# Cached PCA-projected point cloud, computed once at startup.
+_points3d_cache: dict | None = None
+
+
+@contextlib.asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global _points3d_cache
+    settings = Settings()
+    if settings.viz_max_points > 0:
+        sscd_pts, dino_pts = await asyncio.gather(
+            asyncio.to_thread(
+                _fetch_and_project, settings.collection_sscd, settings.viz_max_points, settings
+            ),
+            asyncio.to_thread(
+                _fetch_and_project, settings.collection_dino, settings.viz_max_points, settings
+            ),
+        )
+        _points3d_cache = {"sscd": sscd_pts, "dino": dino_pts}
+    else:
+        _points3d_cache = {"sscd": [], "dino": []}
+    yield
+
+
+app = FastAPI(title="ScalarForensic", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 
@@ -350,24 +374,13 @@ def _fetch_and_project(collection: str, max_points: int, settings: Settings) -> 
 
 
 @app.get("/api/points3d")
-async def points3d(
-    max_points: int = Query(default=5000, ge=1, le=50_000),
-) -> JSONResponse:
-    """Return PCA-projected 3-D coordinates for both vector collections.
+async def points3d() -> JSONResponse:
+    """Return cached PCA-projected 3-D coordinates for both vector collections.
 
-    Used by the Canvas 2-D background visualization on the upload page.
-    ``max_points`` caps the number of vectors fetched per collection.
+    The point cloud is computed once at startup and served from memory.
     Set ``SFN_VIZ_MAX_POINTS=0`` to disable the visualization entirely.
     """
-    settings = Settings()
-    if settings.viz_max_points == 0:
-        return JSONResponse({"sscd": [], "dino": []})
-    limit = min(max_points, settings.viz_max_points)
-    sscd_pts, dino_pts = await asyncio.gather(
-        asyncio.to_thread(_fetch_and_project, settings.collection_sscd, limit, settings),
-        asyncio.to_thread(_fetch_and_project, settings.collection_dino, limit, settings),
-    )
-    return JSONResponse({"sscd": sscd_pts, "dino": dino_pts})
+    return JSONResponse(_points3d_cache or {"sscd": [], "dino": []})
 
 
 # ---------------------------------------------------------------------------

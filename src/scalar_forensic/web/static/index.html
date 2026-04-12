@@ -1078,10 +1078,16 @@ function sfn() {
         this.serverError = 'Backend unreachable — only exact hash matching is available.';
       }
       // Fire-and-forget: populate 3-D background visualization (decorative, non-blocking)
-      fetch('/api/points3d')
+      this.points3dAbortController = new AbortController();
+      const _ctrl = this.points3dAbortController;
+      fetch('/api/points3d', { signal: _ctrl.signal })
         .then(r => r.json())
-        .then(data => initVectorViz(data))
-        .catch(() => {});
+        .then(data => {
+          if (_ctrl.signal.aborted || this.phase !== 'upload') return;
+          this._points3dData = data;
+          initVectorViz(data);
+        })
+        .catch(err => { if (err && err.name === 'AbortError') return; });
     },
 
     toggleMode(mode) {
@@ -1113,7 +1119,8 @@ function sfn() {
     // ── Analysis ──────────────────────────────────────────────────────────
     async startAnalysis() {
       if (!this.pendingFiles.length || !this.selectedModes.length) return;
-      // Stop the background 3-D viz before leaving the upload phase
+      // Abort any in-flight points3d fetch and stop the background viz
+      if (this.points3dAbortController) this.points3dAbortController.abort();
       const _vc = document.getElementById('vec-canvas');
       if (_vc && _vc._stopViz) _vc._stopViz();
       this.analysisRunModes = [...this.selectedModes];
@@ -1492,6 +1499,10 @@ function sfn() {
       this.auditError = null;
       this.auditQueryLibVersions = null;
       this.auditHitProvenance = null;
+      // Restart background viz with client-cached point cloud
+      this.$nextTick(() => {
+        if (this._points3dData) initVectorViz(this._points3dData);
+      });
     },
   };
 }
