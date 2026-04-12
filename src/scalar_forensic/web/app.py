@@ -19,11 +19,13 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from scalar_forensic.config import Settings
-from scalar_forensic.embedder import extract_exif_detailed
+from scalar_forensic.embedder import extract_exif_detailed, get_library_versions
 from scalar_forensic.web.pipeline import (
     QueryProvenance,
     analyze_session,
     get_available_modes,
+    get_hit_qdrant_provenance,
+    query_semantic_stats,
     query_session,
 )
 from scalar_forensic.web.session import FileEntry, create_session, get_session
@@ -205,6 +207,48 @@ async def hit_image(path: str) -> FileResponse:
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(p, filename=p.name)
+
+
+# ---------------------------------------------------------------------------
+# Semantic score distribution stats (on-demand, per file)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/semantic-stats/{session_id}/{file_id}")
+async def semantic_stats(session_id: str, file_id: str) -> JSONResponse:
+    """Return DINOv2 score-distribution stats for one uploaded file.
+
+    Queries the top-10 000 most-similar collection points at threshold 0 and
+    computes min / percentiles / max / mean / stdev / histogram.
+    """
+    session = get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    settings = Settings()
+    stats, error = query_semantic_stats(session, file_id, settings)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    return JSONResponse(stats.__dict__)
+
+
+# ---------------------------------------------------------------------------
+# Forensic audit endpoints (on-demand, for the Audit modal)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/library-versions")
+async def library_versions() -> JSONResponse:
+    """Return the library versions of the current web server process."""
+    return JSONResponse(get_library_versions())
+
+
+@app.get("/api/hit-provenance")
+async def hit_provenance(image_hash: str) -> JSONResponse:
+    """Return full Qdrant indexing provenance for a given image SHA-256."""
+    if not re.fullmatch(r"[0-9a-f]{64}", image_hash):
+        raise HTTPException(status_code=400, detail="Invalid hash")
+    settings = Settings()
+    return JSONResponse(get_hit_qdrant_provenance(image_hash, settings))
 
 
 # ---------------------------------------------------------------------------
