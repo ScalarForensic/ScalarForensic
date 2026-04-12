@@ -36,7 +36,7 @@ from scalar_forensic.web.pipeline import (
 from scalar_forensic.web.session import FileEntry, create_session, get_session
 
 _STATIC_DIR = Path(__file__).parent / "static"
-_VIZ_JS     = _STATIC_DIR / "viz.js"
+_VIZ_JS = _STATIC_DIR / "viz.js"
 
 
 def _render_viz_html(data: dict) -> str:
@@ -62,6 +62,8 @@ def _render_viz_html(data: dict) -> str:
   <script>initVectorViz({data_json});</script>
 </body>
 </html>"""
+
+
 _IMAGE_EXTENSIONS = frozenset(
     {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp", ".gif", ".jp2", ".ico", ".psd"}
 )

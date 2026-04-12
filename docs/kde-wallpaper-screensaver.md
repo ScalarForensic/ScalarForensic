@@ -154,6 +154,6 @@ firefox --kiosk http://localhost:8080/viz
   no configuration needed for HiDPI or ultra-wide displays.
 - If `SFN_VIZ_MAX_POINTS=0` is set, the point cloud is empty and
   `/viz` will show only the animated background gradient.
-- The page has no input handling that conflicts with a wallpaper context —
-  mouse drag and scroll are only wired when a pointer device is actually
-  present and interacting.
+- The page registers mouse drag and scroll handlers unconditionally, but
+  they only have an effect if the user actively interacts with the page;
+  no extra setup is required for typical wallpaper or screensaver use.

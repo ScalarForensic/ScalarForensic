@@ -342,6 +342,8 @@ function initVectorViz(data) {
   const touch  = t => { lastActT = t; };
 
   const onDown  = e => {
+    const t = (performance.now() - t0) / 1000;
+    touch(t);
     dragging = true; lastX = e.clientX; lastY = e.clientY; e.preventDefault();
   };
   const onUp    = () => { dragging = false; };
