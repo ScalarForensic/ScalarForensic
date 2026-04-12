@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import sys
@@ -13,10 +15,12 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+import torch
 import uvicorn
-from fastapi import FastAPI, Form, HTTPException, UploadFile
+from fastapi import FastAPI, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from qdrant_client import QdrantClient
 
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import extract_exif_detailed, get_library_versions
@@ -290,6 +294,80 @@ async def hit_metadata(path: str) -> JSONResponse:
     meta["hash_sha256"] = hashlib.sha256(data).hexdigest()
     meta["hash_md5"] = hashlib.md5(data).hexdigest()  # noqa: S324
     return JSONResponse(meta)
+
+
+# ---------------------------------------------------------------------------
+# 3-D vector visualization
+# ---------------------------------------------------------------------------
+
+_log = logging.getLogger(__name__)
+
+
+def _pca3(vectors: list[list[float]]) -> list[list[float]]:
+    """Project high-dimensional vectors down to 3 principal components.
+
+    Returns coordinates normalised to [-1, 1].  Falls back to zero-vectors
+    when fewer than 3 points are supplied (degenerate case).
+    """
+    if len(vectors) < 3:
+        return [[0.0, 0.0, 0.0]] * len(vectors)
+    X = torch.tensor(vectors, dtype=torch.float32)
+    X -= X.mean(dim=0)
+    _, _, V = torch.pca_lowrank(X, q=3)
+    proj = X @ V
+    mx = proj.abs().max()
+    if mx > 0:
+        proj = proj / mx
+    return proj.tolist()
+
+
+def _fetch_and_project(collection: str, max_points: int, settings: Settings) -> list[list[float]]:
+    """Scroll *collection* for up to *max_points* vectors, then PCA-project to 3-D."""
+    client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+    vectors: list[list[float]] = []
+    offset = None
+    try:
+        while len(vectors) < max_points:
+            batch_size = min(256, max_points - len(vectors))
+            records, offset = client.scroll(
+                collection_name=collection,
+                limit=batch_size,
+                with_vectors=True,
+                offset=offset,
+            )
+            for r in records:
+                v = r.vector
+                if isinstance(v, dict):
+                    v = next(iter(v.values()), None)
+                if v is not None:
+                    vectors.append(v)
+            if offset is None:
+                break
+    except Exception as exc:  # collection missing or Qdrant unreachable
+        _log.warning("points3d: could not scroll %r: %s", collection, exc)
+        return []
+    return _pca3(vectors)
+
+
+@app.get("/api/points3d")
+async def points3d(
+    max_points: int = Query(default=5000, ge=1, le=50_000),
+) -> JSONResponse:
+    """Return PCA-projected 3-D coordinates for both vector collections.
+
+    Used by the Canvas 2-D background visualization on the upload page.
+    ``max_points`` caps the number of vectors fetched per collection.
+    Set ``SFN_VIZ_MAX_POINTS=0`` to disable the visualization entirely.
+    """
+    settings = Settings()
+    if settings.viz_max_points == 0:
+        return JSONResponse({"sscd": [], "dino": []})
+    limit = min(max_points, settings.viz_max_points)
+    sscd_pts, dino_pts = await asyncio.gather(
+        asyncio.to_thread(_fetch_and_project, settings.collection_sscd, limit, settings),
+        asyncio.to_thread(_fetch_and_project, settings.collection_dino, limit, settings),
+    )
+    return JSONResponse({"sscd": sscd_pts, "dino": dino_pts})
 
 
 # ---------------------------------------------------------------------------
