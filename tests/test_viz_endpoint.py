@@ -1,8 +1,19 @@
 """Tests for the /viz standalone visualization endpoint."""
 
+import pytest
 from fastapi.testclient import TestClient
 
 import scalar_forensic.web.app as app_module
+
+
+@pytest.fixture(autouse=True)
+def no_qdrant(monkeypatch):
+    """Disable the lifespan Qdrant fetch so tests are hermetic and fast.
+
+    SFN_VIZ_MAX_POINTS=0 causes the lifespan to skip the threaded scroll
+    and set an empty cache, avoiding connection timeouts on CI.
+    """
+    monkeypatch.setenv("SFN_VIZ_MAX_POINTS", "0")
 
 
 def _client() -> TestClient:

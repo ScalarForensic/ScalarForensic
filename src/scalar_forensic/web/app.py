@@ -36,13 +36,13 @@ from scalar_forensic.web.pipeline import (
 from scalar_forensic.web.session import FileEntry, create_session, get_session
 
 _STATIC_DIR = Path(__file__).parent / "static"
-_VIZ_JS = _STATIC_DIR / "viz.js"
+_VIZ_JS_SRC = (_STATIC_DIR / "viz.js").read_text(encoding="utf-8")
 
 
 def _render_viz_html(data: dict) -> str:
     """Return a self-contained HTML page with the point-cloud data and viz
     code inlined.  No server connection is needed to display the result."""
-    viz_js = _VIZ_JS.read_text(encoding="utf-8")
+    viz_js = _VIZ_JS_SRC
     data_json = json.dumps(data, separators=(",", ":"))
     return f"""<!DOCTYPE html>
 <html lang="en">

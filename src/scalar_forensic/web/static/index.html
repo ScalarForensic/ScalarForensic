@@ -1126,7 +1126,14 @@ function sfn() {
     _startIdleScreensaver() {
       const IDLE_MS = 5000;
       const IDLE_EVENTS = ['mousemove','mousedown','keydown','touchstart','touchmove','dragenter','dragover'];
+      let lastReset = 0;
       const resetIdle = () => {
+        const now = Date.now();
+        // Suppress Alpine reactivity + timer churn on high-frequency events
+        // (mousemove can fire 100+ times/s). Only reschedule if ≥100 ms have
+        // elapsed since the last reset, OR the drop-zone is already faded out.
+        if (!this.dropZoneIdle && now - lastReset < 100) return;
+        lastReset = now;
         this.dropZoneIdle = false;
         clearTimeout(this._idleTimer);
         this._idleTimer = setTimeout(() => { this.dropZoneIdle = true; }, IDLE_MS);
