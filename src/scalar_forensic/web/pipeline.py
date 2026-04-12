@@ -482,7 +482,8 @@ class SemanticStats:
     max_score: float
     mean: float
     stdev: float
-    histogram: list[int]  # _HIST_BUCKETS counts on normalised [0,1] scale; bucket i covers [i*0.05, (i+1)*0.05)
+    # _HIST_BUCKETS counts on normalised [0,1] scale; bucket i covers [i*0.05, (i+1)*0.05)
+    histogram: list[int]
 
 
 def query_semantic_stats(
