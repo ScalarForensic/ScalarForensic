@@ -1276,8 +1276,11 @@ function sfn() {
     applyProvenance() {
       let p;
       try { p = JSON.parse(this.pasteBuffer); } catch { return; }
-      if (Array.isArray(p.modes))
-        this.analysisRunModes = p.modes; // controls which sliders/pills show; runQuery() below re-queries with these modes
+      if (Array.isArray(p.modes)) {
+        const validModes = p.modes.filter(m => this.availableModes.includes(m));
+        this.analysisRunModes = validModes;
+        this.selectedModes = validModes;
+      }
       if (typeof p.threshold_altered === 'number')
         this.thresholdAltered = Math.min(1, Math.max(0, p.threshold_altered));
       if (typeof p.threshold_semantic === 'number')

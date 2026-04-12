@@ -349,7 +349,12 @@ def _query_exact(
                 ),
                 limit=50,
                 with_payload=[
-                    "image_path", "image_hash", "exif", "exif_geo_data", "model_name", "model_hash"
+                    "image_path",
+                    "image_hash",
+                    "exif",
+                    "exif_geo_data",
+                    "model_name",
+                    "model_hash",
                 ],
                 with_vectors=False,
             )
@@ -425,7 +430,12 @@ def _query_vector(
             score_threshold=threshold,
             limit=limit,
             with_payload=[
-                "image_path", "image_hash", "exif", "exif_geo_data", "model_name", "model_hash"
+                "image_path",
+                "image_hash",
+                "exif",
+                "exif_geo_data",
+                "model_name",
+                "model_hash",
             ],
         )
         hits = []
@@ -435,14 +445,16 @@ def _query_vector(
             mh = r.payload.get("model_hash", "")
             if mn or mh:
                 mp[mode] = {"name": mn, "hash": mh}
-            hits.append(Hit(
-                path=r.payload.get("image_path", ""),
-                scores={mode: r.score},
-                exif=r.payload.get("exif"),
-                exif_geo_data=r.payload.get("exif_geo_data"),
-                image_hash=r.payload.get("image_hash"),
-                model_provenance=mp,
-            ))
+            hits.append(
+                Hit(
+                    path=r.payload.get("image_path", ""),
+                    scores={mode: r.score},
+                    exif=r.payload.get("exif"),
+                    exif_geo_data=r.payload.get("exif_geo_data"),
+                    image_hash=r.payload.get("image_hash"),
+                    model_provenance=mp,
+                )
+            )
         return hits, []
     except Exception as exc:  # noqa: BLE001
         logger.warning("Vector query failed on %s (%s): %s", collection, mode, exc)
@@ -454,13 +466,13 @@ def _query_vector(
 # ---------------------------------------------------------------------------
 
 _STATS_SAMPLE = 10_000
-_HIST_BUCKETS = 20  # 0.05-wide buckets covering [0.0, 1.0]
+_HIST_BUCKETS = 20  # 0.1-wide buckets covering normalised [0.0, 1.0] (cosine [-1,1] → [0,1])
 
 
 @dataclass
 class SemanticStats:
-    sample_size: int    # how many points were requested
-    count: int          # how many were actually returned
+    sample_size: int  # how many points were requested
+    count: int  # how many were actually returned
     min_score: float
     p10: float
     p25: float
@@ -498,7 +510,6 @@ def query_semantic_stats(
         result = client.query_points(
             collection_name=settings.collection_dino,
             query=entry.dino_embedding,
-            score_threshold=0.0,
             limit=sample_size,
             with_payload=False,
         )
@@ -526,7 +537,9 @@ def query_semantic_stats(
 
     histogram = [0] * _HIST_BUCKETS
     for s in scores:
-        idx = min(int(s * _HIST_BUCKETS), _HIST_BUCKETS - 1)
+        # Normalise cosine score from [-1, 1] to [0, 1] before bucketing
+        normalised = (max(-1.0, min(s, 1.0)) + 1.0) / 2.0
+        idx = min(max(int(normalised * _HIST_BUCKETS), 0), _HIST_BUCKETS - 1)
         histogram[idx] += 1
 
     return SemanticStats(
@@ -550,8 +563,13 @@ def query_semantic_stats(
 # ---------------------------------------------------------------------------
 
 _PROVENANCE_FIELDS = [
-    "model_name", "model_hash", "indexed_at", "library_versions",
-    "inference_dtype", "normalize_size", "embedding_dim",
+    "model_name",
+    "model_hash",
+    "indexed_at",
+    "library_versions",
+    "inference_dtype",
+    "normalize_size",
+    "embedding_dim",
 ]
 
 

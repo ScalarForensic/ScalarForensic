@@ -353,11 +353,11 @@ def test_merge_hit_max_score_never_downgrades():
     from scalar_forensic.web.pipeline import _merge_hit
 
     high = Hit(path=PATH_A, scores={"semantic": 0.95})
-    low  = Hit(path=PATH_A, scores={"semantic": 0.70})
+    low = Hit(path=PATH_A, scores={"semantic": 0.70})
 
     dest: dict = {}
     _merge_hit(high, dest)
-    _merge_hit(low, dest)   # lower score — must NOT overwrite 0.95
+    _merge_hit(low, dest)  # lower score — must NOT overwrite 0.95
 
     assert dest[PATH_A].scores["semantic"] == 0.95, (
         "later lower score must not overwrite earlier higher score"
@@ -368,12 +368,14 @@ def test_merge_hit_provenance_setdefault():
     """_merge_hit must keep the first-seen provenance for a mode, not replace it."""
     from scalar_forensic.web.pipeline import _merge_hit
 
-    first  = Hit(
-        path=PATH_A, scores={"altered": 0.9},
+    first = Hit(
+        path=PATH_A,
+        scores={"altered": 0.9},
         model_provenance={"altered": {"name": "v1", "hash": "aaa"}},
     )
     second = Hit(
-        path=PATH_A, scores={"altered": 0.8},
+        path=PATH_A,
+        scores={"altered": 0.8},
         model_provenance={"altered": {"name": "v2", "hash": "bbb"}},
     )
 

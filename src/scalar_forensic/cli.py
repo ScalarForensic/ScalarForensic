@@ -86,7 +86,7 @@ def _apply_dedup(
 def _write_thumbnail(img: "Image.Image", dest: Path, size: int) -> None:
     """Save a thumbnail JPEG of *img* at *dest* (size×size, aspect-ratio preserved)."""
     thumb = img.copy()
-    thumb.thumbnail((size, size), Image.LANCZOS)
+    thumb.thumbnail((size, size), Image.Resampling.LANCZOS)
     if thumb.mode not in ("RGB", "L"):
         thumb = thumb.convert("RGB")
     dest.parent.mkdir(parents=True, exist_ok=True)
