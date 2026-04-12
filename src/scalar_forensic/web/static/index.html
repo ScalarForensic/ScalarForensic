@@ -895,6 +895,7 @@ function sfn() {
     dragOver: false,
     dropZoneIdle: false,
     _idleTimer: null,
+    _resetIdle: null,
     selectedModes: [],
     availableModes: [],
     analysisRunModes: [],      // modes actually used in the last analysis
@@ -1079,18 +1080,16 @@ function sfn() {
         this.selectedModes = ['exact'];
         this.serverError = 'Backend unreachable — only exact hash matching is available.';
       }
-      // Screensaver: fade drop-zone out after 5 s of no pointer/keyboard activity
+      // Screensaver: fade drop-zone out after 5 s of no pointer/keyboard/drag activity
       const IDLE_MS = 5000;
       const resetIdle = () => {
         this.dropZoneIdle = false;
         clearTimeout(this._idleTimer);
         this._idleTimer = setTimeout(() => { this.dropZoneIdle = true; }, IDLE_MS);
       };
-      document.addEventListener('mousemove', resetIdle, { passive: true });
-      document.addEventListener('mousedown', resetIdle, { passive: true });
-      document.addEventListener('keydown',   resetIdle, { passive: true });
-      document.addEventListener('touchstart', resetIdle, { passive: true });
-      document.addEventListener('touchmove',  resetIdle, { passive: true });
+      this._resetIdle = resetIdle;
+      const IDLE_EVENTS = ['mousemove','mousedown','keydown','touchstart','touchmove','dragenter','dragover'];
+      for (const ev of IDLE_EVENTS) document.addEventListener(ev, resetIdle, { passive: true });
       resetIdle(); // start the initial countdown
 
       // Fire-and-forget: populate 3-D background visualization (decorative, non-blocking)
@@ -1135,6 +1134,14 @@ function sfn() {
     // ── Analysis ──────────────────────────────────────────────────────────
     async startAnalysis() {
       if (!this.pendingFiles.length || !this.selectedModes.length) return;
+      // Tear down idle screensaver — stop timer and remove all listeners
+      clearTimeout(this._idleTimer);
+      this.dropZoneIdle = false;
+      if (this._resetIdle) {
+        const IDLE_EVENTS = ['mousemove','mousedown','keydown','touchstart','touchmove','dragenter','dragover'];
+        for (const ev of IDLE_EVENTS) document.removeEventListener(ev, this._resetIdle);
+        this._resetIdle = null;
+      }
       // Abort any in-flight points3d fetch and stop the background viz
       if (this.points3dAbortController) this.points3dAbortController.abort();
       const _vc = document.getElementById('vec-canvas');
@@ -1585,36 +1592,49 @@ function initVectorViz(data) {
     ctx.stroke();
   }
 
-  // ── Draw a point cloud with per-point depth-based opacity ────────────────
-  // Points closer to the camera (higher depth / z2) are brighter; far points
-  // fade toward near-invisible, giving the cloud real volumetric depth.
+  // ── Draw a point cloud, batched by depth bucket ───────────────────────────
+  // Depth shading requires varying alpha per point, but drawing each point
+  // individually is O(N) draw calls. Instead we bin points into N_BUCKETS
+  // depth levels and batch each bin into one path → O(N_BUCKETS) draw calls.
+  const N_BUCKETS = 8;
   function drawCloud(pts, cr, cg, cb) {
-    const unit = Math.min(canvas.width, canvas.height) * 0.52 * zoomFactor;
+    const unit    = Math.min(canvas.width, canvas.height) * 0.52 * zoomFactor;
+    const buckets = Array.from({ length: N_BUCKETS }, () => []);
     for (let i = 0; i < pts.length; i++) {
       const q = project(pts[i][0], pts[i][1], pts[i][2]);
       if (!q) continue;
-      // q.depth = z2 in camera space. For unit-sphere data it spans ≈ -1..+1.
-      const t     = Math.max(0, Math.min(1, (q.depth + 1.15) / 2.3));
-      const alpha = (0.12 + t * 0.78).toFixed(3); // 0.12 (far) → 0.90 (near)
-      const r     = Math.max(1.0, q.s / unit * 2.2);
+      const t  = Math.max(0, Math.min(0.9999, (q.depth + 1.15) / 2.3));
+      q._r     = Math.max(1.0, q.s / unit * 2.2);
+      buckets[Math.floor(t * N_BUCKETS)].push(q);
+    }
+    for (let b = 0; b < N_BUCKETS; b++) {
+      if (!buckets[b].length) continue;
+      const alpha = (0.12 + ((b + 0.5) / N_BUCKETS) * 0.78).toFixed(3);
       ctx.beginPath();
       ctx.fillStyle = `rgba(${cr},${cg},${cb},${alpha})`;
-      ctx.arc(q.sx, q.sy, r, 0, Math.PI * 2);
+      for (const q of buckets[b]) {
+        ctx.moveTo(q.sx + q._r, q.sy);   // moveTo prevents connecting lines
+        ctx.arc(q.sx, q.sy, q._r, 0, Math.PI * 2);
+      }
       ctx.fill();
     }
   }
 
   // ── Radial gradient background — dark centre, subtle glow at edges ───────
-  // Darker in the middle means true black on OLED (pixels literally off).
-  function drawBackground() {
+  // Cached and rebuilt only on resize; creating a gradient every frame is
+  // unnecessary work. Darker centre = true black on OLED (pixels off).
+  let bgGradient = null;
+  function rebuildBgGradient() {
     const W = canvas.width, H = canvas.height;
-    const cx = W / 2, cy = H / 2;
-    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.hypot(cx, cy));
-    grad.addColorStop(0,    '#000000');
-    grad.addColorStop(0.45, '#03060e');
-    grad.addColorStop(1,    '#0b1222');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, W, H);
+    const g = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.hypot(W / 2, H / 2));
+    g.addColorStop(0,    '#000000');
+    g.addColorStop(0.45, '#03060e');
+    g.addColorStop(1,    '#0b1222');
+    bgGradient = g;
+  }
+  function drawBackground() {
+    ctx.fillStyle = bgGradient;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
 
   // ── Sync canvas pixel buffer to its CSS-displayed size ─────────────────
@@ -1622,6 +1642,7 @@ function initVectorViz(data) {
     const p = canvas.parentElement;
     canvas.width  = p.clientWidth  || 800;
     canvas.height = p.clientHeight || 400;
+    rebuildBgGradient();
   }
   resize();
   const ro = new ResizeObserver(resize);
@@ -1669,6 +1690,24 @@ function initVectorViz(data) {
   const SPARK_GAP_MAX   = 5.0;   // s between spawn bursts (max)
   const smooth = x => x * x * (3 - 2 * x); // smoothstep for nicer easing
 
+  // Pre-baked glow sprite — rendered once into an offscreen canvas.
+  // drawImage + globalAlpha is far cheaper than ctx.shadowBlur per frame.
+  const GLOW_SZ = 64;
+  const glowSprite = (() => {
+    const oc = document.createElement('canvas');
+    oc.width = oc.height = GLOW_SZ;
+    const og = oc.getContext('2d');
+    const h  = GLOW_SZ / 2;
+    const g  = og.createRadialGradient(h, h, 0, h, h, h);
+    g.addColorStop(0,    'rgba(220,255,240,1.0)');
+    g.addColorStop(0.2,  'rgba(80,255,120,0.85)');
+    g.addColorStop(0.55, 'rgba(60,230,100,0.3)');
+    g.addColorStop(1,    'rgba(60,230,100,0)');
+    og.fillStyle = g;
+    og.fillRect(0, 0, GLOW_SZ, GLOW_SZ);
+    return oc;
+  })();
+
   let sparks      = [];    // { di, si, born, duration }
   let nextSpawnT  = 1.0;   // time of first burst
 
@@ -1693,56 +1732,53 @@ function initVectorViz(data) {
 
     const unit = Math.min(canvas.width, canvas.height) * 0.52 * zoomFactor;
     ctx.save();
+    ctx.lineWidth = 1;
+
     for (const sp of sparks) {
-      const age  = t - sp.born;
-      const a    = smooth(Math.min(1, age / SPARK_FADE_IN))
-                 * smooth(Math.min(1, (sp.duration - age) / SPARK_FADE_OUT));
+      const age = t - sp.born;
+      const a   = smooth(Math.min(1, age / SPARK_FADE_IN))
+                * smooth(Math.min(1, (sp.duration - age) / SPARK_FADE_OUT));
       if (a <= 0) continue;
 
       const pD = project(dino[sp.di][0], dino[sp.di][1], dino[sp.di][2]);
       const pS = project(sscd[sp.si][0], sscd[sp.si][1], sscd[sp.si][2]);
       if (!pD || !pS) continue;
 
-      // Connecting line
+      // Connecting line — no shadowBlur, just a clean alpha stroke
       ctx.beginPath();
-      ctx.strokeStyle = `rgba(60,230,100,${(a * 0.45).toFixed(3)})`;
-      ctx.lineWidth   = 1;
-      ctx.shadowColor = `rgba(60,230,100,${(a * 0.7).toFixed(3)})`;
-      ctx.shadowBlur  = 8;
+      ctx.strokeStyle = `rgba(60,230,100,${(a * 0.5).toFixed(3)})`;
       ctx.moveTo(pD.sx, pD.sy);
       ctx.lineTo(pS.sx, pS.sy);
       ctx.stroke();
 
-      // Travelling pulse — bright dot gliding from dino → sscd
+      const rD     = Math.max(2, pD.s / unit * 2.2) * 2.2;
+      const rS     = Math.max(2, pS.s / unit * 2.2) * 2.2;
       const pulseT = smooth(Math.min(1, age / sp.duration));
       const pulseX = pD.sx + (pS.sx - pD.sx) * pulseT;
       const pulseY = pD.sy + (pS.sy - pD.sy) * pulseT;
+
+      // Glow halos via pre-baked sprite — replaces ctx.shadowBlur entirely
+      ctx.globalAlpha = a;
+      ctx.drawImage(glowSprite, pulseX - 18,     pulseY - 18,     36,      36);
+      ctx.drawImage(glowSprite, pD.sx - rD * 4,  pD.sy - rD * 4,  rD * 8,  rD * 8);
+      ctx.drawImage(glowSprite, pS.sx - rS * 4,  pS.sy - rS * 4,  rS * 8,  rS * 8);
+      ctx.globalAlpha = 1;
+
+      // Crisp center dots drawn on top of the halos
       ctx.beginPath();
-      ctx.fillStyle   = `rgba(215,255,235,${(a * 0.98).toFixed(3)})`;
-      ctx.shadowColor = `rgba(120,255,170,${a.toFixed(3)})`;
-      ctx.shadowBlur  = 20;
+      ctx.fillStyle = `rgba(215,255,235,${(a * 0.98).toFixed(3)})`;
       ctx.arc(pulseX, pulseY, 3, 0, Math.PI * 2);
       ctx.fill();
 
-      // Glowing dot at dino point
-      const rD = Math.max(2, pD.s / unit * 2.2) * 2.2;
       ctx.beginPath();
-      ctx.fillStyle   = `rgba(80,255,120,${(a * 0.95).toFixed(3)})`;
-      ctx.shadowColor = `rgba(80,255,120,${a.toFixed(3)})`;
-      ctx.shadowBlur  = 14;
+      ctx.fillStyle = `rgba(80,255,120,${(a * 0.95).toFixed(3)})`;
+      ctx.moveTo(pD.sx + rD, pD.sy);
       ctx.arc(pD.sx, pD.sy, rD, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Glowing dot at sscd point
-      const rS = Math.max(2, pS.s / unit * 2.2) * 2.2;
-      ctx.beginPath();
-      ctx.fillStyle   = `rgba(80,255,120,${(a * 0.95).toFixed(3)})`;
-      ctx.shadowColor = `rgba(80,255,120,${a.toFixed(3)})`;
-      ctx.shadowBlur  = 14;
+      ctx.moveTo(pS.sx + rS, pS.sy);
       ctx.arc(pS.sx, pS.sy, rS, 0, Math.PI * 2);
       ctx.fill();
     }
-    ctx.shadowBlur = 0;
+
     ctx.restore();
   }
 
@@ -1766,7 +1802,7 @@ function initVectorViz(data) {
     e.preventDefault();
     const t = (performance.now() - t0) / 1000;
     touch(t);
-    zoomFactor = Math.max(Z_MIN, Math.min(Z_MAX, zoomFactor * (1 - e.deltaY * 0.001)));
+    zoomFactor = Math.max(Z_MIN, Math.min(Z_MAX, zoomFactor * Math.exp(-e.deltaY * 0.001)));
   };
   canvas.addEventListener('mousedown', onDown);
   window.addEventListener('mouseup',   onUp);
