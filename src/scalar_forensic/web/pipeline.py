@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import statistics as _statistics
 from collections.abc import Generator
 from dataclasses import dataclass, field
 
@@ -162,6 +163,7 @@ class Hit:
     exif: bool | None = None
     exif_geo_data: bool | None = None
     image_hash: str | None = None  # SHA-256, used to request /api/thumbnail/{hash}
+    model_provenance: dict = field(default_factory=dict)  # mode → {name, hash} from Qdrant payload
 
     def best_score(self) -> float:
         return max(self.scores.values(), default=0.0)
@@ -210,6 +212,8 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
         # Keep the image_hash if we now have one
         if h.image_hash and not dest[h.path].image_hash:
             dest[h.path].image_hash = h.image_hash
+        # Merge per-mode model provenance
+        dest[h.path].model_provenance.update(h.model_provenance)
     else:
         dest[h.path] = h
 
@@ -222,7 +226,7 @@ def query_session(
     limit: int,
     settings: Settings,
     unify: bool = True,
-) -> list[FileResult]:
+) -> tuple[list[FileResult], dict[str, dict]]:
     """Query Qdrant for every file in the session using stored embeddings.
 
     Fast — no re-embedding. Called on every slider change.
@@ -231,6 +235,9 @@ def query_session(
     so each DB image produces one result row with all applicable scores.
     When *unify* is False each mode contributes its own rows independently,
     so the same image may appear multiple times with different scores.
+
+    Returns a tuple of (results, embedding_models) where embedding_models maps
+    mode → {name, hash} for each embedder currently loaded in the web process.
     """
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
     results: list[FileResult] = []
@@ -297,7 +304,18 @@ def query_session(
             file_result.hits = sorted(unmerged, key=_unmerged_sort_key)
         results.append(file_result)
 
-    return results
+    # Collect model provenance for the embedders currently loaded in this process
+    embedding_models: dict[str, dict] = {}
+    if "altered" in modes:
+        emb = _embedder_cache.get("sscd")
+        if emb is not None:
+            embedding_models["altered"] = {"name": emb.model_name, "hash": emb.model_hash}
+    if "semantic" in modes:
+        emb = _embedder_cache.get("dino")
+        if emb is not None:
+            embedding_models["semantic"] = {"name": emb.model_name, "hash": emb.model_hash}
+
+    return results, embedding_models
 
 
 def _query_exact(
@@ -310,7 +328,13 @@ def _query_exact(
     hits: list[Hit] = []
     errors: list[str] = []
     collision_paths: set[str] = set()
+    # Map each collection to the mode label used in model_provenance
+    collection_mode = {
+        settings.collection_sscd: "altered",
+        settings.collection_dino: "semantic",
+    }
     for collection in (settings.collection_sscd, settings.collection_dino):
+        mode_key = collection_mode[collection]
         try:
             records, _ = client.scroll(
                 collection_name=collection,
@@ -318,12 +342,18 @@ def _query_exact(
                     must=[FieldCondition(key="image_hash", match=MatchValue(value=image_hash))]
                 ),
                 limit=50,
-                with_payload=["image_path", "image_hash", "exif", "exif_geo_data"],
+                with_payload=[
+                    "image_path", "image_hash", "exif", "exif_geo_data", "model_name", "model_hash"
+                ],
                 with_vectors=False,
             )
             for r in records:
                 path = r.payload.get("image_path", "")
-                if not any(h.path == path for h in hits):
+                mn = r.payload.get("model_name", "")
+                mh = r.payload.get("model_hash", "")
+                mp: dict = {mode_key: {"name": mn, "hash": mh}} if (mn or mh) else {}
+                existing = next((h for h in hits if h.path == path), None)
+                if existing is None:
                     hits.append(
                         Hit(
                             path=path,
@@ -331,8 +361,12 @@ def _query_exact(
                             exif=r.payload.get("exif"),
                             exif_geo_data=r.payload.get("exif_geo_data"),
                             image_hash=r.payload.get("image_hash"),
+                            model_provenance=mp,
                         )
                     )
+                else:
+                    # Image found in a second collection — merge its model provenance
+                    existing.model_provenance.update(mp)
 
             # Collision detection: find images with same MD5 but different SHA-256
             if image_hash_md5:
@@ -379,21 +413,166 @@ def _query_vector(
             query=vector,
             score_threshold=threshold,
             limit=limit,
-            with_payload=["image_path", "image_hash", "exif", "exif_geo_data"],
+            with_payload=[
+                "image_path", "image_hash", "exif", "exif_geo_data", "model_name", "model_hash"
+            ],
         )
-        return [
-            Hit(
+        hits = []
+        for r in result.points:
+            mp: dict = {}
+            mn = r.payload.get("model_name", "")
+            mh = r.payload.get("model_hash", "")
+            if mn or mh:
+                mp[mode] = {"name": mn, "hash": mh}
+            hits.append(Hit(
                 path=r.payload.get("image_path", ""),
                 scores={mode: r.score},
                 exif=r.payload.get("exif"),
                 exif_geo_data=r.payload.get("exif_geo_data"),
                 image_hash=r.payload.get("image_hash"),
-            )
-            for r in result.points
-        ], []
+                model_provenance=mp,
+            ))
+        return hits, []
     except Exception as exc:  # noqa: BLE001
         logger.warning("Vector query failed on %s (%s): %s", collection, mode, exc)
         return [], [f"{mode} query failed: {type(exc).__name__}"]
+
+
+# ---------------------------------------------------------------------------
+# Semantic score distribution stats (on-demand, per uploaded file)
+# ---------------------------------------------------------------------------
+
+_STATS_SAMPLE = 10_000
+_HIST_BUCKETS = 20  # 0.05-wide buckets covering [0.0, 1.0]
+
+
+@dataclass
+class SemanticStats:
+    sample_size: int    # how many points were requested
+    count: int          # how many were actually returned
+    min_score: float
+    p10: float
+    p25: float
+    median: float
+    p75: float
+    p90: float
+    max_score: float
+    mean: float
+    stdev: float
+    histogram: list[int]  # _HIST_BUCKETS counts, bucket i covers [i*0.05, (i+1)*0.05)
+
+
+def query_semantic_stats(
+    session: Session,
+    file_id: str,
+    settings: Settings,
+    sample_size: int = _STATS_SAMPLE,
+) -> tuple[SemanticStats | None, str | None]:
+    """Return score-distribution stats for one uploaded file against the DINOv2 collection.
+
+    Queries the top-*sample_size* most-similar points with no score threshold so the
+    result covers the full relevant tail.  Returns (stats, None) on success or
+    (None, error_message) on failure.
+    """
+    entry = next((e for e in session.files if e.file_id == file_id), None)
+    if entry is None:
+        return None, "file not found in session"
+    if entry.error:
+        return None, f"analysis failed: {entry.error}"
+    if not entry.dino_embedding:
+        return None, "no semantic embedding — was semantic mode selected during analysis?"
+
+    client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+    try:
+        result = client.query_points(
+            collection_name=settings.collection_dino,
+            query=entry.dino_embedding,
+            score_threshold=0.0,
+            limit=sample_size,
+            with_payload=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Semantic stats query failed: %s", exc)
+        return None, f"Qdrant query failed: {type(exc).__name__}"
+
+    scores = [r.score for r in result.points]
+    if not scores:
+        return None, "no points returned from collection (collection may be empty)"
+
+    n = len(scores)
+    mean = sum(scores) / n
+    stdev = _statistics.stdev(scores) if n >= 2 else 0.0
+
+    if n >= 2:
+        cuts = _statistics.quantiles(scores, n=100, method="inclusive")
+        p10 = cuts[9]
+        p25 = cuts[24]
+        median = cuts[49]
+        p75 = cuts[74]
+        p90 = cuts[89]
+    else:
+        p10 = p25 = median = p75 = p90 = scores[0]
+
+    histogram = [0] * _HIST_BUCKETS
+    for s in scores:
+        idx = min(int(s * _HIST_BUCKETS), _HIST_BUCKETS - 1)
+        histogram[idx] += 1
+
+    return SemanticStats(
+        sample_size=sample_size,
+        count=n,
+        min_score=min(scores),
+        p10=p10,
+        p25=p25,
+        median=median,
+        p75=p75,
+        p90=p90,
+        max_score=max(scores),
+        mean=mean,
+        stdev=stdev,
+        histogram=histogram,
+    ), None
+
+
+# ---------------------------------------------------------------------------
+# Full indexing provenance for a single image (on-demand, for Audit modal)
+# ---------------------------------------------------------------------------
+
+_PROVENANCE_FIELDS = [
+    "model_name", "model_hash", "indexed_at", "library_versions",
+    "inference_dtype", "normalize_size", "embedding_dim",
+]
+
+
+def get_hit_qdrant_provenance(image_hash: str, settings: Settings) -> dict[str, dict]:
+    """Fetch full indexing-time provenance for one image hash from Qdrant.
+
+    Returns a dict keyed by mode ("altered", "semantic") containing all
+    provenance fields stored in the point payload when the image was indexed.
+    Missing collections are silently skipped.
+    """
+    client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+    collection_mode = {
+        settings.collection_sscd: "altered",
+        settings.collection_dino: "semantic",
+    }
+    result: dict[str, dict] = {}
+    for collection, mode in collection_mode.items():
+        try:
+            records, _ = client.scroll(
+                collection_name=collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="image_hash", match=MatchValue(value=image_hash))]
+                ),
+                limit=1,
+                with_payload=_PROVENANCE_FIELDS,
+                with_vectors=False,
+            )
+            if records:
+                result[mode] = {k: records[0].payload.get(k) for k in _PROVENANCE_FIELDS}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Provenance query failed on %s: %s", collection, exc)
+    return result
 
 
 # ---------------------------------------------------------------------------

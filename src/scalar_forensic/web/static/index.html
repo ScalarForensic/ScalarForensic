@@ -27,6 +27,365 @@
     </div>
   </div>
 
+  <!-- ── Semantic stats modal ── -->
+  <div class="stats-modal-backdrop" x-show="showSemanticStats" @click.self="showSemanticStats = false" @keydown.escape.window="showSemanticStats = false">
+    <div class="stats-modal">
+      <div class="stats-modal-header">
+        <span>DINOv2 Score Distribution</span>
+        <button class="stats-modal-close" @click="showSemanticStats = false">✕</button>
+      </div>
+
+      <!-- loading -->
+      <div x-show="semanticStatsLoading" class="stats-modal-body stats-modal-loading">Computing…</div>
+
+      <!-- error -->
+      <template x-if="!semanticStatsLoading && semanticStatsError">
+        <div class="stats-modal-body stats-modal-error" x-text="semanticStatsError"></div>
+      </template>
+
+      <!-- result -->
+      <template x-if="!semanticStatsLoading && semanticStats">
+        <div class="stats-modal-body">
+          <div class="stats-modal-subtitle">
+            <span x-text="shortName(selectedFile?.filename ?? '')"></span>
+            &nbsp;·&nbsp;
+            top <span x-text="semanticStats.count.toLocaleString()"></span> from collection
+          </div>
+
+          <!-- stats grid -->
+          <div class="stats-modal-grid">
+            <div class="stats-cell"><span class="stats-k">Min</span><span class="stats-v" x-text="semanticStats.min_score.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">Mean</span><span class="stats-v" x-text="semanticStats.mean.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">P10</span><span class="stats-v" x-text="semanticStats.p10.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">Std Dev</span><span class="stats-v" x-text="semanticStats.stdev.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">P25</span><span class="stats-v" x-text="semanticStats.p25.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">Max</span><span class="stats-v" x-text="semanticStats.max_score.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">Median</span><span class="stats-v semantic-val" x-text="semanticStats.median.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">P75</span><span class="stats-v" x-text="semanticStats.p75.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">P90</span><span class="stats-v" x-text="semanticStats.p90.toFixed(4)"></span></div>
+          </div>
+
+          <!-- histogram -->
+          <div class="stats-hist-wrap">
+            <div class="stats-hist">
+              <template x-for="(count, i) in semanticStats.histogram" :key="i">
+                <div class="stats-hist-bar"
+                     :style="`height: ${Math.max(2, Math.round(count / Math.max(...semanticStats.histogram) * 60))}px`"
+                     :class="{'stats-hist-bar-threshold': i === Math.min(19, Math.floor(thresholdSemantic * 20))}">
+                </div>
+              </template>
+            </div>
+            <div class="stats-hist-labels">
+              <span>0.0</span><span>0.25</span><span>0.5</span><span>0.75</span><span>1.0</span>
+            </div>
+          </div>
+
+          <!-- threshold context -->
+          <div class="stats-threshold-row">
+            <span class="stats-k">Current threshold</span>
+            <span class="stats-v accent-val" x-text="thresholdSemantic.toFixed(2)"></span>
+            <span class="stats-threshold-note"
+                  x-text="semanticStats.median > thresholdSemantic
+                    ? '(below median — catching broadly)'
+                    : '(above median — selective)'">
+            </span>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- ── Forensic Audit modal ── -->
+  <div class="audit-modal-backdrop" x-show="showAudit"
+       @click.self="showAudit=false"
+       @keydown.escape.window="showAudit=false">
+    <div class="audit-modal">
+
+      <div class="audit-modal-header">
+        <span>Forensic Audit Report</span>
+        <div class="audit-modal-header-btns">
+          <button class="btn-tiny" x-show="!auditLoading && !auditError"
+                  @click="exportAuditJson()">Copy JSON</button>
+          <button class="stats-modal-close" @click="showAudit=false">✕</button>
+        </div>
+      </div>
+
+      <div x-show="auditLoading" class="stats-modal-body stats-modal-loading">
+        Fetching audit data…
+      </div>
+
+      <template x-if="!auditLoading && auditError">
+        <div class="stats-modal-body stats-modal-error" x-text="auditError"></div>
+      </template>
+
+      <template x-if="!auditLoading && !auditError">
+        <div class="audit-body">
+
+          <!-- Integrity banner -->
+          <div class="audit-integrity-banner"
+               :class="auditIntegrity === null ? 'audit-banner-neutral'
+                     : auditIntegrity.clean    ? 'audit-banner-clean'
+                     :                           'audit-banner-warn'">
+            <template x-if="auditIntegrity === null">
+              <span>Integrity assessment unavailable — library version data not loaded</span>
+            </template>
+            <template x-if="auditIntegrity !== null && auditIntegrity.clean">
+              <span>✓ FORENSICALLY CLEAN — all model hashes and library versions match between query process and indexed data</span>
+            </template>
+            <template x-if="auditIntegrity !== null && !auditIntegrity.clean">
+              <span>
+                ⚠ INTEGRITY WARNING —
+                <span x-show="auditIntegrity.modelMismatch > 0"
+                      x-text="auditIntegrity.modelMismatch + ' model hash mismatch(es)'"></span>
+                <span x-show="auditIntegrity.modelMismatch > 0 && auditIntegrity.libMismatch > 0"> · </span>
+                <span x-show="auditIntegrity.libMismatch > 0"
+                      x-text="auditIntegrity.libMismatch + ' library version mismatch(es)'"></span>
+                — exact reproducibility cannot be guaranteed
+              </span>
+            </template>
+          </div>
+
+          <!-- ── Section: Analysis Image ── -->
+          <div class="audit-section">
+            <div class="audit-section-hdr">Analysis Image</div>
+
+            <div class="audit-sub-hdr">Identity</div>
+            <div class="audit-row">
+              <span class="audit-k">File</span>
+              <span class="audit-v" x-text="selectedFile?.filename || '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">SHA-256</span>
+              <span class="audit-v audit-hash" x-text="queryMeta?.hash_sha256 || '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">MD5</span>
+              <span class="audit-v audit-hash" x-text="queryMeta?.hash_md5 || '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">Dimensions</span>
+              <span class="audit-v"
+                    x-text="queryMeta?.width ? `${queryMeta.width} × ${queryMeta.height} px` : '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">File size</span>
+              <span class="audit-v"
+                    x-text="queryMeta?.size_bytes
+                      ? `${(queryMeta.size_bytes/1048576).toFixed(2)} MB (${queryMeta.size_bytes.toLocaleString()} bytes)`
+                      : '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">EXIF</span>
+              <span class="audit-v"
+                    x-text="queryMeta?.exif_geo_data ? 'Present — GPS data included'
+                           : queryMeta?.exif        ? 'Present — no GPS data'
+                           :                          'Not present'"></span>
+            </div>
+
+            <div class="audit-sub-hdr">Embedding Models (Query Process)</div>
+            <template x-if="embeddingModels.altered || embeddingModels.semantic">
+              <div>
+                <template x-for="mode in ['altered','semantic']" :key="mode">
+                  <template x-if="embeddingModels[mode]">
+                    <div class="audit-row" :class="{'audit-row-warn': _modelMismatch(mode)}">
+                      <span class="audit-k">
+                        <span class="badge" :class="`badge-${mode}`"
+                              x-text="mode==='altered'?'ALTER':'SEMAN'"></span>
+                      </span>
+                      <span class="audit-v audit-mono" x-text="embeddingModels[mode].name"></span>
+                      <span class="audit-hash-abbr"
+                            :title="embeddingModels[mode].hash"
+                            x-text="embeddingModels[mode].hash.slice(0,24)+'…'"></span>
+                      <span x-show="_modelMismatch(mode)" class="audit-warn-chip">⚠ hash differs</span>
+                    </div>
+                  </template>
+                </template>
+              </div>
+            </template>
+            <template x-if="!embeddingModels.altered && !embeddingModels.semantic">
+              <div class="audit-row">
+                <span class="audit-v audit-muted">Exact mode only — no embedding models used</span>
+              </div>
+            </template>
+
+            <div class="audit-sub-hdr">Library Versions (Query Process)</div>
+            <template x-if="auditQueryLibVersions">
+              <div>
+                <div class="audit-lib-header">
+                  <span class="audit-lib-col audit-col-lib">Library</span>
+                  <span class="audit-lib-col audit-col-ver">Query process</span>
+                  <span class="audit-lib-col audit-col-ver">At indexing</span>
+                  <span class="audit-lib-col audit-col-status"></span>
+                </div>
+                <template x-for="row in _auditLibRows()" :key="row.lib">
+                  <div class="audit-lib-row"
+                       :class="{'audit-row-warn': !row.match && row.indexed !== null}">
+                    <span class="audit-lib-col audit-col-lib" x-text="row.lib"></span>
+                    <span class="audit-lib-col audit-col-ver audit-mono"
+                          x-text="row.query || '—'"></span>
+                    <span class="audit-lib-col audit-col-ver audit-mono"
+                          x-text="row.indexed || '—'"></span>
+                    <span class="audit-lib-col audit-col-status"
+                          :class="row.indexed === null ? '' : row.match ? 'audit-ok-text' : 'audit-warn-text'"
+                          x-text="row.indexed === null ? '—' : row.match ? '✓' : '⚠'"></span>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <template x-if="!auditQueryLibVersions">
+              <div class="audit-row">
+                <span class="audit-v audit-muted">Library version data unavailable</span>
+              </div>
+            </template>
+          </div>
+
+          <!-- ── Section: Result Image ── -->
+          <div class="audit-section">
+            <div class="audit-section-hdr">Result Image</div>
+
+            <div class="audit-sub-hdr">Identity</div>
+            <div class="audit-row">
+              <span class="audit-k">Path</span>
+              <span class="audit-v audit-mono" x-text="selectedHit?.path || '—'"></span>
+            </div>
+            <div class="audit-row"
+                 :class="{'audit-row-ok': queryMeta?.hash_sha256 && selectedHit?.image_hash && queryMeta.hash_sha256 === selectedHit.image_hash}">
+              <span class="audit-k">SHA-256</span>
+              <span class="audit-v audit-hash"
+                    x-text="selectedHit?.image_hash || matchMeta?.hash_sha256 || '—'"></span>
+              <span x-show="queryMeta?.hash_sha256 && selectedHit?.image_hash && queryMeta.hash_sha256 === selectedHit.image_hash"
+                    class="audit-ok-chip">✓ exact file match</span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">Dimensions</span>
+              <span class="audit-v"
+                    x-text="matchMeta?.width ? `${matchMeta.width} × ${matchMeta.height} px` : '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">File size</span>
+              <span class="audit-v"
+                    x-text="matchMeta?.size_bytes
+                      ? `${(matchMeta.size_bytes/1048576).toFixed(2)} MB (${matchMeta.size_bytes.toLocaleString()} bytes)`
+                      : '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">EXIF</span>
+              <span class="audit-v"
+                    x-text="selectedHit?.exif_geo_data ? 'Present — GPS data included'
+                           : selectedHit?.exif        ? 'Present — no GPS data'
+                           :                            'Not present'"></span>
+            </div>
+            <div class="audit-row" x-show="_firstIndexedAt()">
+              <span class="audit-k">Indexed</span>
+              <span class="audit-v audit-mono" x-text="_firstIndexedAt()"></span>
+            </div>
+
+            <div class="audit-sub-hdr">Similarity Scores</div>
+            <template x-for="row in _scoreRows()" :key="row.mode">
+              <div class="audit-score-row">
+                <span class="badge" :class="`badge-${row.mode}`"
+                      x-text="row.mode==='exact'?'EXACT':row.mode==='altered'?'ALTER':'SEMAN'"></span>
+                <span class="audit-score-pair">
+                  <span class="audit-score-k">Similarity</span>
+                  <span class="audit-score-v" x-text="row.similarity >= 1 ? '1.0000' : row.similarity.toFixed(4)"></span>
+                </span>
+                <span class="audit-score-sep">·</span>
+                <span class="audit-score-pair">
+                  <span class="audit-score-k">Cosine dist.</span>
+                  <span class="audit-score-v" x-text="row.distance.toFixed(4)"></span>
+                </span>
+                <span class="audit-score-note" x-text="'(' + row.note + ')'"></span>
+              </div>
+            </template>
+
+            <div class="audit-sub-hdr">Indexing Provenance</div>
+            <template x-for="mode in ['altered','semantic']" :key="mode">
+              <template x-if="auditHitProvenance?.[mode]">
+                <div class="audit-prov-block"
+                     :class="{'audit-row-warn': _modelMismatch(mode)}">
+                  <div class="audit-prov-badge">
+                    <span class="badge" :class="`badge-${mode}`"
+                          x-text="mode==='altered'?'ALTER':'SEMAN'"></span>
+                  </div>
+                  <div class="audit-prov-detail">
+                    <div class="audit-row">
+                      <span class="audit-k">Model</span>
+                      <span class="audit-v audit-mono"
+                            x-text="auditHitProvenance[mode].model_name || '—'"></span>
+                    </div>
+                    <div class="audit-row">
+                      <span class="audit-k">Hash</span>
+                      <span class="audit-v audit-hash"
+                            :title="auditHitProvenance[mode].model_hash"
+                            x-text="auditHitProvenance[mode].model_hash || '—'"></span>
+                      <span x-show="_modelMismatch(mode)"
+                            class="audit-warn-chip">⚠ differs from query</span>
+                    </div>
+                    <div class="audit-row">
+                      <span class="audit-k">Indexed</span>
+                      <span class="audit-v audit-mono"
+                            x-text="auditHitProvenance[mode].indexed_at || '—'"></span>
+                    </div>
+                    <div class="audit-row">
+                      <span class="audit-k">Config</span>
+                      <span class="audit-v">
+                        <span x-text="auditHitProvenance[mode].inference_dtype || '—'"></span>
+                        ·
+                        <span x-text="(auditHitProvenance[mode].normalize_size || '—') + ' px input'"></span>
+                        ·
+                        <span x-text="(auditHitProvenance[mode].embedding_dim || '—') + '-dim'"></span>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </template>
+            <template x-if="auditHitProvenance && !auditHitProvenance.altered && !auditHitProvenance.semantic">
+              <div class="audit-row">
+                <span class="audit-v audit-muted">
+                  Indexing provenance not found — image may have been indexed without provenance metadata
+                </span>
+              </div>
+            </template>
+          </div>
+
+          <!-- ── Section: Search Parameters ── -->
+          <div class="audit-section">
+            <div class="audit-section-hdr">Search Parameters</div>
+            <div class="audit-row">
+              <span class="audit-k">Compared</span>
+              <span class="audit-v audit-mono" x-text="provenance?.timestamp || '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">Modes</span>
+              <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+                <template x-for="m in (provenance?.modes ?? [])" :key="m">
+                  <span class="badge" :class="`badge-${m}`"
+                        x-text="m==='exact'?'EXACT':m==='altered'?'ALTER':'SEMAN'"></span>
+                </template>
+              </div>
+            </div>
+            <div class="audit-row" x-show="provenance?.modes?.includes('altered')">
+              <span class="audit-k">Thr. ALTER</span>
+              <span class="audit-v audit-mono"
+                    x-text="provenance?.threshold_altered?.toFixed(4) ?? '—'"></span>
+            </div>
+            <div class="audit-row" x-show="provenance?.modes?.includes('semantic')">
+              <span class="audit-k">Thr. SEMAN</span>
+              <span class="audit-v audit-mono"
+                    x-text="provenance?.threshold_semantic?.toFixed(4) ?? '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">Result limit</span>
+              <span class="audit-v audit-mono" x-text="provenance?.limit ?? '—'"></span>
+            </div>
+          </div>
+
+        </div><!-- /audit-body -->
+      </template>
+    </div><!-- /audit-modal -->
+  </div><!-- /audit-modal-backdrop -->
+
   <!-- ── Header ── -->
   <header>
     <img class="header-logo" src="/static/logo.svg" alt="ScalarForensic" height="30">
@@ -217,7 +576,19 @@
 
     <!-- Panel 2: Query image -->
     <div class="image-panel">
-      <div class="panel-header">Query Image</div>
+      <div class="panel-header">
+        Query Image
+        <template x-if="analysisRunModes.includes('semantic') && selectedFileId && !(selectedFile?.errors?.length > 0)">
+          <button class="btn-tiny" :disabled="semanticStatsLoading"
+                  @click="calcSemanticStats()"
+                  x-text="semanticStatsLoading ? '…' : 'Dist Stats'"></button>
+        </template>
+        <template x-if="selectedFileId && selectedHit && !(selectedFile?.errors?.length > 0)">
+          <button class="btn-tiny" :disabled="auditLoading"
+                  @click="openAudit()"
+                  x-text="auditLoading ? '…' : 'Audit'"></button>
+        </template>
+      </div>
 
       <template x-if="!selectedFileId">
         <div class="placeholder">Select a file</div>
@@ -266,6 +637,32 @@
               <span x-show="queryMeta?.exif_geo_data" class="meta-tag">GPS</span>
               <span x-show="queryMeta?.exif && !queryMeta?.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
               <span x-show="!queryMeta || (!queryMeta.exif && !queryMeta.exif_geo_data)" class="muted-text">—</span>
+            </div>
+          </div>
+          <div class="emb-box" x-show="embeddingModels.altered || embeddingModels.semantic">
+            <div class="emb-box-hdr" @click="showEmbModels = !showEmbModels">
+              Embedding Models
+              <span class="emb-chevron" x-text="showEmbModels ? '▴' : '▾'"></span>
+            </div>
+            <div x-show="showEmbModels">
+              <template x-if="embeddingModels.altered">
+                <div class="emb-row">
+                  <span class="badge badge-altered">ALTER</span>
+                  <span class="emb-name" x-text="embeddingModels.altered.name"></span>
+                  <span class="emb-hash"
+                        :title="embeddingModels.altered.hash"
+                        x-text="embeddingModels.altered.hash.slice(0,16) + '…'"></span>
+                </div>
+              </template>
+              <template x-if="embeddingModels.semantic">
+                <div class="emb-row">
+                  <span class="badge badge-semantic">SEMAN</span>
+                  <span class="emb-name" x-text="embeddingModels.semantic.name"></span>
+                  <span class="emb-hash"
+                        :title="embeddingModels.semantic.hash"
+                        x-text="embeddingModels.semantic.hash.slice(0,16) + '…'"></span>
+                </div>
+              </template>
             </div>
           </div>
           <div class="meta-box" x-show="_metaItems(queryMeta, matchMeta).length > 0">
@@ -348,6 +745,35 @@
               <span x-show="selectedHit?.exif_geo_data" class="meta-tag">GPS</span>
               <span x-show="selectedHit?.exif && !selectedHit?.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
               <span x-show="!selectedHit || (!selectedHit.exif && !selectedHit.exif_geo_data)" class="muted-text">—</span>
+            </div>
+          </div>
+          <div class="emb-box"
+               x-show="selectedHit && (selectedHit.model_provenance?.altered || selectedHit.model_provenance?.semantic)">
+            <div class="emb-box-hdr" @click="showEmbModels = !showEmbModels">
+              Embedding Models
+              <span class="emb-chevron" x-text="showEmbModels ? '▴' : '▾'"></span>
+            </div>
+            <div x-show="showEmbModels">
+              <template x-if="selectedHit?.model_provenance?.altered">
+                <div class="emb-row"
+                     :class="{'emb-mismatch': embeddingModels.altered && embeddingModels.altered.hash !== selectedHit.model_provenance.altered.hash}">
+                  <span class="badge badge-altered">ALTER</span>
+                  <span class="emb-name" x-text="selectedHit.model_provenance.altered.name"></span>
+                  <span class="emb-hash"
+                        :title="selectedHit.model_provenance.altered.hash"
+                        x-text="selectedHit.model_provenance.altered.hash.slice(0,16) + '…'"></span>
+                </div>
+              </template>
+              <template x-if="selectedHit?.model_provenance?.semantic">
+                <div class="emb-row"
+                     :class="{'emb-mismatch': embeddingModels.semantic && embeddingModels.semantic.hash !== selectedHit.model_provenance.semantic.hash}">
+                  <span class="badge badge-semantic">SEMAN</span>
+                  <span class="emb-name" x-text="selectedHit.model_provenance.semantic.name"></span>
+                  <span class="emb-hash"
+                        :title="selectedHit.model_provenance.semantic.hash"
+                        x-text="selectedHit.model_provenance.semantic.hash.slice(0,16) + '…'"></span>
+                </div>
+              </template>
             </div>
           </div>
           <div class="meta-box" x-show="_metaItems(matchMeta, queryMeta).length > 0">
@@ -499,9 +925,24 @@ function sfn() {
     queryError: '',
     _queryTimer: null,
 
+    // Semantic stats modal
+    semanticStats: null,
+    semanticStatsLoading: false,
+    semanticStatsError: null,
+    showSemanticStats: false,
+
+    // Forensic audit modal
+    showAudit: false,
+    auditLoading: false,
+    auditError: null,
+    auditQueryLibVersions: null,
+    auditHitProvenance: null,
+
     // Provenance
     provenance: null,
     showProvenance: false,
+    embeddingModels: {},
+    showEmbModels: false,
     showPasteArea: false,
     pasteBuffer: '',
 
@@ -544,6 +985,13 @@ function sfn() {
         if ('semantic' in h.scores && this.hitsFilterSemantic) return true;
         return false;
       });
+    },
+    get auditIntegrity() {
+      if (!this.auditQueryLibVersions) return null;
+      const rows = this._auditLibRows();
+      const libMismatch = rows.filter(r => !r.match && r.indexed !== null).length;
+      const modelMismatch = ['altered', 'semantic'].filter(m => this._modelMismatch(m)).length;
+      return { libMismatch, modelMismatch, clean: libMismatch === 0 && modelMismatch === 0 };
     },
 
     // ── Helpers ───────────────────────────────────────────────────────────
@@ -719,6 +1167,7 @@ function sfn() {
         const d = await resp.json();
         this.results = Array.isArray(d.results) ? d.results : [];
         this.provenance = d.provenance ?? null;
+        this.embeddingModels = d.embedding_models ?? {};
 
         // Re-sync selected hit after re-query
         if (this.selectedFileId) {
@@ -795,6 +1244,28 @@ function sfn() {
       } catch { this.matchMeta = null; }
     },
 
+    // ── Semantic stats ────────────────────────────────────────────────────
+    async calcSemanticStats() {
+      if (!this.sessionId || !this.selectedFileId) return;
+      this.semanticStats = null;
+      this.semanticStatsError = null;
+      this.semanticStatsLoading = true;
+      this.showSemanticStats = true;
+      try {
+        const resp = await fetch(`/api/semantic-stats/${this.sessionId}/${this.selectedFileId}`);
+        if (!resp.ok) {
+          const d = await resp.json().catch(() => ({}));
+          this.semanticStatsError = d.detail || `Stats request failed (HTTP ${resp.status})`;
+        } else {
+          this.semanticStats = await resp.json();
+        }
+      } catch (e) {
+        this.semanticStatsError = e?.message || 'Stats request failed';
+      } finally {
+        this.semanticStatsLoading = false;
+      }
+    },
+
     // ── Provenance ────────────────────────────────────────────────────────
     async copyProvenance() {
       if (!this.provenance) return;
@@ -816,6 +1287,148 @@ function sfn() {
       this.showPasteArea = false;
       this.pasteBuffer = '';
       this.runQuery();
+    },
+
+    // ── Forensic Audit ────────────────────────────────────────────────────
+    async openAudit() {
+      if (!this.sessionId || !this.selectedFileId || !this.selectedHit) return;
+      this.showAudit = true;
+      this.auditLoading = true;
+      this.auditError = null;
+      this.auditQueryLibVersions = null;
+      this.auditHitProvenance = null;
+      try {
+        const hash = this.selectedHit.image_hash;
+        const [lvResp, hpResp] = await Promise.all([
+          fetch('/api/library-versions'),
+          hash ? fetch(`/api/hit-provenance?image_hash=${encodeURIComponent(hash)}`) : Promise.resolve(null),
+        ]);
+        if (!lvResp.ok) throw new Error(`Library versions request failed (HTTP ${lvResp.status})`);
+        this.auditQueryLibVersions = await lvResp.json();
+        if (hpResp?.ok) this.auditHitProvenance = await hpResp.json();
+        else if (hpResp) this.auditHitProvenance = {};
+      } catch (e) {
+        this.auditError = e?.message || 'Audit data fetch failed';
+      } finally {
+        this.auditLoading = false;
+      }
+    },
+
+    async exportAuditJson() {
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(this._buildAuditReport(), null, 2));
+      } catch { /* clipboard unavailable */ }
+    },
+
+    _dbLibVersions() {
+      if (!this.auditHitProvenance) return {};
+      for (const prov of Object.values(this.auditHitProvenance)) {
+        if (prov?.library_versions) return prov.library_versions;
+      }
+      return {};
+    },
+
+    _auditLibRows() {
+      const qLibs = this.auditQueryLibVersions ?? {};
+      const dbLibs = this._dbLibVersions();
+      const all = [...new Set([...Object.keys(qLibs), ...Object.keys(dbLibs)])];
+      return all.map(lib => ({
+        lib,
+        query: qLibs[lib] ?? null,
+        indexed: dbLibs[lib] ?? null,
+        match: qLibs[lib] === dbLibs[lib],
+      }));
+    },
+
+    _modelMismatch(mode) {
+      const qHash = this.embeddingModels[mode]?.hash;
+      const dbHash = this.selectedHit?.model_provenance?.[mode]?.hash;
+      return !!(qHash && dbHash && qHash !== dbHash);
+    },
+
+    _firstIndexedAt() {
+      if (!this.auditHitProvenance) return null;
+      for (const prov of Object.values(this.auditHitProvenance)) {
+        if (prov?.indexed_at) return prov.indexed_at;
+      }
+      return null;
+    },
+
+    _scoreRows() {
+      return Object.entries(this.selectedHit?.scores ?? {}).map(([mode, sim]) => ({
+        mode,
+        similarity: sim,
+        distance: mode === 'exact' ? 0 : 1 - sim,
+        note: mode === 'exact' ? 'identical file'
+            : sim >= 0.99 ? 'near-identical'
+            : sim >= 0.90 ? 'very high similarity'
+            : sim >= 0.75 ? 'high similarity'
+            : sim >= 0.55 ? 'moderate similarity'
+            :               'low similarity',
+      }));
+    },
+
+    _buildAuditReport() {
+      const hit = this.selectedHit;
+      const scores = {};
+      for (const row of this._scoreRows()) {
+        scores[row.mode] = { similarity: row.similarity, cosine_distance: parseFloat(row.distance.toFixed(6)) };
+      }
+      const libRows = this._auditLibRows();
+      const libComp = {};
+      for (const r of libRows) libComp[r.lib] = { query: r.query, indexed: r.indexed, match: r.match };
+      const modelComp = {};
+      for (const mode of ['altered', 'semantic']) {
+        const qHash = this.embeddingModels[mode]?.hash ?? null;
+        const dbHash = hit?.model_provenance?.[mode]?.hash ?? null;
+        if (qHash !== null || dbHash !== null)
+          modelComp[mode] = { query_hash: qHash, indexed_hash: dbHash, match: qHash === dbHash };
+      }
+      const notes = [];
+      for (const r of libRows)
+        if (!r.match && r.indexed !== null)
+          notes.push(`${r.lib}: query process has ${r.query}, indexed with ${r.indexed}`);
+      for (const [mode, info] of Object.entries(modelComp))
+        if (!info.match)
+          notes.push(`${mode} model hash: query ${info.query_hash?.slice(0,16)}… vs indexed ${info.indexed_hash?.slice(0,16)}…`);
+      return {
+        sfn_report_version: '1.0',
+        report_generated_utc: new Date().toISOString(),
+        analysis_image: {
+          filename: this.selectedFile?.filename ?? null,
+          sha256: this.queryMeta?.hash_sha256 ?? null,
+          md5: this.queryMeta?.hash_md5 ?? null,
+          dimensions_px: this.queryMeta?.width ? `${this.queryMeta.width}x${this.queryMeta.height}` : null,
+          size_bytes: this.queryMeta?.size_bytes ?? null,
+          exif_present: this.queryMeta?.exif ?? null,
+          exif_geo_data: this.queryMeta?.exif_geo_data ?? null,
+          embedding_models: this.embeddingModels,
+          library_versions: this.auditQueryLibVersions,
+        },
+        result_image: {
+          path: hit?.path ?? null,
+          sha256: hit?.image_hash ?? null,
+          dimensions_px: this.matchMeta?.width ? `${this.matchMeta.width}x${this.matchMeta.height}` : null,
+          size_bytes: this.matchMeta?.size_bytes ?? null,
+          exif_present: this.matchMeta?.exif ?? null,
+          exif_geo_data: this.matchMeta?.exif_geo_data ?? null,
+          similarity_scores: scores,
+          indexing_provenance: this.auditHitProvenance,
+        },
+        search_parameters: {
+          timestamp_utc: this.provenance?.timestamp ?? null,
+          modes: this.provenance?.modes ?? null,
+          threshold_altered: this.provenance?.threshold_altered ?? null,
+          threshold_semantic: this.provenance?.threshold_semantic ?? null,
+          result_limit: this.provenance?.limit ?? null,
+        },
+        integrity_assessment: {
+          model_hashes: modelComp,
+          library_versions: libComp,
+          forensically_clean: this.auditIntegrity?.clean ?? null,
+          discrepancy_notes: notes,
+        },
+      };
     },
 
     // ── Reset ─────────────────────────────────────────────────────────────
@@ -845,6 +1458,15 @@ function sfn() {
       this.hitsFilterAltered = true;
       this.hitsFilterSemantic = true;
       this.hitsUnified = true;
+      this.semanticStats = null;
+      this.semanticStatsLoading = false;
+      this.semanticStatsError = null;
+      this.showSemanticStats = false;
+      this.showAudit = false;
+      this.auditLoading = false;
+      this.auditError = null;
+      this.auditQueryLibVersions = null;
+      this.auditHitProvenance = null;
     },
   };
 }
