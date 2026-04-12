@@ -1,7 +1,9 @@
-"""Recursive image file discovery."""
+"""Recursive image and container file discovery."""
 
 from collections.abc import Iterator
 from pathlib import Path
+
+from scalar_forensic.extractor import CONTAINER_EXTENSIONS
 
 IMAGE_EXTENSIONS = frozenset(
     {
@@ -45,12 +47,24 @@ def scan_images(root: Path) -> Iterator[Path]:
             yield path
 
 
-def scan_all_files(root: Path) -> Iterator[tuple[Path, bool]]:
-    """Recursively yield *(path, is_image)* for every regular file under *root*.
+def scan_all_files(root: Path) -> Iterator[tuple[Path, str]]:
+    """Recursively yield *(path, file_type)* for every regular file under *root*.
 
-    ``is_image`` is True when the file extension is in the supported set.
+    *file_type* is one of:
+
+    * ``"image"`` — a directly-supported raster image format.
+    * ``"container"`` — a container format (ZIP, PDF, DOCX, ODF) that may hold
+      embedded images and will be processed by the extractor.
+    * ``"other"`` — unrecognised format; skipped during ingestion.
     """
-    extensions = IMAGE_EXTENSIONS | (_HEIF_EXTENSIONS if _HEIF_AVAILABLE else frozenset())
+    image_extensions = IMAGE_EXTENSIONS | (_HEIF_EXTENSIONS if _HEIF_AVAILABLE else frozenset())
     for path in root.rglob("*"):
-        if path.is_file():
-            yield path, path.suffix.lower() in extensions
+        if not path.is_file():
+            continue
+        suffix = path.suffix.lower()
+        if suffix in image_extensions:
+            yield path, "image"
+        elif suffix in CONTAINER_EXTENSIONS:
+            yield path, "container"
+        else:
+            yield path, "other"

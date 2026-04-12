@@ -25,6 +25,7 @@ from qdrant_client import QdrantClient
 
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import extract_exif_detailed, get_library_versions
+from scalar_forensic.extractor import CONTAINER_EXTENSIONS, extract_container
 from scalar_forensic.web.pipeline import (
     QueryProvenance,
     analyze_session,
@@ -207,6 +208,11 @@ async def query(
                             "exif_geo_data": h.exif_geo_data,
                             "image_hash": h.image_hash,
                             "model_provenance": h.model_provenance,
+                            "container_hash": h.container_hash,
+                            "container_path": h.container_path,
+                            "container_type": h.container_type,
+                            "container_item_name": h.container_item_name,
+                            "extraction_kind": h.extraction_kind,
                         }
                         for h in r.hits
                     ],
@@ -255,8 +261,47 @@ async def thumbnail(sha256: str) -> FileResponse:
 async def hit_image(path: str) -> FileResponse:
     """Serve a hit image from the server filesystem.
 
-    Security: only image extensions, resolved absolute path.
+    For direct images: resolves the path and returns the file.
+    For container-extracted images (path contains ``::``): re-extracts the
+    specific item from the container on demand.
+
+    Security: only absolute resolved paths; image-only extensions for direct files.
     """
+    # Container virtual path: "/abs/root.zip::inner/photo.jpg"
+    if "::" in path:
+        sep_idx = path.index("::")
+        container_path_str = path[:sep_idx]
+        item_name = path[sep_idx + 2:]
+        cp = Path(container_path_str).resolve()
+        if not cp.is_absolute() or not cp.exists() or not cp.is_file():
+            raise HTTPException(status_code=404, detail="Container file not found")
+        if cp.suffix.lower() not in CONTAINER_EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Not a container file")
+        settings = Settings()
+        try:
+            extracted = extract_container(
+                cp,
+                max_depth=settings.max_container_depth,
+                pdf_render_dpi=settings.pdf_render_dpi,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Extraction failed: {exc}") from exc
+        match = next((img for img in extracted if img.item_name == item_name), None)
+        if match is None:
+            raise HTTPException(status_code=404, detail="Item not found in container")
+        tmp = tempfile.NamedTemporaryFile(
+            delete=False, suffix=Path(item_name.split("::")[-1]).suffix or ".png"
+        )
+        try:
+            tmp.write(match.data)
+        finally:
+            tmp.close()
+        return FileResponse(
+            tmp.name,
+            filename=Path(item_name.split("::")[-1]).name,
+            background=_cleanup_background(tmp.name),
+        )
+
     p = Path(path).resolve()
     if not p.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
@@ -265,6 +310,80 @@ async def hit_image(path: str) -> FileResponse:
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(p, filename=p.name)
+
+
+@app.get("/api/container-download")
+async def container_download(path: str) -> FileResponse:
+    """Serve a container file (ZIP / PDF / DOCX / ODF) from the server filesystem.
+
+    Security: only absolute resolved paths; container-only extensions.
+    """
+    p = Path(path).resolve()
+    if not p.is_absolute():
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if p.suffix.lower() not in CONTAINER_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Not a container file")
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(p, filename=p.name)
+
+
+@app.get("/api/container-siblings")
+async def container_siblings(container_hash: str, collection: str = "sscd") -> JSONResponse:
+    """Return all images in Qdrant that share the same immediate parent container.
+
+    :param container_hash: SHA-256 of the immediate parent container.
+    :param collection: Which Qdrant collection to query (``"sscd"`` or ``"dino"``).
+    """
+    if not re.fullmatch(r"[0-9a-f]{64}", container_hash):
+        raise HTTPException(status_code=400, detail="Invalid container hash")
+    settings = Settings()
+    coll = settings.collection_sscd if collection == "sscd" else settings.collection_dino
+    from qdrant_client.models import FieldCondition, Filter, MatchValue  # noqa: PLC0415
+    client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+    try:
+        records, _ = client.scroll(
+            collection_name=coll,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key="container_hash", match=MatchValue(value=container_hash))
+                ]
+            ),
+            limit=100,
+            with_payload=[
+                "image_hash",
+                "image_path",
+                "container_item_name",
+                "extraction_kind",
+            ],
+            with_vectors=False,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Qdrant query failed: {exc}") from exc
+    return JSONResponse(
+        [
+            {
+                "image_hash": r.payload.get("image_hash"),
+                "image_path": r.payload.get("image_path"),
+                "container_item_name": r.payload.get("container_item_name"),
+                "extraction_kind": r.payload.get("extraction_kind"),
+            }
+            for r in records
+        ]
+    )
+
+
+def _cleanup_background(path_str: str):
+    """Return a BackgroundTask that deletes a temp file after the response is sent."""
+    from starlette.background import BackgroundTask  # noqa: PLC0415
+
+    def _delete():
+        try:
+            Path(path_str).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    return BackgroundTask(_delete)
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +435,12 @@ async def hit_provenance(image_hash: str) -> JSONResponse:
 
 @app.get("/api/query-metadata/{session_id}/{file_id}")
 async def query_metadata(session_id: str, file_id: str) -> JSONResponse:
-    """Detailed metadata for an uploaded query image."""
+    """Detailed metadata for an uploaded query file.
+
+    For regular images: EXIF + hash + dimension metadata.
+    For container-root entries: container-level metadata (no EXIF).
+    For container-extracted images: image metadata plus container provenance fields.
+    """
     session = get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -325,10 +449,29 @@ async def query_metadata(session_id: str, file_id: str) -> JSONResponse:
         raise HTTPException(status_code=404, detail="File not found")
 
     data = entry.temp_path.read_bytes()
+
+    # Container-root entries are not images — return minimal metadata.
+    if entry.container_type is not None and entry.parent_file_id is None:
+        meta: dict = {
+            "filename": entry.filename,
+            "is_container": True,
+            "container_type": entry.container_type,
+            "size_bytes": len(data),
+            "hash_sha256": entry.file_hash or hashlib.sha256(data).hexdigest(),
+            "hash_md5": entry.file_hash_md5 or hashlib.md5(data).hexdigest(),  # noqa: S324
+        }
+        return JSONResponse(meta)
+
     meta = extract_exif_detailed(data)
     meta["filename"] = entry.filename
     meta["hash_sha256"] = entry.file_hash or hashlib.sha256(data).hexdigest()
     meta["hash_md5"] = entry.file_hash_md5 or hashlib.md5(data).hexdigest()  # noqa: S324
+    # Container provenance for extracted images.
+    if entry.parent_file_id is not None:
+        meta["parent_file_id"] = entry.parent_file_id
+        meta["container_type"] = entry.container_type
+        meta["container_item_name"] = entry.container_item_name
+        meta["extraction_kind"] = entry.extraction_kind
     return JSONResponse(meta)
 
 

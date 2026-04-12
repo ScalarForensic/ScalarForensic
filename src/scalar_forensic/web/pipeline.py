@@ -8,8 +8,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import statistics as _statistics
+import tempfile
+import uuid
 from collections.abc import Generator
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
@@ -22,6 +25,7 @@ from scalar_forensic.embedder import (
     load_embedder,
     preprocess_batch,
 )
+from scalar_forensic.extractor import CONTAINER_EXTENSIONS, extract_container
 from scalar_forensic.web.session import FileEntry, Session
 
 logger = logging.getLogger(__name__)
@@ -78,12 +82,70 @@ class ProgressEvent:
     session_id: str = ""
 
 
+def _expand_containers(session: Session, settings: Settings) -> None:
+    """Expand container FileEntries into per-image entries in place.
+
+    Container entries (ZIP / PDF / DOCX / ODF) are kept in the session so they
+    remain downloadable via ``/api/query-image``.  Extracted image entries are
+    inserted after their container entry and reference it via ``parent_file_id``.
+    The container entry's ``container_type`` is set to flag it as non-embeddable.
+    """
+    new_files: list[FileEntry] = []
+    for entry in session.files:
+        suffix = entry.temp_path.suffix.lower()
+        if suffix not in CONTAINER_EXTENSIONS:
+            new_files.append(entry)
+            continue
+
+        # Mark the container entry itself (kept for download).
+        entry.container_type = suffix.lstrip(".")
+        new_files.append(entry)
+
+        try:
+            extracted = extract_container(
+                entry.temp_path,
+                max_depth=settings.max_container_depth,
+                pdf_render_dpi=settings.pdf_render_dpi,
+            )
+        except Exception as exc:  # noqa: BLE001
+            entry.error = f"container extraction failed: {exc}"
+            continue
+
+        if not extracted:
+            entry.error = "no images found in container"
+            continue
+
+        for img in extracted:
+            img_suffix = Path(img.item_name).suffix or ".png"
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=img_suffix)
+            try:
+                tmp.write(img.data)
+            finally:
+                tmp.close()
+
+            child_entry = FileEntry(
+                file_id=str(uuid.uuid4()),
+                filename=f"{entry.filename}::{img.item_name}",
+                temp_path=Path(tmp.name),
+                parent_file_id=entry.file_id,
+                container_type=img.parent_type,
+                container_item_name=img.item_name,
+                extraction_kind=img.extraction_kind,
+            )
+            new_files.append(child_entry)
+
+    session.files = new_files
+
+
 def analyze_session(
     session: Session,
     modes: list[str],
     settings: Settings,
 ) -> Generator[ProgressEvent]:
     """Hash and embed every file in the session. Yields progress events."""
+    # Expand any uploaded container files into per-image entries first.
+    _expand_containers(session, settings)
+
     need_sscd = "altered" in modes
     need_dino = "semantic" in modes
 
@@ -99,8 +161,14 @@ def analyze_session(
         except Exception as exc:  # noqa: BLE001
             yield ProgressEvent(type="error", message=f"DINOv2 model load failed: {exc}")
 
-    total = len(session.files)
-    for i, entry in enumerate(session.files):
+    # Only embed non-container entries (container entries are kept for download but
+    # cannot be embedded directly).
+    embeddable = [
+        e for e in session.files
+        if e.parent_file_id is not None or e.container_type is None
+    ]
+    total = len(embeddable)
+    for i, entry in enumerate(embeddable):
         yield ProgressEvent(
             type="progress",
             current=i,
@@ -128,7 +196,7 @@ def analyze_session(
                 message=str(exc),
             )
 
-    yield ProgressEvent(type="done", total=total, session_id=session.session_id)
+    yield ProgressEvent(type="done", total=len(session.files), session_id=session.session_id)
 
 
 def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
@@ -164,6 +232,12 @@ class Hit:
     exif_geo_data: bool | None = None
     image_hash: str | None = None  # SHA-256, used to request /api/thumbnail/{hash}
     model_provenance: dict = field(default_factory=dict)  # mode → {name, hash} from Qdrant payload
+    # Container provenance — populated when the indexed image came from a container.
+    container_hash: str | None = None
+    container_path: str | None = None
+    container_type: str | None = None
+    container_item_name: str | None = None
+    extraction_kind: str | None = None
 
     def best_score(self) -> float:
         return max(self.scores.values(), default=0.0)
@@ -220,6 +294,13 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
             existing.image_hash = h.image_hash
         for mode, provenance in h.model_provenance.items():
             existing.model_provenance.setdefault(mode, provenance)
+        # Carry container fields from the first occurrence.
+        if h.container_hash and not existing.container_hash:
+            existing.container_hash = h.container_hash
+            existing.container_path = h.container_path
+            existing.container_type = h.container_type
+            existing.container_item_name = h.container_item_name
+            existing.extraction_kind = h.extraction_kind
     else:
         dest[h.path] = h
 
@@ -249,6 +330,11 @@ def query_session(
     results: list[FileResult] = []
 
     for entry in session.files:
+        # Container-root entries are kept in the session for download but have no
+        # embeddings — skip them in the query loop.
+        if entry.container_type is not None and entry.parent_file_id is None:
+            continue
+
         if entry.error:
             results.append(
                 FileResult(
@@ -355,6 +441,11 @@ def _query_exact(
                     "exif_geo_data",
                     "model_name",
                     "model_hash",
+                    "container_hash",
+                    "container_path",
+                    "container_type",
+                    "container_item_name",
+                    "extraction_kind",
                 ],
                 with_vectors=False,
             )
@@ -373,6 +464,11 @@ def _query_exact(
                             exif_geo_data=r.payload.get("exif_geo_data"),
                             image_hash=r.payload.get("image_hash"),
                             model_provenance=mp,
+                            container_hash=r.payload.get("container_hash"),
+                            container_path=r.payload.get("container_path"),
+                            container_type=r.payload.get("container_type"),
+                            container_item_name=r.payload.get("container_item_name"),
+                            extraction_kind=r.payload.get("extraction_kind"),
                         )
                     )
                 else:
@@ -436,6 +532,11 @@ def _query_vector(
                 "exif_geo_data",
                 "model_name",
                 "model_hash",
+                "container_hash",
+                "container_path",
+                "container_type",
+                "container_item_name",
+                "extraction_kind",
             ],
         )
         hits = []
@@ -453,6 +554,11 @@ def _query_vector(
                     exif_geo_data=r.payload.get("exif_geo_data"),
                     image_hash=r.payload.get("image_hash"),
                     model_provenance=mp,
+                    container_hash=r.payload.get("container_hash"),
+                    container_path=r.payload.get("container_path"),
+                    container_type=r.payload.get("container_type"),
+                    container_item_name=r.payload.get("container_item_name"),
+                    extraction_kind=r.payload.get("extraction_kind"),
                 )
             )
         return hits, []

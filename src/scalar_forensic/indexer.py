@@ -66,6 +66,12 @@ class Indexer:
                 field_name="image_hash_md5",
                 field_schema=PayloadSchemaType.KEYWORD,
             )
+        if "container_hash" not in schema:
+            self.client.create_payload_index(
+                collection_name=self.collection,
+                field_name="container_hash",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
 
     def get_indexed_hashes(self, hashes: list[str]) -> set[str]:
         """Return the subset of hashes that are already in the collection."""
@@ -105,8 +111,23 @@ class Indexer:
         shared_metadata: dict,
         exif_payloads: dict[Path, dict] | None = None,
         image_hashes_md5: list[str] | None = None,
+        virtual_paths: list[str | None] | None = None,
+        container_payloads: list[dict | None] | None = None,
     ) -> None:
-        """Upsert vectors with full forensic metadata payload."""
+        """Upsert vectors with full forensic metadata payload.
+
+        :param virtual_paths: When provided, each non-None entry overrides the
+            ``image_path`` stored in Qdrant for that index.  Used for images
+            extracted from containers, where the logical path is a virtual
+            ``/root_container.zip::inner/photo.jpg`` string rather than a real
+            filesystem path.
+        :param container_payloads: Per-image dicts of container metadata fields
+            (``container_hash``, ``container_path``, ``container_type``,
+            ``container_item_name``, ``extraction_kind``).  When present the UUID
+            is derived from ``image_hash + "::" + container_hash + "::" +
+            container_item_name`` so that the same image bytes in two different
+            containers produce two distinct Qdrant points.
+        """
         if not len(image_paths) == len(image_hashes) == len(embeddings):
             raise ValueError(
                 f"Batch length mismatch: paths={len(image_paths)}, "
@@ -118,28 +139,47 @@ class Indexer:
                 f"sha256={len(image_hashes)}, md5={len(image_hashes_md5)}"
             )
         indexed_at = datetime.now(UTC).isoformat()
-        points = [
-            PointStruct(
-                id=str(uuid.uuid5(uuid.NAMESPACE_URL, image_hash)),
-                vector=embedding,
-                payload={
-                    # Forensic identifiers
-                    "image_hash": image_hash,
-                    **({"image_hash_md5": image_hashes_md5[i]} if image_hashes_md5 else {}),
-                    "image_path": str(image_path.resolve()),
-                    "indexed_at": indexed_at,
-                    # Model & library provenance
-                    "model_name": shared_metadata["model_name"],
-                    "model_hash": shared_metadata["model_hash"],
-                    "embedding_dim": shared_metadata["embedding_dim"],
-                    "normalize_size": shared_metadata["normalize_size"],
-                    "library_versions": shared_metadata["library_versions"],
-                    # EXIF flags (only present when extraction is enabled)
-                    **(exif_payloads.get(image_path, {}) if exif_payloads else {}),
-                },
-            )
-            for i, (image_path, image_hash, embedding) in enumerate(
-                zip(image_paths, image_hashes, embeddings)
-            )
-        ]
+        points = []
+        for i, (image_path, image_hash, embedding) in enumerate(
+            zip(image_paths, image_hashes, embeddings)
+        ):
+            cp = container_payloads[i] if container_payloads else None
+
+            # Derive a deterministic UUID.  Container images encode the full
+            # provenance so the same image bytes in two different containers
+            # produce separate Qdrant points.
+            if cp:
+                uid = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        image_hash + "::" + cp["container_hash"] + "::" + cp["container_item_name"],
+                    )
+                )
+            else:
+                uid = str(uuid.uuid5(uuid.NAMESPACE_URL, image_hash))
+
+            # Resolve the stored image_path.
+            vp = virtual_paths[i] if virtual_paths else None
+            stored_path = vp if vp else str(image_path.resolve())
+
+            payload: dict = {
+                # Forensic identifiers
+                "image_hash": image_hash,
+                **({"image_hash_md5": image_hashes_md5[i]} if image_hashes_md5 else {}),
+                "image_path": stored_path,
+                "indexed_at": indexed_at,
+                # Model & library provenance
+                "model_name": shared_metadata["model_name"],
+                "model_hash": shared_metadata["model_hash"],
+                "embedding_dim": shared_metadata["embedding_dim"],
+                "normalize_size": shared_metadata["normalize_size"],
+                "library_versions": shared_metadata["library_versions"],
+                # EXIF flags (only present when extraction is enabled)
+                **(exif_payloads.get(image_path, {}) if exif_payloads else {}),
+                # Container provenance (only present for extracted images)
+                **(cp if cp else {}),
+            }
+
+            points.append(PointStruct(id=uid, vector=embedding, payload=payload))
+
         self.client.upsert(collection_name=self.collection, points=points)

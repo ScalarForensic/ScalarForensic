@@ -449,7 +449,7 @@
           <button class="btn-secondary" @click.stop="$refs.fileInput.click()">🖼 Select Files</button>
         </div>
         <div class="file-count-badge" x-show="pendingFiles.length > 0">
-          <span x-text="pendingFiles.length"></span> image<span x-show="pendingFiles.length !== 1">s</span> queued
+          <span x-text="pendingFiles.length"></span> file<span x-show="pendingFiles.length !== 1">s</span> queued
         </div>
         <div class="upload-actions">
           <button class="btn-secondary" @click.stop="pendingFiles = []" x-show="pendingFiles.length > 0">Clear</button>
@@ -459,7 +459,7 @@
         </div>
       </div>
 
-      <input type="file" multiple accept="image/*" style="display:none" x-ref="fileInput"
+      <input type="file" multiple accept="image/*,.zip,.docx,.odt,.odp,.ods,.pdf" style="display:none" x-ref="fileInput"
              @change="addFiles($event.target.files); $event.target.value=''">
       <input type="file" multiple style="display:none" x-ref="folderInput" webkitdirectory
              @change="addFiles($event.target.files); $event.target.value=''">
@@ -640,8 +640,32 @@
               <span class="sub-label">Meta</span>
               <span x-show="queryMeta?.exif_geo_data" class="meta-tag">GPS</span>
               <span x-show="queryMeta?.exif && !queryMeta?.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
-              <span x-show="!queryMeta || (!queryMeta.exif && !queryMeta.exif_geo_data)" class="muted-text">—</span>
+              <span x-show="!queryMeta || (!queryMeta.exif && !queryMeta.exif_geo_data && !queryMeta.is_container)" class="muted-text">—</span>
             </div>
+            <!-- Container provenance rows (visible for extracted query images) -->
+            <template x-if="queryMeta?.parent_file_id">
+              <div>
+                <div class="sub-row">
+                  <span class="sub-label">From</span>
+                  <span class="sub-val">
+                    <span class="meta-tag container-tag"
+                          x-text="queryMeta.container_type?.toUpperCase() || 'CONTAINER'"></span>
+                    <span class="muted-text"
+                          x-text="queryMeta.container_item_name || ''"
+                          :title="queryMeta.container_item_name || ''"></span>
+                  </span>
+                </div>
+                <div class="sub-row">
+                  <span class="sub-label">Kind</span>
+                  <span class="sub-val" x-text="queryMeta.extraction_kind || '—'"></span>
+                </div>
+                <div class="sub-row">
+                  <a class="btn-tiny"
+                     :href="`/api/query-image/${sessionId}/${queryMeta.parent_file_id}`"
+                     download>⬇ Download parent</a>
+                </div>
+              </div>
+            </template>
           </div>
           <div class="emb-box" x-show="embeddingModels.altered || embeddingModels.semantic">
             <div class="emb-box-hdr" @click="showEmbModels = !showEmbModels">
@@ -823,6 +847,64 @@
                 title="Merge hits with the same path across all modes into one row">UNIFIED</button>
       </div>
 
+      <!-- Parent container panel (shown when a hit's container is expanded) -->
+      <div class="parent-panel" x-show="parentPanel" x-cloak>
+        <div class="parent-panel-header">
+          <span class="parent-panel-title">
+            Parent Container
+            <span class="meta-tag container-tag"
+                  x-text="parentPanel?.containerType?.toUpperCase() || ''"></span>
+          </span>
+          <button class="btn-tiny" @click="parentPanel = null; parentPanelKey = null">✕</button>
+        </div>
+        <div x-show="parentPanelLoading" class="muted-text" style="padding:6px 0">Loading…</div>
+        <template x-if="parentPanel && !parentPanelLoading">
+          <div class="parent-panel-body">
+            <div class="sub-row">
+              <span class="sub-label">Path</span>
+              <span class="sub-val mono" x-text="parentPanel.containerPath || '—'"></span>
+            </div>
+            <div class="sub-row">
+              <span class="sub-label">SHA-256</span>
+              <span class="sub-val hash" x-text="parentPanel.containerHash"></span>
+            </div>
+            <div class="sub-row">
+              <span class="sub-label">Item</span>
+              <span class="sub-val mono" x-text="parentPanel.itemName || '—'"></span>
+            </div>
+            <div class="sub-row">
+              <span class="sub-label">Kind</span>
+              <span class="sub-val" x-text="parentPanel.extractionKind || '—'"></span>
+            </div>
+            <div class="parent-panel-actions">
+              <a class="btn-tiny"
+                 :href="`/api/container-download?path=${encodeURIComponent(parentPanel.containerPath)}`"
+                 download
+                 x-show="parentPanel.containerPath">⬇ Download container</a>
+            </div>
+            <div class="parent-panel-siblings-hdr"
+                 x-show="parentPanel.siblings && parentPanel.siblings.length > 0">
+              Siblings (<span x-text="parentPanel.siblings?.length || 0"></span>)
+            </div>
+            <div class="parent-panel-siblings" x-show="parentPanel.siblings?.length > 0">
+              <template x-for="sib in (parentPanel.siblings || [])" :key="sib.image_hash">
+                <div class="sibling-row">
+                  <img class="sibling-thumb"
+                       :src="sib.image_hash ? `/api/thumbnail/${sib.image_hash}` : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"
+                       @error="$el.onerror=null; $el.src='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"
+                       alt="" loading="lazy">
+                  <span class="sibling-name muted-text"
+                        x-text="sib.container_item_name ? sib.container_item_name.split('::').pop() : (sib.image_path || '—')"
+                        :title="sib.container_item_name || sib.image_path || ''"></span>
+                </div>
+              </template>
+            </div>
+            <div class="muted-text" x-show="parentPanel.siblings && parentPanel.siblings.length === 0"
+                 style="padding:4px 0;font-size:11px">No other siblings indexed.</div>
+          </div>
+        </template>
+      </div>
+
       <div x-show="!selectedFileId" class="no-hits-msg">No file selected</div>
 
       <template x-if="selectedFile?.errors?.length > 0">
@@ -875,6 +957,18 @@
               <div class="hit-meta-row">
                 <span x-show="hit.exif_geo_data" class="meta-tag">GPS</span>
                 <span x-show="hit.exif && !hit.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
+                <span x-show="hit.container_type"
+                      class="meta-tag container-tag"
+                      x-text="hit.container_type ? hit.container_type.toUpperCase() : ''"
+                      :title="hit.container_item_name || ''"></span>
+              </div>
+              <div x-show="hit.container_hash" class="hit-container-row">
+                <button class="btn-tiny"
+                        @click.stop="openParentPanel(hit)"
+                        x-text="parentPanelKey === hit.container_hash ? '▾ Parent' : '▸ Parent'"></button>
+                <span class="hit-item-name muted-text"
+                      x-text="hit.container_item_name ? hit.container_item_name.split('::').pop() : ''"
+                      :title="hit.container_item_name || ''"></span>
               </div>
             </div>
           </div>
@@ -957,6 +1051,11 @@ function sfn() {
     hitsFilterAltered: true,
     hitsFilterSemantic: true,
     hitsUnified: true,
+
+    // Parent container panel
+    parentPanel: null,     // { containerHash, containerPath, containerType, itemName, extractionKind, siblings }
+    parentPanelLoading: false,
+    parentPanelKey: null,  // key to debounce duplicate fetches (containerHash)
 
     // ── Computed ──────────────────────────────────────────────────────────
     get progressPct() {
@@ -1111,7 +1210,8 @@ function sfn() {
 
     addFiles(fileList) {
       const exts = new Set(['.jpg','.jpeg','.png','.bmp','.tiff','.tif','.webp',
-                             '.gif','.jp2','.ico','.psd','.heic','.heif']);
+                             '.gif','.jp2','.ico','.psd','.heic','.heif',
+                             '.zip','.docx','.odt','.odp','.ods','.pdf']);
       for (const f of fileList) {
         const dot = f.name.lastIndexOf('.');
         const ext = dot >= 0 ? f.name.slice(dot).toLowerCase() : '';
@@ -1263,6 +1363,8 @@ function sfn() {
       this.selectedHitKey = null;
       this.queryMeta = null;
       this.matchMeta = null;
+      this.parentPanel = null;
+      this.parentPanelKey = null;
       this.queryZoom = 1.0;
       this.matchZoom = 1.0;
       this.querySrc = this.sessionId ? `/api/query-image/${this.sessionId}/${fileId}` : null;
@@ -1310,6 +1412,42 @@ function sfn() {
           `/api/metadata?path=${encodeURIComponent(path)}`
         ).then(r => r.json());
       } catch { this.matchMeta = null; }
+    },
+
+    // ── Parent container panel ────────────────────────────────────────────
+    async openParentPanel(hit) {
+      if (!hit.container_hash) return;
+      // Toggle off if already open for same container.
+      if (this.parentPanelKey === hit.container_hash) {
+        this.parentPanel = null;
+        this.parentPanelKey = null;
+        return;
+      }
+      this.parentPanelKey = hit.container_hash;
+      this.parentPanel = {
+        containerHash: hit.container_hash,
+        containerPath: hit.container_path || '',
+        containerType: hit.container_type || '',
+        itemName: hit.container_item_name || '',
+        extractionKind: hit.extraction_kind || '',
+        siblings: null,
+      };
+      this.parentPanelLoading = true;
+      try {
+        const collection = this.analysisRunModes.includes('altered') ? 'sscd' : 'dino';
+        const resp = await fetch(
+          `/api/container-siblings?container_hash=${encodeURIComponent(hit.container_hash)}&collection=${collection}`
+        );
+        if (resp.ok) {
+          this.parentPanel.siblings = await resp.json();
+        } else {
+          this.parentPanel.siblings = [];
+        }
+      } catch (_) {
+        this.parentPanel.siblings = [];
+      } finally {
+        this.parentPanelLoading = false;
+      }
     },
 
     // ── Semantic stats ────────────────────────────────────────────────────

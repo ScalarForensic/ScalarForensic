@@ -68,6 +68,13 @@ class Settings:
         self.embedding_model: str | None = os.environ.get("SFN_EMBEDDING_MODEL") or None
         self.embedding_dim: int = self._parse_int("SFN_EMBEDDING_DIM", 0)
 
+        # --- Container extraction ---
+        # DPI at which PDF pages are rendered to raster images.
+        self.pdf_render_dpi: int = self._parse_int("SFN_PDF_RENDER_DPI", 150)
+        # Maximum nesting depth for recursive container extraction
+        # (e.g. ZIP inside ZIP inside ZIP counts as depth 3).
+        self.max_container_depth: int = self._parse_int("SFN_MAX_CONTAINER_DEPTH", 5)
+
     def _parse_int(self, key: str, default: int) -> int:
         raw = os.environ.get(key)
         if raw is None:

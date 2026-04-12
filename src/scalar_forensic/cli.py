@@ -24,6 +24,7 @@ from scalar_forensic.embedder import (
     load_embedder,
     preprocess_batch,
 )
+from scalar_forensic.extractor import extract_container
 from scalar_forensic.indexer import Indexer
 from scalar_forensic.scanner import _HEIF_AVAILABLE, scan_all_files
 
@@ -35,6 +36,8 @@ _S_FAIL_READ = "failed_read"
 _S_FAIL_PRE = "failed_preprocessing"
 _S_FAIL_EMB = "failed_embedding"
 _S_UNSUPPORTED = "unsupported"
+_S_CONTAINER_PROCESSED = "container_processed"
+_S_FAIL_EXTRACT = "failed_extraction"
 
 
 @dataclass
@@ -44,6 +47,9 @@ class _FileRecord:
     reason: str = ""
     md5: str = ""
     sha256: str = ""
+    # Set for images extracted from container files.
+    container_path: str = ""
+    container_item_name: str = ""
 
 
 def _fmt_rate(count: int, seconds: float, unit: str) -> str:
@@ -93,15 +99,34 @@ def _write_thumbnail(img: "Image.Image", dest: Path, size: int) -> None:
     thumb.save(dest, format="JPEG", quality=85, optimize=True)
 
 
-def _write_csv(records: dict[Path, "_FileRecord"], csv_path: Path) -> None:
+def _write_csv(
+    records: dict[Path, "_FileRecord"],
+    csv_path: Path,
+    extracted_records: "list[_FileRecord] | None" = None,
+) -> None:
     try:
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         with csv_path.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
-            writer.writerow(["path", "processed", "reason", "md5", "sha256"])
+            writer.writerow(
+                ["path", "processed", "reason", "md5", "sha256",
+                 "container_path", "container_item_name"]
+            )
             for rec in sorted(records.values(), key=lambda r: str(r.path)):
                 processed = "yes" if rec.status == _S_INDEXED else "no"
-                writer.writerow([str(rec.path), processed, rec.reason, rec.md5, rec.sha256])
+                writer.writerow([
+                    str(rec.path), processed, rec.reason, rec.md5, rec.sha256,
+                    rec.container_path, rec.container_item_name,
+                ])
+            if extracted_records:
+                for rec in sorted(
+                    extracted_records, key=lambda r: (str(r.path), r.container_item_name)
+                ):
+                    processed = "yes" if rec.status == _S_INDEXED else "no"
+                    writer.writerow([
+                        str(rec.path), processed, rec.reason, rec.md5, rec.sha256,
+                        rec.container_path, rec.container_item_name,
+                    ])
     except OSError as exc:
         typer.echo(f"[ERROR] Could not write CSV report to {csv_path}: {exc}", err=True)
 
@@ -114,10 +139,23 @@ def _print_summary(
     indexed_counts: list[int],
     skipped_counts: list[int],
     failed_counts: list[int],
+    extracted_records: "list[_FileRecord] | None" = None,
 ) -> None:
     counts = Counter(r.status for r in records.values())
     total = len(records)
-    n_image = total - counts[_S_UNSUPPORTED]
+    n_image = (
+        total
+        - counts[_S_UNSUPPORTED]
+        - counts[_S_CONTAINER_PROCESSED]
+        - counts[_S_FAIL_EXTRACT]
+        - counts[_S_FAIL_READ]
+    )
+    n_containers = counts[_S_CONTAINER_PROCESSED] + counts[_S_FAIL_EXTRACT]
+
+    n_extracted = len(extracted_records) if extracted_records else 0
+    extracted_counts = (
+        Counter(r.status for r in extracted_records) if extracted_records else Counter()
+    )
 
     # Per-model breakdown
     typer.echo("\nDone.")
@@ -131,15 +169,23 @@ def _print_summary(
     sep = "─" * 52
     typer.echo(f"\nIngestion summary  ({resolved_input})")
     typer.echo(sep)
-    rows = [
+    rows: list[tuple[str, int | None]] = [
         ("Total files found", total),
         ("  image files", n_image),
+        ("  container files", n_containers),
         ("  non-image files (unsupported)", counts[_S_UNSUPPORTED]),
         ("", None),
-        ("Indexed (new)", counts[_S_INDEXED]),
+        ("Images extracted from containers", n_extracted),
+        ("  indexed (new)", extracted_counts[_S_INDEXED]),
+        ("  skipped — already indexed", extracted_counts[_S_SKIP_IDX]),
+        ("  failed — preprocessing", extracted_counts[_S_FAIL_PRE]),
+        ("  failed — embedding", extracted_counts[_S_FAIL_EMB]),
+        ("", None),
+        ("Direct images indexed (new)", counts[_S_INDEXED]),
         ("Skipped — already indexed", counts[_S_SKIP_IDX]),
         ("Skipped — duplicate in batch", counts[_S_SKIP_DUP]),
         ("Failed  — read error", counts[_S_FAIL_READ]),
+        ("Failed  — extraction error", counts[_S_FAIL_EXTRACT]),
         ("Failed  — preprocessing", counts[_S_FAIL_PRE]),
         ("Failed  — embedding", counts[_S_FAIL_EMB]),
     ]
@@ -285,23 +331,27 @@ def index(
 
         specs.append((embedder, indexer, model_hash))
 
-    # ── Pre-scan: collect all files and classify image vs. non-image ─────────
+    # ── Pre-scan: collect all files and classify image / container / other ────
     typer.echo(f"Scanning {resolved_input} ...")
     records: dict[Path, _FileRecord] = {}
     image_paths: list[Path] = []
-    for path, is_image in scan_all_files(resolved_input):
+    container_paths: list[Path] = []
+    for path, file_type in scan_all_files(resolved_input):
         rec = _FileRecord(path=path)
         records[path] = rec
-        if is_image:
+        if file_type == "image":
             image_paths.append(path)
+        elif file_type == "container":
+            container_paths.append(path)
         else:
             ext = path.suffix.lower() or "(no extension)"
             rec.status = _S_UNSUPPORTED
             rec.reason = f"unsupported extension: {ext}"
 
-    n_unsupported = len(records) - len(image_paths)
+    n_unsupported = sum(1 for r in records.values() if r.status == _S_UNSUPPORTED)
     typer.echo(
-        f"  {len(records):,} files found  ({len(image_paths):,} image, {n_unsupported:,} non-image)"
+        f"  {len(records):,} files found  ({len(image_paths):,} image,"
+        f" {len(container_paths):,} container, {n_unsupported:,} other)"
     )
 
     # ── Per-model counters ────────────────────────────────────────────────────
@@ -571,12 +621,200 @@ def index(
             )
             typer.echo(shared + "  |  " + "  |  ".join(model_segments) + upsert_str)
 
+    # ── Container file processing ─────────────────────────────────────────────
+    extracted_records: list[_FileRecord] = []
+
+    if container_paths:
+        typer.echo(f"Processing {len(container_paths):,} container file(s) ...")
+
+    for container_path in container_paths:
+        rec = records[container_path]
+
+        # Read container bytes.
+        try:
+            container_bytes = container_path.read_bytes()
+        except OSError as exc:
+            typer.echo(f"[WARN] Cannot read container {container_path.name}: {exc}", err=True)
+            rec.status = _S_FAIL_READ
+            rec.reason = f"read error: {exc}"
+            continue
+
+        rec.sha256 = hash_bytes(container_bytes)
+        rec.md5 = hash_bytes_md5(container_bytes)
+
+        # Extract embedded images.
+        try:
+            extracted = extract_container(
+                container_path,
+                max_depth=settings.max_container_depth,
+                pdf_render_dpi=settings.pdf_render_dpi,
+            )
+        except Exception as exc:  # noqa: BLE001
+            typer.echo(f"[WARN] Extraction failed for {container_path.name}: {exc}", err=True)
+            rec.status = _S_FAIL_EXTRACT
+            rec.reason = f"extraction error: {exc}"
+            continue
+
+        if not extracted:
+            rec.status = _S_FAIL_EXTRACT
+            rec.reason = "no images found in container"
+            continue
+
+        rec.status = _S_CONTAINER_PROCESSED
+        typer.echo(f"  {container_path.name}: {len(extracted)} image(s) extracted")
+
+        # Process extracted images in batches.
+        for batch_extracted in batched(extracted, settings.batch_size):
+            # Build per-image metadata.
+            img_data_list = [img.data for img in batch_extracted]
+            img_shas = [hash_bytes(d) for d in img_data_list]
+            img_md5s = [hash_bytes_md5(d) for d in img_data_list]
+            virtual_paths_for_batch = [
+                f"{img.root_container_path}::{img.item_name}" for img in batch_extracted
+            ]
+            cpayloads = [
+                {
+                    "container_hash": img.parent_hash,
+                    "container_path": str(img.root_container_path),
+                    "container_type": img.parent_type,
+                    "container_item_name": img.item_name,
+                    "extraction_kind": img.extraction_kind,
+                }
+                for img in batch_extracted
+            ]
+
+            # Create _FileRecord for each extracted image (for CSV).
+            batch_recs = [
+                _FileRecord(
+                    path=img.root_container_path,
+                    sha256=sha,
+                    md5=md5,
+                    container_path=str(img.root_container_path),
+                    container_item_name=img.item_name,
+                )
+                for img, sha, md5 in zip(batch_extracted, img_shas, img_md5s)
+            ]
+            extracted_records.extend(batch_recs)
+
+            # Preprocess.
+            pre_results = preprocess_batch(img_data_list)
+            valid_indices = []
+            pil_valid: list[Image.Image] = []
+            for idx, result in enumerate(pre_results):
+                if isinstance(result, Exception):
+                    batch_recs[idx].status = _S_FAIL_PRE
+                    batch_recs[idx].reason = f"preprocessing error: {result}"
+                else:
+                    valid_indices.append(idx)
+                    pil_valid.append(result)
+
+            if not valid_indices:
+                continue
+
+            # Thumbnails.
+            if settings.thumbnail_dir is not None:
+                for idx, pil_img in zip(valid_indices, pil_valid):
+                    sha = img_shas[idx]
+                    thumb_path = settings.thumbnail_dir / f"{sha}.jpg"
+                    if not thumb_path.exists():
+                        try:
+                            _write_thumbnail(pil_img, thumb_path, settings.thumbnail_size)
+                        except Exception:  # noqa: BLE001
+                            pass
+
+            # Per-model embed + upsert.
+            valid_shas = [img_shas[i] for i in valid_indices]
+            valid_md5s = [img_md5s[i] for i in valid_indices]
+            valid_vpaths = [virtual_paths_for_batch[i] for i in valid_indices]
+            valid_cpayloads = [cpayloads[i] for i in valid_indices]
+            valid_fake_paths = [batch_extracted[i].root_container_path for i in valid_indices]
+            valid_recs = [batch_recs[i] for i in valid_indices]
+
+            # Dedup: skip images whose virtual path is already in Qdrant.
+            upsert_jobs_container: list = []
+            for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
+                already = indexer.get_indexed_paths(valid_vpaths)
+                to_embed_indices = [j for j, vp in enumerate(valid_vpaths) if vp not in already]
+                n_skipped_here = len(valid_vpaths) - len(to_embed_indices)
+                skipped_counts[spec_idx] += n_skipped_here
+
+                for j, orig_j in enumerate(to_embed_indices):
+                    _ = j  # suppress unused warning
+                    if valid_recs[orig_j].status != _S_INDEXED:
+                        pass  # will be set after embedding
+
+                if not to_embed_indices:
+                    for rec2 in valid_recs:
+                        if rec2.status == "pending":
+                            rec2.status = _S_SKIP_IDX
+                            rec2.reason = "already indexed in Qdrant"
+                    continue
+
+                te_shas = [valid_shas[j] for j in to_embed_indices]
+                te_md5s = [valid_md5s[j] for j in to_embed_indices]
+                te_vpaths = [valid_vpaths[j] for j in to_embed_indices]
+                te_cpayloads = [valid_cpayloads[j] for j in to_embed_indices]
+                te_fake_paths = [valid_fake_paths[j] for j in to_embed_indices]
+                te_pil = [pil_valid[j] for j in to_embed_indices]
+                te_recs = [valid_recs[j] for j in to_embed_indices]
+
+                try:
+                    norm_images = embedder.normalize_batch_bytes(te_pil)
+                    embeddings = embedder.embed_images(norm_images)
+                except Exception as exc:  # noqa: BLE001
+                    failed_counts[spec_idx] += len(te_recs)
+                    for rec2 in te_recs:
+                        rec2.status = _S_FAIL_EMB
+                        rec2.reason = f"embedding error: {exc}"
+                    continue
+
+                shared_metadata = {
+                    "model_name": embedder.model_name,
+                    "model_hash": model_hash,
+                    "embedding_dim": embedder.embedding_dim,
+                    "normalize_size": embedder.normalize_size,
+                    "inference_dtype": embedder.inference_dtype,
+                    "library_versions": get_library_versions(),
+                }
+
+                def _make_container_upsert(idx_, ps, hs, hs_md5, embs, meta, vpaths_, cpayloads_):
+                    def _job():
+                        idx_.upsert_batch(
+                            ps, hs, embs, meta,
+                            image_hashes_md5=hs_md5,
+                            virtual_paths=vpaths_,
+                            container_payloads=cpayloads_,
+                        )
+                    return _job
+
+                upsert_jobs_container.append(
+                    _make_container_upsert(
+                        indexer,
+                        te_fake_paths,
+                        te_shas,
+                        te_md5s,
+                        embeddings,
+                        shared_metadata,
+                        te_vpaths,
+                        te_cpayloads,
+                    )
+                )
+
+                indexed_counts[spec_idx] += len(te_recs)
+                for rec2 in te_recs:
+                    rec2.status = _S_INDEXED
+
+            if upsert_jobs_container:
+                with ThreadPoolExecutor(max_workers=len(upsert_jobs_container)) as pool:
+                    list(pool.map(lambda j: j(), upsert_jobs_container))
+
     # ── Write CSV report ──────────────────────────────────────────────────────
-    _write_csv(records, csv_path)
+    _write_csv(records, csv_path, extracted_records)
 
     # ── Print summary table ───────────────────────────────────────────────────
     _print_summary(
-        records, resolved_input, csv_path, specs, indexed_counts, skipped_counts, failed_counts
+        records, resolved_input, csv_path, specs, indexed_counts, skipped_counts, failed_counts,
+        extracted_records,
     )
 
 

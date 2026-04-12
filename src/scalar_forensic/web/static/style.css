@@ -831,6 +831,11 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   color: var(--text2);
   border-color: rgba(154,163,178,0.15);
 }
+.meta-tag.container-tag {
+  background: rgba(135,100,220,0.10);
+  color: #a07de0;
+  border-color: rgba(135,100,220,0.20);
+}
 
 /* ── Right panel: hits ── */
 .right-panel {
@@ -946,6 +951,89 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   display: flex;
   gap: 4px;
   margin-top: 1px;
+}
+.hit-container-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+}
+.hit-item-name {
+  font-size: 10px;
+  font-family: var(--mono);
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Parent container panel ── */
+.parent-panel {
+  border: 1px solid rgba(135,100,220,0.25);
+  border-radius: 6px;
+  margin: 8px 10px;
+  background: rgba(135,100,220,0.05);
+  font-size: 12px;
+}
+.parent-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(135,100,220,0.15);
+}
+.parent-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text2);
+}
+.parent-panel-body {
+  padding: 6px 10px;
+}
+.parent-panel-actions {
+  margin-top: 6px;
+  display: flex;
+  gap: 6px;
+}
+.parent-panel-siblings-hdr {
+  margin-top: 8px;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--text2);
+  letter-spacing: 0.04em;
+}
+.parent-panel-siblings {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.sibling-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sibling-thumb {
+  width: 28px;
+  height: 28px;
+  object-fit: cover;
+  border-radius: 3px;
+  background: var(--surface2);
+  flex-shrink: 0;
+}
+.sibling-name {
+  font-size: 11px;
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
 }
 
 .no-hits-msg {

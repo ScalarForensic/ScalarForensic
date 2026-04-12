@@ -16,7 +16,7 @@ dependencies = [
     # AMD ROCm only: pytorch-triton-rocm must be pinned as a direct dependency with a
     # hard-coded wheel URL to work around uv's wheel-tag validation.  Uncomment this
     # line when switching to a ROCm index — see INSTALL.md for full instructions.
-    # "pytorch-triton-rocm==3.5.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "pytorch-triton-rocm==3.5.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 [project.scripts]
@@ -26,6 +26,7 @@ sfn-web = "scalar_forensic.web.app:start"
 [dependency-groups]
 dev = [
     { include-group = "web" },
+    { include-group = "containers" },
     "pytest>=8.0",
     "pytest-cov>=6.0",
     "ruff>=0.11",
@@ -33,6 +34,11 @@ dev = [
 ]
 heif = [
     "pillow-heif>=0.13",
+]
+containers = [
+    "pymupdf>=1.24",
+    "python-docx>=1.1",
+    "odfpy>=1.4",
 ]
 web = [
     "fastapi>=0.111",
@@ -45,10 +51,10 @@ web = [
 # See INSTALL.md § "GPU / hardware acceleration" for full switching instructions.
 
 # NVIDIA CUDA 12.8 (active default)
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
+#[[tool.uv.index]]
+#name = "pytorch-cu128"
+#url = "https://download.pytorch.org/whl/cu128"
+#explicit = true
 
 # AMD ROCm 6.4 — torch 2.9.1, supports gfx1201 (RDNA 4) natively.
 # Other available indexes: rocm6.2, rocm6.3, rocm7.2 (torch 2.11).
@@ -59,14 +65,14 @@ explicit = true
 #   3. Uncomment the pytorch-triton-rocm pin in [project.dependencies].
 #   4. Run: uv sync --reinstall-package torch --reinstall-package torchvision \
 #                   --reinstall-package pytorch-triton-rocm
-#[[tool.uv.index]]
-#name = "pytorch-rocm64"
-#url = "https://download.pytorch.org/whl/rocm6.4"
-#explicit = true
+[[tool.uv.index]]
+name = "pytorch-rocm64"
+url = "https://download.pytorch.org/whl/rocm6.4"
+explicit = true
 
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu128" }]
-torchvision = [{ index = "pytorch-cu128" }]
+#torch = [{ index = "pytorch-cu128" }]
+#torchvision = [{ index = "pytorch-cu128" }]
 
 # AMD ROCm sources — swap in when using the ROCm index above.
 # pytorch-triton-rocm is a transitive dependency of torch on ROCm.  PyTorch ships
@@ -75,11 +81,11 @@ torchvision = [{ index = "pytorch-cu128" }]
 # The matching pin in [project.dependencies] is required for this source to apply.
 # When upgrading torch, check the triton-rocm version in the torch wheel metadata
 # and update both the version pin and the URL accordingly.
-#torch = [{ index = "pytorch-rocm64" }]
-#torchvision = [{ index = "pytorch-rocm64" }]
-#pytorch-triton-rocm = [
-#    { url = "https://download-r2.pytorch.org/whl/pytorch_triton_rocm-3.5.1-cp312-cp312-linux_x86_64.whl", marker = "python_version == '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-#]
+torch = [{ index = "pytorch-rocm64" }]
+torchvision = [{ index = "pytorch-rocm64" }]
+pytorch-triton-rocm = [
+    { url = "https://download-r2.pytorch.org/whl/pytorch_triton_rocm-3.5.1-cp312-cp312-linux_x86_64.whl", marker = "python_version == '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
 
 [build-system]
 requires = ["hatchling"]

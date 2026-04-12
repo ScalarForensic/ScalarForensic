@@ -20,6 +20,21 @@ class FileEntry:
     dino_embedding: list[float] | None = None
     error: str | None = None
 
+    # ── Container provenance ──────────────────────────────────────────────
+    # Set when this entry was extracted from an uploaded container file.
+    #
+    # ``parent_file_id`` points to the container's own FileEntry still in the
+    # session (download it via /api/query-image/{session_id}/{parent_file_id}).
+    # ``container_type`` identifies the kind of immediate parent container
+    # ("zip", "docx", "odf", "pdf", "pdf_page").
+    # ``container_item_name`` is the full internal path from the root container
+    # using ``::`` as the nesting separator (e.g. "page_1::embed_0").
+    # ``extraction_kind`` is "rendered" or "embedded".
+    parent_file_id: str | None = None
+    container_type: str | None = None
+    container_item_name: str | None = None
+    extraction_kind: str | None = None
+
 
 @dataclass
 class Session:
