@@ -466,7 +466,7 @@ def _query_vector(
 # ---------------------------------------------------------------------------
 
 _STATS_SAMPLE = 10_000
-_HIST_BUCKETS = 20  # 0.1-wide buckets covering normalised [0.0, 1.0] (cosine [-1,1] → [0,1])
+_HIST_BUCKETS = 20  # 0.05-wide buckets covering normalised [0.0, 1.0] (cosine [-1,1] → [0,1])
 
 
 @dataclass
@@ -482,7 +482,7 @@ class SemanticStats:
     max_score: float
     mean: float
     stdev: float
-    histogram: list[int]  # _HIST_BUCKETS counts, bucket i covers [i*0.05, (i+1)*0.05)
+    histogram: list[int]  # _HIST_BUCKETS counts on normalised [0,1] scale; bucket i covers [i*0.05, (i+1)*0.05)
 
 
 def query_semantic_stats(
@@ -537,7 +537,10 @@ def query_semantic_stats(
 
     histogram = [0] * _HIST_BUCKETS
     for s in scores:
-        # Normalise cosine score from [-1, 1] to [0, 1] before bucketing
+        # Normalise cosine score from [-1, 1] to [0, 1] before bucketing.
+        # Note: the numeric stats (min/max/percentiles) are on the raw cosine scale;
+        # the histogram intentionally uses the normalised scale so the UI threshold
+        # marker (also normalised before bucket lookup) aligns correctly.
         normalised = (max(-1.0, min(s, 1.0)) + 1.0) / 2.0
         idx = min(max(int(normalised * _HIST_BUCKETS), 0), _HIST_BUCKETS - 1)
         histogram[idx] += 1

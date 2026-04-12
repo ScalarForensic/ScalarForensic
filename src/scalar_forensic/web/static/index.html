@@ -71,7 +71,7 @@
               <template x-for="(count, i) in semanticStats.histogram" :key="i">
                 <div class="stats-hist-bar"
                      :style="`height: ${Math.max(2, Math.round(count / Math.max(...semanticStats.histogram) * 60))}px`"
-                     :class="{'stats-hist-bar-threshold': i === Math.min(19, Math.floor(thresholdSemantic * 20))}">
+                     :class="{'stats-hist-bar-threshold': i === Math.min(19, Math.floor(Math.max(0, Math.min(1, (thresholdSemantic + 1) / 2)) * 20))}">
                 </div>
               </template>
             </div>
@@ -1173,8 +1173,18 @@ function sfn() {
         if (this.selectedFileId) {
           const f = this.results.find(r => r.file_id === this.selectedFileId);
           if (f && this.selectedHitKey &&
-              !f.hits.find(h => this.hitKey(h) === this.selectedHitKey))
+              !f.hits.find(h => this.hitKey(h) === this.selectedHitKey)) {
+            // Previously selected hit dropped from results — auto-select new best.
             this.selectedHitKey = null;
+            const bestHit = this.selectedHit;
+            if (bestHit) {
+              this.selectedHitKey = this.hitKey(bestHit);
+              this.matchSrc = `/api/hit-image?path=${encodeURIComponent(bestHit.path)}`;
+            } else {
+              this.matchSrc = null;
+            }
+            this.matchZoom = 1.0;
+          }
           await this._loadMatchMeta();
         }
       } catch (e) {
@@ -1278,8 +1288,11 @@ function sfn() {
       try { p = JSON.parse(this.pasteBuffer); } catch { return; }
       if (Array.isArray(p.modes)) {
         const validModes = p.modes.filter(m => this.availableModes.includes(m));
-        this.analysisRunModes = validModes;
-        this.selectedModes = validModes;
+        const normalizedModes = this.availableModes.includes('exact') && !validModes.includes('exact')
+          ? ['exact', ...validModes]
+          : validModes;
+        this.analysisRunModes = normalizedModes;
+        this.selectedModes = normalizedModes;
       }
       if (typeof p.threshold_altered === 'number')
         this.thresholdAltered = Math.min(1, Math.max(0, p.threshold_altered));
