@@ -689,17 +689,23 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .emb-box {
   border-top: 1px solid var(--border);
   flex-shrink: 0;
-  padding: 5px 0 3px;
 }
 .emb-box-hdr {
-  padding: 0 12px 4px;
+  padding: 5px 12px;
   font-family: var(--display);
   font-weight: 700;
   font-size: 10px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  user-select: none;
 }
+.emb-box-hdr:hover { color: var(--text2); }
+.emb-chevron { font-size: 9px; }
 .emb-row {
   display: flex;
   align-items: baseline;

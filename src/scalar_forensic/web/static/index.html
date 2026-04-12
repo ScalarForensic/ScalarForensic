@@ -269,25 +269,30 @@
             </div>
           </div>
           <div class="emb-box" x-show="embeddingModels.altered || embeddingModels.semantic">
-            <div class="emb-box-hdr">Embedding Models</div>
-            <template x-if="embeddingModels.altered">
-              <div class="emb-row">
-                <span class="badge badge-altered">ALTER</span>
-                <span class="emb-name" x-text="embeddingModels.altered.name"></span>
-                <span class="emb-hash"
-                      :title="embeddingModels.altered.hash"
-                      x-text="embeddingModels.altered.hash.slice(0,16) + '…'"></span>
-              </div>
-            </template>
-            <template x-if="embeddingModels.semantic">
-              <div class="emb-row">
-                <span class="badge badge-semantic">SEMAN</span>
-                <span class="emb-name" x-text="embeddingModels.semantic.name"></span>
-                <span class="emb-hash"
-                      :title="embeddingModels.semantic.hash"
-                      x-text="embeddingModels.semantic.hash.slice(0,16) + '…'"></span>
-              </div>
-            </template>
+            <div class="emb-box-hdr" @click="showEmbModels = !showEmbModels">
+              Embedding Models
+              <span class="emb-chevron" x-text="showEmbModels ? '▴' : '▾'"></span>
+            </div>
+            <div x-show="showEmbModels">
+              <template x-if="embeddingModels.altered">
+                <div class="emb-row">
+                  <span class="badge badge-altered">ALTER</span>
+                  <span class="emb-name" x-text="embeddingModels.altered.name"></span>
+                  <span class="emb-hash"
+                        :title="embeddingModels.altered.hash"
+                        x-text="embeddingModels.altered.hash.slice(0,16) + '…'"></span>
+                </div>
+              </template>
+              <template x-if="embeddingModels.semantic">
+                <div class="emb-row">
+                  <span class="badge badge-semantic">SEMAN</span>
+                  <span class="emb-name" x-text="embeddingModels.semantic.name"></span>
+                  <span class="emb-hash"
+                        :title="embeddingModels.semantic.hash"
+                        x-text="embeddingModels.semantic.hash.slice(0,16) + '…'"></span>
+                </div>
+              </template>
+            </div>
           </div>
           <div class="meta-box" x-show="_metaItems(queryMeta, matchMeta).length > 0">
             <div class="meta-box-hdr">EXIF / File Info</div>
@@ -373,27 +378,32 @@
           </div>
           <div class="emb-box"
                x-show="selectedHit && (selectedHit.model_provenance?.altered || selectedHit.model_provenance?.semantic)">
-            <div class="emb-box-hdr">Embedding Models</div>
-            <template x-if="selectedHit?.model_provenance?.altered">
-              <div class="emb-row"
-                   :class="{'emb-mismatch': embeddingModels.altered && embeddingModels.altered.hash !== selectedHit.model_provenance.altered.hash}">
-                <span class="badge badge-altered">ALTER</span>
-                <span class="emb-name" x-text="selectedHit.model_provenance.altered.name"></span>
-                <span class="emb-hash"
-                      :title="selectedHit.model_provenance.altered.hash"
-                      x-text="selectedHit.model_provenance.altered.hash.slice(0,16) + '…'"></span>
-              </div>
-            </template>
-            <template x-if="selectedHit?.model_provenance?.semantic">
-              <div class="emb-row"
-                   :class="{'emb-mismatch': embeddingModels.semantic && embeddingModels.semantic.hash !== selectedHit.model_provenance.semantic.hash}">
-                <span class="badge badge-semantic">SEMAN</span>
-                <span class="emb-name" x-text="selectedHit.model_provenance.semantic.name"></span>
-                <span class="emb-hash"
-                      :title="selectedHit.model_provenance.semantic.hash"
-                      x-text="selectedHit.model_provenance.semantic.hash.slice(0,16) + '…'"></span>
-              </div>
-            </template>
+            <div class="emb-box-hdr" @click="showEmbModels = !showEmbModels">
+              Embedding Models
+              <span class="emb-chevron" x-text="showEmbModels ? '▴' : '▾'"></span>
+            </div>
+            <div x-show="showEmbModels">
+              <template x-if="selectedHit?.model_provenance?.altered">
+                <div class="emb-row"
+                     :class="{'emb-mismatch': embeddingModels.altered && embeddingModels.altered.hash !== selectedHit.model_provenance.altered.hash}">
+                  <span class="badge badge-altered">ALTER</span>
+                  <span class="emb-name" x-text="selectedHit.model_provenance.altered.name"></span>
+                  <span class="emb-hash"
+                        :title="selectedHit.model_provenance.altered.hash"
+                        x-text="selectedHit.model_provenance.altered.hash.slice(0,16) + '…'"></span>
+                </div>
+              </template>
+              <template x-if="selectedHit?.model_provenance?.semantic">
+                <div class="emb-row"
+                     :class="{'emb-mismatch': embeddingModels.semantic && embeddingModels.semantic.hash !== selectedHit.model_provenance.semantic.hash}">
+                  <span class="badge badge-semantic">SEMAN</span>
+                  <span class="emb-name" x-text="selectedHit.model_provenance.semantic.name"></span>
+                  <span class="emb-hash"
+                        :title="selectedHit.model_provenance.semantic.hash"
+                        x-text="selectedHit.model_provenance.semantic.hash.slice(0,16) + '…'"></span>
+                </div>
+              </template>
+            </div>
           </div>
           <div class="meta-box" x-show="_metaItems(matchMeta, queryMeta).length > 0">
             <div class="meta-box-hdr">EXIF / File Info</div>
@@ -548,6 +558,7 @@ function sfn() {
     provenance: null,
     showProvenance: false,
     embeddingModels: {},
+    showEmbModels: false,
     showPasteArea: false,
     pasteBuffer: '',
 
