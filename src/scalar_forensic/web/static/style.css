@@ -127,7 +127,7 @@ header::after {
 .header-logo {
   display: block;
   height: 30px;
-  width: auto;
+  width: 274px;
   flex-shrink: 0;
 }
 
@@ -196,12 +196,29 @@ header::after {
 
 /* ── Upload section ── */
 .upload-section {
-  padding: 20px 24px 0;
-  flex-shrink: 0;
+  padding: 20px 24px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  position: relative;
 }
+
+/* 3-D vector visualization canvas — sits behind all upload UI */
+#vec-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  cursor: grab;
+}
+#vec-canvas:active { cursor: grabbing; }
 
 .drop-zone {
   position: relative;
+  z-index: 1;
   border: 1px dashed var(--border2);
   border-radius: var(--radius-lg);
   padding: 28px 24px;
@@ -210,6 +227,8 @@ header::after {
   background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
   background-size: 24px 24px;
   transition: border-color 0.2s, background-color 0.2s;
+  width: 100%;
+  max-width: 480px;
 }
 
 .drop-zone.drag-over {
@@ -274,7 +293,7 @@ header::after {
   padding: 7px 24px;
   border: 1px solid var(--accent);
   border-radius: var(--radius);
-  background: rgba(232,147,32,0.1);
+  background: var(--surface2);
   color: var(--accent);
   font-family: var(--display);
   font-weight: 700;
@@ -284,7 +303,7 @@ header::after {
   cursor: pointer;
   transition: background 0.15s, box-shadow 0.15s;
 }
-.btn-primary:hover { background: rgba(232,147,32,0.18); box-shadow: 0 0 12px rgba(232,147,32,0.2); }
+.btn-primary:hover { background: var(--surface); box-shadow: 0 0 12px rgba(232,147,32,0.2); }
 .btn-primary:disabled { opacity: 0.35; cursor: not-allowed; }
 
 /* ── Progress bar ── */

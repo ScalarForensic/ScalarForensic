@@ -53,6 +53,10 @@ class Settings:
         # --- Qdrant auth (optional) ---
         self.qdrant_api_key: str | None = os.environ.get("SFN_QDRANT_API_KEY") or None
 
+        # --- Vector visualization ---
+        # Maximum number of points fetched per collection for the 3-D background viz.
+        self.viz_max_points: int = self._parse_int("SFN_VIZ_MAX_POINTS", 5000)
+
         # --- Remote embeddings endpoint (optional, OpenAI-compatible) ---
         self.embedding_endpoint: str | None = os.environ.get("SFN_EMBEDDING_ENDPOINT") or None
         self.embedding_api_key: str | None = os.environ.get("SFN_EMBEDDING_API_KEY") or None
