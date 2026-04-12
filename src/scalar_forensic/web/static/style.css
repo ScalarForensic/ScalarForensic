@@ -226,9 +226,15 @@ header::after {
   background-color: var(--bg2);
   background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
   background-size: 24px 24px;
-  transition: border-color 0.2s, background-color 0.2s;
+  transition: border-color 0.2s, background-color 0.2s, opacity 0.4s ease;
   width: 100%;
   max-width: 480px;
+}
+
+.drop-zone.idle {
+  opacity: 0;
+  pointer-events: none;
+  transition: border-color 0.2s, background-color 0.2s, opacity 2.5s ease;
 }
 
 .drop-zone.drag-over {

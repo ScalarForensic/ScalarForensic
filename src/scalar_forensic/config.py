@@ -56,6 +56,11 @@ class Settings:
         # --- Vector visualization ---
         # Maximum number of points fetched per collection for the 3-D background viz.
         self.viz_max_points: int = self._parse_int("SFN_VIZ_MAX_POINTS", 5000)
+        # Optional path to write a self-contained viz HTML file on startup.
+        # When set, the file is (re-)written every time the server starts so it
+        # always reflects the current indexed collection.
+        # Example: SFN_VIZ_EXPORT_PATH=~/.local/share/sfn/viz.html
+        self.viz_export_path: Path | None = self._parse_optional_path("SFN_VIZ_EXPORT_PATH")
 
         # --- Remote embeddings endpoint (optional, OpenAI-compatible) ---
         self.embedding_endpoint: str | None = os.environ.get("SFN_EMBEDDING_ENDPOINT") or None

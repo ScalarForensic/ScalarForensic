@@ -427,7 +427,7 @@
   <!-- ── Upload ── -->
   <div class="upload-section" x-show="phase === 'upload'">
     <canvas id="vec-canvas" aria-hidden="true"></canvas>
-    <div class="drop-zone" :class="{'drag-over': dragOver}"
+    <div class="drop-zone" :class="{'drag-over': dragOver, 'idle': dropZoneIdle}"
          @dragover.prevent="dragOver = true"
          @dragleave.prevent="dragOver = false"
          @drop.prevent="onDrop($event)">
@@ -893,6 +893,9 @@ function sfn() {
     phase: 'upload',
     pendingFiles: [],
     dragOver: false,
+    dropZoneIdle: false,
+    _idleTimer: null,
+    _resetIdle: null,
     selectedModes: [],
     availableModes: [],
     analysisRunModes: [],      // modes actually used in the last analysis
@@ -1077,6 +1080,9 @@ function sfn() {
         this.selectedModes = ['exact'];
         this.serverError = 'Backend unreachable — only exact hash matching is available.';
       }
+      // Screensaver: fade drop-zone out after 5 s of no pointer/keyboard/drag activity
+      this._startIdleScreensaver();
+
       // Fire-and-forget: populate 3-D background visualization (decorative, non-blocking)
       this.points3dAbortController = new AbortController();
       const _ctrl = this.points3dAbortController;
@@ -1116,9 +1122,42 @@ function sfn() {
       this.addFiles(e.dataTransfer.files);
     },
 
+    // ── Idle screensaver ───────────────────────────────────────────────────
+    _startIdleScreensaver() {
+      const IDLE_MS = 5000;
+      const IDLE_EVENTS = ['mousemove','mousedown','keydown','touchstart','touchmove','dragenter','dragover'];
+      let lastReset = 0;
+      const resetIdle = () => {
+        const now = Date.now();
+        // Suppress Alpine reactivity + timer churn on high-frequency events
+        // (mousemove can fire 100+ times/s). Only reschedule if ≥100 ms have
+        // elapsed since the last reset, OR the drop-zone is already faded out.
+        if (!this.dropZoneIdle && now - lastReset < 100) return;
+        lastReset = now;
+        this.dropZoneIdle = false;
+        clearTimeout(this._idleTimer);
+        this._idleTimer = setTimeout(() => { this.dropZoneIdle = true; }, IDLE_MS);
+      };
+      this._resetIdle = resetIdle;
+      for (const ev of IDLE_EVENTS) document.addEventListener(ev, resetIdle, { passive: true });
+      resetIdle(); // start the initial countdown
+    },
+
+    _stopIdleScreensaver() {
+      clearTimeout(this._idleTimer);
+      this.dropZoneIdle = false;
+      if (this._resetIdle) {
+        const IDLE_EVENTS = ['mousemove','mousedown','keydown','touchstart','touchmove','dragenter','dragover'];
+        for (const ev of IDLE_EVENTS) document.removeEventListener(ev, this._resetIdle);
+        this._resetIdle = null;
+      }
+    },
+
     // ── Analysis ──────────────────────────────────────────────────────────
     async startAnalysis() {
       if (!this.pendingFiles.length || !this.selectedModes.length) return;
+      // Tear down idle screensaver — stop timer and remove all listeners
+      this._stopIdleScreensaver();
       // Abort any in-flight points3d fetch and stop the background viz
       if (this.points3dAbortController) this.points3dAbortController.abort();
       const _vc = document.getElementById('vec-canvas');
@@ -1503,202 +1542,13 @@ function sfn() {
       this.$nextTick(() => {
         if (this._points3dData) initVectorViz(this._points3dData);
       });
+      // Re-initialize idle screensaver for this upload session
+      this._startIdleScreensaver();
     },
   };
 }
 
-// ── 3-D vector visualization (Canvas 2D, no WebGL) ──────────────────────────
-function initVectorViz(data) {
-  const canvas = document.getElementById('vec-canvas');
-  if (!canvas) return;
-  const sscd = data.sscd || [];
-  const dino = data.dino || [];
-  if (!sscd.length && !dino.length) return;
-
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-
-  // ── Camera state (spherical coords, orbiting origin) ───────────────────
-  let radius = 2.5;
-  let theta  = 0.7;    // azimuth  (rotation around Y)
-  let phi    = 1.15;   // polar    (0 = north pole, π = south pole)
-  const PHI_MIN = 0.05, PHI_MAX = Math.PI - 0.05;
-  const R_MIN   = 0.5,  R_MAX   = 8.0;
-
-  // ── Perspective projection ──────────────────────────────────────────────
-  // Rotate world so the camera lands at (0, 0, radius), then apply perspective.
-  function project(px, py, pz) {
-    const W = canvas.width, H = canvas.height;
-    // 1. Rotate around Y by -theta
-    const x1 =  px * Math.cos(theta) - pz * Math.sin(theta);
-    const z1 =  px * Math.sin(theta) + pz * Math.cos(theta);
-    // 2. Rotate around X by (π/2 - phi)
-    const sp = Math.sin(phi), cp = Math.cos(phi);
-    const y2 =  py * sp - z1 * cp;
-    const z2 =  py * cp + z1 * sp;
-    // 3. Perspective (camera at z=radius, looking toward -Z)
-    const d = radius - z2;
-    if (d < 0.01) return null;
-    const unit = Math.min(W, H) * 0.38;
-    const s = (radius * unit) / d;
-    return { sx: x1 * s + W * 0.5, sy: -y2 * s + H * 0.5, depth: z2, s };
-  }
-
-  // ── Draw one axis segment (line between two 3D points) ─────────────────
-  function seg(x0, y0, z0, x1, y1, z1) {
-    const a = project(x0, y0, z0), b = project(x1, y1, z1);
-    if (!a || !b) return;
-    ctx.moveTo(a.sx, a.sy);
-    ctx.lineTo(b.sx, b.sy);
-  }
-
-  // ── Draw axes + tick marks ─────────────────────────────────────────────
-  function drawAxes() {
-    const L = 1.25, T = 0.045;
-    const TICKS = [-1.0, -0.5, 0.5, 1.0];
-    ctx.beginPath();
-    ctx.strokeStyle = 'rgba(107,122,141,0.55)';
-    ctx.lineWidth   = 1;
-    seg(-L, 0, 0, L, 0, 0);
-    for (const v of TICKS) seg(v, -T, 0, v, T, 0);
-    seg(0, -L, 0, 0, L, 0);
-    for (const v of TICKS) seg(-T, v, 0, T, v, 0);
-    seg(0, 0, -L, 0, 0, L);
-    for (const v of TICKS) seg(-T, 0, v, T, 0, v);
-    ctx.stroke();
-  }
-
-  // ── Draw a point cloud (all points batched into one path per colour) ───
-  function drawCloud(pts, fillStyle) {
-    const W = canvas.width, H = canvas.height;
-    const unit = Math.min(W, H) * 0.38;
-    ctx.beginPath();
-    ctx.fillStyle = fillStyle;
-    for (let i = 0; i < pts.length; i++) {
-      const q = project(pts[i][0], pts[i][1], pts[i][2]);
-      if (!q) continue;
-      const r = Math.max(1.0, q.s / unit * 2.2);
-      ctx.moveTo(q.sx + r, q.sy);
-      ctx.arc(q.sx, q.sy, r, 0, Math.PI * 2);
-    }
-    ctx.fill();
-  }
-
-  // ── Sync canvas pixel buffer to its CSS-displayed size ─────────────────
-  function resize() {
-    const p = canvas.parentElement;
-    canvas.width  = p.clientWidth  || 800;
-    canvas.height = p.clientHeight || 400;
-  }
-  resize();
-  const ro = new ResizeObserver(resize);
-  ro.observe(canvas.parentElement);
-
-  // ── Spin state ─────────────────────────────────────────────────────────
-  // After user interaction, spin pauses then fades back in over BLEND_TIME.
-  const SPIN_BASE      = 0.01 * Math.PI; // 20 % of original 0.05 * π
-  const IDLE_DELAY     = 3.0;            // seconds idle before spin resumes
-  const BLEND_TIME     = 2.0;            // seconds to fade spin back to full
-  const AXIS_HOLD_MIN  = 6;             // min seconds on one random axis
-  const AXIS_HOLD_MAX  = 14;            // max seconds on one random axis
-
-  let spinVTheta  = SPIN_BASE;  // angular velocity on theta
-  let spinVPhi    = 0;          // angular velocity on phi
-  let nextAxisAt  = 0;          // clock-time to pick a new random axis
-  let lastActT    = -999;       // last time user interacted (seconds from t0)
-  let spinBlend   = 1;          // 0 = fully paused, 1 = full speed
-
-  function pickAxis(t) {
-    const r = Math.random();
-    if (r < 0.35) {
-      // Pure Y rotation (most recognisable, feels like a globe)
-      spinVTheta = (Math.random() > 0.5 ? 1 : -1) * SPIN_BASE;
-      spinVPhi   = 0;
-    } else if (r < 0.65) {
-      // Y + slow phi drift (tilted tumble)
-      spinVTheta = (Math.random() > 0.5 ? 1 : -1) * SPIN_BASE;
-      spinVPhi   = (Math.random() - 0.5) * SPIN_BASE * 0.5;
-    } else {
-      // Diagonal spin (feels like free tumble)
-      spinVTheta = (Math.random() - 0.5) * SPIN_BASE * 1.6;
-      spinVPhi   = (Math.random() - 0.5) * SPIN_BASE * 0.7;
-    }
-    nextAxisAt = t + AXIS_HOLD_MIN + Math.random() * (AXIS_HOLD_MAX - AXIS_HOLD_MIN);
-  }
-  pickAxis(0); // initialise first axis immediately
-
-  // ── Mouse / wheel interaction ──────────────────────────────────────────
-  let dragging = false, lastX = 0, lastY = 0;
-  const touch  = t => { lastActT = t; };
-
-  const onDown  = e => {
-    dragging = true; lastX = e.clientX; lastY = e.clientY; e.preventDefault();
-  };
-  const onUp    = () => { dragging = false; };
-  const onMove  = e => {
-    if (!dragging) return;
-    const t = (performance.now() - t0) / 1000;
-    touch(t);
-    theta -= (e.clientX - lastX) * 0.006;
-    phi    = Math.max(PHI_MIN, Math.min(PHI_MAX, phi + (e.clientY - lastY) * 0.006));
-    lastX = e.clientX; lastY = e.clientY;
-  };
-  const onWheel = e => {
-    e.preventDefault();
-    const t = (performance.now() - t0) / 1000;
-    touch(t);
-    radius = Math.max(R_MIN, Math.min(R_MAX, radius + e.deltaY * 0.003));
-  };
-  canvas.addEventListener('mousedown', onDown);
-  window.addEventListener('mouseup',   onUp);
-  window.addEventListener('mousemove', onMove);
-  canvas.addEventListener('wheel',     onWheel, { passive: false });
-
-  // ── Animation loop ─────────────────────────────────────────────────────
-  let rafId;
-  const t0 = performance.now();
-  let prevT = 0;
-  function animate() {
-    rafId = requestAnimationFrame(animate);
-    const t  = (performance.now() - t0) / 1000;
-    const dt = Math.min(t - prevT, 0.1); prevT = t; // clamp dt to avoid jump on tab-switch
-
-    // Compute how much spin to apply this frame
-    const idle = t - lastActT;
-    if (idle < IDLE_DELAY) {
-      spinBlend = 0;
-    } else {
-      spinBlend = Math.min(1, (idle - IDLE_DELAY) / BLEND_TIME);
-    }
-
-    // Randomly change rotation axis while actively spinning
-    if (spinBlend > 0 && t > nextAxisAt) pickAxis(t);
-
-    if (spinBlend > 0) {
-      theta += spinVTheta * dt * spinBlend;
-      phi   += spinVPhi   * dt * spinBlend;
-      phi    = Math.max(PHI_MIN, Math.min(PHI_MAX, phi));
-      // Bounce phi velocity at the poles so it never gets stuck
-      if (phi <= PHI_MIN || phi >= PHI_MAX) spinVPhi *= -1;
-    }
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    drawAxes();
-    if (sscd.length) drawCloud(sscd, 'rgba(232,147,32,0.65)');
-    if (dino.length) drawCloud(dino, 'rgba(74,158,224,0.65)');
-  }
-  animate();
-
-  // ── Cleanup ────────────────────────────────────────────────────────────
-  canvas._stopViz = () => {
-    cancelAnimationFrame(rafId);
-    canvas.removeEventListener('mousedown', onDown);
-    window.removeEventListener('mouseup',   onUp);
-    window.removeEventListener('mousemove', onMove);
-    canvas.removeEventListener('wheel',     onWheel);
-    ro.disconnect();
-  };
-}
 </script>
+<script src="/static/viz.js"></script>
 </body>
 </html>

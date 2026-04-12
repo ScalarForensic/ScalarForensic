@@ -19,7 +19,7 @@ from pathlib import Path
 import torch
 import uvicorn
 from fastapi import FastAPI, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from qdrant_client import QdrantClient
 
@@ -36,6 +36,34 @@ from scalar_forensic.web.pipeline import (
 from scalar_forensic.web.session import FileEntry, create_session, get_session
 
 _STATIC_DIR = Path(__file__).parent / "static"
+_VIZ_JS_SRC = (_STATIC_DIR / "viz.js").read_text(encoding="utf-8")
+
+
+def _render_viz_html(data: dict) -> str:
+    """Return a self-contained HTML page with the point-cloud data and viz
+    code inlined.  No server connection is needed to display the result."""
+    viz_js = _VIZ_JS_SRC
+    data_json = json.dumps(data, separators=(",", ":"))
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ScalarForensic — vector visualization</title>
+  <style>
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    html, body {{ width: 100%; height: 100%; overflow: hidden; background: #000; }}
+    #vec-canvas {{ position: fixed; inset: 0; width: 100%; height: 100%; }}
+  </style>
+</head>
+<body>
+  <canvas id="vec-canvas"></canvas>
+  <script>{viz_js}</script>
+  <script>initVectorViz({data_json});</script>
+</body>
+</html>"""
+
+
 _IMAGE_EXTENSIONS = frozenset(
     {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp", ".gif", ".jp2", ".ico", ".psd"}
 )
@@ -60,6 +88,8 @@ async def lifespan(_app: FastAPI):
         _points3d_cache = {"sscd": sscd_pts, "dino": dino_pts}
     else:
         _points3d_cache = {"sscd": [], "dino": []}
+    if settings.viz_export_path and _points3d_cache:
+        _write_viz_export(settings.viz_export_path, _points3d_cache)
     yield
 
 
@@ -371,6 +401,28 @@ def _fetch_and_project(collection: str, max_points: int, settings: Settings) -> 
         _log.warning("points3d: could not scroll %r: %s", collection, exc)
         return []
     return _pca3(vectors)
+
+
+def _write_viz_export(path: Path, data: dict) -> None:
+    """Write the standalone viz HTML to *path*, creating parent dirs as needed."""
+    try:
+        path = path.expanduser().resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_render_viz_html(data), encoding="utf-8")
+        _log.info("viz export written to %s", path)
+    except Exception as exc:
+        _log.warning("could not write viz export to %s: %s", path, exc)
+
+
+@app.get("/viz")
+async def viz_standalone() -> HTMLResponse:
+    """Self-contained visualization page — no server calls after load.
+
+    Point-cloud data is embedded as JSON; ``viz.js`` is inlined.
+    Suitable for use as a KDE web-page wallpaper or browser-based screensaver
+    by pointing the client at ``http://localhost:8080/viz``.
+    """
+    return HTMLResponse(_render_viz_html(_points3d_cache or {"sscd": [], "dino": []}))
 
 
 @app.get("/api/points3d")
