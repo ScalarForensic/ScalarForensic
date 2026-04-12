@@ -161,7 +161,7 @@ header::after {
 .mode-btn.active-altered { border-color: var(--altered);  color: var(--altered); background: rgba(232,147,32,0.08); }
 .mode-btn.active-dino    { border-color: var(--semantic);  color: var(--semantic);background: rgba(74,158,224,0.08); }
 .mode-btn:disabled       { opacity: 0.3; cursor: not-allowed; }
-/* EXACT is always mandatory — visually locked, no hover effect */
+/* EXACT is always mandatory — visually locked; hover preserves the locked styling */
 .mode-btn.mode-mandatory { cursor: default; }
 .mode-btn.mode-mandatory:hover { border-color: var(--exact); color: var(--exact); background: rgba(200,207,216,0.07); }
 

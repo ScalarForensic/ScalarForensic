@@ -838,8 +838,8 @@
           <div class="hit-card" :class="{selected: hitKey(hit) === selectedHitKey}"
                @click="selectHit(hit)">
             <img class="hit-thumb"
-                 :src="hit.image_hash ? `/api/thumbnail/${hit.image_hash}` : ''"
-                 @error="$el.src = ''"
+                 :src="hit.image_hash ? `/api/thumbnail/${hit.image_hash}` : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"
+                 @error="$el.onerror=null; $el.src='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"
                  loading="lazy"
                  alt="">
             <div class="hit-body">

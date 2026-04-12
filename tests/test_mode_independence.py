@@ -288,3 +288,91 @@ def test_exact_hits_rank_first_in_combined_sort():
 
     hits = results[0].hits
     assert hits[0].scores == {"exact": 1.0}, "exact hit must sort first"
+
+
+# ---------------------------------------------------------------------------
+# unify=False: per-mode independent rows
+# ---------------------------------------------------------------------------
+
+
+def _altered_hit(path: str, score: float = 0.90) -> Hit:
+    return Hit(path=path, scores={"altered": score})
+
+
+def test_unify_false_same_path_yields_separate_rows():
+    """With unify=False the same path from altered and semantic appears as two rows."""
+    session = _make_session([_make_entry(dino=True, sscd=True)])
+    settings = _mock_settings()
+
+    def _fake_qv(client, collection, vector, mode, threshold, limit):
+        return ([Hit(path=PATH_A, scores={mode: 0.92})], [])
+
+    with (
+        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline._query_vector", side_effect=_fake_qv),
+    ):
+        results, _ = query_session(
+            session, ["altered", "semantic"], 0.75, 0.55, 10, settings, unify=False
+        )
+
+    hits = results[0].hits
+    assert len(hits) == 2, "unify=False must keep one row per mode even for the same path"
+    modes = {next(iter(h.scores)) for h in hits}
+    assert modes == {"altered", "semantic"}
+
+
+def test_unify_false_sort_order_exact_altered_semantic():
+    """With unify=False rows sort exact → altered → semantic."""
+    session = _make_session([_make_entry(dino=True, sscd=True)])
+    settings = _mock_settings()
+
+    def _fake_qv(client, collection, vector, mode, threshold, limit):
+        return ([Hit(path=PATH_A, scores={mode: 0.92})], [])
+
+    with (
+        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch(
+            "scalar_forensic.web.pipeline._query_exact",
+            return_value=([_exact_hit(PATH_B)], []),
+        ),
+        patch("scalar_forensic.web.pipeline._query_vector", side_effect=_fake_qv),
+    ):
+        results, _ = query_session(
+            session, ["exact", "altered", "semantic"], 0.75, 0.55, 10, settings, unify=False
+        )
+
+    hits = results[0].hits
+    row_modes = [next(iter(h.scores)) for h in hits]
+    assert row_modes == ["exact", "altered", "semantic"], (
+        f"expected exact→altered→semantic ordering, got {row_modes}"
+    )
+
+
+def test_merge_hit_max_score_never_downgrades():
+    """_merge_hit must keep the higher score when the same mode appears twice."""
+    from scalar_forensic.web.pipeline import _merge_hit
+
+    high = Hit(path=PATH_A, scores={"semantic": 0.95})
+    low  = Hit(path=PATH_A, scores={"semantic": 0.70})
+
+    dest: dict = {}
+    _merge_hit(high, dest)
+    _merge_hit(low, dest)   # lower score — must NOT overwrite 0.95
+
+    assert dest[PATH_A].scores["semantic"] == 0.95, "later lower score must not overwrite earlier higher score"
+
+
+def test_merge_hit_provenance_setdefault():
+    """_merge_hit must keep the first-seen provenance for a mode, not replace it."""
+    from scalar_forensic.web.pipeline import _merge_hit
+
+    first  = Hit(path=PATH_A, scores={"altered": 0.9}, model_provenance={"altered": {"name": "v1", "hash": "aaa"}})
+    second = Hit(path=PATH_A, scores={"altered": 0.8}, model_provenance={"altered": {"name": "v2", "hash": "bbb"}})
+
+    dest: dict = {}
+    _merge_hit(first, dest)
+    _merge_hit(second, dest)
+
+    assert dest[PATH_A].model_provenance["altered"]["hash"] == "aaa", (
+        "first-seen provenance must be preserved on repeated merge"
+    )

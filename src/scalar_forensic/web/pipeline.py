@@ -206,14 +206,20 @@ def _unmerged_sort_key(h: Hit) -> tuple:
 
 
 def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
-    """Merge a hit into the accumulator, combining scores from multiple modes."""
+    """Merge a hit into the accumulator, combining scores from multiple modes.
+
+    Scores are merged with max() so a later, lower score for the same mode
+    never downgrades an earlier, higher one.  Model provenance uses setdefault
+    so the first-seen value is kept; it doesn't change across duplicate points.
+    """
     if h.path in dest:
-        dest[h.path].scores.update(h.scores)
-        # Keep the image_hash if we now have one
-        if h.image_hash and not dest[h.path].image_hash:
-            dest[h.path].image_hash = h.image_hash
-        # Merge per-mode model provenance
-        dest[h.path].model_provenance.update(h.model_provenance)
+        existing = dest[h.path]
+        for mode, score in h.scores.items():
+            existing.scores[mode] = max(existing.scores.get(mode, score), score)
+        if h.image_hash and not existing.image_hash:
+            existing.image_hash = h.image_hash
+        for mode, provenance in h.model_provenance.items():
+            existing.model_provenance.setdefault(mode, provenance)
     else:
         dest[h.path] = h
 
@@ -394,8 +400,13 @@ def _query_exact(
                                 f"but a different SHA-256 ({stored_sha256})"
                             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Exact query failed on %s: %s", collection, exc)
-            errors.append(f"exact query failed: {type(exc).__name__}")
+            msg = str(exc).lower()
+            if "not found" in msg or "doesn't exist" in msg:
+                # Collection not yet indexed — not an error, just skip it
+                logger.debug("Exact query skipped non-existent collection %s", collection)
+            else:
+                logger.warning("Exact query failed on %s: %s", collection, exc)
+                errors.append(f"exact query failed: {type(exc).__name__}")
     return hits, errors
 
 
