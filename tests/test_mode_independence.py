@@ -106,7 +106,7 @@ def test_same_image_both_modes_yields_one_merged_row():
             return_value=([_semantic_hit(PATH_A, score=1.0)], []),
         ),
     ):
-        results = query_session(session, ["exact", "semantic"], 0.75, 0.55, 10, settings)
+        results, _ = query_session(session, ["exact", "semantic"], 0.75, 0.55, 10, settings)
 
     assert len(results) == 1
     hits = results[0].hits
@@ -137,7 +137,7 @@ def test_semantic_only_includes_self_match():
             return_value=([_semantic_hit(PATH_A, score=1.0)], []),
         ),
     ):
-        results = query_session(session, ["semantic"], 0.75, 0.55, 10, settings)
+        results, _ = query_session(session, ["semantic"], 0.75, 0.55, 10, settings)
 
     hits = results[0].hits
     paths = [h.path for h in hits]
@@ -156,7 +156,7 @@ def test_exact_deselected_does_not_drop_semantic_hit():
             return_value=([_semantic_hit(PATH_A, score=0.95)], []),
         ),
     ):
-        results_no_exact = query_session(session, ["semantic"], 0.75, 0.55, 10, settings)
+        results_no_exact, _ = query_session(session, ["semantic"], 0.75, 0.55, 10, settings)
 
     hits = results_no_exact[0].hits
     assert any(h.path == PATH_A for h in hits)
@@ -190,7 +190,7 @@ def test_per_mode_limit_respected():
         ),
         patch("scalar_forensic.web.pipeline._query_vector", side_effect=_fake_query_vector),
     ):
-        results = query_session(
+        results, _ = query_session(
             session, ["exact", "altered", "semantic"], 0.75, 0.55, limit, settings
         )
 
@@ -224,7 +224,7 @@ def test_altered_and_semantic_same_path_yields_one_merged_row():
         patch("scalar_forensic.web.pipeline.QdrantClient"),
         patch("scalar_forensic.web.pipeline._query_vector", side_effect=_fake_query_vector),
     ):
-        results = query_session(session, ["altered", "semantic"], 0.75, 0.55, 10, settings)
+        results, _ = query_session(session, ["altered", "semantic"], 0.75, 0.55, 10, settings)
 
     hits = results[0].hits
     assert len(hits) == 1, f"expected 1 merged row, got {hits}"
@@ -256,7 +256,7 @@ def test_per_mode_dedup_keeps_highest_score():
         patch("scalar_forensic.web.pipeline.QdrantClient"),
         patch("scalar_forensic.web.pipeline._query_vector", return_value=(dup_hits, [])),
     ):
-        results = query_session(session, ["semantic"], 0.75, 0.55, 10, settings)
+        results, _ = query_session(session, ["semantic"], 0.75, 0.55, 10, settings)
 
     hits = results[0].hits
     path_a_hits = [h for h in hits if h.path == PATH_A]
@@ -284,7 +284,7 @@ def test_exact_hits_rank_first_in_combined_sort():
             return_value=([_semantic_hit(PATH_B, score=0.80)], []),
         ),
     ):
-        results = query_session(session, ["exact", "semantic"], 0.75, 0.55, 10, settings)
+        results, _ = query_session(session, ["exact", "semantic"], 0.75, 0.55, 10, settings)
 
     hits = results[0].hits
     assert hits[0].scores == {"exact": 1.0}, "exact hit must sort first"

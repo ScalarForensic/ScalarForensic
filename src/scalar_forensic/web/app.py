@@ -113,7 +113,7 @@ async def query(
 
     settings = Settings()
     mode_list = [m.strip() for m in modes.split(",") if m.strip()]
-    results = query_session(
+    results, embedding_models = query_session(
         session,
         mode_list,
         threshold_altered,
@@ -133,6 +133,7 @@ async def query(
     return JSONResponse(
         {
             "provenance": provenance.__dict__,
+            "embedding_models": embedding_models,
             "results": [
                 {
                     "file_id": r.file_id,
@@ -145,6 +146,7 @@ async def query(
                             "exif": h.exif,
                             "exif_geo_data": h.exif_geo_data,
                             "image_hash": h.image_hash,
+                            "model_provenance": h.model_provenance,
                         }
                         for h in r.hits
                     ],

@@ -685,6 +685,48 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .meta-item.meta-partial .meta-k { color: var(--altered); }
 .meta-item.meta-partial .meta-v { color: var(--altered); }
 
+/* ── Embedding model box ── */
+.emb-box {
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  padding: 5px 0 3px;
+}
+.emb-box-hdr {
+  padding: 0 12px 4px;
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.emb-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 12px;
+  min-width: 0;
+}
+.emb-name {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.emb-hash {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--muted);
+  flex-shrink: 0;
+  cursor: help;
+}
+/* Mismatch: query embedder hash ≠ database point hash for the same mode */
+.emb-row.emb-mismatch .emb-name,
+.emb-row.emb-mismatch .emb-hash { color: var(--accent); }
+
 /* ── Badges ── */
 .badge {
   padding: 1px 6px;

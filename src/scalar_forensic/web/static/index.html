@@ -268,6 +268,27 @@
               <span x-show="!queryMeta || (!queryMeta.exif && !queryMeta.exif_geo_data)" class="muted-text">—</span>
             </div>
           </div>
+          <div class="emb-box" x-show="embeddingModels.altered || embeddingModels.semantic">
+            <div class="emb-box-hdr">Embedding Models</div>
+            <template x-if="embeddingModels.altered">
+              <div class="emb-row">
+                <span class="badge badge-altered">ALTER</span>
+                <span class="emb-name" x-text="embeddingModels.altered.name"></span>
+                <span class="emb-hash"
+                      :title="embeddingModels.altered.hash"
+                      x-text="embeddingModels.altered.hash.slice(0,16) + '…'"></span>
+              </div>
+            </template>
+            <template x-if="embeddingModels.semantic">
+              <div class="emb-row">
+                <span class="badge badge-semantic">SEMAN</span>
+                <span class="emb-name" x-text="embeddingModels.semantic.name"></span>
+                <span class="emb-hash"
+                      :title="embeddingModels.semantic.hash"
+                      x-text="embeddingModels.semantic.hash.slice(0,16) + '…'"></span>
+              </div>
+            </template>
+          </div>
           <div class="meta-box" x-show="_metaItems(queryMeta, matchMeta).length > 0">
             <div class="meta-box-hdr">EXIF / File Info</div>
             <div class="meta-grid">
@@ -349,6 +370,30 @@
               <span x-show="selectedHit?.exif && !selectedHit?.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
               <span x-show="!selectedHit || (!selectedHit.exif && !selectedHit.exif_geo_data)" class="muted-text">—</span>
             </div>
+          </div>
+          <div class="emb-box"
+               x-show="selectedHit && (selectedHit.model_provenance?.altered || selectedHit.model_provenance?.semantic)">
+            <div class="emb-box-hdr">Embedding Models</div>
+            <template x-if="selectedHit?.model_provenance?.altered">
+              <div class="emb-row"
+                   :class="{'emb-mismatch': embeddingModels.altered && embeddingModels.altered.hash !== selectedHit.model_provenance.altered.hash}">
+                <span class="badge badge-altered">ALTER</span>
+                <span class="emb-name" x-text="selectedHit.model_provenance.altered.name"></span>
+                <span class="emb-hash"
+                      :title="selectedHit.model_provenance.altered.hash"
+                      x-text="selectedHit.model_provenance.altered.hash.slice(0,16) + '…'"></span>
+              </div>
+            </template>
+            <template x-if="selectedHit?.model_provenance?.semantic">
+              <div class="emb-row"
+                   :class="{'emb-mismatch': embeddingModels.semantic && embeddingModels.semantic.hash !== selectedHit.model_provenance.semantic.hash}">
+                <span class="badge badge-semantic">SEMAN</span>
+                <span class="emb-name" x-text="selectedHit.model_provenance.semantic.name"></span>
+                <span class="emb-hash"
+                      :title="selectedHit.model_provenance.semantic.hash"
+                      x-text="selectedHit.model_provenance.semantic.hash.slice(0,16) + '…'"></span>
+              </div>
+            </template>
           </div>
           <div class="meta-box" x-show="_metaItems(matchMeta, queryMeta).length > 0">
             <div class="meta-box-hdr">EXIF / File Info</div>
@@ -502,6 +547,7 @@ function sfn() {
     // Provenance
     provenance: null,
     showProvenance: false,
+    embeddingModels: {},
     showPasteArea: false,
     pasteBuffer: '',
 
@@ -719,6 +765,7 @@ function sfn() {
         const d = await resp.json();
         this.results = Array.isArray(d.results) ? d.results : [];
         this.provenance = d.provenance ?? null;
+        this.embeddingModels = d.embedding_models ?? {};
 
         // Re-sync selected hit after re-query
         if (this.selectedFileId) {

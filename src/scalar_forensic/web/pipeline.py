@@ -162,6 +162,7 @@ class Hit:
     exif: bool | None = None
     exif_geo_data: bool | None = None
     image_hash: str | None = None  # SHA-256, used to request /api/thumbnail/{hash}
+    model_provenance: dict = field(default_factory=dict)  # mode → {name, hash} from Qdrant payload
 
     def best_score(self) -> float:
         return max(self.scores.values(), default=0.0)
@@ -210,6 +211,8 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
         # Keep the image_hash if we now have one
         if h.image_hash and not dest[h.path].image_hash:
             dest[h.path].image_hash = h.image_hash
+        # Merge per-mode model provenance
+        dest[h.path].model_provenance.update(h.model_provenance)
     else:
         dest[h.path] = h
 
@@ -222,7 +225,7 @@ def query_session(
     limit: int,
     settings: Settings,
     unify: bool = True,
-) -> list[FileResult]:
+) -> tuple[list[FileResult], dict[str, dict]]:
     """Query Qdrant for every file in the session using stored embeddings.
 
     Fast — no re-embedding. Called on every slider change.
@@ -231,6 +234,9 @@ def query_session(
     so each DB image produces one result row with all applicable scores.
     When *unify* is False each mode contributes its own rows independently,
     so the same image may appear multiple times with different scores.
+
+    Returns a tuple of (results, embedding_models) where embedding_models maps
+    mode → {name, hash} for each embedder currently loaded in the web process.
     """
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
     results: list[FileResult] = []
@@ -297,7 +303,18 @@ def query_session(
             file_result.hits = sorted(unmerged, key=_unmerged_sort_key)
         results.append(file_result)
 
-    return results
+    # Collect model provenance for the embedders currently loaded in this process
+    embedding_models: dict[str, dict] = {}
+    if "altered" in modes:
+        emb = _embedder_cache.get("sscd")
+        if emb is not None:
+            embedding_models["altered"] = {"name": emb.model_name, "hash": emb.model_hash}
+    if "semantic" in modes:
+        emb = _embedder_cache.get("dino")
+        if emb is not None:
+            embedding_models["semantic"] = {"name": emb.model_name, "hash": emb.model_hash}
+
+    return results, embedding_models
 
 
 def _query_exact(
@@ -310,7 +327,13 @@ def _query_exact(
     hits: list[Hit] = []
     errors: list[str] = []
     collision_paths: set[str] = set()
+    # Map each collection to the mode label used in model_provenance
+    collection_mode = {
+        settings.collection_sscd: "altered",
+        settings.collection_dino: "semantic",
+    }
     for collection in (settings.collection_sscd, settings.collection_dino):
+        mode_key = collection_mode[collection]
         try:
             records, _ = client.scroll(
                 collection_name=collection,
@@ -318,12 +341,18 @@ def _query_exact(
                     must=[FieldCondition(key="image_hash", match=MatchValue(value=image_hash))]
                 ),
                 limit=50,
-                with_payload=["image_path", "image_hash", "exif", "exif_geo_data"],
+                with_payload=[
+                    "image_path", "image_hash", "exif", "exif_geo_data", "model_name", "model_hash"
+                ],
                 with_vectors=False,
             )
             for r in records:
                 path = r.payload.get("image_path", "")
-                if not any(h.path == path for h in hits):
+                mn = r.payload.get("model_name", "")
+                mh = r.payload.get("model_hash", "")
+                mp: dict = {mode_key: {"name": mn, "hash": mh}} if (mn or mh) else {}
+                existing = next((h for h in hits if h.path == path), None)
+                if existing is None:
                     hits.append(
                         Hit(
                             path=path,
@@ -331,8 +360,12 @@ def _query_exact(
                             exif=r.payload.get("exif"),
                             exif_geo_data=r.payload.get("exif_geo_data"),
                             image_hash=r.payload.get("image_hash"),
+                            model_provenance=mp,
                         )
                     )
+                else:
+                    # Image found in a second collection — merge its model provenance
+                    existing.model_provenance.update(mp)
 
             # Collision detection: find images with same MD5 but different SHA-256
             if image_hash_md5:
@@ -379,18 +412,26 @@ def _query_vector(
             query=vector,
             score_threshold=threshold,
             limit=limit,
-            with_payload=["image_path", "image_hash", "exif", "exif_geo_data"],
+            with_payload=[
+                "image_path", "image_hash", "exif", "exif_geo_data", "model_name", "model_hash"
+            ],
         )
-        return [
-            Hit(
+        hits = []
+        for r in result.points:
+            mp: dict = {}
+            mn = r.payload.get("model_name", "")
+            mh = r.payload.get("model_hash", "")
+            if mn or mh:
+                mp[mode] = {"name": mn, "hash": mh}
+            hits.append(Hit(
                 path=r.payload.get("image_path", ""),
                 scores={mode: r.score},
                 exif=r.payload.get("exif"),
                 exif_geo_data=r.payload.get("exif_geo_data"),
                 image_hash=r.payload.get("image_hash"),
-            )
-            for r in result.points
-        ], []
+                model_provenance=mp,
+            ))
+        return hits, []
     except Exception as exc:  # noqa: BLE001
         logger.warning("Vector query failed on %s (%s): %s", collection, mode, exc)
         return [], [f"{mode} query failed: {type(exc).__name__}"]

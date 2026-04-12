@@ -85,7 +85,7 @@ def test_api_query_returns_provenance():
 
     with (
         patch("scalar_forensic.web.app.get_session", return_value=session),
-        patch("scalar_forensic.web.app.query_session", return_value=[]),
+        patch("scalar_forensic.web.app.query_session", return_value=([], {})),
         patch("scalar_forensic.web.app.Settings"),
     ):
         client = TestClient(app)
@@ -115,7 +115,7 @@ def test_api_query_provenance_modes_match():
 
     with (
         patch("scalar_forensic.web.app.get_session", return_value=session),
-        patch("scalar_forensic.web.app.query_session", return_value=[]),
+        patch("scalar_forensic.web.app.query_session", return_value=([], {})),
         patch("scalar_forensic.web.app.Settings"),
     ):
         client = TestClient(app)
@@ -145,7 +145,7 @@ def test_api_query_provenance_timestamp_is_utc():
 
     with (
         patch("scalar_forensic.web.app.get_session", return_value=session),
-        patch("scalar_forensic.web.app.query_session", return_value=[]),
+        patch("scalar_forensic.web.app.query_session", return_value=([], {})),
         patch("scalar_forensic.web.app.Settings"),
     ):
         client = TestClient(app)
