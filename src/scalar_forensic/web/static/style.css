@@ -237,6 +237,10 @@ header::after {
   transition: border-color 0.2s, background-color 0.2s, opacity 2.5s ease;
 }
 
+.drop-zone.analyzing {
+  pointer-events: none;
+}
+
 .drop-zone.drag-over {
   border-color: var(--accent);
   background-color: rgba(232,147,32,0.04);
@@ -312,6 +316,34 @@ header::after {
 .btn-primary:hover { background: var(--surface); box-shadow: 0 0 12px rgba(232,147,32,0.2); }
 .btn-primary:disabled { opacity: 0.35; cursor: not-allowed; }
 
+/* ── Drop-zone progress overlay ── */
+.drop-zone-progress {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px 4px;
+  width: 100%;
+}
+
+.drop-zone-progress-label {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text);
+  text-align: center;
+}
+
+.drop-zone-progress-filename {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── Progress bar ── */
 .progress-track {
   height: 3px;
@@ -334,14 +366,6 @@ header::after {
   50%       { box-shadow: 0 0 14px rgba(232,147,32,1); }
 }
 
-.progress-label {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 5px;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--muted);
-}
 
 /* ── Results layout: 4 panels ── */
 .results-layout {
