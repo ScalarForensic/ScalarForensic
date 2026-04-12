@@ -85,11 +85,13 @@ def test_query_vector_has_no_exclude_hash_parameter():
 
 
 # ---------------------------------------------------------------------------
-# Two separate rows when same image matches Exact and Semantic
+# Same path from multiple modes is merged into one unified row
 # ---------------------------------------------------------------------------
 
 
-def test_same_image_both_modes_yields_two_rows():
+def test_same_image_both_modes_yields_one_merged_row():
+    """When the same path appears in exact and semantic results, scores are merged
+    into a single Hit so the UI can show all scores in one row."""
     session = _make_session([_make_entry(dino=True)])
     settings = _mock_settings()
 
@@ -104,20 +106,18 @@ def test_same_image_both_modes_yields_two_rows():
             return_value=([_semantic_hit(PATH_A, score=1.0)], []),
         ),
     ):
-        results = query_session(session, ["exact", "semantic"], 0.75, 0.55, 10, settings)
+        results, _ = query_session(session, ["exact", "semantic"], 0.75, 0.55, 10, settings)
 
     assert len(results) == 1
     hits = results[0].hits
-    assert len(hits) == 2, f"expected 2 rows for same path in two modes, got {hits}"
+    assert len(hits) == 1, f"expected 1 merged row for same path in two modes, got {hits}"
 
-    modes_present = {list(h.scores.keys())[0] for h in hits}
-    assert modes_present == {"exact", "semantic"}
-
-    exact_row = next(h for h in hits if "exact" in h.scores)
-    semantic_row = next(h for h in hits if "semantic" in h.scores)
-    assert exact_row.path == PATH_A
-    assert semantic_row.path == PATH_A
-    assert semantic_row.scores["semantic"] == 1.0
+    hit = hits[0]
+    assert hit.path == PATH_A
+    assert "exact" in hit.scores
+    assert "semantic" in hit.scores
+    assert hit.scores["exact"] == 1.0
+    assert hit.scores["semantic"] == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +137,7 @@ def test_semantic_only_includes_self_match():
             return_value=([_semantic_hit(PATH_A, score=1.0)], []),
         ),
     ):
-        results = query_session(session, ["semantic"], 0.75, 0.55, 10, settings)
+        results, _ = query_session(session, ["semantic"], 0.75, 0.55, 10, settings)
 
     hits = results[0].hits
     paths = [h.path for h in hits]
@@ -156,7 +156,7 @@ def test_exact_deselected_does_not_drop_semantic_hit():
             return_value=([_semantic_hit(PATH_A, score=0.95)], []),
         ),
     ):
-        results_no_exact = query_session(session, ["semantic"], 0.75, 0.55, 10, settings)
+        results_no_exact, _ = query_session(session, ["semantic"], 0.75, 0.55, 10, settings)
 
     hits = results_no_exact[0].hits
     assert any(h.path == PATH_A for h in hits)
@@ -190,7 +190,7 @@ def test_per_mode_limit_respected():
         ),
         patch("scalar_forensic.web.pipeline._query_vector", side_effect=_fake_query_vector),
     ):
-        results = query_session(
+        results, _ = query_session(
             session, ["exact", "altered", "semantic"], 0.75, 0.55, limit, settings
         )
 
@@ -207,11 +207,13 @@ def test_per_mode_limit_respected():
 
 
 # ---------------------------------------------------------------------------
-# Altered mode produces independent rows from Semantic for same path
+# Altered + Semantic for same path merges into one row with both scores
 # ---------------------------------------------------------------------------
 
 
-def test_altered_and_semantic_same_path_yields_two_rows():
+def test_altered_and_semantic_same_path_yields_one_merged_row():
+    """When altered and semantic both match the same path, they are merged into
+    a single Hit with both scores so the UI can display a unified row."""
     session = _make_session([_make_entry(dino=True, sscd=True)])
     settings = _mock_settings()
 
@@ -222,12 +224,15 @@ def test_altered_and_semantic_same_path_yields_two_rows():
         patch("scalar_forensic.web.pipeline.QdrantClient"),
         patch("scalar_forensic.web.pipeline._query_vector", side_effect=_fake_query_vector),
     ):
-        results = query_session(session, ["altered", "semantic"], 0.75, 0.55, 10, settings)
+        results, _ = query_session(session, ["altered", "semantic"], 0.75, 0.55, 10, settings)
 
     hits = results[0].hits
-    assert len(hits) == 2
-    modes = {list(h.scores.keys())[0] for h in hits}
-    assert modes == {"altered", "semantic"}
+    assert len(hits) == 1, f"expected 1 merged row, got {hits}"
+    hit = hits[0]
+    assert "altered" in hit.scores
+    assert "semantic" in hit.scores
+    assert hit.scores["altered"] == 0.92
+    assert hit.scores["semantic"] == 0.92
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +256,7 @@ def test_per_mode_dedup_keeps_highest_score():
         patch("scalar_forensic.web.pipeline.QdrantClient"),
         patch("scalar_forensic.web.pipeline._query_vector", return_value=(dup_hits, [])),
     ):
-        results = query_session(session, ["semantic"], 0.75, 0.55, 10, settings)
+        results, _ = query_session(session, ["semantic"], 0.75, 0.55, 10, settings)
 
     hits = results[0].hits
     path_a_hits = [h for h in hits if h.path == PATH_A]
@@ -279,7 +284,101 @@ def test_exact_hits_rank_first_in_combined_sort():
             return_value=([_semantic_hit(PATH_B, score=0.80)], []),
         ),
     ):
-        results = query_session(session, ["exact", "semantic"], 0.75, 0.55, 10, settings)
+        results, _ = query_session(session, ["exact", "semantic"], 0.75, 0.55, 10, settings)
 
     hits = results[0].hits
     assert hits[0].scores == {"exact": 1.0}, "exact hit must sort first"
+
+
+# ---------------------------------------------------------------------------
+# unify=False: per-mode independent rows
+# ---------------------------------------------------------------------------
+
+
+def test_unify_false_same_path_yields_separate_rows():
+    """With unify=False the same path from altered and semantic appears as two rows."""
+    session = _make_session([_make_entry(dino=True, sscd=True)])
+    settings = _mock_settings()
+
+    def _fake_qv(client, collection, vector, mode, threshold, limit):
+        return ([Hit(path=PATH_A, scores={mode: 0.92})], [])
+
+    with (
+        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline._query_vector", side_effect=_fake_qv),
+    ):
+        results, _ = query_session(
+            session, ["altered", "semantic"], 0.75, 0.55, 10, settings, unify=False
+        )
+
+    hits = results[0].hits
+    assert len(hits) == 2, "unify=False must keep one row per mode even for the same path"
+    modes = {next(iter(h.scores)) for h in hits}
+    assert modes == {"altered", "semantic"}
+
+
+def test_unify_false_sort_order_exact_altered_semantic():
+    """With unify=False rows sort exact → altered → semantic."""
+    session = _make_session([_make_entry(dino=True, sscd=True)])
+    settings = _mock_settings()
+
+    def _fake_qv(client, collection, vector, mode, threshold, limit):
+        return ([Hit(path=PATH_A, scores={mode: 0.92})], [])
+
+    with (
+        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch(
+            "scalar_forensic.web.pipeline._query_exact",
+            return_value=([_exact_hit(PATH_B)], []),
+        ),
+        patch("scalar_forensic.web.pipeline._query_vector", side_effect=_fake_qv),
+    ):
+        results, _ = query_session(
+            session, ["exact", "altered", "semantic"], 0.75, 0.55, 10, settings, unify=False
+        )
+
+    hits = results[0].hits
+    row_modes = [next(iter(h.scores)) for h in hits]
+    assert row_modes == ["exact", "altered", "semantic"], (
+        f"expected exact→altered→semantic ordering, got {row_modes}"
+    )
+
+
+def test_merge_hit_max_score_never_downgrades():
+    """_merge_hit must keep the higher score when the same mode appears twice."""
+    from scalar_forensic.web.pipeline import _merge_hit
+
+    high = Hit(path=PATH_A, scores={"semantic": 0.95})
+    low = Hit(path=PATH_A, scores={"semantic": 0.70})
+
+    dest: dict = {}
+    _merge_hit(high, dest)
+    _merge_hit(low, dest)  # lower score — must NOT overwrite 0.95
+
+    assert dest[PATH_A].scores["semantic"] == 0.95, (
+        "later lower score must not overwrite earlier higher score"
+    )
+
+
+def test_merge_hit_provenance_setdefault():
+    """_merge_hit must keep the first-seen provenance for a mode, not replace it."""
+    from scalar_forensic.web.pipeline import _merge_hit
+
+    first = Hit(
+        path=PATH_A,
+        scores={"altered": 0.9},
+        model_provenance={"altered": {"name": "v1", "hash": "aaa"}},
+    )
+    second = Hit(
+        path=PATH_A,
+        scores={"altered": 0.8},
+        model_provenance={"altered": {"name": "v2", "hash": "bbb"}},
+    )
+
+    dest: dict = {}
+    _merge_hit(first, dest)
+    _merge_hit(second, dest)
+
+    assert dest[PATH_A].model_provenance["altered"]["hash"] == "aaa", (
+        "first-seen provenance must be preserved on repeated merge"
+    )

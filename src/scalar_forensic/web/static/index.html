@@ -11,31 +11,422 @@
 <body>
 <div id="app" x-data="sfn()" x-init="init()" x-cloak>
 
+  <!-- ── Error banner ── -->
   <div class="error-banner" x-show="serverError" x-text="serverError"></div>
+
+  <!-- ── Lightbox ── -->
+  <div class="lightbox" x-show="lightboxSrc" @click.self="closeLightbox()" @keydown.escape.window="closeLightbox()">
+    <div class="lightbox-controls">
+      <button class="lightbox-btn" @click="lightboxZoom = Math.min(5, lightboxZoom + 0.25)" title="Zoom in">+</button>
+      <button class="lightbox-btn" @click="lightboxZoom = Math.max(0.1, lightboxZoom - 0.25)" title="Zoom out">−</button>
+      <button class="lightbox-btn" @click="lightboxZoom = 1" title="Reset zoom">⊡</button>
+      <button class="lightbox-btn" @click="closeLightbox()" title="Close">✕</button>
+    </div>
+    <div class="lightbox-img-wrap" @click.stop>
+      <img :src="lightboxSrc" :style="`transform: scale(${lightboxZoom})`" alt="Full size image">
+    </div>
+  </div>
+
+  <!-- ── Semantic stats modal ── -->
+  <div class="stats-modal-backdrop" x-show="showSemanticStats" @click.self="showSemanticStats = false" @keydown.escape.window="showSemanticStats = false">
+    <div class="stats-modal">
+      <div class="stats-modal-header">
+        <span>DINOv2 Score Distribution</span>
+        <button class="stats-modal-close" @click="showSemanticStats = false">✕</button>
+      </div>
+
+      <!-- loading -->
+      <div x-show="semanticStatsLoading" class="stats-modal-body stats-modal-loading">Computing…</div>
+
+      <!-- error -->
+      <template x-if="!semanticStatsLoading && semanticStatsError">
+        <div class="stats-modal-body stats-modal-error" x-text="semanticStatsError"></div>
+      </template>
+
+      <!-- result -->
+      <template x-if="!semanticStatsLoading && semanticStats">
+        <div class="stats-modal-body">
+          <div class="stats-modal-subtitle">
+            <span x-text="shortName(selectedFile?.filename ?? '')"></span>
+            &nbsp;·&nbsp;
+            top <span x-text="semanticStats.count.toLocaleString()"></span> from collection
+          </div>
+
+          <!-- stats grid -->
+          <div class="stats-modal-grid">
+            <div class="stats-cell"><span class="stats-k">Min</span><span class="stats-v" x-text="semanticStats.min_score.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">Mean</span><span class="stats-v" x-text="semanticStats.mean.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">P10</span><span class="stats-v" x-text="semanticStats.p10.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">Std Dev</span><span class="stats-v" x-text="semanticStats.stdev.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">P25</span><span class="stats-v" x-text="semanticStats.p25.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">Max</span><span class="stats-v" x-text="semanticStats.max_score.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">Median</span><span class="stats-v semantic-val" x-text="semanticStats.median.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">P75</span><span class="stats-v" x-text="semanticStats.p75.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">P90</span><span class="stats-v" x-text="semanticStats.p90.toFixed(4)"></span></div>
+          </div>
+
+          <!-- histogram -->
+          <div class="stats-hist-wrap">
+            <div class="stats-hist">
+              <template x-for="(count, i) in semanticStats.histogram" :key="i">
+                <div class="stats-hist-bar"
+                     :style="`height: ${Math.max(2, Math.round(count / Math.max(...semanticStats.histogram) * 60))}px`"
+                     :class="{'stats-hist-bar-threshold': i === Math.min(19, Math.floor(Math.max(0, Math.min(1, thresholdSemantic)) * 20))}">
+                </div>
+              </template>
+            </div>
+            <div class="stats-hist-labels">
+              <span>0.0</span><span>0.25</span><span>0.5</span><span>0.75</span><span>1.0</span>
+            </div>
+          </div>
+
+          <!-- threshold context -->
+          <div class="stats-threshold-row">
+            <span class="stats-k">Current threshold</span>
+            <span class="stats-v accent-val" x-text="thresholdSemantic.toFixed(2)"></span>
+            <span class="stats-threshold-note"
+                  x-text="semanticStats.median > thresholdSemantic
+                    ? '(below median — catching broadly)'
+                    : '(above median — selective)'">
+            </span>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- ── Forensic Audit modal ── -->
+  <div class="audit-modal-backdrop" x-show="showAudit"
+       @click.self="showAudit=false"
+       @keydown.escape.window="showAudit=false">
+    <div class="audit-modal">
+
+      <div class="audit-modal-header">
+        <span>Forensic Audit Report</span>
+        <div class="audit-modal-header-btns">
+          <button class="btn-tiny" x-show="!auditLoading && !auditError"
+                  @click="exportAuditJson()">Copy JSON</button>
+          <button class="stats-modal-close" @click="showAudit=false">✕</button>
+        </div>
+      </div>
+
+      <div x-show="auditLoading" class="stats-modal-body stats-modal-loading">
+        Fetching audit data…
+      </div>
+
+      <template x-if="!auditLoading && auditError">
+        <div class="stats-modal-body stats-modal-error" x-text="auditError"></div>
+      </template>
+
+      <template x-if="!auditLoading && !auditError">
+        <div class="audit-body">
+
+          <!-- Integrity banner -->
+          <div class="audit-integrity-banner"
+               :class="auditIntegrity === null ? 'audit-banner-neutral'
+                     : auditIntegrity.clean    ? 'audit-banner-clean'
+                     :                           'audit-banner-warn'">
+            <template x-if="auditIntegrity === null">
+              <span>Integrity assessment unavailable — library version data not loaded</span>
+            </template>
+            <template x-if="auditIntegrity !== null && auditIntegrity.clean">
+              <span>✓ FORENSICALLY CLEAN — all model hashes and library versions match between query process and indexed data</span>
+            </template>
+            <template x-if="auditIntegrity !== null && !auditIntegrity.clean">
+              <span>
+                ⚠ INTEGRITY WARNING —
+                <span x-show="auditIntegrity.modelMismatch > 0"
+                      x-text="auditIntegrity.modelMismatch + ' model hash mismatch(es)'"></span>
+                <span x-show="auditIntegrity.modelMismatch > 0 && auditIntegrity.libMismatch > 0"> · </span>
+                <span x-show="auditIntegrity.libMismatch > 0"
+                      x-text="auditIntegrity.libMismatch + ' library version mismatch(es)'"></span>
+                — exact reproducibility cannot be guaranteed
+              </span>
+            </template>
+          </div>
+
+          <!-- ── Section: Analysis Image ── -->
+          <div class="audit-section">
+            <div class="audit-section-hdr">Analysis Image</div>
+
+            <div class="audit-sub-hdr">Identity</div>
+            <div class="audit-row">
+              <span class="audit-k">File</span>
+              <span class="audit-v" x-text="selectedFile?.filename || '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">SHA-256</span>
+              <span class="audit-v audit-hash" x-text="queryMeta?.hash_sha256 || '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">MD5</span>
+              <span class="audit-v audit-hash" x-text="queryMeta?.hash_md5 || '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">Dimensions</span>
+              <span class="audit-v"
+                    x-text="queryMeta?.width ? `${queryMeta.width} × ${queryMeta.height} px` : '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">File size</span>
+              <span class="audit-v"
+                    x-text="queryMeta?.size_bytes
+                      ? `${(queryMeta.size_bytes/1048576).toFixed(2)} MB (${queryMeta.size_bytes.toLocaleString()} bytes)`
+                      : '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">EXIF</span>
+              <span class="audit-v"
+                    x-text="queryMeta?.exif_geo_data ? 'Present — GPS data included'
+                           : queryMeta?.exif        ? 'Present — no GPS data'
+                           :                          'Not present'"></span>
+            </div>
+
+            <div class="audit-sub-hdr">Embedding Models (Query Process)</div>
+            <template x-if="embeddingModels.altered || embeddingModels.semantic">
+              <div>
+                <template x-for="mode in ['altered','semantic']" :key="mode">
+                  <template x-if="embeddingModels[mode]">
+                    <div class="audit-row" :class="{'audit-row-warn': _modelMismatch(mode)}">
+                      <span class="audit-k">
+                        <span class="badge" :class="`badge-${mode}`"
+                              x-text="mode==='altered'?'ALTER':'SEMAN'"></span>
+                      </span>
+                      <span class="audit-v audit-mono" x-text="embeddingModels[mode].name"></span>
+                      <span class="audit-hash-abbr"
+                            :title="embeddingModels[mode].hash"
+                            x-text="embeddingModels[mode].hash.slice(0,24)+'…'"></span>
+                      <span x-show="_modelMismatch(mode)" class="audit-warn-chip">⚠ hash differs</span>
+                    </div>
+                  </template>
+                </template>
+              </div>
+            </template>
+            <template x-if="!embeddingModels.altered && !embeddingModels.semantic">
+              <div class="audit-row">
+                <span class="audit-v audit-muted">Exact mode only — no embedding models used</span>
+              </div>
+            </template>
+
+            <div class="audit-sub-hdr">Library Versions (Query Process)</div>
+            <template x-if="auditQueryLibVersions">
+              <div>
+                <div class="audit-lib-header">
+                  <span class="audit-lib-col audit-col-lib">Library</span>
+                  <span class="audit-lib-col audit-col-ver">Query process</span>
+                  <span class="audit-lib-col audit-col-ver">At indexing</span>
+                  <span class="audit-lib-col audit-col-status"></span>
+                </div>
+                <template x-for="row in _auditLibRows()" :key="row.lib">
+                  <div class="audit-lib-row"
+                       :class="{'audit-row-warn': !row.match && row.indexed !== null}">
+                    <span class="audit-lib-col audit-col-lib" x-text="row.lib"></span>
+                    <span class="audit-lib-col audit-col-ver audit-mono"
+                          x-text="row.query || '—'"></span>
+                    <span class="audit-lib-col audit-col-ver audit-mono"
+                          x-text="row.indexed || '—'"></span>
+                    <span class="audit-lib-col audit-col-status"
+                          :class="row.indexed === null ? '' : row.match ? 'audit-ok-text' : 'audit-warn-text'"
+                          x-text="row.indexed === null ? '—' : row.match ? '✓' : '⚠'"></span>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <template x-if="!auditQueryLibVersions">
+              <div class="audit-row">
+                <span class="audit-v audit-muted">Library version data unavailable</span>
+              </div>
+            </template>
+          </div>
+
+          <!-- ── Section: Result Image ── -->
+          <div class="audit-section">
+            <div class="audit-section-hdr">Result Image</div>
+
+            <div class="audit-sub-hdr">Identity</div>
+            <div class="audit-row">
+              <span class="audit-k">Path</span>
+              <span class="audit-v audit-mono" x-text="selectedHit?.path || '—'"></span>
+            </div>
+            <div class="audit-row"
+                 :class="{'audit-row-ok': queryMeta?.hash_sha256 && selectedHit?.image_hash && queryMeta.hash_sha256 === selectedHit.image_hash}">
+              <span class="audit-k">SHA-256</span>
+              <span class="audit-v audit-hash"
+                    x-text="selectedHit?.image_hash || matchMeta?.hash_sha256 || '—'"></span>
+              <span x-show="queryMeta?.hash_sha256 && selectedHit?.image_hash && queryMeta.hash_sha256 === selectedHit.image_hash"
+                    class="audit-ok-chip">✓ exact file match</span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">Dimensions</span>
+              <span class="audit-v"
+                    x-text="matchMeta?.width ? `${matchMeta.width} × ${matchMeta.height} px` : '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">File size</span>
+              <span class="audit-v"
+                    x-text="matchMeta?.size_bytes
+                      ? `${(matchMeta.size_bytes/1048576).toFixed(2)} MB (${matchMeta.size_bytes.toLocaleString()} bytes)`
+                      : '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">EXIF</span>
+              <span class="audit-v"
+                    x-text="selectedHit?.exif_geo_data ? 'Present — GPS data included'
+                           : selectedHit?.exif        ? 'Present — no GPS data'
+                           :                            'Not present'"></span>
+            </div>
+            <div class="audit-row" x-show="_firstIndexedAt()">
+              <span class="audit-k">Indexed</span>
+              <span class="audit-v audit-mono" x-text="_firstIndexedAt()"></span>
+            </div>
+
+            <div class="audit-sub-hdr">Similarity Scores</div>
+            <template x-for="row in _scoreRows()" :key="row.mode">
+              <div class="audit-score-row">
+                <span class="badge" :class="`badge-${row.mode}`"
+                      x-text="row.mode==='exact'?'EXACT':row.mode==='altered'?'ALTER':'SEMAN'"></span>
+                <span class="audit-score-pair">
+                  <span class="audit-score-k">Similarity</span>
+                  <span class="audit-score-v" x-text="row.similarity >= 1 ? '1.0000' : row.similarity.toFixed(4)"></span>
+                </span>
+                <span class="audit-score-sep">·</span>
+                <span class="audit-score-pair">
+                  <span class="audit-score-k">Cosine dist.</span>
+                  <span class="audit-score-v" x-text="row.distance.toFixed(4)"></span>
+                </span>
+                <span class="audit-score-note" x-text="'(' + row.note + ')'"></span>
+              </div>
+            </template>
+
+            <div class="audit-sub-hdr">Indexing Provenance</div>
+            <template x-for="mode in ['altered','semantic']" :key="mode">
+              <template x-if="auditHitProvenance?.[mode]">
+                <div class="audit-prov-block"
+                     :class="{'audit-row-warn': _modelMismatch(mode)}">
+                  <div class="audit-prov-badge">
+                    <span class="badge" :class="`badge-${mode}`"
+                          x-text="mode==='altered'?'ALTER':'SEMAN'"></span>
+                  </div>
+                  <div class="audit-prov-detail">
+                    <div class="audit-row">
+                      <span class="audit-k">Model</span>
+                      <span class="audit-v audit-mono"
+                            x-text="auditHitProvenance[mode].model_name || '—'"></span>
+                    </div>
+                    <div class="audit-row">
+                      <span class="audit-k">Hash</span>
+                      <span class="audit-v audit-hash"
+                            :title="auditHitProvenance[mode].model_hash"
+                            x-text="auditHitProvenance[mode].model_hash || '—'"></span>
+                      <span x-show="_modelMismatch(mode)"
+                            class="audit-warn-chip">⚠ differs from query</span>
+                    </div>
+                    <div class="audit-row">
+                      <span class="audit-k">Indexed</span>
+                      <span class="audit-v audit-mono"
+                            x-text="auditHitProvenance[mode].indexed_at || '—'"></span>
+                    </div>
+                    <div class="audit-row">
+                      <span class="audit-k">Config</span>
+                      <span class="audit-v">
+                        <span x-text="auditHitProvenance[mode].inference_dtype || '—'"></span>
+                        ·
+                        <span x-text="(auditHitProvenance[mode].normalize_size || '—') + ' px input'"></span>
+                        ·
+                        <span x-text="(auditHitProvenance[mode].embedding_dim || '—') + '-dim'"></span>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </template>
+            <template x-if="auditHitProvenance && !auditHitProvenance.altered && !auditHitProvenance.semantic">
+              <div class="audit-row">
+                <span class="audit-v audit-muted">
+                  Indexing provenance not found — image may have been indexed without provenance metadata
+                </span>
+              </div>
+            </template>
+          </div>
+
+          <!-- ── Section: Search Parameters ── -->
+          <div class="audit-section">
+            <div class="audit-section-hdr">Search Parameters</div>
+            <div class="audit-row">
+              <span class="audit-k">Compared</span>
+              <span class="audit-v audit-mono" x-text="provenance?.timestamp || '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">Modes</span>
+              <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+                <template x-for="m in (provenance?.modes ?? [])" :key="m">
+                  <span class="badge" :class="`badge-${m}`"
+                        x-text="m==='exact'?'EXACT':m==='altered'?'ALTER':'SEMAN'"></span>
+                </template>
+              </div>
+            </div>
+            <div class="audit-row" x-show="provenance?.modes?.includes('altered')">
+              <span class="audit-k">Thr. ALTER</span>
+              <span class="audit-v audit-mono"
+                    x-text="provenance?.threshold_altered?.toFixed(4) ?? '—'"></span>
+            </div>
+            <div class="audit-row" x-show="provenance?.modes?.includes('semantic')">
+              <span class="audit-k">Thr. SEMAN</span>
+              <span class="audit-v audit-mono"
+                    x-text="provenance?.threshold_semantic?.toFixed(4) ?? '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">Result limit</span>
+              <span class="audit-v audit-mono" x-text="provenance?.limit ?? '—'"></span>
+            </div>
+          </div>
+
+        </div><!-- /audit-body -->
+      </template>
+    </div><!-- /audit-modal -->
+  </div><!-- /audit-modal-backdrop -->
 
   <!-- ── Header ── -->
   <header>
     <img class="header-logo" src="/static/logo.svg" alt="ScalarForensic" height="30">
-    <div class="mode-toggles">
+
+    <!-- Pre-analysis: mode toggles -->
+    <div class="mode-toggles" x-show="phase === 'upload'">
       <template x-for="mode in ['exact','altered','semantic']" :key="mode">
         <button class="mode-btn"
           :class="{
-            'active-exact':   mode === 'exact'    && selectedModes.includes('exact'),
-            'active-altered': mode === 'altered'  && selectedModes.includes('altered'),
-            'active-dino':    mode === 'semantic' && selectedModes.includes('semantic'),
+            'active-exact':    mode === 'exact'    && selectedModes.includes('exact'),
+            'active-altered':  mode === 'altered'  && selectedModes.includes('altered'),
+            'active-dino':     mode === 'semantic' && selectedModes.includes('semantic'),
+            'mode-mandatory':  mode === 'exact',
           }"
-          :disabled="!availableModes.includes(mode)"
+          :disabled="!availableModes.includes(mode) && mode !== 'exact'"
           @click="toggleMode(mode)"
-          :title="!availableModes.includes(mode) ? 'Collection not indexed yet' : ''">
+          :title="mode === 'exact' ? 'Always active — required for analysis' : (!availableModes.includes(mode) ? 'Collection not indexed yet' : '')">
           <span class="dot"></span>
           <span x-text="mode === 'exact' ? 'Exact' : mode === 'altered' ? 'Altered' : 'Semantic'"></span>
         </button>
+      </template>
+    </div>
+
+    <!-- Post-analysis: non-interactive run pills -->
+    <div class="analysis-pills" x-show="phase !== 'upload'">
+      <template x-for="mode in analysisRunModes" :key="mode">
+        <span class="analysis-pill"
+          :class="{
+            'analysis-pill-exact':    mode === 'exact',
+            'analysis-pill-altered':  mode === 'altered',
+            'analysis-pill-semantic': mode === 'semantic',
+          }"
+          x-text="mode === 'exact' ? 'Exact' : mode === 'altered' ? 'Altered' : 'Semantic'">
+        </span>
       </template>
     </div>
   </header>
 
   <!-- ── Upload ── -->
   <div class="upload-section" x-show="phase === 'upload'">
+    <canvas id="vec-canvas" aria-hidden="true"></canvas>
     <div class="drop-zone" :class="{'drag-over': dragOver}"
          @dragover.prevent="dragOver = true"
          @dragleave.prevent="dragOver = false"
@@ -46,18 +437,18 @@
         <button class="btn-secondary" @click.stop="$refs.fileInput.click()">🖼 Select Files</button>
       </div>
       <div class="file-count-badge" x-show="pendingFiles.length > 0">
-        <span x-text="pendingFiles.length"></span> file<span x-show="pendingFiles.length !== 1">s</span> queued
+        <span x-text="pendingFiles.length"></span> image<span x-show="pendingFiles.length !== 1">s</span> queued
+      </div>
+      <div class="upload-actions">
+        <button class="btn-secondary" @click.stop="pendingFiles = []" x-show="pendingFiles.length > 0">Clear</button>
+        <button class="btn-primary"
+          :disabled="pendingFiles.length === 0 || selectedModes.length === 0"
+          @click="startAnalysis()">▶ Analyze</button>
       </div>
       <input type="file" multiple accept="image/*" style="display:none" x-ref="fileInput"
              @change="addFiles($event.target.files); $event.target.value=''">
       <input type="file" multiple style="display:none" x-ref="folderInput" webkitdirectory
              @change="addFiles($event.target.files); $event.target.value=''">
-    </div>
-    <div class="upload-actions">
-      <button class="btn-secondary" @click.stop="pendingFiles = []" x-show="pendingFiles.length > 0">Clear</button>
-      <button class="btn-primary"
-        :disabled="pendingFiles.length === 0 || selectedModes.length === 0"
-        @click="startAnalysis()">▶ Analyze</button>
     </div>
   </div>
 
@@ -87,28 +478,28 @@
   <!-- ── 4-panel results layout ── -->
   <div class="results-layout" x-show="phase === 'results'">
 
-    <!-- Panel 1: Controls + file lists + folder tree -->
+    <!-- Panel 1: Controls + file lists -->
     <div class="left-panel">
 
       <div class="panel-header">Query Controls</div>
       <div class="sliders">
         <div class="slider-row">
           <div class="slider-label">
-            <span title="Maximum number of hits returned per uploaded file">Top K (max results per file)</span>
+            <span title="Maximum hits returned per uploaded file">Top K</span>
             <span class="slider-value" x-text="limit"></span>
           </div>
           <input type="range" min="1" max="50" step="1" x-model.number="limit" @input="debouncedQuery()">
         </div>
-        <div class="slider-row">
+        <div class="slider-row" x-show="analysisRunModes.includes('altered')">
           <div class="slider-label">
-            <span title="Minimum SSCD cosine similarity to include a hit (detects edited/cropped copies)">SSCD similarity threshold</span>
+            <span title="Minimum SSCD similarity (copy detection)">SSCD threshold</span>
             <span class="slider-value altered-val" x-text="thresholdAltered.toFixed(2)"></span>
           </div>
           <input type="range" min="0" max="1" step="0.01" x-model.number="thresholdAltered" @input="debouncedQuery()" class="range-altered">
         </div>
-        <div class="slider-row">
+        <div class="slider-row" x-show="analysisRunModes.includes('semantic')">
           <div class="slider-label">
-            <span title="Minimum DINOv2 cosine similarity to include a hit (detects visually similar images)">DINOv2 similarity threshold</span>
+            <span title="Minimum DINOv2 similarity (semantic search)">DINOv2 threshold</span>
             <span class="slider-value semantic-val" x-text="thresholdSemantic.toFixed(2)"></span>
           </div>
           <input type="range" min="0" max="1" step="0.01" x-model.number="thresholdSemantic" @input="debouncedQuery()" class="range-semantic">
@@ -137,36 +528,40 @@
         Matched <span class="count-chip" x-text="matchedFiles.length"></span>
       </div>
       <div class="file-list matched-list">
-        <template x-for="(r, idx) in matchedFiles" :key="r.file_id">
+        <template x-for="(r, idx) in matchedFiles.slice(0, LIST_CAP)" :key="r.file_id">
           <div class="file-item" :class="{selected: selectedFileId===r.file_id}"
-               :style="`animation-delay:${idx*20}ms`"
+               :style="`animation-delay:${idx*15}ms`"
                @click="selectFile(r.file_id)">
             <span class="file-name" :title="r.filename" x-text="shortName(r.filename)"></span>
             <span class="hit-count" x-text="r.hits.length"></span>
           </div>
         </template>
+        <div class="list-overflow-msg" x-show="matchedFiles.length > LIST_CAP"
+             x-text="`… and ${matchedFiles.length - LIST_CAP} more`"></div>
       </div>
 
       <div class="panel-header section-header">
         Not Matched <span class="count-chip muted-chip" x-text="unmatchedFiles.length"></span>
       </div>
       <div class="file-list unmatched-list">
-        <template x-for="r in unmatchedFiles" :key="r.file_id">
+        <template x-for="r in unmatchedFiles.slice(0, LIST_CAP)" :key="r.file_id">
           <div class="file-item no-hits" :class="{selected: selectedFileId===r.file_id}"
                @click="selectFile(r.file_id)">
             <span class="file-name" :title="r.filename" x-text="shortName(r.filename)"></span>
             <span class="hit-count zero">0</span>
           </div>
         </template>
-        <div x-show="unmatchedFiles.length===0" class="empty-list-msg">—</div>
+        <div class="list-overflow-msg" x-show="unmatchedFiles.length > LIST_CAP"
+             x-text="`… and ${unmatchedFiles.length - LIST_CAP} more`"></div>
+        <div x-show="unmatchedFiles.length === 0" class="empty-list-msg">—</div>
       </div>
 
       <template x-if="errorFiles.length > 0">
         <div>
           <div class="panel-header section-header">
-            Query Errors <span class="count-chip error-chip" x-text="errorFiles.length"></span>
+            Errors <span class="count-chip error-chip" x-text="errorFiles.length"></span>
           </div>
-          <div class="file-list error-list">
+          <div class="file-list" style="max-height:10vh;overflow-y:auto">
             <template x-for="r in errorFiles" :key="r.file_id">
               <div class="file-item no-hits" :class="{selected: selectedFileId===r.file_id}"
                    @click="selectFile(r.file_id)">
@@ -178,21 +573,23 @@
         </div>
       </template>
 
-      <div class="panel-header section-header">Folders</div>
-      <div class="folder-tree">
-        <template x-for="f in folderTree" :key="f.name">
-          <div class="folder-node">
-            <span class="folder-icon">▸</span>
-            <span class="folder-name" x-text="f.name"></span>
-            <span class="folder-count" x-text="f.count"></span>
-          </div>
-        </template>
-      </div>
     </div>
 
     <!-- Panel 2: Query image -->
     <div class="image-panel">
-      <div class="panel-header">Query Image</div>
+      <div class="panel-header">
+        Query Image
+        <template x-if="analysisRunModes.includes('semantic') && selectedFileId && !(selectedFile?.errors?.length > 0)">
+          <button class="btn-tiny" :disabled="semanticStatsLoading"
+                  @click="calcSemanticStats()"
+                  x-text="semanticStatsLoading ? '…' : 'Dist Stats'"></button>
+        </template>
+        <template x-if="selectedFileId && selectedHit && !(selectedFile?.errors?.length > 0)">
+          <button class="btn-tiny" :disabled="auditLoading"
+                  @click="openAudit()"
+                  x-text="auditLoading ? '…' : 'Audit'"></button>
+        </template>
+      </div>
 
       <template x-if="!selectedFileId">
         <div class="placeholder">Select a file</div>
@@ -201,45 +598,78 @@
       <template x-if="selectedFileId">
         <div class="image-panel-inner">
           <div class="image-box">
-            <img :src="`/api/query-image/${sessionId}/${selectedFileId}`"
-                 :alt="selectedFile?.filename">
+            <img x-show="querySrc"
+                 :src="querySrc"
+                 :style="`transform: scale(${queryZoom})`"
+                 @click="openLightbox(querySrc)"
+                 alt="Query image">
+            <div class="image-zoom-btns">
+              <button class="zoom-btn" @click.stop="queryZoom = Math.min(4, queryZoom + 0.25)" title="Zoom in">+</button>
+              <button class="zoom-btn" @click.stop="queryZoom = Math.max(0.2, queryZoom - 0.25)" title="Zoom out">−</button>
+              <button class="zoom-btn" @click.stop="queryZoom = 1" title="Reset" style="font-size:10px">⊡</button>
+            </div>
           </div>
           <div class="image-subs">
-            <div class="sub-row"
-                 :class="{'sub-match': matchMeta && shortName(selectedFile?.filename??'') === selectedHit?.path?.split('/').pop()}">
+            <div class="sub-row">
               <span class="sub-label">File</span>
-              <span class="sub-val" x-text="shortName(selectedFile?.filename??'')"></span>
+              <span class="sub-val" x-text="shortName(selectedFile?.filename ?? '')"></span>
             </div>
             <div class="sub-row">
               <span class="sub-label">Path</span>
-              <span class="sub-val mono" x-text="folderOf(selectedFile?.filename??'') || '—'"></span>
+              <span class="sub-val mono" x-text="folderOf(selectedFile?.filename ?? '') || '(root)'"></span>
             </div>
-            <div class="sub-row" x-show="queryMeta?.hash_sha256"
+            <div class="sub-row"
                  :class="{'sub-match': queryMeta?.hash_sha256 && matchMeta?.hash_sha256 && queryMeta.hash_sha256 === matchMeta.hash_sha256}">
               <span class="sub-label">SHA-256</span>
-              <span class="sub-val hash" x-text="queryMeta?.hash_sha256??''"></span>
+              <span class="sub-val hash" x-text="queryMeta?.hash_sha256 || '—'"></span>
             </div>
-            <div class="sub-row" x-show="queryMeta?.hash_md5"
+            <div class="sub-row"
                  :class="{'sub-match': queryMeta?.hash_md5 && matchMeta?.hash_md5 && queryMeta.hash_md5 === matchMeta.hash_md5}">
               <span class="sub-label">MD5</span>
-              <span class="sub-val hash" x-text="queryMeta?.hash_md5??''"></span>
+              <span class="sub-val hash" x-text="queryMeta?.hash_md5 || '—'"></span>
+            </div>
+            <div class="sub-row"
+                 :class="{'sub-match': queryMeta?.width && matchMeta?.width && queryMeta.width === matchMeta.width && queryMeta.height === matchMeta.height}">
+              <span class="sub-label">Dims</span>
+              <span class="sub-val" x-text="queryMeta?.width ? `${queryMeta.width}×${queryMeta.height}` : '—'"></span>
             </div>
             <div class="sub-row">
               <span class="sub-label">Meta</span>
               <span x-show="queryMeta?.exif_geo_data" class="meta-tag">GPS</span>
               <span x-show="queryMeta?.exif && !queryMeta?.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
-              <span x-show="queryMeta && !queryMeta?.exif" class="muted-text">none</span>
-            </div>
-            <div class="sub-row" x-show="queryMeta?.width"
-                 :class="{'sub-match': queryMeta?.width && matchMeta?.width && queryMeta.width === matchMeta.width && queryMeta.height === matchMeta.height}">
-              <span class="sub-label">Dims</span>
-              <span class="sub-val" x-text="`${queryMeta?.width}×${queryMeta?.height}`"></span>
+              <span x-show="!queryMeta || (!queryMeta.exif && !queryMeta.exif_geo_data)" class="muted-text">—</span>
             </div>
           </div>
-          <div class="meta-box" x-show="_metaItemsWithMatch(queryMeta, matchMeta).length > 0">
+          <div class="emb-box" x-show="embeddingModels.altered || embeddingModels.semantic">
+            <div class="emb-box-hdr" @click="showEmbModels = !showEmbModels">
+              Embedding Models
+              <span class="emb-chevron" x-text="showEmbModels ? '▴' : '▾'"></span>
+            </div>
+            <div x-show="showEmbModels">
+              <template x-if="embeddingModels.altered">
+                <div class="emb-row">
+                  <span class="badge badge-altered">ALTER</span>
+                  <span class="emb-name" x-text="embeddingModels.altered.name"></span>
+                  <span class="emb-hash"
+                        :title="embeddingModels.altered.hash"
+                        x-text="embeddingModels.altered.hash.slice(0,16) + '…'"></span>
+                </div>
+              </template>
+              <template x-if="embeddingModels.semantic">
+                <div class="emb-row">
+                  <span class="badge badge-semantic">SEMAN</span>
+                  <span class="emb-name" x-text="embeddingModels.semantic.name"></span>
+                  <span class="emb-hash"
+                        :title="embeddingModels.semantic.hash"
+                        x-text="embeddingModels.semantic.hash.slice(0,16) + '…'"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+          <div class="meta-box" x-show="_metaItems(queryMeta, matchMeta).length > 0">
             <div class="meta-box-hdr">EXIF / File Info</div>
             <div class="meta-grid">
-              <template x-for="item in _metaItemsWithMatch(queryMeta, matchMeta)" :key="item.label">
+              <template x-for="item in _metaItems(queryMeta, matchMeta)" :key="item.label">
                 <div class="meta-item" :class="{'meta-match': item.match, 'meta-partial': item.partial}">
                   <span class="meta-k" x-text="item.label"></span>
                   <span class="meta-v" x-text="item.value"></span>
@@ -257,11 +687,10 @@
         Best Match
         <template x-if="selectedHit">
           <div class="header-pills">
-            <template x-for="p in hitPills(selectedHit.scores)" :key="p.mode">
+            <template x-for="[mode, score] in Object.entries(selectedHit.scores)" :key="mode">
               <div class="pill-group">
-                <span class="badge" :class="`badge-${p.mode}`"
-                      x-text="p.mode.toUpperCase()"></span>
-                <span class="pill-score" x-text="p.score>=1?'1.000':p.score.toFixed(3)"></span>
+                <span class="badge" :class="`badge-${mode}`" x-text="mode.toUpperCase()"></span>
+                <span class="pill-score" x-text="score >= 1 ? '1.000' : score.toFixed(3)"></span>
               </div>
             </template>
           </div>
@@ -275,46 +704,83 @@
       <template x-if="selectedHit">
         <div class="image-panel-inner">
           <div class="image-box">
-            <img :src="`/api/hit-image?path=${encodeURIComponent(selectedHit.path)}`"
-                 :alt="selectedHit.path"
-                 @error="$el.style.opacity='0.2'">
+            <img x-show="matchSrc"
+                 :src="matchSrc"
+                 :style="`transform: scale(${matchZoom})`"
+                 @click="openLightbox(matchSrc)"
+                 @error="$el.style.opacity='0.2'"
+                 alt="Best match">
+            <div class="image-zoom-btns">
+              <button class="zoom-btn" @click.stop="matchZoom = Math.min(4, matchZoom + 0.25)" title="Zoom in">+</button>
+              <button class="zoom-btn" @click.stop="matchZoom = Math.max(0.2, matchZoom - 0.25)" title="Zoom out">−</button>
+              <button class="zoom-btn" @click.stop="matchZoom = 1" title="Reset" style="font-size:10px">⊡</button>
+            </div>
           </div>
           <div class="image-subs">
             <div class="sub-row"
-                 :class="{'sub-match': queryMeta && selectedHit.path.split('/').pop() === shortName(selectedFile?.filename??'')}">
+                 :class="{'sub-match': selectedHit && queryMeta && shortName(selectedFile?.filename??'') === selectedHit.path.split('/').pop()}">
               <span class="sub-label">File</span>
-              <span class="sub-val" x-text="selectedHit.path.split('/').pop()"></span>
+              <span class="sub-val" x-text="selectedHit?.path.split('/').pop() ?? '—'"></span>
             </div>
             <div class="sub-row">
               <span class="sub-label">Path</span>
-              <span class="sub-val mono" x-text="selectedHit.path.split('/').slice(0,-1).join('/')"></span>
+              <span class="sub-val mono" x-text="selectedHit?.path.split('/').slice(0,-1).join('/') || '—'"></span>
             </div>
-            <div class="sub-row" x-show="matchMeta?.hash_sha256"
+            <div class="sub-row"
                  :class="{'sub-match': queryMeta?.hash_sha256 && matchMeta?.hash_sha256 && queryMeta.hash_sha256 === matchMeta.hash_sha256}">
               <span class="sub-label">SHA-256</span>
-              <span class="sub-val hash" x-text="matchMeta?.hash_sha256??''"></span>
+              <span class="sub-val hash" x-text="matchMeta?.hash_sha256 || '—'"></span>
             </div>
-            <div class="sub-row" x-show="matchMeta?.hash_md5"
+            <div class="sub-row"
                  :class="{'sub-match': queryMeta?.hash_md5 && matchMeta?.hash_md5 && queryMeta.hash_md5 === matchMeta.hash_md5}">
               <span class="sub-label">MD5</span>
-              <span class="sub-val hash" x-text="matchMeta?.hash_md5??''"></span>
+              <span class="sub-val hash" x-text="matchMeta?.hash_md5 || '—'"></span>
+            </div>
+            <div class="sub-row"
+                 :class="{'sub-match': queryMeta?.width && matchMeta?.width && queryMeta.width === matchMeta.width && queryMeta.height === matchMeta.height}">
+              <span class="sub-label">Dims</span>
+              <span class="sub-val" x-text="matchMeta?.width ? `${matchMeta.width}×${matchMeta.height}` : '—'"></span>
             </div>
             <div class="sub-row">
               <span class="sub-label">Meta</span>
-              <span x-show="selectedHit.exif_geo_data" class="meta-tag">GPS</span>
-              <span x-show="selectedHit.exif && !selectedHit.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
-              <span x-show="!selectedHit.exif" class="muted-text">none</span>
-            </div>
-            <div class="sub-row" x-show="matchMeta?.width"
-                 :class="{'sub-match': queryMeta?.width && matchMeta?.width && queryMeta.width === matchMeta.width && queryMeta.height === matchMeta.height}">
-              <span class="sub-label">Dims</span>
-              <span class="sub-val" x-text="`${matchMeta?.width}×${matchMeta?.height}`"></span>
+              <span x-show="selectedHit?.exif_geo_data" class="meta-tag">GPS</span>
+              <span x-show="selectedHit?.exif && !selectedHit?.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
+              <span x-show="!selectedHit || (!selectedHit.exif && !selectedHit.exif_geo_data)" class="muted-text">—</span>
             </div>
           </div>
-          <div class="meta-box" x-show="_metaItemsWithMatch(matchMeta, queryMeta).length > 0">
+          <div class="emb-box"
+               x-show="selectedHit && (selectedHit.model_provenance?.altered || selectedHit.model_provenance?.semantic)">
+            <div class="emb-box-hdr" @click="showEmbModels = !showEmbModels">
+              Embedding Models
+              <span class="emb-chevron" x-text="showEmbModels ? '▴' : '▾'"></span>
+            </div>
+            <div x-show="showEmbModels">
+              <template x-if="selectedHit?.model_provenance?.altered">
+                <div class="emb-row"
+                     :class="{'emb-mismatch': embeddingModels.altered && embeddingModels.altered.hash !== selectedHit.model_provenance.altered.hash}">
+                  <span class="badge badge-altered">ALTER</span>
+                  <span class="emb-name" x-text="selectedHit.model_provenance.altered.name"></span>
+                  <span class="emb-hash"
+                        :title="selectedHit.model_provenance.altered.hash"
+                        x-text="selectedHit.model_provenance.altered.hash.slice(0,16) + '…'"></span>
+                </div>
+              </template>
+              <template x-if="selectedHit?.model_provenance?.semantic">
+                <div class="emb-row"
+                     :class="{'emb-mismatch': embeddingModels.semantic && embeddingModels.semantic.hash !== selectedHit.model_provenance.semantic.hash}">
+                  <span class="badge badge-semantic">SEMAN</span>
+                  <span class="emb-name" x-text="selectedHit.model_provenance.semantic.name"></span>
+                  <span class="emb-hash"
+                        :title="selectedHit.model_provenance.semantic.hash"
+                        x-text="selectedHit.model_provenance.semantic.hash.slice(0,16) + '…'"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+          <div class="meta-box" x-show="_metaItems(matchMeta, queryMeta).length > 0">
             <div class="meta-box-hdr">EXIF / File Info</div>
             <div class="meta-grid">
-              <template x-for="item in _metaItemsWithMatch(matchMeta, queryMeta)" :key="item.label">
+              <template x-for="item in _metaItems(matchMeta, queryMeta)" :key="item.label">
                 <div class="meta-item" :class="{'meta-match': item.match, 'meta-partial': item.partial}">
                   <span class="meta-k" x-text="item.label"></span>
                   <span class="meta-v" x-text="item.value"></span>
@@ -326,16 +792,36 @@
       </template>
     </div>
 
-    <!-- Panel 4: Hits list -->
+    <!-- Panel 4: Hits -->
     <div class="right-panel">
       <div class="panel-header">
         Hits
         <template x-if="selectedFile">
-          <span class="count-chip" x-text="selectedFile.hits.length"></span>
+          <span class="count-chip" x-text="filteredHits.length"></span>
         </template>
       </div>
 
+      <!-- Filter pills -->
+      <div class="hits-filters"
+           x-show="analysisRunModes.includes('altered') || analysisRunModes.includes('semantic')">
+        <template x-if="analysisRunModes.includes('altered')">
+          <button class="hit-filter-pill hit-filter-pill-altered"
+                  :class="{off: !hitsFilterAltered}"
+                  @click="hitsFilterAltered = !hitsFilterAltered; selectedHitKey = null; matchSrc = null">ALTERED</button>
+        </template>
+        <template x-if="analysisRunModes.includes('semantic')">
+          <button class="hit-filter-pill hit-filter-pill-semantic"
+                  :class="{off: !hitsFilterSemantic}"
+                  @click="hitsFilterSemantic = !hitsFilterSemantic; selectedHitKey = null; matchSrc = null">SEMANTIC</button>
+        </template>
+        <button class="hit-filter-pill hit-filter-pill-unify"
+                :class="{off: !hitsUnified}"
+                @click="hitsUnified = !hitsUnified; selectedHitKey = null; matchSrc = null; runQuery()"
+                title="Merge hits with the same path across all modes into one row">UNIFIED</button>
+      </div>
+
       <div x-show="!selectedFileId" class="no-hits-msg">No file selected</div>
+
       <template x-if="selectedFile?.errors?.length > 0">
         <div class="query-error-banner">
           <strong>Query error</strong>
@@ -344,24 +830,42 @@
           </template>
         </div>
       </template>
-      <div x-show="selectedFileId && selectedFile?.hits.length===0 && !(selectedFile?.errors?.length > 0)" class="no-hits-msg">No hits</div>
 
-      <div class="hits-list" x-show="selectedFile?.hits.length > 0">
-        <template x-for="hit in (selectedFile?.hits??[])" :key="hitKey(hit)">
+      <div x-show="selectedFileId && filteredHits.length === 0 && !(selectedFile?.errors?.length > 0)"
+           class="no-hits-msg">No hits</div>
+
+      <div class="hits-list" x-show="filteredHits.length > 0">
+        <template x-for="hit in filteredHits" :key="hitKey(hit)">
           <div class="hit-card" :class="{selected: hitKey(hit) === selectedHitKey}"
                @click="selectHit(hit)">
             <img class="hit-thumb"
-                 :src="`/api/hit-image?path=${encodeURIComponent(hit.path)}`"
-                 :alt="hit.path" loading="lazy"
-                 @error="$el.style.opacity='0.2'">
-            <div class="hit-info">
-              <div class="hit-pills">
-                <template x-for="p in hitPills(hit.scores)" :key="p.mode">
-                  <div class="pill-group">
-                    <span class="badge" :class="`badge-${p.mode}`" x-text="p.mode.toUpperCase()"></span>
-                    <span class="pill-score" x-text="p.score>=1?'1.000':p.score.toFixed(3)"></span>
-                  </div>
-                </template>
+                 :src="hit.image_hash ? `/api/thumbnail/${hit.image_hash}` : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"
+                 @error="$el.onerror=null; $el.src='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"
+                 loading="lazy"
+                 alt="">
+            <div class="hit-body">
+              <div class="hit-scores">
+                <!-- Fixed slot 1: always reserved; hidden when not an exact match -->
+                <div class="pill-group" :style="'exact' in hit.scores ? '' : 'visibility:hidden'">
+                  <span class="badge badge-exact">EXACT</span>
+                  <span class="pill-score pill-score-exact">✓</span>
+                </div>
+                <!-- Fixed slot 2: reserved when altered mode was run -->
+                <div class="pill-group"
+                     x-show="analysisRunModes.includes('altered')"
+                     :style="'altered' in hit.scores && hitsFilterAltered ? '' : 'visibility:hidden'">
+                  <span class="badge badge-altered">ALTER</span>
+                  <span class="pill-score pill-score-altered"
+                        x-text="'altered' in hit.scores ? hit.scores.altered.toFixed(3) : ''"></span>
+                </div>
+                <!-- Fixed slot 3: reserved when semantic mode was run -->
+                <div class="pill-group"
+                     x-show="analysisRunModes.includes('semantic')"
+                     :style="'semantic' in hit.scores && hitsFilterSemantic ? '' : 'visibility:hidden'">
+                  <span class="badge badge-semantic">SEMAN</span>
+                  <span class="pill-score pill-score-semantic"
+                        x-text="'semantic' in hit.scores ? hit.scores.semantic.toFixed(3) : ''"></span>
+                </div>
               </div>
               <div class="hit-filename" x-text="hit.path.split('/').pop()"></div>
               <div class="hit-dirpath" x-text="hit.path.split('/').slice(0,-1).join('/')"></div>
@@ -382,11 +886,16 @@
 <script>
 function sfn() {
   return {
+    // ── Constants ──────────────────────────────────────────────────────────
+    LIST_CAP: 200,
+
+    // ── State ─────────────────────────────────────────────────────────────
     phase: 'upload',
     pendingFiles: [],
     dragOver: false,
     selectedModes: [],
     availableModes: [],
+    analysisRunModes: [],      // modes actually used in the last analysis
     serverError: '',
     progress: { current: 0, total: 0, filename: '' },
     sessionId: null,
@@ -396,71 +905,134 @@ function sfn() {
     thresholdAltered: 0.75,
     thresholdSemantic: 0.55,
     limit: 10,
+
+    // Image sources with TTL management
+    querySrc: null,
+    matchSrc: null,
+    _queryImgTimer: null,
+    _matchImgTimer: null,
+
+    // In-panel zoom
+    queryZoom: 1.0,
+    matchZoom: 1.0,
+
+    // Lightbox
+    lightboxSrc: null,
+    lightboxZoom: 1.0,
+
+    // Metadata
     queryMeta: null,
     matchMeta: null,
     queryError: '',
     _queryTimer: null,
+
+    // Semantic stats modal
+    semanticStats: null,
+    semanticStatsLoading: false,
+    semanticStatsError: null,
+    showSemanticStats: false,
+
+    // Forensic audit modal
+    showAudit: false,
+    auditLoading: false,
+    auditError: null,
+    auditQueryLibVersions: null,
+    auditHitProvenance: null,
+
+    // Provenance
     provenance: null,
     showProvenance: false,
+    embeddingModels: {},
+    showEmbModels: false,
     showPasteArea: false,
     pasteBuffer: '',
 
+    // Hits filtering
+    hitsFilterAltered: true,
+    hitsFilterSemantic: true,
+    hitsUnified: true,
+
     // ── Computed ──────────────────────────────────────────────────────────
     get progressPct() {
-      return this.progress.total === 0 ? 0 : Math.round(this.progress.current / this.progress.total * 100);
+      return this.progress.total === 0 ? 0
+        : Math.round(this.progress.current / this.progress.total * 100);
     },
     get selectedFile() {
       return this.results.find(r => r.file_id === this.selectedFileId) ?? null;
     },
-    get matchedFiles() { return this.results.filter(r => r.hits.length > 0 && !(r.errors?.length > 0)); },
-    get errorFiles() { return this.results.filter(r => r.errors?.length > 0); },
-    get unmatchedFiles() { return this.results.filter(r => r.hits.length === 0 && !(r.errors?.length > 0)); },
+    get matchedFiles() {
+      return this.results.filter(r => r.hits.length > 0 && !(r.errors?.length > 0));
+    },
+    get errorFiles() {
+      return this.results.filter(r => r.errors?.length > 0);
+    },
+    get unmatchedFiles() {
+      return this.results.filter(r => r.hits.length === 0 && !(r.errors?.length > 0));
+    },
     get selectedHit() {
-      const hits = this.selectedFile?.hits ?? [];
+      const hits = this.filteredHits;
       if (this.selectedHitKey) {
         const h = hits.find(h => this.hitKey(h) === this.selectedHitKey);
         if (h) return h;
       }
       return hits[0] ?? null;
     },
-    get folderTree() {
-      const map = new Map();
-      for (const r of this.results) {
-        const parts = r.filename.replace(/\\/g, '/').split('/');
-        const folder = parts.length > 1 ? parts.slice(0, -1).join('/') : '(root)';
-        map.set(folder, (map.get(folder) ?? 0) + 1);
-      }
-      return [...map.entries()].map(([name, count]) => ({ name, count }));
+    get filteredHits() {
+      if (!this.selectedFile) return [];
+      return this.selectedFile.hits.filter(h => {
+        // Keep if any active-mode score is present
+        if ('exact' in h.scores) return true;
+        if ('altered' in h.scores && this.hitsFilterAltered) return true;
+        if ('semantic' in h.scores && this.hitsFilterSemantic) return true;
+        return false;
+      });
     },
-    // ── Helpers ───────────────────────────────────────────────────────────
-    hitKey(hit) { return hit.path + '::' + Object.keys(hit.scores)[0]; },
-    hitPills(scores) {
-      const order = ['exact', 'altered', 'semantic'];
-      return Object.entries(scores)
-        .sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]))
-        .map(([mode, score]) => ({ mode, score }));
+    get auditIntegrity() {
+      if (!this.auditQueryLibVersions) return null;
+      const rows = this._auditLibRows();
+      const libMismatch = rows.filter(r => !r.match && r.indexed !== null).length;
+      const modelMismatch = ['altered', 'semantic'].filter(m => this._modelMismatch(m)).length;
+      return { libMismatch, modelMismatch, clean: libMismatch === 0 && modelMismatch === 0 };
     },
 
-    _metaItemsWithMatch(meta, other) {
+    // ── Helpers ───────────────────────────────────────────────────────────
+    hitKey(hit) {
+      // Stable key derived from the hit itself — works for both unified and unmerged.
+      // Unified hits have multiple score keys (e.g. "exact,altered"); unmerged hits have one.
+      return hit.path + '\x00' + Object.keys(hit.scores).sort().join(',');
+    },
+    shortName(filename) {
+      return filename.replace(/\\/g, '/').split('/').pop();
+    },
+    folderOf(filename) {
+      const parts = filename.replace(/\\/g, '/').split('/');
+      return parts.length > 1 ? parts.slice(0, -1).join('/') : '';
+    },
+    openLightbox(src) {
+      if (!src) return;
+      this.lightboxSrc = src;
+      this.lightboxZoom = 1.0;
+    },
+    closeLightbox() {
+      this.lightboxSrc = null;
+    },
+
+    _metaItems(meta, other) {
       if (!meta) return [];
       const eq  = (a, b) => a != null && b != null && String(a).trim() === String(b).trim();
       const num = (a, b, tol = 0) => a != null && b != null && Math.abs(Number(a) - Number(b)) <= tol;
       const items = [];
 
-      if (meta.size_bytes) {
-        const rel = other?.size_bytes ? Math.abs(meta.size_bytes - other.size_bytes) / Math.max(meta.size_bytes, other.size_bytes) : 1;
+      if (meta.size_bytes != null) {
+        const rel = other?.size_bytes != null
+          ? Math.abs(meta.size_bytes - other.size_bytes) / Math.max(meta.size_bytes, other.size_bytes)
+          : 1;
         items.push({ label: 'Size', value: this._fmtSize(meta.size_bytes),
           match: rel === 0, partial: rel > 0 && rel < 0.05 });
       }
-      if (meta.width && meta.height) items.push({
-        label: 'Dims', value: `${meta.width}×${meta.height}`,
-        match: num(meta.width, other?.width) && num(meta.height, other?.height),
-        partial: false,
-      });
-      if (meta.format) items.push({
-        label: 'Format', value: meta.format,
-        match: eq(meta.format, other?.format), partial: false,
-      });
+      if (meta.format)
+        items.push({ label: 'Format', value: meta.format,
+          match: eq(meta.format, other?.format), partial: false });
       if (meta.make || meta.model) {
         const makeMatch  = eq(meta.make,  other?.make);
         const modelMatch = eq(meta.model, other?.model);
@@ -468,24 +1040,21 @@ function sfn() {
           match: makeMatch && modelMatch, partial: makeMatch && !modelMatch });
       }
       if (meta.datetime) {
-        const dateA = meta.datetime.split(' ')[0];
-        const dateB = other?.datetime?.split(' ')[0];
-        const timeA = meta.datetime.split(' ')[1];
-        const timeB = other?.datetime?.split(' ')[1];
+        const [dateA, timeA] = (meta.datetime ?? '').split(' ');
+        const [dateB, timeB] = (other?.datetime ?? '').split(' ');
         items.push({ label: 'Date', value: meta.datetime,
           match: eq(dateA, dateB) && eq(timeA, timeB),
           partial: eq(dateA, dateB) && !eq(timeA, timeB) });
       }
-      if (meta.gps_lat !== undefined) items.push({
-        label: 'GPS', value: `${meta.gps_lat.toFixed(5)}, ${meta.gps_lon.toFixed(5)}`,
-        match:   num(meta.gps_lat, other?.gps_lat, 0.0001) && num(meta.gps_lon, other?.gps_lon, 0.0001),
-        partial: num(meta.gps_lat, other?.gps_lat, 0.01)   && num(meta.gps_lon, other?.gps_lon, 0.01),
-      });
-      if (meta.software) items.push({
-        label: 'Software', value: meta.software,
-        match: eq(meta.software, other?.software), partial: false,
-      });
-      if (items.length === 0 && meta.exif === false) items.push({ label: 'EXIF', value: 'None', match: false, partial: false });
+      if (meta.gps_lat !== undefined && meta.gps_lat !== null)
+        items.push({
+          label: 'GPS', value: `${meta.gps_lat.toFixed(5)}, ${meta.gps_lon.toFixed(5)}`,
+          match:   num(meta.gps_lat, other?.gps_lat, 0.0001) && num(meta.gps_lon, other?.gps_lon, 0.0001),
+          partial: num(meta.gps_lat, other?.gps_lat, 0.01)   && num(meta.gps_lon, other?.gps_lon, 0.01),
+        });
+      if (meta.software)
+        items.push({ label: 'Software', value: meta.software,
+          match: eq(meta.software, other?.software), partial: false });
       return items;
     },
 
@@ -500,18 +1069,29 @@ function sfn() {
       try {
         const d = await fetch('/api/collections').then(r => r.json());
         this.availableModes = d.modes;
-        this.selectedModes = [...d.modes];
-        if (d.error) {
-          this.serverError = d.error;
-        }
+        // EXACT is always selected; add other available modes
+        this.selectedModes = ['exact', ...d.modes.filter(m => m !== 'exact')];
+        if (d.error) this.serverError = d.error;
       } catch {
         this.availableModes = ['exact'];
         this.selectedModes = ['exact'];
         this.serverError = 'Backend unreachable — only exact hash matching is available.';
       }
+      // Fire-and-forget: populate 3-D background visualization (decorative, non-blocking)
+      this.points3dAbortController = new AbortController();
+      const _ctrl = this.points3dAbortController;
+      fetch('/api/points3d', { signal: _ctrl.signal })
+        .then(r => r.json())
+        .then(data => {
+          if (_ctrl.signal.aborted || this.phase !== 'upload') return;
+          this._points3dData = data;
+          initVectorViz(data);
+        })
+        .catch(err => { if (err && err.name === 'AbortError') return; });
     },
 
     toggleMode(mode) {
+      if (mode === 'exact') return; // mandatory, cannot deselect
       if (this.selectedModes.includes(mode)) {
         this.selectedModes = this.selectedModes.filter(m => m !== mode);
       } else {
@@ -524,10 +1104,10 @@ function sfn() {
       const exts = new Set(['.jpg','.jpeg','.png','.bmp','.tiff','.tif','.webp',
                              '.gif','.jp2','.ico','.psd','.heic','.heif']);
       for (const f of fileList) {
-        const ext = f.name.toLowerCase().slice(f.name.lastIndexOf('.'));
-        if (exts.has(ext) && !this.pendingFiles.some(p => p.name === f.name && p.size === f.size)) {
+        const dot = f.name.lastIndexOf('.');
+        const ext = dot >= 0 ? f.name.slice(dot).toLowerCase() : '';
+        if (exts.has(ext) && !this.pendingFiles.some(p => p.name === f.name && p.size === f.size))
           this.pendingFiles.push(f);
-        }
       }
     },
 
@@ -539,12 +1119,20 @@ function sfn() {
     // ── Analysis ──────────────────────────────────────────────────────────
     async startAnalysis() {
       if (!this.pendingFiles.length || !this.selectedModes.length) return;
+      // Abort any in-flight points3d fetch and stop the background viz
+      if (this.points3dAbortController) this.points3dAbortController.abort();
+      const _vc = document.getElementById('vec-canvas');
+      if (_vc && _vc._stopViz) _vc._stopViz();
+      this.analysisRunModes = [...this.selectedModes];
       this.phase = 'analyzing';
       this.progress = { current: 0, total: this.pendingFiles.length, filename: '' };
 
       const fd = new FormData();
       for (const f of this.pendingFiles) fd.append('files', f, f.webkitRelativePath || f.name);
       fd.append('modes', this.selectedModes.join(','));
+
+      // Release file objects — server now holds temp copies
+      this.pendingFiles = [];
 
       const resp = await fetch('/api/analyze', { method: 'POST', body: fd });
       const reader = resp.body.getReader();
@@ -561,9 +1149,8 @@ function sfn() {
           if (!line.startsWith('data: ')) continue;
           let evt;
           try { evt = JSON.parse(line.slice(6)); } catch { continue; }
-          if (['progress','file_done','error'].includes(evt.type)) {
+          if (['progress','file_done','error'].includes(evt.type))
             this.progress = { current: evt.current, total: evt.total, filename: evt.filename };
-          }
           if (evt.type === 'done') {
             this.sessionId = evt.session_id;
             await this.runQuery();
@@ -580,10 +1167,11 @@ function sfn() {
       if (!this.sessionId) return;
       const fd = new FormData();
       fd.append('session_id', this.sessionId);
-      fd.append('modes', this.selectedModes.join(','));
+      fd.append('modes', this.analysisRunModes.join(','));
       fd.append('threshold_altered', this.thresholdAltered);
       fd.append('threshold_semantic', this.thresholdSemantic);
       fd.append('limit', this.limit);
+      fd.append('unify', this.hitsUnified ? 'true' : 'false');
       this.queryError = '';
       this.provenance = null;
       try {
@@ -595,12 +1183,23 @@ function sfn() {
         const d = await resp.json();
         this.results = Array.isArray(d.results) ? d.results : [];
         this.provenance = d.provenance ?? null;
+        this.embeddingModels = d.embedding_models ?? {};
+
         // Re-sync selected hit after re-query
         if (this.selectedFileId) {
           const f = this.results.find(r => r.file_id === this.selectedFileId);
           if (f && this.selectedHitKey &&
               !f.hits.find(h => this.hitKey(h) === this.selectedHitKey)) {
+            // Previously selected hit dropped from results — auto-select new best.
             this.selectedHitKey = null;
+            const bestHit = this.selectedHit;
+            if (bestHit) {
+              this.selectedHitKey = this.hitKey(bestHit);
+              this.matchSrc = `/api/hit-image?path=${encodeURIComponent(bestHit.path)}`;
+            } else {
+              this.matchSrc = null;
+            }
+            this.matchZoom = 1.0;
           }
           await this._loadMatchMeta();
         }
@@ -616,16 +1215,34 @@ function sfn() {
 
     // ── Selection ─────────────────────────────────────────────────────────
     async selectFile(fileId) {
+      clearTimeout(this._matchImgTimer);
+
       this.selectedFileId = fileId;
       this.selectedHitKey = null;
       this.queryMeta = null;
       this.matchMeta = null;
+      this.queryZoom = 1.0;
+      this.matchZoom = 1.0;
+      this.querySrc = this.sessionId ? `/api/query-image/${this.sessionId}/${fileId}` : null;
+
+      // Auto-select best hit: set matchSrc immediately, or clear it if no hits.
+      const bestHit = this.selectedHit; // filteredHits[0] since selectedHitKey is null
+      if (bestHit) {
+        this.selectedHitKey = this.hitKey(bestHit);
+        this.matchSrc = `/api/hit-image?path=${encodeURIComponent(bestHit.path)}`;
+      } else {
+        this.matchSrc = null;
+      }
+
       await Promise.all([this._loadQueryMeta(), this._loadMatchMeta()]);
     },
 
     async selectHit(hit) {
+      clearTimeout(this._matchImgTimer);
       this.selectedHitKey = this.hitKey(hit);
+      this.matchZoom = 1.0;
       this.matchMeta = null;
+      this.matchSrc = `/api/hit-image?path=${encodeURIComponent(hit.path)}`;
       await this._loadMatchMetaFor(hit.path);
     },
 
@@ -633,7 +1250,9 @@ function sfn() {
     async _loadQueryMeta() {
       if (!this.sessionId || !this.selectedFileId) return;
       try {
-        this.queryMeta = await fetch(`/api/query-metadata/${this.sessionId}/${this.selectedFileId}`).then(r => r.json());
+        this.queryMeta = await fetch(
+          `/api/query-metadata/${this.sessionId}/${this.selectedFileId}`
+        ).then(r => r.json());
       } catch { this.queryMeta = null; }
     },
 
@@ -645,25 +1264,52 @@ function sfn() {
 
     async _loadMatchMetaFor(path) {
       try {
-        this.matchMeta = await fetch(`/api/metadata?path=${encodeURIComponent(path)}`).then(r => r.json());
+        this.matchMeta = await fetch(
+          `/api/metadata?path=${encodeURIComponent(path)}`
+        ).then(r => r.json());
       } catch { this.matchMeta = null; }
+    },
+
+    // ── Semantic stats ────────────────────────────────────────────────────
+    async calcSemanticStats() {
+      if (!this.sessionId || !this.selectedFileId) return;
+      this.semanticStats = null;
+      this.semanticStatsError = null;
+      this.semanticStatsLoading = true;
+      this.showSemanticStats = true;
+      try {
+        const resp = await fetch(`/api/semantic-stats/${this.sessionId}/${this.selectedFileId}`);
+        if (!resp.ok) {
+          const d = await resp.json().catch(() => ({}));
+          this.semanticStatsError = d.detail || `Stats request failed (HTTP ${resp.status})`;
+        } else {
+          this.semanticStats = await resp.json();
+        }
+      } catch (e) {
+        this.semanticStatsError = e?.message || 'Stats request failed';
+      } finally {
+        this.semanticStatsLoading = false;
+      }
     },
 
     // ── Provenance ────────────────────────────────────────────────────────
     async copyProvenance() {
       if (!this.provenance) return;
-      try {
-        await navigator.clipboard.writeText(JSON.stringify(this.provenance, null, 2));
-      } catch {
-        // clipboard access denied or unavailable (non-HTTPS / blocked permission)
-      }
+      try { await navigator.clipboard.writeText(JSON.stringify(this.provenance, null, 2)); }
+      catch { /* clipboard unavailable */ }
     },
 
     applyProvenance() {
       let p;
       try { p = JSON.parse(this.pasteBuffer); } catch { return; }
-      if (Array.isArray(p.modes))
-        this.selectedModes = p.modes.filter(m => this.availableModes.includes(m));
+      if (Array.isArray(p.modes)) {
+        const validModes = p.modes.filter(m => this.availableModes.includes(m));
+        const normalizedModes = this.availableModes.includes('exact') && !validModes.includes('exact')
+          ? ['exact', ...validModes]
+          : validModes;
+        this.analysisRunModes = normalizedModes;
+        this.selectedModes = normalizedModes;
+      }
       if (typeof p.threshold_altered === 'number')
         this.thresholdAltered = Math.min(1, Math.max(0, p.threshold_altered));
       if (typeof p.threshold_semantic === 'number')
@@ -671,18 +1317,165 @@ function sfn() {
       if (typeof p.limit === 'number')
         this.limit = Math.min(50, Math.max(1, Math.round(p.limit)));
       this.showPasteArea = false;
-      this.pasteBuffer   = '';
+      this.pasteBuffer = '';
       this.runQuery();
+    },
+
+    // ── Forensic Audit ────────────────────────────────────────────────────
+    async openAudit() {
+      if (!this.sessionId || !this.selectedFileId || !this.selectedHit) return;
+      this.showAudit = true;
+      this.auditLoading = true;
+      this.auditError = null;
+      this.auditQueryLibVersions = null;
+      this.auditHitProvenance = null;
+      try {
+        const hash = this.selectedHit.image_hash;
+        const [lvResp, hpResp] = await Promise.all([
+          fetch('/api/library-versions'),
+          hash ? fetch(`/api/hit-provenance?image_hash=${encodeURIComponent(hash)}`) : Promise.resolve(null),
+        ]);
+        if (!lvResp.ok) throw new Error(`Library versions request failed (HTTP ${lvResp.status})`);
+        this.auditQueryLibVersions = await lvResp.json();
+        if (hpResp?.ok) this.auditHitProvenance = await hpResp.json();
+        else if (hpResp) this.auditHitProvenance = {};
+      } catch (e) {
+        this.auditError = e?.message || 'Audit data fetch failed';
+      } finally {
+        this.auditLoading = false;
+      }
+    },
+
+    async exportAuditJson() {
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(this._buildAuditReport(), null, 2));
+      } catch { /* clipboard unavailable */ }
+    },
+
+    _dbLibVersions() {
+      if (!this.auditHitProvenance) return {};
+      for (const prov of Object.values(this.auditHitProvenance)) {
+        if (prov?.library_versions) return prov.library_versions;
+      }
+      return {};
+    },
+
+    _auditLibRows() {
+      const qLibs = this.auditQueryLibVersions ?? {};
+      const dbLibs = this._dbLibVersions();
+      const all = [...new Set([...Object.keys(qLibs), ...Object.keys(dbLibs)])];
+      return all.map(lib => ({
+        lib,
+        query: qLibs[lib] ?? null,
+        indexed: dbLibs[lib] ?? null,
+        match: qLibs[lib] === dbLibs[lib],
+      }));
+    },
+
+    _modelMismatch(mode) {
+      const qHash = this.embeddingModels[mode]?.hash;
+      const dbHash = this.selectedHit?.model_provenance?.[mode]?.hash;
+      return !!(qHash && dbHash && qHash !== dbHash);
+    },
+
+    _firstIndexedAt() {
+      if (!this.auditHitProvenance) return null;
+      for (const prov of Object.values(this.auditHitProvenance)) {
+        if (prov?.indexed_at) return prov.indexed_at;
+      }
+      return null;
+    },
+
+    _scoreRows() {
+      return Object.entries(this.selectedHit?.scores ?? {}).map(([mode, sim]) => ({
+        mode,
+        similarity: sim,
+        distance: mode === 'exact' ? 0 : 1 - sim,
+        note: mode === 'exact' ? 'identical file'
+            : sim >= 0.99 ? 'near-identical'
+            : sim >= 0.90 ? 'very high similarity'
+            : sim >= 0.75 ? 'high similarity'
+            : sim >= 0.55 ? 'moderate similarity'
+            :               'low similarity',
+      }));
+    },
+
+    _buildAuditReport() {
+      const hit = this.selectedHit;
+      const scores = {};
+      for (const row of this._scoreRows()) {
+        scores[row.mode] = { similarity: row.similarity, cosine_distance: parseFloat(row.distance.toFixed(6)) };
+      }
+      const libRows = this._auditLibRows();
+      const libComp = {};
+      for (const r of libRows) libComp[r.lib] = { query: r.query, indexed: r.indexed, match: r.match };
+      const modelComp = {};
+      for (const mode of ['altered', 'semantic']) {
+        const qHash = this.embeddingModels[mode]?.hash ?? null;
+        const dbHash = hit?.model_provenance?.[mode]?.hash ?? null;
+        if (qHash !== null || dbHash !== null)
+          modelComp[mode] = { query_hash: qHash, indexed_hash: dbHash, match: qHash === dbHash };
+      }
+      const notes = [];
+      for (const r of libRows)
+        if (!r.match && r.indexed !== null)
+          notes.push(`${r.lib}: query process has ${r.query}, indexed with ${r.indexed}`);
+      for (const [mode, info] of Object.entries(modelComp))
+        if (!info.match)
+          notes.push(`${mode} model hash: query ${info.query_hash?.slice(0,16)}… vs indexed ${info.indexed_hash?.slice(0,16)}…`);
+      return {
+        sfn_report_version: '1.0',
+        report_generated_utc: new Date().toISOString(),
+        analysis_image: {
+          filename: this.selectedFile?.filename ?? null,
+          sha256: this.queryMeta?.hash_sha256 ?? null,
+          md5: this.queryMeta?.hash_md5 ?? null,
+          dimensions_px: this.queryMeta?.width ? `${this.queryMeta.width}x${this.queryMeta.height}` : null,
+          size_bytes: this.queryMeta?.size_bytes ?? null,
+          exif_present: this.queryMeta?.exif ?? null,
+          exif_geo_data: this.queryMeta?.exif_geo_data ?? null,
+          embedding_models: this.embeddingModels,
+          library_versions: this.auditQueryLibVersions,
+        },
+        result_image: {
+          path: hit?.path ?? null,
+          sha256: hit?.image_hash ?? null,
+          dimensions_px: this.matchMeta?.width ? `${this.matchMeta.width}x${this.matchMeta.height}` : null,
+          size_bytes: this.matchMeta?.size_bytes ?? null,
+          exif_present: this.matchMeta?.exif ?? null,
+          exif_geo_data: this.matchMeta?.exif_geo_data ?? null,
+          similarity_scores: scores,
+          indexing_provenance: this.auditHitProvenance,
+        },
+        search_parameters: {
+          timestamp_utc: this.provenance?.timestamp ?? null,
+          modes: this.provenance?.modes ?? null,
+          threshold_altered: this.provenance?.threshold_altered ?? null,
+          threshold_semantic: this.provenance?.threshold_semantic ?? null,
+          result_limit: this.provenance?.limit ?? null,
+        },
+        integrity_assessment: {
+          model_hashes: modelComp,
+          library_versions: libComp,
+          forensically_clean: this.auditIntegrity?.clean ?? null,
+          discrepancy_notes: notes,
+        },
+      };
     },
 
     // ── Reset ─────────────────────────────────────────────────────────────
     resetToUpload() {
+      clearTimeout(this._queryTimer);
+      clearTimeout(this._matchImgTimer);
+      clearTimeout(this._queryImgTimer);
       this.phase = 'upload';
       this.pendingFiles = [];
       this.results = [];
       this.selectedFileId = null;
       this.selectedHitKey = null;
       this.sessionId = null;
+      this.querySrc = null;
+      this.matchSrc = null;
       this.queryMeta = null;
       this.matchMeta = null;
       this.queryError = '';
@@ -690,16 +1483,220 @@ function sfn() {
       this.showProvenance = false;
       this.showPasteArea = false;
       this.pasteBuffer = '';
+      this.analysisRunModes = [];
+      this.queryZoom = 1.0;
+      this.matchZoom = 1.0;
+      this.lightboxSrc = null;
+      this.hitsFilterAltered = true;
+      this.hitsFilterSemantic = true;
+      this.hitsUnified = true;
+      this.semanticStats = null;
+      this.semanticStatsLoading = false;
+      this.semanticStatsError = null;
+      this.showSemanticStats = false;
+      this.showAudit = false;
+      this.auditLoading = false;
+      this.auditError = null;
+      this.auditQueryLibVersions = null;
+      this.auditHitProvenance = null;
+      // Restart background viz with client-cached point cloud
+      this.$nextTick(() => {
+        if (this._points3dData) initVectorViz(this._points3dData);
+      });
     },
+  };
+}
 
-    // ── Formatters ────────────────────────────────────────────────────────
-    shortName(filename) {
-      return filename.replace(/\\/g, '/').split('/').pop();
-    },
-    folderOf(filename) {
-      const parts = filename.replace(/\\/g, '/').split('/');
-      return parts.length > 1 ? parts.slice(0, -1).join('/') : '';
-    },
+// ── 3-D vector visualization (Canvas 2D, no WebGL) ──────────────────────────
+function initVectorViz(data) {
+  const canvas = document.getElementById('vec-canvas');
+  if (!canvas) return;
+  const sscd = data.sscd || [];
+  const dino = data.dino || [];
+  if (!sscd.length && !dino.length) return;
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  // ── Camera state (spherical coords, orbiting origin) ───────────────────
+  let radius = 2.5;
+  let theta  = 0.7;    // azimuth  (rotation around Y)
+  let phi    = 1.15;   // polar    (0 = north pole, π = south pole)
+  const PHI_MIN = 0.05, PHI_MAX = Math.PI - 0.05;
+  const R_MIN   = 0.5,  R_MAX   = 8.0;
+
+  // ── Perspective projection ──────────────────────────────────────────────
+  // Rotate world so the camera lands at (0, 0, radius), then apply perspective.
+  function project(px, py, pz) {
+    const W = canvas.width, H = canvas.height;
+    // 1. Rotate around Y by -theta
+    const x1 =  px * Math.cos(theta) - pz * Math.sin(theta);
+    const z1 =  px * Math.sin(theta) + pz * Math.cos(theta);
+    // 2. Rotate around X by (π/2 - phi)
+    const sp = Math.sin(phi), cp = Math.cos(phi);
+    const y2 =  py * sp - z1 * cp;
+    const z2 =  py * cp + z1 * sp;
+    // 3. Perspective (camera at z=radius, looking toward -Z)
+    const d = radius - z2;
+    if (d < 0.01) return null;
+    const unit = Math.min(W, H) * 0.38;
+    const s = (radius * unit) / d;
+    return { sx: x1 * s + W * 0.5, sy: -y2 * s + H * 0.5, depth: z2, s };
+  }
+
+  // ── Draw one axis segment (line between two 3D points) ─────────────────
+  function seg(x0, y0, z0, x1, y1, z1) {
+    const a = project(x0, y0, z0), b = project(x1, y1, z1);
+    if (!a || !b) return;
+    ctx.moveTo(a.sx, a.sy);
+    ctx.lineTo(b.sx, b.sy);
+  }
+
+  // ── Draw axes + tick marks ─────────────────────────────────────────────
+  function drawAxes() {
+    const L = 1.25, T = 0.045;
+    const TICKS = [-1.0, -0.5, 0.5, 1.0];
+    ctx.beginPath();
+    ctx.strokeStyle = 'rgba(107,122,141,0.55)';
+    ctx.lineWidth   = 1;
+    seg(-L, 0, 0, L, 0, 0);
+    for (const v of TICKS) seg(v, -T, 0, v, T, 0);
+    seg(0, -L, 0, 0, L, 0);
+    for (const v of TICKS) seg(-T, v, 0, T, v, 0);
+    seg(0, 0, -L, 0, 0, L);
+    for (const v of TICKS) seg(-T, 0, v, T, 0, v);
+    ctx.stroke();
+  }
+
+  // ── Draw a point cloud (all points batched into one path per colour) ───
+  function drawCloud(pts, fillStyle) {
+    const W = canvas.width, H = canvas.height;
+    const unit = Math.min(W, H) * 0.38;
+    ctx.beginPath();
+    ctx.fillStyle = fillStyle;
+    for (let i = 0; i < pts.length; i++) {
+      const q = project(pts[i][0], pts[i][1], pts[i][2]);
+      if (!q) continue;
+      const r = Math.max(1.0, q.s / unit * 2.2);
+      ctx.moveTo(q.sx + r, q.sy);
+      ctx.arc(q.sx, q.sy, r, 0, Math.PI * 2);
+    }
+    ctx.fill();
+  }
+
+  // ── Sync canvas pixel buffer to its CSS-displayed size ─────────────────
+  function resize() {
+    const p = canvas.parentElement;
+    canvas.width  = p.clientWidth  || 800;
+    canvas.height = p.clientHeight || 400;
+  }
+  resize();
+  const ro = new ResizeObserver(resize);
+  ro.observe(canvas.parentElement);
+
+  // ── Spin state ─────────────────────────────────────────────────────────
+  // After user interaction, spin pauses then fades back in over BLEND_TIME.
+  const SPIN_BASE      = 0.01 * Math.PI; // 20 % of original 0.05 * π
+  const IDLE_DELAY     = 3.0;            // seconds idle before spin resumes
+  const BLEND_TIME     = 2.0;            // seconds to fade spin back to full
+  const AXIS_HOLD_MIN  = 6;             // min seconds on one random axis
+  const AXIS_HOLD_MAX  = 14;            // max seconds on one random axis
+
+  let spinVTheta  = SPIN_BASE;  // angular velocity on theta
+  let spinVPhi    = 0;          // angular velocity on phi
+  let nextAxisAt  = 0;          // clock-time to pick a new random axis
+  let lastActT    = -999;       // last time user interacted (seconds from t0)
+  let spinBlend   = 1;          // 0 = fully paused, 1 = full speed
+
+  function pickAxis(t) {
+    const r = Math.random();
+    if (r < 0.35) {
+      // Pure Y rotation (most recognisable, feels like a globe)
+      spinVTheta = (Math.random() > 0.5 ? 1 : -1) * SPIN_BASE;
+      spinVPhi   = 0;
+    } else if (r < 0.65) {
+      // Y + slow phi drift (tilted tumble)
+      spinVTheta = (Math.random() > 0.5 ? 1 : -1) * SPIN_BASE;
+      spinVPhi   = (Math.random() - 0.5) * SPIN_BASE * 0.5;
+    } else {
+      // Diagonal spin (feels like free tumble)
+      spinVTheta = (Math.random() - 0.5) * SPIN_BASE * 1.6;
+      spinVPhi   = (Math.random() - 0.5) * SPIN_BASE * 0.7;
+    }
+    nextAxisAt = t + AXIS_HOLD_MIN + Math.random() * (AXIS_HOLD_MAX - AXIS_HOLD_MIN);
+  }
+  pickAxis(0); // initialise first axis immediately
+
+  // ── Mouse / wheel interaction ──────────────────────────────────────────
+  let dragging = false, lastX = 0, lastY = 0;
+  const touch  = t => { lastActT = t; };
+
+  const onDown  = e => {
+    dragging = true; lastX = e.clientX; lastY = e.clientY; e.preventDefault();
+  };
+  const onUp    = () => { dragging = false; };
+  const onMove  = e => {
+    if (!dragging) return;
+    const t = (performance.now() - t0) / 1000;
+    touch(t);
+    theta -= (e.clientX - lastX) * 0.006;
+    phi    = Math.max(PHI_MIN, Math.min(PHI_MAX, phi + (e.clientY - lastY) * 0.006));
+    lastX = e.clientX; lastY = e.clientY;
+  };
+  const onWheel = e => {
+    e.preventDefault();
+    const t = (performance.now() - t0) / 1000;
+    touch(t);
+    radius = Math.max(R_MIN, Math.min(R_MAX, radius + e.deltaY * 0.003));
+  };
+  canvas.addEventListener('mousedown', onDown);
+  window.addEventListener('mouseup',   onUp);
+  window.addEventListener('mousemove', onMove);
+  canvas.addEventListener('wheel',     onWheel, { passive: false });
+
+  // ── Animation loop ─────────────────────────────────────────────────────
+  let rafId;
+  const t0 = performance.now();
+  let prevT = 0;
+  function animate() {
+    rafId = requestAnimationFrame(animate);
+    const t  = (performance.now() - t0) / 1000;
+    const dt = Math.min(t - prevT, 0.1); prevT = t; // clamp dt to avoid jump on tab-switch
+
+    // Compute how much spin to apply this frame
+    const idle = t - lastActT;
+    if (idle < IDLE_DELAY) {
+      spinBlend = 0;
+    } else {
+      spinBlend = Math.min(1, (idle - IDLE_DELAY) / BLEND_TIME);
+    }
+
+    // Randomly change rotation axis while actively spinning
+    if (spinBlend > 0 && t > nextAxisAt) pickAxis(t);
+
+    if (spinBlend > 0) {
+      theta += spinVTheta * dt * spinBlend;
+      phi   += spinVPhi   * dt * spinBlend;
+      phi    = Math.max(PHI_MIN, Math.min(PHI_MAX, phi));
+      // Bounce phi velocity at the poles so it never gets stuck
+      if (phi <= PHI_MIN || phi >= PHI_MAX) spinVPhi *= -1;
+    }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawAxes();
+    if (sscd.length) drawCloud(sscd, 'rgba(232,147,32,0.65)');
+    if (dino.length) drawCloud(dino, 'rgba(74,158,224,0.65)');
+  }
+  animate();
+
+  // ── Cleanup ────────────────────────────────────────────────────────────
+  canvas._stopViz = () => {
+    cancelAnimationFrame(rafId);
+    canvas.removeEventListener('mousedown', onDown);
+    window.removeEventListener('mouseup',   onUp);
+    window.removeEventListener('mousemove', onMove);
+    canvas.removeEventListener('wheel',     onWheel);
+    ro.disconnect();
   };
 }
 </script>

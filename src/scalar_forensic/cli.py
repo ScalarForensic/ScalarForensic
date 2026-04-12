@@ -83,6 +83,16 @@ def _apply_dedup(
     ]
 
 
+def _write_thumbnail(img: "Image.Image", dest: Path, size: int) -> None:
+    """Save a thumbnail JPEG of *img* at *dest* (size×size, aspect-ratio preserved)."""
+    thumb = img.copy()
+    thumb.thumbnail((size, size), Image.Resampling.LANCZOS)
+    if thumb.mode not in ("RGB", "L"):
+        thumb = thumb.convert("RGB")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    thumb.save(dest, format="JPEG", quality=85, optimize=True)
+
+
 def _write_csv(records: dict[Path, "_FileRecord"], csv_path: Path) -> None:
     try:
         csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -360,13 +370,33 @@ def index(
 
         data_by_path = {p: data for p, data in raw}
 
-        # ── Shared pre-processing ─────────────────────────────────────────────
+        # ── Pre-dedup: determine which images actually need work ─────────────────
+        # Run dedup for every spec before preprocessing so we only decode/resize
+        # images that will be embedded or need a thumbnail generated.
+        to_embed_per_spec: list[list[tuple[Path, str]]] = []
+        needs_embed: set[Path] = set()
+        for _, indexer, _ in specs:
+            te = _apply_dedup(unique_pairs, indexer, settings)
+            to_embed_per_spec.append(te)
+            needs_embed.update(p for p, _ in te)
+
+        needs_thumbnail: set[Path] = set()
+        if settings.thumbnail_dir is not None:
+            for p, h in unique_pairs:
+                if not (settings.thumbnail_dir / f"{h}.jpg").exists():
+                    needs_thumbnail.add(p)
+
+        needs_pre = needs_embed | needs_thumbnail
+
+        # ── Shared pre-processing (only images that need it) ──────────────────
         t0 = perf_counter()
-        unique_paths_list = [p for p, _ in unique_pairs]
-        pre_results = preprocess_batch([data_by_path[p] for p in unique_paths_list])
+        paths_to_pre = [p for p, _ in unique_pairs if p in needs_pre]
+        pre_results = (
+            preprocess_batch([data_by_path[p] for p in paths_to_pre]) if paths_to_pre else []
+        )
 
         pre_by_path: dict[Path, Image.Image] = {}
-        for p, result in zip(unique_paths_list, pre_results, strict=True):
+        for p, result in zip(paths_to_pre, pre_results, strict=True):
             if isinstance(result, Exception):
                 typer.echo(f"[WARN] Preprocessing failed for {p.name}: {result}", err=True)
                 if records[p].status == "pending":
@@ -375,10 +405,24 @@ def index(
             else:
                 pre_by_path[p] = result
 
+        # ── Thumbnail generation (shared, after preprocessing) ────────────────
+        if settings.thumbnail_dir is not None:
+            hash_by_path = {p: h for p, h in unique_pairs}
+            for p, img in pre_by_path.items():
+                sha = hash_by_path.get(p)
+                if sha:
+                    thumb_path = settings.thumbnail_dir / f"{sha}.jpg"
+                    if not thumb_path.exists():
+                        try:
+                            _write_thumbnail(img, thumb_path, settings.thumbnail_size)
+                        except Exception as exc:  # noqa: BLE001
+                            typer.echo(f"[WARN] Thumbnail failed for {p.name}: {exc}", err=True)
+
         # Propagate preprocessing failure to batch-duplicates of a failed winner.
         # Those duplicates were marked _S_SKIP_DUP earlier; update them so the
         # final report accurately reflects that their hash-winner couldn't be processed.
-        failed_pre_hashes = {h for p, h in unique_pairs if p not in pre_by_path}
+        pre_failures: set[Path] = {p for p in paths_to_pre if p not in pre_by_path}
+        failed_pre_hashes = {h for p, h in unique_pairs if p in pre_failures}
         if failed_pre_hashes:
             for p, h in path_hash_pairs:
                 if h in failed_pre_hashes and records[p].status in ("pending", _S_SKIP_DUP):
@@ -388,13 +432,13 @@ def index(
 
         pre_s = perf_counter() - t0
 
-        if not pre_by_path:
-            continue
+        # Exclude preprocessing failures from the per-model loop; images that were
+        # skipped pre-dedup (already indexed + thumbnail present) stay in unique_pairs
+        # so the per-model loop can mark them _S_SKIP_IDX and log them correctly.
+        unique_pairs = [(p, h) for p, h in unique_pairs if p not in pre_failures]
 
-        # Narrow unique_pairs to successfully preprocessed images so the
-        # per-model dedup check and status updates only touch the images that
-        # are actually going to be embedded.
-        unique_pairs = [(p, h) for p, h in unique_pairs if p in pre_by_path]
+        if not unique_pairs:
+            continue
 
         # Recompute the in-batch duplicate skip count after preprocessing-failure
         # propagation: some records originally marked _S_SKIP_DUP may have been
@@ -409,7 +453,8 @@ def index(
         upsert_jobs: list = []
 
         for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
-            to_embed = _apply_dedup(unique_pairs, indexer, settings)
+            # Use pre-computed dedup result, filtered to exclude any preprocessing failures.
+            to_embed = [(p, h) for p, h in to_embed_per_spec[spec_idx] if p not in pre_failures]
             n_skipped = duplicate_skips_in_batch + (len(unique_pairs) - len(to_embed))
             skipped_counts[spec_idx] += n_skipped
 
