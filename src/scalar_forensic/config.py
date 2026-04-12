@@ -37,9 +37,12 @@ class Settings:
         self.extract_exif: bool = self._parse_bool("SFN_EXTRACT_EXIF", default=False)
 
         # --- Thumbnail cache ---
-        # When set, 128×128 JPEG thumbnails are written during indexing and
-        # served at /api/thumbnail/{sha256} by sfn-web.
-        self.thumbnail_dir: Path | None = self._parse_optional_path("SFN_THUMBNAIL_DIR")
+        # 128×128 JPEG thumbnails are written during indexing and served at
+        # /api/thumbnail/{sha256} by sfn-web.  Defaults to data/thumbnails
+        # (relative to CWD).  Set SFN_THUMBNAIL_DIR= (empty) to disable.
+        self.thumbnail_dir: Path | None = self._parse_optional_path(
+            "SFN_THUMBNAIL_DIR", "data/thumbnails"
+        )
         self.thumbnail_size: int = self._parse_int("SFN_THUMBNAIL_SIZE", 128)
 
         # --- Network policy ---
@@ -76,9 +79,11 @@ class Settings:
             return False
         raise ValueError(f"{key}={raw!r} must be 'true' or 'false'")
 
-    def _parse_optional_path(self, key: str) -> Path | None:
+    def _parse_optional_path(self, key: str, default: str | None = None) -> Path | None:
         raw = os.environ.get(key)
-        return Path(raw) if raw else None
+        if raw is not None:
+            return Path(raw) if raw else None
+        return Path(default) if default else None
 
     def _parse_dedup_mode(self) -> str:
         raw = os.environ.get("SFN_DUPLICATE_CHECK_MODE", "hash")

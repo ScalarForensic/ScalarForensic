@@ -322,7 +322,9 @@ header::after {
 .results-layout {
   display: grid;
   grid-template-columns: 230px 1fr 1fr 270px;
+  grid-template-rows: 1fr;
   flex: 1;
+  min-height: 0;
   overflow: hidden;
   border-top: 1px solid var(--border);
   margin-top: 16px;
@@ -784,6 +786,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   display: grid;
   grid-template-columns: 80px 1fr;
   gap: 0;
+  flex-shrink: 0;
   background: var(--surface2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
