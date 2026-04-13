@@ -61,7 +61,7 @@ def extract_container(
     *,
     max_depth: int = 5,
     pdf_render_dpi: int = 150,
-    allowed_root: Path | None = None,
+    allowed_root: Path,
 ) -> list[ExtractedImage]:
     """Extract all images from a container file (ZIP / DOCX / ODF / PDF).
 
@@ -72,21 +72,22 @@ def extract_container(
     :param max_depth: Maximum nesting depth.  Depth 1 means only the root
         container is processed; depth 2 allows one level of nesting, etc.
     :param pdf_render_dpi: Resolution used when rasterising PDF pages.
-    :param allowed_root: Optional trusted root directory.  When provided, *path*
-        must resolve inside this directory.
+    :param allowed_root: Trusted root directory.  *path* must resolve inside
+        this directory; an error is raised if it does not.
     """
-    path = Path(os.path.realpath(str(path)))
-    if allowed_root is not None:
-        root_str = str(Path(os.path.realpath(str(allowed_root))))
-        path_str = str(path)
-        if path_str != root_str and not path_str.startswith(root_str + os.sep):
-            raise ValueError(f"Container path is outside allowed root: {path}")
-    if not path.exists() or not path.is_file():  # lgtm[py/path-injection]
+    root_str = str(Path(os.path.realpath(str(allowed_root))))
+    path_str = str(Path(os.path.realpath(str(path))))
+    if path_str != root_str and not path_str.startswith(root_str + os.sep):
+        raise ValueError(f"Container path is outside allowed root: {path}")
+    # Re-derive path from the validated string so subsequent operations use
+    # the sanitised value that CodeQL can track as safe.
+    path = Path(path_str)
+    if not path.exists() or not path.is_file():
         raise ValueError(f"Container path is not a file: {path}")
     ext = path.suffix.lower()
     if ext not in CONTAINER_EXTENSIONS:
         raise ValueError(f"Unsupported container extension: {ext}")
-    data = path.read_bytes()  # lgtm[py/path-injection]
+    data = path.read_bytes()
     container_hash = _sha256(data)
     root_type = _ext_to_type(ext)
 

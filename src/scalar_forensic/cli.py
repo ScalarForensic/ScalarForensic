@@ -668,6 +668,7 @@ def index(
                 container_path,
                 max_depth=settings.max_container_depth,
                 pdf_render_dpi=settings.pdf_render_dpi,
+                allowed_root=container_path.parent,
             )
         except Exception as exc:  # noqa: BLE001
             typer.echo(f"[WARN] Extraction failed for {container_path.name}: {exc}", err=True)

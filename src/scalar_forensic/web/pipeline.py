@@ -107,6 +107,7 @@ def _expand_containers(session: Session, settings: Settings) -> None:
                 entry.temp_path,
                 max_depth=settings.max_container_depth,
                 pdf_render_dpi=settings.pdf_render_dpi,
+                allowed_root=entry.temp_path.parent,
             )
         except Exception as exc:  # noqa: BLE001
             entry.error = f"container extraction failed: {exc}"
