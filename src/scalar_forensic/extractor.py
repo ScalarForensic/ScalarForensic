@@ -15,7 +15,21 @@ CONTAINER_EXTENSIONS: frozenset[str] = frozenset({".zip", ".docx", ".odt", ".odp
 
 # Image formats that may appear inside containers.
 _IMAGE_EXTENSIONS: frozenset[str] = frozenset(
-    {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp", ".gif", ".jp2"}
+    {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".bmp",
+        ".tiff",
+        ".tif",
+        ".webp",
+        ".gif",
+        ".jp2",
+        ".psd",
+        ".ico",
+        ".heif",
+        ".heic",
+    }
 )
 
 
