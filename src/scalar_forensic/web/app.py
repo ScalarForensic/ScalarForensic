@@ -77,21 +77,6 @@ _VALID_COLLECTIONS = frozenset({"sscd", "dino"})
 _points3d_cache: dict | None = None
 
 
-def _ensure_within_data_root(p: Path, settings: Settings) -> None:
-    """Raise HTTP 403 if *p* is outside the configured data root.
-
-    When ``settings.data_root`` is *None* (neither ``SFN_DATA_ROOT`` nor
-    ``SFN_INPUT_DIR`` is set) the check is skipped and callers rely on
-    extension-only protection — the legacy behaviour preserved for existing
-    deployments that have not yet configured a data root.
-    """
-    if settings.data_root is not None:
-        try:
-            p.relative_to(settings.data_root.resolve())
-        except ValueError:
-            raise HTTPException(status_code=403, detail="Path not allowed") from None
-
-
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI):
     global _points3d_cache
@@ -295,7 +280,12 @@ async def hit_image(path: str) -> FileResponse:
     if not raw_fs_path or not os.path.isabs(raw_fs_path):
         raise HTTPException(status_code=400, detail="Invalid path")
     canonical = Path(os.path.realpath(raw_fs_path))
-    _ensure_within_data_root(canonical, settings)
+    if settings.data_root is not None:
+        _root = settings.data_root.resolve()
+        try:
+            canonical = _root / canonical.relative_to(_root)
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Path not allowed") from None
 
     # Container virtual path: "/abs/root.zip::inner/photo.jpg"
     if "::" in path:
@@ -354,7 +344,12 @@ async def container_download(path: str) -> FileResponse:
     if not path or not os.path.isabs(path):
         raise HTTPException(status_code=400, detail="Invalid path")
     p = Path(os.path.realpath(path))
-    _ensure_within_data_root(p, settings)
+    if settings.data_root is not None:
+        _root = settings.data_root.resolve()
+        try:
+            p = _root / p.relative_to(_root)
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Path not allowed") from None
     if p.suffix.lower() not in CONTAINER_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not a container file")
     if not p.exists() or not p.is_file():
@@ -523,7 +518,12 @@ async def hit_metadata(path: str) -> JSONResponse:
     if not path or not os.path.isabs(path):
         raise HTTPException(status_code=400, detail="Invalid path")
     p = Path(os.path.realpath(path))
-    _ensure_within_data_root(p, settings)
+    if settings.data_root is not None:
+        _root = settings.data_root.resolve()
+        try:
+            p = _root / p.relative_to(_root)
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Path not allowed") from None
     if p.suffix.lower() not in _IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not an image file")
     if not p.exists() or not p.is_file():
