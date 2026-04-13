@@ -282,21 +282,51 @@ async def query_image(session_id: str, file_id: str) -> FileResponse:
 async def thumbnail(sha256: str) -> FileResponse:
     """Serve a pre-generated thumbnail by SHA-256 hash.
 
-async def hit_image(sha256: str) -> FileResponse:
-    """Serve a hit image by SHA-256 hash from the configured data root."""
-    if not str(thumb_path).startswith(thumb_dir_str + os.sep):
-        raise HTTPException(status_code=400, detail="Invalid hash")
-    if not thumb_path.exists():
+    Thumbnails are written during `sfn index` when SFN_THUMBNAIL_DIR is configured.
+    Returns 404 when thumbnail dir is not configured or the file is not yet generated.
+    """
     if not re.fullmatch(r"[0-9a-f]{64}", sha256):
         raise HTTPException(status_code=400, detail="Invalid hash")
-    # Front-load validation: resolve only the filesystem portion (before any
-    data_root = settings.data_root.resolve()
-    for ext in _IMAGE_EXTENSIONS:
-        candidate = data_root / f"{sha256}{ext}"
-        if candidate.exists() and candidate.is_file():
-            return FileResponse(candidate, filename=candidate.name)
+    settings = Settings()
+    if settings.thumbnail_dir is None:
+        raise HTTPException(status_code=404, detail="Thumbnail directory not configured")
+    thumb_path = settings.thumbnail_dir / f"{sha256}.jpg"
+    if not thumb_path.exists():
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    return FileResponse(thumb_path, media_type="image/jpeg")
 
-    raise HTTPException(status_code=404, detail="File not found")
+
+@app.get("/api/hit-image")
+async def hit_image(path: str) -> FileResponse:
+    """Serve a hit image from the server filesystem.
+
+    For direct images: resolves the path and returns the file.
+    For container-extracted images (path contains ``::``): re-extracts the
+    specific item from the container on demand.
+
+    Security: only absolute resolved paths within the configured data root;
+    image-only extensions for direct files.
+    """
+    settings = Settings()
+    if settings.data_root is None:
+        raise HTTPException(status_code=503, detail="Data root not configured")
+    raw_fs_path = path.split("::", 1)[0] if "::" in path else path
+    canonical = _canonical_path_within_root(raw_fs_path, settings.data_root)
+
+    # Container virtual path: "/abs/root.zip::inner/photo.jpg"
+    if "::" in path:
+        item_name = path[path.index("::") + 2:]
+        cp = canonical
+        if cp.suffix.lower() not in CONTAINER_EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Not a container file")
+        if not cp.exists() or not cp.is_file():
+            raise HTTPException(status_code=404, detail="Container file not found")
+        try:
+            extracted = extract_container(
+                cp,
+                max_depth=settings.max_container_depth,
+                pdf_render_dpi=settings.pdf_render_dpi,
+                allowed_root=settings.data_root,
             )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Extraction failed: {exc}") from exc
@@ -356,19 +386,7 @@ async def container_download(path: str) -> FileResponse:
     settings = Settings()
     if settings.data_root is None:
         raise HTTPException(status_code=503, detail="Data root not configured")
-    if not path or os.path.isabs(path):
-        raise HTTPException(status_code=400, detail="Invalid path")
-    if "\x00" in path:
-        raise HTTPException(status_code=400, detail="Invalid path")
-
-    _root = settings.data_root.resolve()
-    p = (_root / path).resolve()
-    try:
-        _rel = p.relative_to(_root)
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Path not allowed") from None
-    # Reconstruct from the trusted root so subsequent ops use a clean path.
-    p = _root / _rel
+    p = _canonical_path_within_root(path, settings.data_root)
     if p.suffix.lower() not in CONTAINER_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not a container file")
     if not p.exists() or not p.is_file():
@@ -385,11 +403,6 @@ async def container_siblings(container_hash: str, collection: str = "sscd") -> J
     """
     if not re.fullmatch(r"[0-9a-f]{64}", container_hash):
         raise HTTPException(status_code=400, detail="Invalid container hash")
-    if collection not in {"sscd", "dino"}:
-        raise HTTPException(
-            status_code=400,
-            detail='Invalid collection; expected "sscd" or "dino"',
-        )
     if collection not in _VALID_COLLECTIONS:
         raise HTTPException(
             status_code=400,
