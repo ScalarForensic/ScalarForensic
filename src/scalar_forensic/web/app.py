@@ -73,6 +73,21 @@ _IMAGE_EXTENSIONS = frozenset(
     {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp", ".gif", ".jp2", ".ico", ".psd"}
 )
 
+# Maps validated image extensions to their MIME type for explicit FileResponse media_type.
+_SUFFIX_MEDIA_TYPE: dict[str, str] = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".bmp": "image/bmp",
+    ".tiff": "image/tiff",
+    ".tif": "image/tiff",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".jp2": "image/jp2",
+    ".ico": "image/x-icon",
+    ".psd": "image/vnd.adobe.photoshop",
+}
+
 _VALID_COLLECTIONS = frozenset({"sscd", "dino"})
 
 # Cached PCA-projected point cloud, computed once at startup.
@@ -286,11 +301,12 @@ async def hit_image(path: str) -> FileResponse:
     raw_fs_path = path.split("::", 1)[0] if "::" in path else path
     if not raw_fs_path or not os.path.isabs(raw_fs_path):
         raise HTTPException(status_code=400, detail="Invalid path")
-    canonical = Path(os.path.realpath(raw_fs_path))
-    _root_str = str(settings.data_root.resolve())
-    _canonical_str = str(canonical)
-    if _canonical_str != _root_str and not _canonical_str.startswith(_root_str + os.sep):
-        raise HTTPException(status_code=403, detail="Path not allowed")
+    _data_root = settings.data_root.resolve()
+    canonical = Path(raw_fs_path).resolve()
+    try:
+        canonical.relative_to(_data_root)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Path not allowed") from None
 
     # Container virtual path: "/abs/root.zip::inner/photo.jpg"
     if "::" in path:
@@ -333,13 +349,17 @@ async def hit_image(path: str) -> FileResponse:
                 ) from exc
         else:
             image_data = match.data
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=safe_suffix)
+        # Use a fixed .tmp suffix so the temp-file path does not carry user-derived
+        # data; set the MIME type explicitly from the validated safe_suffix instead.
+        media_type = _SUFFIX_MEDIA_TYPE.get(safe_suffix, "image/png")
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tmp")
         try:
             tmp.write(image_data)
         finally:
             tmp.close()
         return FileResponse(
             tmp.name,
+            media_type=media_type,
             filename=download_name or ("image" + safe_suffix),
             background=_cleanup_background(tmp.name),
         )
@@ -363,11 +383,12 @@ async def container_download(path: str) -> FileResponse:
         raise HTTPException(status_code=503, detail="Data root not configured")
     if not path or not os.path.isabs(path):
         raise HTTPException(status_code=400, detail="Invalid path")
-    p = Path(os.path.realpath(path))
-    _root_str = str(settings.data_root.resolve())
-    _p_str = str(p)
-    if _p_str != _root_str and not _p_str.startswith(_root_str + os.sep):
-        raise HTTPException(status_code=403, detail="Path not allowed")
+    _root = settings.data_root.resolve()
+    p = Path(path).resolve()
+    try:
+        p.relative_to(_root)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Path not allowed") from None
     if p.suffix.lower() not in CONTAINER_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not a container file")
     if not p.exists() or not p.is_file():

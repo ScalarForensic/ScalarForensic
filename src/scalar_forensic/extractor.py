@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import zipfile
 from dataclasses import dataclass
 from io import BytesIO
@@ -75,13 +74,12 @@ def extract_container(
     :param allowed_root: Trusted root directory.  *path* must resolve inside
         this directory; an error is raised if it does not.
     """
-    root_str = str(Path(os.path.realpath(str(allowed_root))))
-    path_str = str(Path(os.path.realpath(str(path))))
-    if path_str != root_str and not path_str.startswith(root_str + os.sep):
-        raise ValueError(f"Container path is outside allowed root: {path}")
-    # Re-derive path from the validated string so subsequent operations use
-    # the sanitised value that CodeQL can track as safe.
-    path = Path(path_str)
+    resolved_root = allowed_root.resolve()
+    path = path.resolve()
+    try:
+        path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(f"Container path is outside allowed root: {path}") from exc
     if not path.exists() or not path.is_file():
         raise ValueError(f"Container path is not a file: {path}")
     ext = path.suffix.lower()
