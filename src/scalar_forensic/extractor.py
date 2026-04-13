@@ -11,9 +11,7 @@ from pathlib import Path
 from PIL import Image as PilImage
 
 # File extensions recognised as container formats (hold images inside).
-CONTAINER_EXTENSIONS: frozenset[str] = frozenset(
-    {".zip", ".docx", ".odt", ".odp", ".ods", ".pdf"}
-)
+CONTAINER_EXTENSIONS: frozenset[str] = frozenset({".zip", ".docx", ".odt", ".odp", ".ods", ".pdf"})
 
 # Image formats that may appear inside containers.
 _IMAGE_EXTENSIONS: frozenset[str] = frozenset(
@@ -62,6 +60,7 @@ def extract_container(
     *,
     max_depth: int = 5,
     pdf_render_dpi: int = 150,
+    allowed_root: Path | None = None,
 ) -> list[ExtractedImage]:
     """Extract all images from a container file (ZIP / DOCX / ODF / PDF).
 
@@ -72,8 +71,16 @@ def extract_container(
     :param max_depth: Maximum nesting depth.  Depth 1 means only the root
         container is processed; depth 2 allows one level of nesting, etc.
     :param pdf_render_dpi: Resolution used when rasterising PDF pages.
+    :param allowed_root: Optional trusted root directory.  When provided, *path*
+        must resolve inside this directory.
     """
     path = path.resolve()
+    if allowed_root is not None:
+        root = allowed_root.resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"Container path is outside allowed root: {path}") from exc
     if not path.exists() or not path.is_file():
         raise ValueError(f"Container path is not a file: {path}")
     ext = path.suffix.lower()

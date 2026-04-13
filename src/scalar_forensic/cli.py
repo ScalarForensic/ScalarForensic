@@ -109,24 +109,45 @@ def _write_csv(
         with csv_path.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
             writer.writerow(
-                ["path", "processed", "reason", "md5", "sha256",
-                 "container_path", "container_item_name"]
+                [
+                    "path",
+                    "processed",
+                    "reason",
+                    "md5",
+                    "sha256",
+                    "container_path",
+                    "container_item_name",
+                ]
             )
             for rec in sorted(records.values(), key=lambda r: str(r.path)):
                 processed = "yes" if rec.status == _S_INDEXED else "no"
-                writer.writerow([
-                    str(rec.path), processed, rec.reason, rec.md5, rec.sha256,
-                    rec.container_path, rec.container_item_name,
-                ])
+                writer.writerow(
+                    [
+                        str(rec.path),
+                        processed,
+                        rec.reason,
+                        rec.md5,
+                        rec.sha256,
+                        rec.container_path,
+                        rec.container_item_name,
+                    ]
+                )
             if extracted_records:
                 for rec in sorted(
                     extracted_records, key=lambda r: (str(r.path), r.container_item_name)
                 ):
                     processed = "yes" if rec.status == _S_INDEXED else "no"
-                    writer.writerow([
-                        str(rec.path), processed, rec.reason, rec.md5, rec.sha256,
-                        rec.container_path, rec.container_item_name,
-                    ])
+                    writer.writerow(
+                        [
+                            str(rec.path),
+                            processed,
+                            rec.reason,
+                            rec.md5,
+                            rec.sha256,
+                            rec.container_path,
+                            rec.container_item_name,
+                        ]
+                    )
     except OSError as exc:
         typer.echo(f"[ERROR] Could not write CSV report to {csv_path}: {exc}", err=True)
 
@@ -773,11 +794,15 @@ def index(
                 def _make_container_upsert(idx_, ps, hs, hs_md5, embs, meta, vpaths_, cpayloads_):
                     def _job():
                         idx_.upsert_batch(
-                            ps, hs, embs, meta,
+                            ps,
+                            hs,
+                            embs,
+                            meta,
                             image_hashes_md5=hs_md5,
                             virtual_paths=vpaths_,
                             container_payloads=cpayloads_,
                         )
+
                     return _job
 
                 upsert_jobs_container.append(
@@ -806,7 +831,13 @@ def index(
 
     # ── Print summary table ───────────────────────────────────────────────────
     _print_summary(
-        records, resolved_input, csv_path, specs, indexed_counts, skipped_counts, failed_counts,
+        records,
+        resolved_input,
+        csv_path,
+        specs,
+        indexed_counts,
+        skipped_counts,
+        failed_counts,
         extracted_records,
     )
 

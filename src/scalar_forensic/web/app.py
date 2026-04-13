@@ -290,7 +290,7 @@ async def hit_image(path: str) -> FileResponse:
     if "::" in path:
         sep_idx = path.index("::")
         container_path_str = path[:sep_idx]
-        item_name = path[sep_idx + 2:]
+        item_name = path[sep_idx + 2 :]
         if not container_path_str or not os.path.isabs(container_path_str):
             raise HTTPException(status_code=400, detail="Invalid path")
         cp = Path(os.path.realpath(container_path_str))
@@ -304,6 +304,7 @@ async def hit_image(path: str) -> FileResponse:
                 cp,
                 max_depth=settings.max_container_depth,
                 pdf_render_dpi=settings.pdf_render_dpi,
+                allowed_root=settings.data_root,
             )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Extraction failed: {exc}") from exc
@@ -376,6 +377,7 @@ async def container_siblings(container_hash: str, collection: str = "sscd") -> J
     settings = Settings()
     coll = settings.collection_sscd if collection == "sscd" else settings.collection_dino
     from qdrant_client.models import FieldCondition, Filter, MatchValue  # noqa: PLC0415
+
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
     try:
         records: list = []

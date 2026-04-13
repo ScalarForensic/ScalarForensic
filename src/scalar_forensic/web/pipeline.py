@@ -165,8 +165,7 @@ def analyze_session(
     # Only embed non-container entries (container entries are kept for download but
     # cannot be embedded directly).
     embeddable = [
-        e for e in session.files
-        if e.parent_file_id is not None or e.container_type is None
+        e for e in session.files if e.parent_file_id is not None or e.container_type is None
     ]
     total = len(embeddable)
     for i, entry in enumerate(embeddable):
