@@ -291,9 +291,9 @@ async def hit_image(path: str) -> FileResponse:
         sep_idx = path.index("::")
         container_path_str = path[:sep_idx]
         item_name = path[sep_idx + 2:]
-        cp = Path(container_path_str).resolve()
-        if not cp.is_absolute():
+        if not container_path_str or not os.path.isabs(container_path_str):
             raise HTTPException(status_code=400, detail="Invalid path")
+        cp = Path(os.path.realpath(container_path_str))
         _ensure_within_data_root(cp, settings)
         if cp.suffix.lower() not in CONTAINER_EXTENSIONS:
             raise HTTPException(status_code=400, detail="Not a container file")
@@ -329,9 +329,9 @@ async def hit_image(path: str) -> FileResponse:
             background=_cleanup_background(tmp.name),
         )
 
-    p = Path(path).resolve()
-    if not p.is_absolute():
+    if not path or not os.path.isabs(path):
         raise HTTPException(status_code=400, detail="Invalid path")
+    p = Path(os.path.realpath(path))
     _ensure_within_data_root(p, settings)
     if p.suffix.lower() not in _IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not an image file")
@@ -348,9 +348,9 @@ async def container_download(path: str) -> FileResponse:
     container-only extensions.
     """
     settings = Settings()
-    p = Path(path).resolve()
-    if not p.is_absolute():
+    if not path or not os.path.isabs(path):
         raise HTTPException(status_code=400, detail="Invalid path")
+    p = Path(os.path.realpath(path))
     _ensure_within_data_root(p, settings)
     if p.suffix.lower() not in CONTAINER_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not a container file")
@@ -516,9 +516,9 @@ async def query_metadata(session_id: str, file_id: str) -> JSONResponse:
 async def hit_metadata(path: str) -> JSONResponse:
     """Detailed metadata for a hit image (filesystem path)."""
     settings = Settings()
-    p = Path(path).resolve()
-    if not p.is_absolute():
+    if not path or not os.path.isabs(path):
         raise HTTPException(status_code=400, detail="Invalid path")
+    p = Path(os.path.realpath(path))
     _ensure_within_data_root(p, settings)
     if p.suffix.lower() not in _IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not an image file")

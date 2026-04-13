@@ -74,9 +74,13 @@ def extract_container(
     :param pdf_render_dpi: Resolution used when rasterising PDF pages.
     """
     path = path.resolve()
+    if not path.exists() or not path.is_file():
+        raise ValueError(f"Container path is not a file: {path}")
+    ext = path.suffix.lower()
+    if ext not in CONTAINER_EXTENSIONS:
+        raise ValueError(f"Unsupported container extension: {ext}")
     data = path.read_bytes()
     container_hash = _sha256(data)
-    ext = path.suffix.lower()
     root_type = _ext_to_type(ext)
 
     return _dispatch(
