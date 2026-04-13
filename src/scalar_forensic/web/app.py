@@ -310,18 +310,20 @@ async def hit_image(path: str) -> FileResponse:
         raise HTTPException(status_code=403, detail="Path not allowed") from None
     # Reconstruct from trusted root so downstream file access is rooted.
     canonical = _data_root / _rel
+    # Require caller path to already be canonical to avoid ambiguous forms.
+    if str(canonical) != raw_fs_path:
+        raise HTTPException(status_code=400, detail="Invalid path")
 
     # Container virtual path: "/abs/root.zip::inner/photo.jpg"
     if "::" in path:
         item_name = path[path.index("::") + 2 :]
-        cp = canonical
-        if cp.suffix.lower() not in CONTAINER_EXTENSIONS:
+        if canonical.suffix.lower() not in CONTAINER_EXTENSIONS:
             raise HTTPException(status_code=400, detail="Not a container file")
-        if not cp.exists() or not cp.is_file():
+        if not canonical.exists() or not canonical.is_file():
             raise HTTPException(status_code=404, detail="Container file not found")
         try:
             extracted = extract_container(
-                cp,
+                canonical,
                 max_depth=settings.max_container_depth,
                 pdf_render_dpi=settings.pdf_render_dpi,
                 allowed_root=settings.data_root,
