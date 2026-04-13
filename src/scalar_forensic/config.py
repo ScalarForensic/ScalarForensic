@@ -77,10 +77,11 @@ class Settings:
 
         # --- Web server file-serving root ---
         # All /api/hit-image and /api/container-download requests are validated
-        # against this root to prevent path-traversal attacks.  Defaults to
+        # against this root to prevent path-traversal attacks. Defaults to
         # SFN_INPUT_DIR when that is set; can be overridden explicitly via
-        # SFN_DATA_ROOT.  When neither is set, path traversal protection falls
-        # back to extension-only checking (legacy behaviour).
+        # SFN_DATA_ROOT. When neither is set, self.data_root remains None and
+        # those endpoints are unavailable rather than falling back to the
+        # legacy extension-only checks.
         explicit_data_root = self._parse_optional_path("SFN_DATA_ROOT")
         self.data_root: Path | None = (
             explicit_data_root if explicit_data_root is not None else self.input_dir
