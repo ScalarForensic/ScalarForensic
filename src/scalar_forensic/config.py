@@ -82,7 +82,9 @@ class Settings:
         # SFN_DATA_ROOT.  When neither is set, path traversal protection falls
         # back to extension-only checking (legacy behaviour).
         explicit_data_root = self._parse_optional_path("SFN_DATA_ROOT")
-        self.data_root: Path | None = explicit_data_root if explicit_data_root is not None else self.input_dir
+        self.data_root: Path | None = (
+            explicit_data_root if explicit_data_root is not None else self.input_dir
+        )
 
     def _parse_int(self, key: str, default: int) -> int:
         raw = os.environ.get(key)
