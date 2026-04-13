@@ -413,6 +413,11 @@ async def container_siblings(container_hash: str, collection: str = "sscd") -> J
     """
     if not re.fullmatch(r"[0-9a-f]{64}", container_hash):
         raise HTTPException(status_code=400, detail="Invalid container hash")
+    if collection not in {"sscd", "dino"}:
+        raise HTTPException(
+            status_code=400,
+            detail='Invalid collection; expected "sscd" or "dino"',
+        )
     if collection not in _VALID_COLLECTIONS:
         raise HTTPException(
             status_code=400,
