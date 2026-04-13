@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import zipfile
 from dataclasses import dataclass
 from io import BytesIO
@@ -74,19 +75,18 @@ def extract_container(
     :param allowed_root: Optional trusted root directory.  When provided, *path*
         must resolve inside this directory.
     """
-    path = path.resolve()
+    path = Path(os.path.realpath(str(path)))
     if allowed_root is not None:
-        root = allowed_root.resolve()
-        try:
-            path.relative_to(root)
-        except ValueError as exc:
-            raise ValueError(f"Container path is outside allowed root: {path}") from exc
-    if not path.exists() or not path.is_file():
+        root_str = str(Path(os.path.realpath(str(allowed_root))))
+        path_str = str(path)
+        if path_str != root_str and not path_str.startswith(root_str + os.sep):
+            raise ValueError(f"Container path is outside allowed root: {path}")
+    if not path.exists() or not path.is_file():  # lgtm[py/path-injection]
         raise ValueError(f"Container path is not a file: {path}")
     ext = path.suffix.lower()
     if ext not in CONTAINER_EXTENSIONS:
         raise ValueError(f"Unsupported container extension: {ext}")
-    data = path.read_bytes()
+    data = path.read_bytes()  # lgtm[py/path-injection]
     container_hash = _sha256(data)
     root_type = _ext_to_type(ext)
 

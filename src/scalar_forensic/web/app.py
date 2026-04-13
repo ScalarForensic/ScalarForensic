@@ -257,7 +257,10 @@ async def thumbnail(sha256: str) -> FileResponse:
     settings = Settings()
     if settings.thumbnail_dir is None:
         raise HTTPException(status_code=404, detail="Thumbnail directory not configured")
-    thumb_path = settings.thumbnail_dir / f"{sha256}.jpg"
+    thumb_dir_str = str(settings.thumbnail_dir.resolve())
+    thumb_path = Path(os.path.realpath(str(settings.thumbnail_dir / f"{sha256}.jpg")))
+    if not str(thumb_path).startswith(thumb_dir_str + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid hash")
     if not thumb_path.exists():
         raise HTTPException(status_code=404, detail="Thumbnail not found")
     return FileResponse(thumb_path, media_type="image/jpeg")
@@ -275,6 +278,8 @@ async def hit_image(path: str) -> FileResponse:
     image-only extensions for direct files.
     """
     settings = Settings()
+    if settings.data_root is None:
+        raise HTTPException(status_code=503, detail="Data root not configured")
     # Front-load validation: resolve the filesystem portion of the path (the
     # part before any ``::`` separator) to a canonical absolute path and check
     # it against the data root before branching into container vs. direct logic.
@@ -282,12 +287,10 @@ async def hit_image(path: str) -> FileResponse:
     if not raw_fs_path or not os.path.isabs(raw_fs_path):
         raise HTTPException(status_code=400, detail="Invalid path")
     canonical = Path(os.path.realpath(raw_fs_path))
-    if settings.data_root is not None:
-        _root = settings.data_root.resolve()
-        try:
-            canonical = _root / canonical.relative_to(_root)
-        except ValueError:
-            raise HTTPException(status_code=403, detail="Path not allowed") from None
+    _root_str = str(settings.data_root.resolve())
+    _canonical_str = str(canonical)
+    if _canonical_str != _root_str and not _canonical_str.startswith(_root_str + os.sep):
+        raise HTTPException(status_code=403, detail="Path not allowed")
 
     # Container virtual path: "/abs/root.zip::inner/photo.jpg"
     if "::" in path:
@@ -354,15 +357,15 @@ async def container_download(path: str) -> FileResponse:
     container-only extensions.
     """
     settings = Settings()
+    if settings.data_root is None:
+        raise HTTPException(status_code=503, detail="Data root not configured")
     if not path or not os.path.isabs(path):
         raise HTTPException(status_code=400, detail="Invalid path")
     p = Path(os.path.realpath(path))
-    if settings.data_root is not None:
-        _root = settings.data_root.resolve()
-        try:
-            p = _root / p.relative_to(_root)
-        except ValueError:
-            raise HTTPException(status_code=403, detail="Path not allowed") from None
+    _root_str = str(settings.data_root.resolve())
+    _p_str = str(p)
+    if _p_str != _root_str and not _p_str.startswith(_root_str + os.sep):
+        raise HTTPException(status_code=403, detail="Path not allowed")
     if p.suffix.lower() not in CONTAINER_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not a container file")
     if not p.exists() or not p.is_file():

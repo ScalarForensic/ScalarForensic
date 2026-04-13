@@ -52,22 +52,26 @@ def _make_zip_with_image(tmp_dir: Path) -> Path:
 
 
 class TestContainerDownload:
-    def test_valid_zip_returns_file(self, tmp_path):
+    def test_valid_zip_returns_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SFN_DATA_ROOT", str(tmp_path))
         zip_path = _make_zip_with_image(tmp_path)
         resp = _client().get("/api/container-download", params={"path": str(zip_path)})
         assert resp.status_code == 200
 
-    def test_rejects_relative_path(self):
+    def test_rejects_relative_path(self, monkeypatch):
+        monkeypatch.setenv("SFN_DATA_ROOT", "/tmp")
         resp = _client().get("/api/container-download", params={"path": "relative/path.zip"})
         assert resp.status_code == 400
 
-    def test_rejects_non_container_extension(self, tmp_path):
+    def test_rejects_non_container_extension(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SFN_DATA_ROOT", str(tmp_path))
         img_path = tmp_path / "image.png"
         img_path.write_bytes(_make_png_bytes())
         resp = _client().get("/api/container-download", params={"path": str(img_path)})
         assert resp.status_code == 400
 
-    def test_rejects_missing_file(self, tmp_path):
+    def test_rejects_missing_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SFN_DATA_ROOT", str(tmp_path))
         missing = tmp_path / "nonexistent.zip"
         resp = _client().get("/api/container-download", params={"path": str(missing)})
         assert resp.status_code == 404
@@ -172,22 +176,26 @@ class TestContainerSiblings:
 
 
 class TestHitImageContainer:
-    def test_rejects_relative_container_path(self):
+    def test_rejects_relative_container_path(self, monkeypatch):
+        monkeypatch.setenv("SFN_DATA_ROOT", "/tmp")
         resp = _client().get("/api/hit-image", params={"path": "relative/path.zip::photo.png"})
         assert resp.status_code == 400
 
-    def test_rejects_non_container_extension_in_virtual_path(self, tmp_path):
+    def test_rejects_non_container_extension_in_virtual_path(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SFN_DATA_ROOT", str(tmp_path))
         img_path = tmp_path / "image.png"
         img_path.write_bytes(_make_png_bytes())
         resp = _client().get("/api/hit-image", params={"path": f"{img_path}::inner.png"})
         assert resp.status_code == 400
 
-    def test_rejects_missing_container(self, tmp_path):
+    def test_rejects_missing_container(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SFN_DATA_ROOT", str(tmp_path))
         missing = tmp_path / "nonexistent.zip"
         resp = _client().get("/api/hit-image", params={"path": f"{missing}::photo.png"})
         assert resp.status_code == 404
 
-    def test_returns_image_from_zip(self, tmp_path):
+    def test_returns_image_from_zip(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SFN_DATA_ROOT", str(tmp_path))
         zip_path = _make_zip_with_image(tmp_path)
         resp = _client().get("/api/hit-image", params={"path": f"{zip_path}::photo.png"})
         assert resp.status_code == 200
