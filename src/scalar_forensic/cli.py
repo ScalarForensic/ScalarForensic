@@ -772,11 +772,14 @@ def index(
                 n_skipped_here = len(candidate_uids) - len(to_embed_indices)
                 skipped_counts[spec_idx] += n_skipped_here
 
+                skipped_indices = [j for j, uid in enumerate(candidate_uids) if uid in already]
+                for j in skipped_indices:
+                    rec2 = valid_recs[j]
+                    if rec2.status == "pending":
+                        rec2.status = _S_SKIP_IDX
+                        rec2.reason = "already indexed in Qdrant"
+
                 if not to_embed_indices:
-                    for rec2 in valid_recs:
-                        if rec2.status == "pending":
-                            rec2.status = _S_SKIP_IDX
-                            rec2.reason = "already indexed in Qdrant"
                     continue
 
                 te_shas = [valid_shas[j] for j in to_embed_indices]
