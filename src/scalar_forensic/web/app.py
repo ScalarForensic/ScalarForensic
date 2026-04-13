@@ -39,6 +39,8 @@ from scalar_forensic.web.session import FileEntry, create_session, get_session
 _STATIC_DIR = Path(__file__).parent / "static"
 _VIZ_JS_SRC = (_STATIC_DIR / "viz.js").read_text(encoding="utf-8")
 
+_log = logging.getLogger(__name__)
+
 
 def _render_viz_html(data: dict) -> str:
     """Return a self-contained HTML page with the point-cloud data and viz
@@ -539,8 +541,6 @@ async def hit_metadata(path: str) -> JSONResponse:
 # ---------------------------------------------------------------------------
 # 3-D vector visualization
 # ---------------------------------------------------------------------------
-
-_log = logging.getLogger(__name__)
 
 
 def _pca3(vectors: list[list[float]]) -> list[list[float]]:

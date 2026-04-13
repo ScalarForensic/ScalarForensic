@@ -196,7 +196,7 @@ def analyze_session(
                 message=str(exc),
             )
 
-    yield ProgressEvent(type="done", total=len(session.files), session_id=session.session_id)
+    yield ProgressEvent(type="done", total=total, session_id=session.session_id)
 
 
 def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
@@ -330,9 +330,18 @@ def query_session(
     results: list[FileResult] = []
 
     for entry in session.files:
-        # Container-root entries are kept in the session for download but have no
-        # embeddings — skip them in the query loop.
+        # Surface extraction errors for container-root entries so the UI can
+        # display them; other container-roots (no error) have no embeddings and
+        # are skipped.
         if entry.container_type is not None and entry.parent_file_id is None:
+            if entry.error:
+                results.append(
+                    FileResult(
+                        file_id=entry.file_id,
+                        filename=entry.filename,
+                        errors=[f"analysis failed: {entry.error}"],
+                    )
+                )
             continue
 
         if entry.error:

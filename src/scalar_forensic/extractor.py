@@ -401,7 +401,8 @@ def _extract_pdf(
                 continue
             if not img_bytes or not _is_valid_image(img_bytes):
                 continue
-            embed_item_name = f"{page_item_name}::embed_{embed_idx}"
+            img_ext = base_image.get("ext") or "png"
+            embed_item_name = f"{page_item_name}::embed_{embed_idx}.{img_ext}"
             results.append(
                 ExtractedImage(
                     data=img_bytes,
