@@ -69,8 +69,25 @@ _IMAGE_EXTENSIONS = frozenset(
     {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp", ".gif", ".jp2", ".ico", ".psd"}
 )
 
+_VALID_COLLECTIONS = frozenset({"sscd", "dino"})
+
 # Cached PCA-projected point cloud, computed once at startup.
 _points3d_cache: dict | None = None
+
+
+def _ensure_within_data_root(p: Path, settings: Settings) -> None:
+    """Raise HTTP 403 if *p* is outside the configured data root.
+
+    When ``settings.data_root`` is *None* (neither ``SFN_DATA_ROOT`` nor
+    ``SFN_INPUT_DIR`` is set) the check is skipped and callers rely on
+    extension-only protection — the legacy behaviour preserved for existing
+    deployments that have not yet configured a data root.
+    """
+    if settings.data_root is not None:
+        try:
+            p.relative_to(settings.data_root.resolve())
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Path not allowed") from None
 
 
 @contextlib.asynccontextmanager
@@ -265,19 +282,23 @@ async def hit_image(path: str) -> FileResponse:
     For container-extracted images (path contains ``::``): re-extracts the
     specific item from the container on demand.
 
-    Security: only absolute resolved paths; image-only extensions for direct files.
+    Security: only absolute resolved paths within the configured data root;
+    image-only extensions for direct files.
     """
+    settings = Settings()
     # Container virtual path: "/abs/root.zip::inner/photo.jpg"
     if "::" in path:
         sep_idx = path.index("::")
         container_path_str = path[:sep_idx]
         item_name = path[sep_idx + 2:]
         cp = Path(container_path_str).resolve()
-        if not cp.is_absolute() or not cp.exists() or not cp.is_file():
-            raise HTTPException(status_code=404, detail="Container file not found")
+        if not cp.is_absolute():
+            raise HTTPException(status_code=400, detail="Invalid path")
+        _ensure_within_data_root(cp, settings)
         if cp.suffix.lower() not in CONTAINER_EXTENSIONS:
             raise HTTPException(status_code=400, detail="Not a container file")
-        settings = Settings()
+        if not cp.exists() or not cp.is_file():
+            raise HTTPException(status_code=404, detail="Container file not found")
         try:
             extracted = extract_container(
                 cp,
@@ -289,22 +310,25 @@ async def hit_image(path: str) -> FileResponse:
         match = next((img for img in extracted if img.item_name == item_name), None)
         if match is None:
             raise HTTPException(status_code=404, detail="Item not found in container")
-        tmp = tempfile.NamedTemporaryFile(
-            delete=False, suffix=Path(item_name.split("::")[-1]).suffix or ".png"
-        )
+        # Sanitise the suffix derived from item_name: allow only known image extensions.
+        item_leaf = item_name.split("::")[-1].rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        item_ext = f".{item_leaf.rsplit('.', 1)[-1].lower()}" if "." in item_leaf else ""
+        safe_suffix = item_ext if item_ext in _IMAGE_EXTENSIONS else ".png"
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=safe_suffix)
         try:
             tmp.write(match.data)
         finally:
             tmp.close()
         return FileResponse(
             tmp.name,
-            filename=Path(item_name.split("::")[-1]).name,
+            filename=item_leaf or "image",
             background=_cleanup_background(tmp.name),
         )
 
     p = Path(path).resolve()
     if not p.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
+    _ensure_within_data_root(p, settings)
     if p.suffix.lower() not in _IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not an image file")
     if not p.exists() or not p.is_file():
@@ -316,11 +340,14 @@ async def hit_image(path: str) -> FileResponse:
 async def container_download(path: str) -> FileResponse:
     """Serve a container file (ZIP / PDF / DOCX / ODF) from the server filesystem.
 
-    Security: only absolute resolved paths; container-only extensions.
+    Security: only absolute resolved paths within the configured data root;
+    container-only extensions.
     """
+    settings = Settings()
     p = Path(path).resolve()
     if not p.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
+    _ensure_within_data_root(p, settings)
     if p.suffix.lower() not in CONTAINER_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not a container file")
     if not p.exists() or not p.is_file():
@@ -337,27 +364,33 @@ async def container_siblings(container_hash: str, collection: str = "sscd") -> J
     """
     if not re.fullmatch(r"[0-9a-f]{64}", container_hash):
         raise HTTPException(status_code=400, detail="Invalid container hash")
+    if collection not in _VALID_COLLECTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid collection; expected one of: {', '.join(sorted(_VALID_COLLECTIONS))}",
+        )
     settings = Settings()
     coll = settings.collection_sscd if collection == "sscd" else settings.collection_dino
     from qdrant_client.models import FieldCondition, Filter, MatchValue  # noqa: PLC0415
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
     try:
-        records, _ = client.scroll(
-            collection_name=coll,
-            scroll_filter=Filter(
-                must=[
-                    FieldCondition(key="container_hash", match=MatchValue(value=container_hash))
-                ]
-            ),
-            limit=100,
-            with_payload=[
-                "image_hash",
-                "image_path",
-                "container_item_name",
-                "extraction_kind",
-            ],
-            with_vectors=False,
+        records: list = []
+        offset = None
+        scroll_filter = Filter(
+            must=[FieldCondition(key="container_hash", match=MatchValue(value=container_hash))]
         )
+        while True:
+            page, offset = client.scroll(
+                collection_name=coll,
+                scroll_filter=scroll_filter,
+                limit=100,
+                offset=offset,
+                with_payload=["image_hash", "image_path", "container_item_name", "extraction_kind"],
+                with_vectors=False,
+            )
+            records.extend(page)
+            if offset is None:
+                break
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Qdrant query failed: {exc}") from exc
     return JSONResponse(
@@ -380,8 +413,8 @@ def _cleanup_background(path_str: str):
     def _delete():
         try:
             Path(path_str).unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            _log.debug("Could not delete temporary file %r: %s", path_str, exc)
 
     return BackgroundTask(_delete)
 
@@ -478,9 +511,13 @@ async def query_metadata(session_id: str, file_id: str) -> JSONResponse:
 @app.get("/api/metadata")
 async def hit_metadata(path: str) -> JSONResponse:
     """Detailed metadata for a hit image (filesystem path)."""
+    settings = Settings()
     p = Path(path).resolve()
-    if not p.is_absolute() or p.suffix.lower() not in _IMAGE_EXTENSIONS:
+    if not p.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
+    _ensure_within_data_root(p, settings)
+    if p.suffix.lower() not in _IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Not an image file")
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 

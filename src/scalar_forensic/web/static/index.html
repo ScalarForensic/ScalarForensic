@@ -887,7 +887,8 @@
               Siblings (<span x-text="parentPanel.siblings?.length || 0"></span>)
             </div>
             <div class="parent-panel-siblings" x-show="parentPanel.siblings?.length > 0">
-              <template x-for="sib in (parentPanel.siblings || [])" :key="sib.image_hash">
+              <template x-for="sib in (parentPanel.siblings || [])"
+                        :key="(sib.container_item_name || '') + '|' + (sib.image_hash || '')">
                 <div class="sibling-row">
                   <img class="sibling-thumb"
                        :src="sib.image_hash ? `/api/thumbnail/${sib.image_hash}` : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"

@@ -75,6 +75,15 @@ class Settings:
         # (e.g. ZIP inside ZIP inside ZIP counts as depth 3).
         self.max_container_depth: int = self._parse_int("SFN_MAX_CONTAINER_DEPTH", 5)
 
+        # --- Web server file-serving root ---
+        # All /api/hit-image and /api/container-download requests are validated
+        # against this root to prevent path-traversal attacks.  Defaults to
+        # SFN_INPUT_DIR when that is set; can be overridden explicitly via
+        # SFN_DATA_ROOT.  When neither is set, path traversal protection falls
+        # back to extension-only checking (legacy behaviour).
+        explicit_data_root = self._parse_optional_path("SFN_DATA_ROOT")
+        self.data_root: Path | None = explicit_data_root if explicit_data_root is not None else self.input_dir
+
     def _parse_int(self, key: str, default: int) -> int:
         raw = os.environ.get(key)
         if raw is None:

@@ -204,7 +204,8 @@ def _extract_zip(
                     )
                     results.extend(nested)
     except zipfile.BadZipFile:
-        pass
+        # Invalid or corrupt ZIP payload — treat as non-extractable container.
+        return results
     return results
 
 
@@ -221,7 +222,13 @@ def _extract_docx(
     """Extract embedded images from a DOCX file via python-docx."""
     results: list[ExtractedImage] = []
     try:
-        from docx import Document  # noqa: PLC0415
+        try:
+            from docx import Document  # noqa: PLC0415
+        except ModuleNotFoundError:
+            raise ModuleNotFoundError(
+                "python-docx is required for DOCX extraction: "
+                "install it with 'uv sync --group containers'"
+            ) from None
 
         doc = Document(BytesIO(docx_bytes))
         seen_parts: set[int] = set()
@@ -253,7 +260,9 @@ def _extract_docx(
                     )
                 )
     except Exception:
-        pass
+        # Best-effort extraction: unreadable or malformed DOCX must not abort
+        # container processing; return whatever images were extracted so far.
+        return results
     return results
 
 
@@ -298,7 +307,8 @@ def _extract_odf(
                         )
                     )
     except zipfile.BadZipFile:
-        pass
+        # Invalid or corrupt ODF archive — treat as non-extractable container.
+        return results
     return results
 
 

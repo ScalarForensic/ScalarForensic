@@ -738,11 +738,6 @@ def index(
                 n_skipped_here = len(valid_vpaths) - len(to_embed_indices)
                 skipped_counts[spec_idx] += n_skipped_here
 
-                for j, orig_j in enumerate(to_embed_indices):
-                    _ = j  # suppress unused warning
-                    if valid_recs[orig_j].status != _S_INDEXED:
-                        pass  # will be set after embedding
-
                 if not to_embed_indices:
                     for rec2 in valid_recs:
                         if rec2.status == "pending":
