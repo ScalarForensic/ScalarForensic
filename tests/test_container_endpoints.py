@@ -171,31 +171,23 @@ class TestContainerSiblings:
 
 class TestHitImageContainer:
     def test_rejects_relative_container_path(self):
-        resp = _client().get(
-            "/api/hit-image", params={"path": "relative/path.zip::photo.png"}
-        )
+        resp = _client().get("/api/hit-image", params={"path": "relative/path.zip::photo.png"})
         assert resp.status_code == 400
 
     def test_rejects_non_container_extension_in_virtual_path(self, tmp_path):
         img_path = tmp_path / "image.png"
         img_path.write_bytes(_make_png_bytes())
-        resp = _client().get(
-            "/api/hit-image", params={"path": f"{img_path}::inner.png"}
-        )
+        resp = _client().get("/api/hit-image", params={"path": f"{img_path}::inner.png"})
         assert resp.status_code == 400
 
     def test_rejects_missing_container(self, tmp_path):
         missing = tmp_path / "nonexistent.zip"
-        resp = _client().get(
-            "/api/hit-image", params={"path": f"{missing}::photo.png"}
-        )
+        resp = _client().get("/api/hit-image", params={"path": f"{missing}::photo.png"})
         assert resp.status_code == 404
 
     def test_returns_image_from_zip(self, tmp_path):
         zip_path = _make_zip_with_image(tmp_path)
-        resp = _client().get(
-            "/api/hit-image", params={"path": f"{zip_path}::photo.png"}
-        )
+        resp = _client().get("/api/hit-image", params={"path": f"{zip_path}::photo.png"})
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("image/")
 
@@ -204,7 +196,5 @@ class TestHitImageContainer:
         data_root = tmp_path / "allowed"
         data_root.mkdir()
         monkeypatch.setenv("SFN_DATA_ROOT", str(data_root))
-        resp = _client().get(
-            "/api/hit-image", params={"path": f"{zip_path}::photo.png"}
-        )
+        resp = _client().get("/api/hit-image", params={"path": f"{zip_path}::photo.png"})
         assert resp.status_code == 403

@@ -288,15 +288,19 @@ async def hit_image(path: str) -> FileResponse:
     image-only extensions for direct files.
     """
     settings = Settings()
+    # Front-load validation: resolve the filesystem portion of the path (the
+    # part before any ``::`` separator) to a canonical absolute path and check
+    # it against the data root before branching into container vs. direct logic.
+    raw_fs_path = path.split("::", 1)[0] if "::" in path else path
+    if not raw_fs_path or not os.path.isabs(raw_fs_path):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    canonical = Path(os.path.realpath(raw_fs_path))
+    _ensure_within_data_root(canonical, settings)
+
     # Container virtual path: "/abs/root.zip::inner/photo.jpg"
     if "::" in path:
-        sep_idx = path.index("::")
-        container_path_str = path[:sep_idx]
-        item_name = path[sep_idx + 2 :]
-        if not container_path_str or not os.path.isabs(container_path_str):
-            raise HTTPException(status_code=400, detail="Invalid path")
-        cp = Path(os.path.realpath(container_path_str))
-        _ensure_within_data_root(cp, settings)
+        item_name = path[path.index("::") + 2 :]
+        cp = canonical
         if cp.suffix.lower() not in CONTAINER_EXTENSIONS:
             raise HTTPException(status_code=400, detail="Not a container file")
         if not cp.exists() or not cp.is_file():
@@ -332,15 +336,11 @@ async def hit_image(path: str) -> FileResponse:
             background=_cleanup_background(tmp.name),
         )
 
-    if not path or not os.path.isabs(path):
-        raise HTTPException(status_code=400, detail="Invalid path")
-    p = Path(os.path.realpath(path))
-    _ensure_within_data_root(p, settings)
-    if p.suffix.lower() not in _IMAGE_EXTENSIONS:
+    if canonical.suffix.lower() not in _IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not an image file")
-    if not p.exists() or not p.is_file():
+    if not canonical.exists() or not canonical.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(p, filename=p.name)
+    return FileResponse(canonical, filename=canonical.name)
 
 
 @app.get("/api/container-download")
