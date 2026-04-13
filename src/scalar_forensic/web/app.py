@@ -327,8 +327,10 @@ async def hit_image(path: str) -> FileResponse:
                 _buf = io.BytesIO()
                 PilImage.open(io.BytesIO(match.data)).save(_buf, format="PNG")
                 image_data: bytes = _buf.getvalue()
-            except Exception:
-                image_data = match.data
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500, detail=f"Transcoding to PNG failed: {exc}"
+                ) from exc
         else:
             image_data = match.data
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=safe_suffix)
