@@ -98,7 +98,8 @@ def _expand_containers(session: Session, settings: Settings) -> None:
             continue
 
         # Mark the container entry itself (kept for download).
-        entry.container_type = suffix.lstrip(".")
+        # Normalise ODF sub-formats (.odt/.ods/.odp) to the canonical "odf" type.
+        entry.container_type = "odf" if suffix in {".odt", ".odp", ".ods"} else suffix.lstrip(".")
         new_files.append(entry)
 
         try:

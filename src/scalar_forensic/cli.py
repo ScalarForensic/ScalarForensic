@@ -143,13 +143,9 @@ def _print_summary(
 ) -> None:
     counts = Counter(r.status for r in records.values())
     total = len(records)
-    n_image = (
-        total
-        - counts[_S_UNSUPPORTED]
-        - counts[_S_CONTAINER_PROCESSED]
-        - counts[_S_FAIL_EXTRACT]
-        - counts[_S_FAIL_READ]
-    )
+    # Count image files by classification, not by outcome: a file that failed to read
+    # is still an image file and should appear in the image count.
+    n_image = total - counts[_S_UNSUPPORTED] - counts[_S_CONTAINER_PROCESSED] - counts[_S_FAIL_EXTRACT]
     n_containers = counts[_S_CONTAINER_PROCESSED] + counts[_S_FAIL_EXTRACT]
 
     n_extracted = len(extracted_records) if extracted_records else 0

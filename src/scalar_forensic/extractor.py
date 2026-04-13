@@ -329,7 +329,13 @@ def _extract_pdf(
     1. A **rendered** PNG raster of the full page (child of the PDF).
     2. **Embedded** image blobs found on that page (children of the rendered page).
     """
-    import fitz  # noqa: PLC0415  (pymupdf)
+    try:
+        import fitz  # noqa: PLC0415  (pymupdf)
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "PDF extraction requires the optional PyMuPDF dependency. "
+            "Install it with 'uv sync --group containers'."
+        ) from exc
 
     results: list[ExtractedImage] = []
     try:

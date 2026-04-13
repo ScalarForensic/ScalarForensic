@@ -314,6 +314,10 @@ async def hit_image(path: str) -> FileResponse:
         item_leaf = item_name.split("::")[-1].rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
         item_ext = f".{item_leaf.rsplit('.', 1)[-1].lower()}" if "." in item_leaf else ""
         safe_suffix = item_ext if item_ext in _IMAGE_EXTENSIONS else ".png"
+        # Ensure the download filename always carries an image extension.  Rendered
+        # PDF pages have names like "page_1" with no extension, so we append the
+        # safe suffix when none is present (or when the original ext was rejected).
+        download_name = item_leaf if item_ext in _IMAGE_EXTENSIONS else (item_leaf + safe_suffix)
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=safe_suffix)
         try:
             tmp.write(match.data)
@@ -321,7 +325,7 @@ async def hit_image(path: str) -> FileResponse:
             tmp.close()
         return FileResponse(
             tmp.name,
-            filename=item_leaf or "image",
+            filename=download_name or ("image" + safe_suffix),
             background=_cleanup_background(tmp.name),
         )
 

@@ -138,6 +138,16 @@ class Indexer:
                 f"MD5 hash list length mismatch: "
                 f"sha256={len(image_hashes)}, md5={len(image_hashes_md5)}"
             )
+        if virtual_paths is not None and len(virtual_paths) != len(image_paths):
+            raise ValueError(
+                f"virtual_paths length mismatch: "
+                f"paths={len(image_paths)}, virtual_paths={len(virtual_paths)}"
+            )
+        if container_payloads is not None and len(container_payloads) != len(image_paths):
+            raise ValueError(
+                f"container_payloads length mismatch: "
+                f"paths={len(image_paths)}, container_payloads={len(container_payloads)}"
+            )
         indexed_at = datetime.now(UTC).isoformat()
         points = []
         for i, (image_path, image_hash, embedding) in enumerate(
