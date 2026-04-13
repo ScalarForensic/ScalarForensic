@@ -695,9 +695,9 @@ def index(
             ]
             cpayloads = [
                 {
-                    "container_hash": rec.sha256,
+                    "container_hash": img.parent_hash,
                     "container_path": str(img.root_container_path),
-                    "container_type": img.root_container_type,
+                    "container_type": img.parent_type,
                     "container_item_name": img.item_name,
                     "extraction_kind": img.extraction_kind,
                 }
