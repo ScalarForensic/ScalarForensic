@@ -75,11 +75,20 @@ def extract_container(
         this directory; an error is raised if it does not.
     """
     resolved_root = allowed_root.resolve()
+    # Reject dangerous sequences before any filesystem operation so CodeQL can
+    # see a string-level sanitizer ahead of the resolve() call.
+    _path_str = str(path)
+    _norm = _path_str.replace("\\", "/")
+    if "\x00" in _path_str or "/../" in _norm or _norm.endswith("/.."):
+        raise ValueError(f"Container path is outside allowed root: {path}")
     path = path.resolve()
     try:
-        path.relative_to(resolved_root)
+        _rel = path.relative_to(resolved_root)
     except ValueError as exc:
         raise ValueError(f"Container path is outside allowed root: {path}") from exc
+    # Reconstruct from the trusted root so subsequent ops use a path whose
+    # provenance is anchored to the validated allowed_root.
+    path = resolved_root / _rel
     if not path.exists() or not path.is_file():
         raise ValueError(f"Container path is not a file: {path}")
     ext = path.suffix.lower()

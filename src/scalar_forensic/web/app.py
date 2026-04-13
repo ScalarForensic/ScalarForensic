@@ -301,12 +301,24 @@ async def hit_image(path: str) -> FileResponse:
     raw_fs_path = path.split("::", 1)[0] if "::" in path else path
     if not raw_fs_path or not os.path.isabs(raw_fs_path):
         raise HTTPException(status_code=400, detail="Invalid path")
+    # Reject dangerous sequences before any filesystem operation.
+    _norm_raw = raw_fs_path.replace("\\", "/")
+    if (
+        "\x00" in raw_fs_path
+        or "/../" in _norm_raw
+        or _norm_raw.endswith("/..")
+        or "/./" in _norm_raw
+        or _norm_raw.endswith("/.")
+    ):
+        raise HTTPException(status_code=400, detail="Invalid path")
     _data_root = settings.data_root.resolve()
     canonical = Path(raw_fs_path).resolve()
     try:
-        canonical.relative_to(_data_root)
+        _rel = canonical.relative_to(_data_root)
     except ValueError:
         raise HTTPException(status_code=403, detail="Path not allowed") from None
+    # Reconstruct from the trusted root so subsequent ops use a clean path.
+    canonical = _data_root / _rel
 
     # Container virtual path: "/abs/root.zip::inner/photo.jpg"
     if "::" in path:
@@ -383,12 +395,24 @@ async def container_download(path: str) -> FileResponse:
         raise HTTPException(status_code=503, detail="Data root not configured")
     if not path or not os.path.isabs(path):
         raise HTTPException(status_code=400, detail="Invalid path")
+    # Reject dangerous sequences before any filesystem operation.
+    _norm_p = path.replace("\\", "/")
+    if (
+        "\x00" in path
+        or "/../" in _norm_p
+        or _norm_p.endswith("/..")
+        or "/./" in _norm_p
+        or _norm_p.endswith("/.")
+    ):
+        raise HTTPException(status_code=400, detail="Invalid path")
     _root = settings.data_root.resolve()
     p = Path(path).resolve()
     try:
-        p.relative_to(_root)
+        _rel = p.relative_to(_root)
     except ValueError:
         raise HTTPException(status_code=403, detail="Path not allowed") from None
+    # Reconstruct from the trusted root so subsequent ops use a clean path.
+    p = _root / _rel
     if p.suffix.lower() not in CONTAINER_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not a container file")
     if not p.exists() or not p.is_file():
