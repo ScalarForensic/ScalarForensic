@@ -13,9 +13,17 @@
 #   Changing this after the stack is running requires `docker compose down` first.
 #
 # Start the stack:
-#   docker compose up -d
 #
-# Index images (uses the directory mounted as /images above):
+#   CPU (default — works on any machine):
+#     docker compose up -d
+#
+#   NVIDIA GPU (requires nvidia-container-toolkit on the host):
+#     docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up -d
+#
+#   AMD ROCm GPU (requires ROCm driver on the host):
+#     docker compose -f docker-compose.yml -f docker-compose.amd.yml up -d
+#
+# Index images:
 #   docker compose run --rm sfn-web sfn --dino --sscd
 #
 # To index a different directory without restarting the stack:
@@ -59,25 +67,6 @@ services:
       - SFN_QDRANT_API_KEY=
       # Default input dir for the CLI indexer (used when no argument is given).
       - SFN_INPUT_DIR=/images
-
-    # ── NVIDIA GPU (requires nvidia-container-toolkit on the host) ────────────
-    # Uncomment to enable CUDA acceleration:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-
-    # ── AMD ROCm GPU ──────────────────────────────────────────────────────────
-    # Uncomment to pass through the ROCm device nodes:
-    devices:
-      - /dev/kfd:/dev/kfd
-      - /dev/dri:/dev/dri
-    group_add:
-      - video
-#      - render
 
 volumes:
   # Qdrant vector data — persists across container restarts and image updates.

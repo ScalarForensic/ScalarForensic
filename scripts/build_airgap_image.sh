@@ -105,7 +105,7 @@ printf "  %-14s %s\n" "Qdrant image:" "${QDRANT_IMAGE}"
 printf "  %-14s %s  (%s)\n" "Output:" "${OUTPUT}" "${FILESIZE}"
 printf "  %-14s %s\n" "SHA256:" "${SHA256}"
 echo ""
-echo "Transfer ${OUTPUT} (and docker-compose.yml + .env.example) to the airgapped machine."
+echo "Transfer ${OUTPUT} (and docker-compose.yml, docker-compose.nvidia.yml, docker-compose.amd.yml, .env.example) to the airgapped machine."
 echo ""
 if [ "${TAG}" != "latest" ]; then
     echo "The app image was tagged '${TAG}' (not 'latest')."
