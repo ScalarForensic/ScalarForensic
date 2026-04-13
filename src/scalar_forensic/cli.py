@@ -2,6 +2,7 @@
 
 import csv
 import os
+import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -749,12 +750,25 @@ def index(
             valid_fake_paths = [batch_extracted[i].root_container_path for i in valid_indices]
             valid_recs = [batch_recs[i] for i in valid_indices]
 
-            # Dedup: skip images whose virtual path is already in Qdrant.
+            # Dedup: skip images whose content-addressed UUID is already in Qdrant.
+            # Using the compound UUID (image_hash::container_hash::item_name) mirrors
+            # the UUID minted at upsert time and handles the case where a container
+            # file is replaced at the same path with different content — path-based
+            # dedup would incorrectly skip the changed images in that scenario.
+            candidate_uids = [
+                str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"{sha}::{cp['container_hash']}::{cp['container_item_name']}",
+                    )
+                )
+                for sha, cp in zip(valid_shas, valid_cpayloads)
+            ]
             upsert_jobs_container: list = []
             for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
-                already = indexer.get_indexed_paths(valid_vpaths)
-                to_embed_indices = [j for j, vp in enumerate(valid_vpaths) if vp not in already]
-                n_skipped_here = len(valid_vpaths) - len(to_embed_indices)
+                already = indexer.get_existing_ids(candidate_uids)
+                to_embed_indices = [j for j, uid in enumerate(candidate_uids) if uid not in already]
+                n_skipped_here = len(candidate_uids) - len(to_embed_indices)
                 skipped_counts[spec_idx] += n_skipped_here
 
                 if not to_embed_indices:

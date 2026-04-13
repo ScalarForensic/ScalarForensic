@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import contextlib
 import hashlib
+import io
 import json
 import logging
 import os
@@ -21,6 +22,7 @@ import uvicorn
 from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from PIL import Image as PilImage
 from qdrant_client import QdrantClient
 
 from scalar_forensic.config import Settings
@@ -315,9 +317,20 @@ async def hit_image(path: str) -> FileResponse:
         # PDF pages have names like "page_1" with no extension, so we append the
         # safe suffix when none is present (or when the original ext was rejected).
         download_name = item_leaf if item_ext in _IMAGE_EXTENSIONS else (item_leaf + safe_suffix)
+        # When the original format isn't in the browser-safe allowlist (e.g. jpx,
+        # jxr), transcode to PNG so the bytes always match the served content-type.
+        if item_ext not in _IMAGE_EXTENSIONS:
+            try:
+                _buf = io.BytesIO()
+                PilImage.open(io.BytesIO(match.data)).save(_buf, format="PNG")
+                image_data: bytes = _buf.getvalue()
+            except Exception:
+                image_data = match.data
+        else:
+            image_data = match.data
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=safe_suffix)
         try:
-            tmp.write(match.data)
+            tmp.write(image_data)
         finally:
             tmp.close()
         return FileResponse(

@@ -103,6 +103,18 @@ class Indexer:
         )
         return {r.payload["image_path"] for r in results}
 
+    def get_existing_ids(self, ids: list[str]) -> set[str]:
+        """Return the subset of point IDs (UUIDs) that already exist in the collection."""
+        if not ids:
+            return set()
+        results = self.client.retrieve(
+            collection_name=self.collection,
+            ids=ids,
+            with_payload=False,
+            with_vectors=False,
+        )
+        return {str(r.id) for r in results}
+
     def upsert_batch(
         self,
         image_paths: list[Path],

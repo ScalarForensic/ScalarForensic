@@ -20,8 +20,10 @@ import scalar_forensic.web.app as app_module
 
 @pytest.fixture(autouse=True)
 def no_qdrant(monkeypatch):
-    """Disable lifespan Qdrant fetch so tests are hermetic."""
+    """Disable lifespan Qdrant fetch and clear data-root env vars so tests are hermetic."""
     monkeypatch.setenv("SFN_VIZ_MAX_POINTS", "0")
+    monkeypatch.delenv("SFN_DATA_ROOT", raising=False)
+    monkeypatch.delenv("SFN_INPUT_DIR", raising=False)
 
 
 def _client() -> TestClient:
