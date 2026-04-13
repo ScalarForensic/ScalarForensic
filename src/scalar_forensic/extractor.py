@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import os
 import zipfile
 from dataclasses import dataclass
 from io import BytesIO
@@ -88,22 +89,17 @@ def extract_container(
     :param pdf_render_dpi: Resolution used when rasterising PDF pages.
     :param allowed_root: Trusted root directory.  *path* must resolve inside
         this directory; an error is raised if it does not.
-    """
-    resolved_root = allowed_root.resolve()
-    # Reject dangerous sequences before any filesystem operation so CodeQL can
-    # see a string-level sanitizer ahead of the resolve() call.
-    _path_str = str(path)
-    _norm = _path_str.replace("\\", "/")
-    if "\x00" in _path_str or "/../" in _norm or _norm.endswith("/.."):
-        raise ValueError(f"Container path is outside allowed root: {path}")
+    resolved_root = allowed_root.resolve(strict=True)
     path = path.resolve()
-    root_real = str(resolved_root)
-    path_real = str(path)
-    if os.path.commonpath([root_real, path_real]) != root_real:
-        raise ValueError(f"Container path is outside allowed root: {path}")
-    try:
-        _rel = path.relative_to(resolved_root)
-    except ValueError as exc:
+        resolved_path = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ValueError(f"Container path is not a file: {path}") from exc
+
+    if os.path.commonpath((str(resolved_root), str(resolved_path))) != str(resolved_root):
+        raise ValueError(f"Container path is outside allowed root: {resolved_path}")
+
+    path = resolved_path
+    if not path.is_file():
         raise ValueError(f"Container path is outside allowed root: {path}") from exc
     # Reconstruct from the trusted root so subsequent ops use a path whose
     # provenance is anchored to the validated allowed_root.
