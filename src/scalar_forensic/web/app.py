@@ -295,29 +295,20 @@ async def hit_image(path: str) -> FileResponse:
     settings = Settings()
     if settings.data_root is None:
         raise HTTPException(status_code=503, detail="Data root not configured")
-    # Front-load validation: resolve the filesystem portion of the path (the
-    # part before any ``::`` separator) to a canonical absolute path and check
-    # it against the data root before branching into container vs. direct logic.
+    # Front-load validation: resolve only the filesystem portion (before any
+    # ``::`` virtual-path separator), then enforce containment in data_root.
     raw_fs_path = path.split("::", 1)[0] if "::" in path else path
-    if not raw_fs_path or not os.path.isabs(raw_fs_path):
+    if not raw_fs_path or "\x00" in raw_fs_path:
         raise HTTPException(status_code=400, detail="Invalid path")
-    # Reject dangerous sequences before any filesystem operation.
-    _norm_raw = raw_fs_path.replace("\\", "/")
-    if (
-        "\x00" in raw_fs_path
-        or "/../" in _norm_raw
-        or _norm_raw.endswith("/..")
-        or "/./" in _norm_raw
-        or _norm_raw.endswith("/.")
-    ):
+    if not os.path.isabs(raw_fs_path):
         raise HTTPException(status_code=400, detail="Invalid path")
     _data_root = settings.data_root.resolve()
-    canonical = Path(raw_fs_path).resolve()
+    requested_fs = Path(raw_fs_path).resolve(strict=False)
     try:
-        _rel = canonical.relative_to(_data_root)
+        _rel = requested_fs.relative_to(_data_root)
     except ValueError:
         raise HTTPException(status_code=403, detail="Path not allowed") from None
-    # Reconstruct from the trusted root so subsequent ops use a clean path.
+    # Reconstruct from trusted root so downstream file access is rooted.
     canonical = _data_root / _rel
 
     # Container virtual path: "/abs/root.zip::inner/photo.jpg"
