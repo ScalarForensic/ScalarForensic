@@ -44,6 +44,24 @@ _VIZ_JS_SRC = (_STATIC_DIR / "viz.js").read_text(encoding="utf-8")
 _log = logging.getLogger(__name__)
 
 
+def _canonical_path_within_root(raw_fs_path: str, root: Path) -> Path:
+    """Return a canonical absolute path within *root* or raise HTTPException."""
+    if not raw_fs_path or "\x00" in raw_fs_path:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not os.path.isabs(raw_fs_path):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    resolved_root = root.resolve()
+    requested_fs = Path(raw_fs_path).resolve(strict=False)
+    try:
+        rel = requested_fs.relative_to(resolved_root)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Path not allowed") from None
+    canonical = resolved_root / rel
+    if str(canonical) != raw_fs_path:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    return canonical
+
+
 def _render_viz_html(data: dict) -> str:
     """Return a self-contained HTML page with the point-cloud data and viz
     code inlined.  No server connection is needed to display the result."""
@@ -298,21 +316,7 @@ async def hit_image(path: str) -> FileResponse:
     # Front-load validation: resolve only the filesystem portion (before any
     # ``::`` virtual-path separator), then enforce containment in data_root.
     raw_fs_path = path.split("::", 1)[0] if "::" in path else path
-    if not raw_fs_path or "\x00" in raw_fs_path:
-        raise HTTPException(status_code=400, detail="Invalid path")
-    if not os.path.isabs(raw_fs_path):
-        raise HTTPException(status_code=400, detail="Invalid path")
-    _data_root = settings.data_root.resolve()
-    requested_fs = Path(raw_fs_path).resolve(strict=False)
-    try:
-        _rel = requested_fs.relative_to(_data_root)
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Path not allowed") from None
-    # Reconstruct from trusted root so downstream file access is rooted.
-    canonical = _data_root / _rel
-    # Require caller path to already be canonical to avoid ambiguous forms.
-    if str(canonical) != raw_fs_path:
-        raise HTTPException(status_code=400, detail="Invalid path")
+    canonical = _canonical_path_within_root(raw_fs_path, settings.data_root)
 
     # Container virtual path: "/abs/root.zip::inner/photo.jpg"
     if "::" in path:
