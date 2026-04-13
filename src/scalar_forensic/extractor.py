@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import zipfile
 from dataclasses import dataclass
 from io import BytesIO
@@ -96,6 +97,10 @@ def extract_container(
     if "\x00" in _path_str or "/../" in _norm or _norm.endswith("/.."):
         raise ValueError(f"Container path is outside allowed root: {path}")
     path = path.resolve()
+    root_real = str(resolved_root)
+    path_real = str(path)
+    if os.path.commonpath([root_real, path_real]) != root_real:
+        raise ValueError(f"Container path is outside allowed root: {path}")
     try:
         _rel = path.relative_to(resolved_root)
     except ValueError as exc:
