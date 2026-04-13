@@ -221,25 +221,19 @@ Leave `SFN_ALLOW_ONLINE=false` (or unset) — the app enforces offline mode by d
 **2. Download Python wheels:**
 
 ```bash
-bash scripts/download_deps.sh
+bash scripts/download_deps.sh --web        # CLI + web UI (recommended)
+bash scripts/download_deps.sh --web --heif # add HEIC/HEIF support
 ```
 
 This runs `uv export --frozen` to capture the locked dependency list, then downloads all
-wheels into `vendor/` using `uv pip download`. Because it goes through uv, the custom
-PyTorch index configured in `pyproject.toml` is respected automatically.
+wheels into `vendor/` using `uv pip download`. The `--web` flag is required if you intend
+to run `sfn-web` on the offline machine (FastAPI, Uvicorn, python-multipart). Without it
+only the CLI indexer (`sfn`) will be available.
 
 > **Platform requirement:** wheels are specific to OS, CPU architecture, and Python
 > version. Run this script on a machine that matches the airgapped target (e.g.
 > `linux/x86_64`, Python 3.12). Downloading on macOS or a different Python version and
 > transferring to a Linux target will cause install failures on the offline machine.
-
-For optional groups add flags:
-
-```bash
-bash scripts/download_deps.sh --web        # include web-UI dependencies
-bash scripts/download_deps.sh --heif       # include HEIF/HEIC support
-bash scripts/download_deps.sh --web --heif # all optional groups
-```
 
 **3. Save the Qdrant Docker image:**
 
@@ -258,6 +252,10 @@ docker save qdrant/qdrant:v1.17.1 | gzip > qdrant.tar.gz
 | `qdrant.tar.gz` | Qdrant Docker image |
 
 ### On the airgapped machine
+
+> **Prerequisite:** `uv` must be installed on the airgapped machine. Install it
+> once from the [uv releases page](https://github.com/astral-sh/uv/releases)
+> (single static binary, no internet needed after download).
 
 **5. Install Python dependencies from the local wheelhouse:**
 
@@ -300,6 +298,19 @@ replaces the seven steps above.
 - You need to deploy to multiple airgapped machines from the same artifact.
 
 #### On the internet-connected machine
+
+**GPU backend selection (do this before building):**
+
+The image bakes in a specific PyTorch backend. Choose before running the
+build script:
+
+- **NVIDIA CUDA (default)** — no changes needed; CUDA 12.8 is active in
+  `pyproject.toml`.
+- **AMD ROCm** — swap the active index blocks in `pyproject.toml` first
+  (see [AMD ROCm](#amd-rocm) above), then run the build script. The resulting
+  image will only work with ROCm GPU passthrough; it still runs on CPU if no
+  GPU override is used.
+- **CPU-only** — CUDA wheels run fine on CPU; no special build needed.
 
 Run the all-in-one build script:
 
@@ -378,11 +389,23 @@ docker compose up -d
 
 **4. Index images:**
 
+`docker compose run` creates a fresh container and does **not** automatically
+inherit override files from `up`. Pass the same `-f` flags you used in step 3:
+
 ```bash
+# CPU:
 docker compose run --rm sfn-web sfn --dino --sscd
-# /images is the default input dir inside the container (set by docker-compose.yml).
-# Pass a subdirectory if needed: sfn /images/case-001 --dino --sscd
+
+# NVIDIA:
+docker compose -f docker-compose.yml -f docker-compose.nvidia.yml run --rm sfn-web sfn --dino --sscd
+
+# AMD ROCm:
+docker compose -f docker-compose.yml -f docker-compose.amd.yml run --rm sfn-web sfn --dino --sscd
 ```
+
+`/images` is the default input directory inside the container (set by `SFN_INPUT_DIR`
+in `docker-compose.yml`). Pass a subdirectory if needed:
+`sfn /images/case-001 --dino --sscd`
 
 If you need to index a directory that differs from the one the stack was started
 with (e.g. a second evidence drive), override the volume for that one run:
