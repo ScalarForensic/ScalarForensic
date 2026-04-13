@@ -282,55 +282,21 @@ async def query_image(session_id: str, file_id: str) -> FileResponse:
 async def thumbnail(sha256: str) -> FileResponse:
     """Serve a pre-generated thumbnail by SHA-256 hash.
 
-    Thumbnails are written during `sfn index` when SFN_THUMBNAIL_DIR is configured.
-    Returns 404 when thumbnail dir is not configured or the file is not yet generated.
-    """
-    if not re.fullmatch(r"[0-9a-f]{64}", sha256):
-        raise HTTPException(status_code=400, detail="Invalid hash")
-    settings = Settings()
-    if settings.thumbnail_dir is None:
-        raise HTTPException(status_code=404, detail="Thumbnail directory not configured")
-    thumb_dir_str = str(settings.thumbnail_dir.resolve())
-    thumb_path = Path(os.path.realpath(str(settings.thumbnail_dir / f"{sha256}.jpg")))
+async def hit_image(sha256: str) -> FileResponse:
+    """Serve a hit image by SHA-256 hash from the configured data root."""
     if not str(thumb_path).startswith(thumb_dir_str + os.sep):
         raise HTTPException(status_code=400, detail="Invalid hash")
     if not thumb_path.exists():
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
-    return FileResponse(thumb_path, media_type="image/jpeg")
-
-
-@app.get("/api/hit-image")
-async def hit_image(path: str) -> FileResponse:
-    """Serve a hit image from the server filesystem.
-
-    For direct images: resolves the path and returns the file.
-    For container-extracted images (path contains ``::``): re-extracts the
-    specific item from the container on demand.
-
-    Security: only absolute resolved paths within the configured data root;
-    image-only extensions for direct files.
-    """
-    settings = Settings()
-    if settings.data_root is None:
-        raise HTTPException(status_code=503, detail="Data root not configured")
+    if not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise HTTPException(status_code=400, detail="Invalid hash")
     # Front-load validation: resolve only the filesystem portion (before any
-    # ``::`` virtual-path separator), then enforce containment in data_root.
-    raw_fs_path = path.split("::", 1)[0] if "::" in path else path
-    canonical = _canonical_path_within_root(raw_fs_path, settings.data_root)
+    data_root = settings.data_root.resolve()
+    for ext in _IMAGE_EXTENSIONS:
+        candidate = data_root / f"{sha256}{ext}"
+        if candidate.exists() and candidate.is_file():
+            return FileResponse(candidate, filename=candidate.name)
 
-    # Container virtual path: "/abs/root.zip::inner/photo.jpg"
-    if "::" in path:
-        item_name = path[path.index("::") + 2 :]
-        if canonical.suffix.lower() not in CONTAINER_EXTENSIONS:
-            raise HTTPException(status_code=400, detail="Not a container file")
-        if not canonical.exists() or not canonical.is_file():
-            raise HTTPException(status_code=404, detail="Container file not found")
-        try:
-            extracted = extract_container(
-                canonical,
-                max_depth=settings.max_container_depth,
-                pdf_render_dpi=settings.pdf_render_dpi,
-                allowed_root=settings.data_root,
+    raise HTTPException(status_code=404, detail="File not found")
             )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Extraction failed: {exc}") from exc
