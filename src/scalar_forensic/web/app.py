@@ -378,26 +378,19 @@ async def hit_image(path: str) -> FileResponse:
 async def container_download(path: str) -> FileResponse:
     """Serve a container file (ZIP / PDF / DOCX / ODF) from the server filesystem.
 
-    Security: only absolute resolved paths within the configured data root;
+    Security: only resolved paths within the configured data root;
     container-only extensions.
     """
     settings = Settings()
     if settings.data_root is None:
         raise HTTPException(status_code=503, detail="Data root not configured")
-    if not path or not os.path.isabs(path):
+    if not path or os.path.isabs(path):
         raise HTTPException(status_code=400, detail="Invalid path")
-    # Reject dangerous sequences before any filesystem operation.
-    _norm_p = path.replace("\\", "/")
-    if (
-        "\x00" in path
-        or "/../" in _norm_p
-        or _norm_p.endswith("/..")
-        or "/./" in _norm_p
-        or _norm_p.endswith("/.")
-    ):
+    if "\x00" in path:
         raise HTTPException(status_code=400, detail="Invalid path")
+
     _root = settings.data_root.resolve()
-    p = Path(path).resolve()
+    p = (_root / path).resolve()
     try:
         _rel = p.relative_to(_root)
     except ValueError:
