@@ -1,0 +1,18 @@
+# AMD ROCm GPU override for ScalarForensic.
+#
+# Requires the ROCm kernel driver on the host (amdgpu module loaded,
+# /dev/kfd and /dev/dri present).  The image must have been built with
+# the ROCm PyTorch index active in pyproject.toml.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.amd.yml up -d
+
+services:
+  sfn-web:
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      # Uncomment if your distribution uses a separate render group:
+      # - render

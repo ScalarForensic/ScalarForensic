@@ -1,0 +1,17 @@
+# NVIDIA GPU override for ScalarForensic.
+#
+# Requires nvidia-container-toolkit installed on the host:
+#   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up -d
+
+services:
+  sfn-web:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

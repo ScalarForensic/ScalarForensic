@@ -318,7 +318,9 @@ dependency layers.
 | File | Purpose |
 |------|---------|
 | `scalarforensic-<tag>.tar.gz` | Both Docker images: ScalarForensic + Qdrant |
-| `docker-compose.yml` | Service definitions |
+| `docker-compose.yml` | Base service definitions (CPU, works everywhere) |
+| `docker-compose.nvidia.yml` | NVIDIA GPU override |
+| `docker-compose.amd.yml` | AMD ROCm GPU override |
 | `.env.example` | Config template |
 
 #### On the airgapped machine
@@ -352,10 +354,18 @@ SFN_IMAGES_DIR=/path/to/evidence/images
 **3. Start Qdrant and the web UI:**
 
 ```bash
+# CPU (default — works on any machine):
 docker compose up -d
-# If you built with --tag 1.0 (not latest), prefix with the image name:
-# SCALARFORENSIC_IMAGE=scalarforensic:1.0 docker compose up -d
+
+# NVIDIA GPU (requires nvidia-container-toolkit on the host):
+docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up -d
+
+# AMD ROCm GPU (requires ROCm driver; image must be built with ROCm wheels):
+docker compose -f docker-compose.yml -f docker-compose.amd.yml up -d
 ```
+
+> If you built with `--tag 1.0` (not `latest`), prefix any of the above with
+> `SCALARFORENSIC_IMAGE=scalarforensic:1.0`.
 
 If you need to change `SFN_IMAGES_DIR` after the stack is running, update `.env`
 then restart:
@@ -398,14 +408,16 @@ http://localhost:8080
 
 **GPU passthrough:**
 
-Uncomment the relevant block in `docker-compose.yml`:
+GPU support is opt-in via override files — no file editing needed. The base
+`docker-compose.yml` runs on CPU and works on any machine.
 
-- **NVIDIA** — requires `nvidia-container-toolkit` on the host; uncomment the
-  `deploy.resources.reservations.devices` block.
-- **AMD ROCm** — uncomment the `devices` (`/dev/kfd`, `/dev/dri`) and
-  `group_add` blocks.
+- **NVIDIA** — requires `nvidia-container-toolkit` on the host; use
+  `docker-compose.nvidia.yml` as shown in step 3.
+- **AMD ROCm** — requires the ROCm kernel driver (`/dev/kfd` present); use
+  `docker-compose.amd.yml` as shown in step 3. The image must also have been
+  built with the ROCm PyTorch index active in `pyproject.toml`.
 
-Without GPU passthrough the app runs on CPU, which is significantly slower but
+Without a GPU override the app runs on CPU, which is significantly slower but
 fully functional.
 
 **Qdrant data persistence:**
