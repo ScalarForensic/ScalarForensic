@@ -78,6 +78,18 @@ class Indexer:
                 field_name="video_path",
                 field_schema=PayloadSchemaType.KEYWORD,
             )
+        if "frame_timecode_ms" not in schema:
+            self.client.create_payload_index(
+                collection_name=self.collection,
+                field_name="frame_timecode_ms",
+                field_schema=PayloadSchemaType.INTEGER,
+            )
+        if "is_video_frame" not in schema:
+            self.client.create_payload_index(
+                collection_name=self.collection,
+                field_name="is_video_frame",
+                field_schema=PayloadSchemaType.BOOL,
+            )
 
     def get_indexed_hashes(self, hashes: list[str]) -> set[str]:
         """Return the subset of hashes that are already in the collection."""

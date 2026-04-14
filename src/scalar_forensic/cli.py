@@ -275,7 +275,8 @@ def _index_video(
                 vpath_strings = [str(p) for p in virtual_paths]
                 already = indexer.get_indexed_paths(vpath_strings)
                 to_embed_idx = [i for i, p in enumerate(vpath_strings) if p not in already]
-                frames_skipped += len(frames) - len(to_embed_idx)
+                if spec_idx == 0:
+                    frames_skipped += len(frames) - len(to_embed_idx)
 
                 if not to_embed_idx:
                     continue
@@ -323,9 +324,8 @@ def _index_video(
     rec.status = _S_INDEXED
     rec.reason = f"{total_frames_seen} frames extracted"
 
-    # frames_skipped was incremented once per (frame, model) pair; normalise
-    # back to a per-frame count so callers aggregate frames, not model×frames.
-    n_skip = frames_skipped // max(len(specs), 1)
+    # frames_skipped tracks only spec_idx==0 (symmetric with frames_indexed).
+    n_skip = frames_skipped
     typer.echo(
         f"  video {v_idx}/{v_total} [{video_path.name}]: "
         f"{total_frames_seen} frames, {frames_indexed} embedded, {n_skip} skipped (dup)"

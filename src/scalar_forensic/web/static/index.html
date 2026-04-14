@@ -1661,7 +1661,11 @@ function sfn() {
         this.selectedHitKey = null;
         this.matchSrc = null;
       }
-      await Promise.all([this._loadQueryMeta(), this._loadMatchMeta()]);
+      // Only (re)load query metadata when switching to a new file; frame
+      // navigation within the same video must not re-read the full upload.
+      const loads = [this._loadMatchMeta()];
+      if (this.queryMeta === null) loads.push(this._loadQueryMeta());
+      await Promise.all(loads);
     },
 
     async selectMatchedFrame(hit, mf) {

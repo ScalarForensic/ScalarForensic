@@ -20,7 +20,7 @@ from pathlib import Path
 import torch
 import uvicorn
 from fastapi import FastAPI, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
@@ -378,7 +378,7 @@ async def thumbnail(sha256: str) -> FileResponse:
 
 
 @app.get("/api/hit-image")
-async def hit_image(path: str) -> FileResponse:
+async def hit_image(path: str) -> Response:
     """Serve a hit image (or video frame) from the server filesystem.
 
     Accepts both regular image paths and virtual video frame paths

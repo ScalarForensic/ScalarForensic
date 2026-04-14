@@ -487,7 +487,10 @@ def query_session(
         # dataset path are combined onto one hit card (unify=True) so both
         # measurements are visible side by side — both scores originate from
         # the exact same query→dataset pair, just via different models.
-        # No scores from different query frames are ever combined.
+        # After the per-qtc loop, the final unify pass may merge hits for the
+        # same dataset path across different query frames (video queries); when
+        # that happens the reported score is the max across those comparisons
+        # and query_timecodes accumulates all contributing query timecodes.
         for qtc in all_qtcs:
             frame_merged: dict[str, Hit] = {}  # used when unify=True
             frame_unmerged: list[Hit] = []  # used when unify=False
