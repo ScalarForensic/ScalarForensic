@@ -67,6 +67,17 @@ def _fmt_mbps(bytes_total: int, seconds: float) -> str:
     return f"{bytes_total / 1e6 / seconds:.1f} MB/s"
 
 
+def _fmt_duration(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m {s:02d}s"
+
+
 def _apply_dedup(
     pairs: list[tuple[Path, str]],
     indexer: Indexer,
@@ -391,9 +402,13 @@ def index(
     total_read_s = total_hash_s = 0.0
     total_bytes = 0
     batch_num = 0
+    imgs_processed_so_far = 0
+    image_loop_start_t = perf_counter()
+    total_image_count = len(image_paths)
 
     for batch_paths in batched(iter(image_paths), settings.batch_size):
         batch_num += 1
+        imgs_processed_so_far += len(batch_paths)
         batch_wall_t0 = perf_counter()
 
         # ── Read (shared) ────────────────────────────────────────────────────
@@ -641,14 +656,30 @@ def index(
         if model_segments:
             wall_s = perf_counter() - batch_wall_t0
             n_imgs = len(path_hash_pairs)
-            upsert_str = f"  |  upsert {upsert_wall_s:.2f}s" if upsert_jobs else ""
+            upsert_str = f"  │  upsert {upsert_wall_s:.2f}s" if upsert_jobs else ""
             shared = (
-                f"  batch {batch_num} [{n_imgs} imgs  {batch_bytes / 1e6:.1f} MB"
-                f"  {_fmt_rate(n_imgs, wall_s, 'img')} total]"
-                f"  read {read_s:.2f}s ({_fmt_mbps(batch_bytes, read_s)})"
+                f"  batch {batch_num:>4}  {n_imgs} imgs  {batch_bytes / 1e6:.1f} MB"
+                f"  {_fmt_rate(n_imgs, wall_s, 'img')}"
+                f"  │  read {read_s:.2f}s ({_fmt_mbps(batch_bytes, read_s)})"
                 f"  hash {hash_s:.2f}s  pre {pre_s:.2f}s"
             )
-            typer.echo(shared + "  |  " + "  |  ".join(model_segments) + upsert_str)
+            typer.echo(shared + "  │  " + "  │  ".join(model_segments) + upsert_str)
+
+            if batch_num % 10 == 0 and total_image_count > 0:
+                elapsed = perf_counter() - image_loop_start_t
+                if elapsed > 0:
+                    avg_rate = imgs_processed_so_far / elapsed
+                    remaining = total_image_count - imgs_processed_so_far
+                    pct = imgs_processed_so_far / total_image_count * 100
+                    eta_str = (
+                        f"ETA ~{_fmt_duration(remaining / avg_rate)}"
+                        if avg_rate > 0 and remaining > 0
+                        else "almost done"
+                    )
+                    typer.echo(
+                        f"  ── {imgs_processed_so_far:,}/{total_image_count:,} imgs"
+                        f" ({pct:.1f}%)  avg {avg_rate:.1f} img/s  {eta_str} ──"
+                    )
 
     # ── Video processing pass ─────────────────────────────────────────────────
     n_video_frames_indexed = 0
@@ -852,12 +883,12 @@ def index(
 
             if model_segments:
                 wall_s = perf_counter() - batch_wall_t0
-                upsert_str = f"  |  upsert {upsert_wall_s:.2f}s" if upsert_jobs else ""
+                upsert_str = f"  │  upsert {upsert_wall_s:.2f}s" if upsert_jobs else ""
                 typer.echo(
-                    f"  batch {batch_num} [{n_items} imgs  0.0 MB"
-                    f"  {_fmt_rate(n_items, wall_s, 'img')} total]"
-                    f"  read 0.00s  hash 0.00s  pre {pre_s:.2f}s"
-                    f"  |  " + "  |  ".join(model_segments) + upsert_str
+                    f"  batch {batch_num:>4}  {n_items} frames"
+                    f"  {_fmt_rate(n_items, wall_s, 'img')}"
+                    f"  │  pre {pre_s:.2f}s"
+                    f"  │  " + "  │  ".join(model_segments) + upsert_str
                 )
 
         # ── Mark videos as fully indexed (per spec) ──────────────────────────
