@@ -121,7 +121,7 @@ class Indexer:
                 must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
             ),
             limit=1,
-            with_payload=["extraction_fps", "max_frames_cap"],
+            with_payload=["extraction_fps", "max_frames_cap", "video_frames_total"],
             with_vectors=False,
         )
         if not results:

@@ -314,22 +314,22 @@ def _unmerged_sort_key(h: Hit) -> tuple:
     return (priority, -score, h.path)
 
 
-def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
-    """Merge a hit into a path-keyed accumulator.
+def _merge_hit(h: Hit, dest: dict[str, Hit], key: str | None = None) -> None:
+    """Merge a hit into an accumulator keyed by *key* (defaults to ``h.path``).
 
     Used in two contexts:
     1. Per-query-entity (within one image or video frame): combines ALTER and
        SEMAN scores for the same dataset path onto one card.
     2. Final unify pass (video queries only): folds hits for the same dataset
-       path across different query frames; query_timecodes and matched_frames
-       are unioned so the resulting card shows all matching query timecodes
-       and all database frames found across those queries.
+       video across different query frames; the caller passes ``video_path`` as
+       the key so all query-frame × dataset-video pairs collapse to one card.
 
     Scores are kept at their highest observed value (max) so a later, lower
     score for the same mode never downgrades an earlier, higher one.
     """
-    if h.path in dest:
-        existing = dest[h.path]
+    k = key if key is not None else h.path
+    if k in dest:
+        existing = dest[k]
         pre_merge_best = existing.best_score()
 
         for mode, score in h.scores.items():
@@ -380,7 +380,7 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
     else:
         if h.query_timecodes:
             h.best_query_timecode_ms = h.query_timecodes[0]
-        dest[h.path] = h
+        dest[k] = h
 
 
 def _group_video_hits(hits: list[Hit]) -> list[Hit]:
@@ -616,7 +616,11 @@ def query_session(
         if unify:
             final_merged: dict[str, Hit] = {}
             for h in all_flat_hits:
-                _merge_hit(h, final_merged)
+                # Video hits: key by video_path so all query-frame × dataset-video
+                # pairs collapse into one card regardless of which frame was chosen
+                # as the representative.  Image hits: key by path as before.
+                key = h.video_path if h.is_video_frame and h.video_path else None
+                _merge_hit(h, final_merged, key=key)
             # Sort matched_frames once after all merges (deferred from _merge_hit).
             for h in final_merged.values():
                 if h.matched_frames:
