@@ -323,12 +323,14 @@ def _index_video(
     rec.status = _S_INDEXED
     rec.reason = f"{total_frames_seen} frames extracted"
 
+    # frames_skipped was incremented once per (frame, model) pair; normalise
+    # back to a per-frame count so callers aggregate frames, not model×frames.
     n_skip = frames_skipped // max(len(specs), 1)
     typer.echo(
         f"  video {v_idx}/{v_total} [{video_path.name}]: "
         f"{total_frames_seen} frames, {frames_indexed} embedded, {n_skip} skipped (dup)"
     )
-    return frames_indexed, frames_skipped
+    return frames_indexed, n_skip
 
 
 def index(

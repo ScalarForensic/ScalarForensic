@@ -154,8 +154,12 @@ async def analyze(
         # (PyAV, Pillow) can identify the format from the filename.
         suffix = Path(filename).suffix
         dest = tmp_dir / (file_id + suffix)
-        data = await upload.read()
-        dest.write_bytes(data)
+        with dest.open("wb") as fout:
+            while True:
+                chunk = await upload.read(1024 * 1024)  # 1 MB chunks
+                if not chunk:
+                    break
+                fout.write(chunk)
         session.files.append(FileEntry(file_id=file_id, filename=filename, temp_path=dest))
 
     async def event_stream():
@@ -484,12 +488,11 @@ async def hit_metadata(path: str) -> JSONResponse:
                         must=[FieldCondition(key="image_path", match=MatchValue(value=path))]
                     ),
                     limit=1,
-                    with_payload=["video_hash", "image_hash_md5"],
+                    with_payload=["video_hash"],
                     with_vectors=False,
                 )
                 if records:
                     sha256 = records[0].payload.get("video_hash")
-                    md5 = records[0].payload.get("image_hash_md5")
                     break
         except Exception:  # noqa: BLE001
             pass  # fall through — hashes will be omitted rather than blocking
@@ -503,8 +506,6 @@ async def hit_metadata(path: str) -> JSONResponse:
         }
         if sha256:
             meta["hash_sha256"] = sha256
-        if md5:
-            meta["hash_md5"] = md5
         return JSONResponse(meta)
 
     # Regular image path

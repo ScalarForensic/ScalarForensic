@@ -105,6 +105,11 @@ def extract_frames(
     Yields:
         :class:`ExtractedFrame` for each unique (non-duplicate) sampled frame.
     """
+    if fps <= 0:
+        raise ValueError(f"fps must be > 0, got {fps!r}")
+    if max_frames < 0:
+        raise ValueError(f"max_frames must be >= 0, got {max_frames!r}")
+
     import av  # local import: PyAV is optional at the module level
 
     frame_interval_s = 1.0 / fps

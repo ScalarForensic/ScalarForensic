@@ -115,7 +115,7 @@ def analyze_session(
         )
         try:
             if Path(entry.filename).suffix.lower() in VIDEO_EXTENSIONS:
-                yield from _analyze_video_file(entry, embedders)
+                yield from _analyze_video_file(entry, embedders, settings)
             else:
                 _analyze_file(entry, embedders)
             yield ProgressEvent(
@@ -163,7 +163,7 @@ _VIDEO_FRAME_BATCH = 32  # frames processed per embedding batch in the web pipel
 
 
 def _analyze_video_file(
-    entry: FileEntry, embedders: dict[str, AnyEmbedder]
+    entry: FileEntry, embedders: dict[str, AnyEmbedder], settings: Settings
 ) -> Generator[ProgressEvent, None, None]:
     """Extract frames from an uploaded video temp file and embed each one.
 
@@ -177,14 +177,10 @@ def _analyze_video_file(
     """
     from itertools import batched as _batched
 
-    from scalar_forensic.config import Settings
-
     # Chunked hash — avoids reading the whole upload into memory just to hash it
     entry.file_hash = hash_file(entry.temp_path)
     entry.file_hash_md5 = hash_file_md5(entry.temp_path)
     entry.is_video = True
-
-    settings = Settings()
     frame_entries: list[VideoFrameEntry] = []
 
     try:
@@ -367,8 +363,8 @@ def _group_video_hits(hits: list[Hit]) -> list[Hit]:
 
     grouped_video: list[Hit] = []
     for vpath, group in video_groups.items():
-        # Representative = frame with highest score for this query entity.
-        # The score kept is that frame's exact Qdrant similarity — no combination.
+        # Representative = frame with highest overall score for this query entity.
+        # Its image_hash/timecode are used for the thumbnail.
         representative = max(group, key=lambda h: h.best_score())
         matched = [
             MatchedVideoFrame(
@@ -378,17 +374,30 @@ def _group_video_hits(hits: list[Hit]) -> list[Hit]:
             )
             for h in sorted(group, key=lambda h: h.frame_timecode_ms or 0)
         ]
+        # Build per-mode best scores across all dataset frames in this group.
+        # Each score IS the exact Qdrant similarity from one specific 1:1
+        # comparison — we pick the best-scoring frame for each mode so that
+        # the grouped hit remains visible under all applicable mode filters,
+        # even when the best ALTER frame and best SEMAN frame differ.
+        group_scores: dict[str, float] = {}
+        group_provenance: dict[str, dict] = {}
+        for h in group:
+            for mode, score in h.scores.items():
+                if mode not in group_scores or score > group_scores[mode]:
+                    group_scores[mode] = score
+                    if mode in h.model_provenance:
+                        group_provenance[mode] = h.model_provenance[mode]
         # query_timecodes: all hits in this group come from the same query
         # entity so they share the same single timecode (or None for images).
         qtc = representative.query_timecodes
         grouped_video.append(
             Hit(
                 path=representative.path,
-                scores=representative.scores,
+                scores=group_scores,
                 exif=representative.exif,
                 exif_geo_data=representative.exif_geo_data,
                 image_hash=representative.image_hash,
-                model_provenance=representative.model_provenance,
+                model_provenance=group_provenance,
                 is_video_frame=True,
                 video_path=vpath,
                 video_hash=representative.video_hash,
