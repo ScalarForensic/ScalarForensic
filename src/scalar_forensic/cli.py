@@ -213,6 +213,7 @@ def _frame_stream(
                     "frame_timecode_ms": frame.timecode_ms,
                     "frame_index": frame.frame_index,
                     "extraction_fps": settings.video_fps,
+                    "max_frames_cap": settings.video_max_frames,
                     "pyav_version": pyav_version,
                 }
                 yield virtual_path, frame.frame_hash, frame.image, vmeta, video_path
@@ -681,7 +682,7 @@ def index(
             already_in = {
                 spec_idx
                 for spec_idx, (_, indexer, _) in enumerate(specs)
-                if indexer.is_video_indexed(vh)
+                if indexer.is_video_complete(vh, settings.video_fps, settings.video_max_frames)
             }
             if already_in:
                 skip_by_spec[vp] = already_in
@@ -750,8 +751,10 @@ def index(
 
                 if spec_idx == 0:
                     n_video_frames_skipped += n_skipped
-                    for i in set(range(n_items)) - set(to_embed_idx):
-                        vf_skipped[source_vpaths[i]] += 1
+                # Update per-video skip flag for all specs so that a video only
+                # indexed by spec 1 (not spec 0) is still reflected in vf_skipped.
+                for i in set(range(n_items)) - set(to_embed_idx):
+                    vf_skipped[source_vpaths[i]] += 1
 
                 backend = type(embedder).__name__
 
@@ -794,8 +797,10 @@ def index(
                 indexed_counts[spec_idx] += n
                 if spec_idx == 0:
                     n_video_frames_indexed += n
-                    for sv in embed_src:
-                        vf_indexed[sv] += 1
+                # Update per-video indexed flag for all specs so that a video only
+                # indexed by spec 1 (not spec 0) is still marked as _S_INDEXED.
+                for sv in embed_src:
+                    vf_indexed[sv] += 1
 
                 model_segments.append(
                     f"{backend} norm {norm_s:.2f}s"

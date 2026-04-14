@@ -73,6 +73,8 @@ class Settings:
         # SFN_VIDEO_MAX_FRAMES: hard cap on frames yielded per video file (0 = no cap).
         self.video_fps: float = self._parse_float("SFN_VIDEO_FPS", 1.0)
         self.video_max_frames: int = self._parse_int("SFN_VIDEO_MAX_FRAMES", 500)
+        if self.video_max_frames < 0:
+            raise ValueError("SFN_VIDEO_MAX_FRAMES must be >= 0 (use 0 for no cap)")
 
     def _parse_float(self, key: str, default: float) -> float:
         raw = os.environ.get(key)

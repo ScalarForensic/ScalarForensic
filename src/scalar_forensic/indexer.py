@@ -106,18 +106,31 @@ class Indexer:
         )
         return {r.payload["image_hash"] for r in results}
 
-    def is_video_indexed(self, video_hash: str) -> bool:
-        """Return True if any frame from this video is already in the collection."""
+    def is_video_complete(
+        self, video_hash: str, extraction_fps: float, max_frames_cap: int
+    ) -> bool:
+        """Return True if this video was previously indexed with matching extraction settings.
+
+        Fetches one stored frame for the given video_hash and compares extraction_fps
+        and max_frames_cap against the current settings.  A mismatch means the video
+        must be re-indexed (e.g. fps increased → more frames expected).
+        """
         results, _ = self.client.scroll(
             collection_name=self.collection,
             scroll_filter=Filter(
                 must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
             ),
             limit=1,
-            with_payload=False,
+            with_payload=["extraction_fps", "max_frames_cap"],
             with_vectors=False,
         )
-        return bool(results)
+        if not results:
+            return False
+        payload = results[0].payload or {}
+        return (
+            payload.get("extraction_fps") == extraction_fps
+            and payload.get("max_frames_cap") == max_frames_cap
+        )
 
     def get_indexed_paths(self, paths: list[str]) -> set[str]:
         """Return the subset of absolute path strings already stored in the collection."""
@@ -150,7 +163,7 @@ class Indexer:
         (or ``None`` entries for non-video points in a mixed batch).  When a
         dict is present for point ``i`` it must contain: ``video_hash``,
         ``video_path``, ``frame_timecode_ms``, ``frame_index``,
-        ``extraction_fps``, ``pyav_version``.  The point ID is derived from
+        ``extraction_fps``, ``max_frames_cap``, ``pyav_version``.  The point ID is derived from
         ``video_hash + ":" + str(frame_timecode_ms)`` to ensure per-video-frame
         uniqueness across different source files with identical frame content.
         """
@@ -213,6 +226,7 @@ class Indexer:
                 payload["frame_timecode_ms"] = vmeta["frame_timecode_ms"]
                 payload["frame_index"] = vmeta["frame_index"]
                 payload["extraction_fps"] = vmeta["extraction_fps"]
+                payload["max_frames_cap"] = vmeta["max_frames_cap"]
                 payload["pyav_version"] = vmeta["pyav_version"]
 
             points.append(PointStruct(id=point_id, vector=embedding, payload=payload))

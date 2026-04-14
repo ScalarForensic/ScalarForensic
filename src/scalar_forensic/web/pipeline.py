@@ -348,7 +348,9 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
                 existing._query_timecodes_seen: set = {tc}  # type: ignore[attr-defined]
                 existing.best_query_timecode_ms = tc
             else:
-                seen: set = getattr(existing, "_query_timecodes_seen", set(existing.query_timecodes))
+                seen: set = getattr(
+                    existing, "_query_timecodes_seen", set(existing.query_timecodes)
+                )
                 if tc not in seen:
                     existing.query_timecodes.append(tc)
                     seen.add(tc)

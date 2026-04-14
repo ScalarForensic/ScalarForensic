@@ -137,6 +137,13 @@ class TestQueryFrameImage:
             r = client.get(f"/api/query-frame/s1/{entry.file_id}?timecode_ms=0")
         assert r.status_code == 400
 
+    def test_negative_timecode_returns_400(self, client, tmp_path):
+        entry = _video_entry(tmp_path=tmp_path)
+        sess = _mock_session([entry])
+        with patch("scalar_forensic.web.app.get_session", return_value=sess):
+            r = client.get(f"/api/query-frame/s1/{entry.file_id}?timecode_ms=-1")
+        assert r.status_code == 400
+
     def test_frame_not_found_at_timecode_returns_404(self, client, tmp_path):
         entry = _video_entry(tmp_path=tmp_path)
         sess = _mock_session([entry])
@@ -169,26 +176,35 @@ class TestQueryFrameImage:
 
 class TestVideoFrame:
     def test_non_video_extension_returns_400(self, client, tmp_path):
+        # Extension check fires before _check_allowed_path — no SFN_INPUT_DIR needed.
         p = tmp_path / "image.jpg"
         p.write_bytes(b"x")
         r = client.get(f"/api/video-frame?path={p}&timecode_ms=0")
         assert r.status_code == 400
 
-    def test_missing_file_returns_404(self, client, tmp_path):
+    def test_negative_timecode_returns_400(self, client, tmp_path):
+        p = tmp_path / "clip.mp4"
+        r = client.get(f"/api/video-frame?path={p}&timecode_ms=-1")
+        assert r.status_code == 400
+
+    def test_missing_file_returns_404(self, client, tmp_path, monkeypatch):
+        monkeypatch.setenv("SFN_INPUT_DIR", str(tmp_path))
         p = tmp_path / "missing.mp4"
         r = client.get(f"/api/video-frame?path={p}&timecode_ms=0")
         assert r.status_code == 404
 
-    def test_frame_not_found_returns_404(self, client, tmp_path):
+    def test_frame_not_found_returns_404(self, client, tmp_path, monkeypatch):
+        monkeypatch.setenv("SFN_INPUT_DIR", str(tmp_path))
         p = tmp_path / "clip.mp4"
         p.write_bytes(b"fake")
         with patch("scalar_forensic.web.app.extract_frame_at", return_value=None):
             r = client.get(f"/api/video-frame?path={p}&timecode_ms=99999")
         assert r.status_code == 404
 
-    def test_valid_frame_returns_jpeg(self, client, tmp_path):
+    def test_valid_frame_returns_jpeg(self, client, tmp_path, monkeypatch):
         from PIL import Image
 
+        monkeypatch.setenv("SFN_INPUT_DIR", str(tmp_path))
         img = Image.new("RGB", (32, 32), color=(0, 128, 255))
         p = tmp_path / "clip.mp4"
         p.write_bytes(b"fake")

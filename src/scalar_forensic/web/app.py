@@ -361,6 +361,8 @@ async def query_video_frame(session_id: str, file_id: str, timecode_ms: int) -> 
         raise HTTPException(status_code=404, detail="File not found")
     if not entry.is_video:
         raise HTTPException(status_code=400, detail="Not a video file")
+    if timecode_ms < 0:
+        raise HTTPException(status_code=400, detail="timecode_ms must be >= 0")
     img = await asyncio.to_thread(extract_frame_at, entry.temp_path, timecode_ms)
     if img is None:
         raise HTTPException(status_code=404, detail="Frame not found at given timecode")
@@ -597,13 +599,15 @@ async def video_frame(path: str, timecode_ms: int) -> StreamingResponse:
     ``path`` must be an absolute filesystem path to a video file.
     ``timecode_ms`` is the target timecode in milliseconds.
     """
+    if timecode_ms < 0:
+        raise HTTPException(status_code=400, detail="timecode_ms must be >= 0")
     raw = Path(path)
     if not raw.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
     p = raw.resolve()
-    _check_allowed_path(p)
     if p.suffix.lower() not in VIDEO_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not a video file")
+    _check_allowed_path(p)
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="Video file not found")
 
