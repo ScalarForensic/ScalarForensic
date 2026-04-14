@@ -459,6 +459,27 @@ def index(
 
         specs.append((embedder, indexer, model_hash))
 
+    # ── Batch size: explicit config > calibration cache > auto-calibrate ─────
+    if settings.batch_size is None:
+        from scalar_forensic.calibration import calibrate, load_cached_batch_size
+
+        _sample_dir = Path("data/sample_images")
+        cached = load_cached_batch_size()
+        if cached is not None:
+            settings.batch_size = cached
+            typer.echo(f"Batch size: {cached}  (calibration cache)")
+        elif _sample_dir.is_dir():
+            settings.batch_size = calibrate(specs[0][0], _sample_dir)
+        else:
+            settings.batch_size = 32
+            typer.echo(
+                f"[WARN] {_sample_dir} not found — using batch_size=32. "
+                "Add sample images there to enable auto-calibration.",
+                err=True,
+            )
+    else:
+        typer.echo(f"Batch size: {settings.batch_size}  (SFN_BATCH_SIZE)")
+
     # ── Pre-scan: collect all files and classify image / video / unsupported ──
     typer.echo(f"Scanning {resolved_input} ...")
     records: dict[Path, _FileRecord] = {}
