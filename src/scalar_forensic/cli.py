@@ -3,6 +3,7 @@
 import csv
 import os
 from collections import Counter
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
@@ -170,176 +171,53 @@ def _print_summary(
     typer.echo(f"  CSV report → {csv_path}")
 
 
-def _index_video(
-    video_path: Path,
-    v_idx: int,
-    v_total: int,
+def _frame_stream(
+    video_paths: list[Path],
     records: dict[Path, "_FileRecord"],
-    specs: list,
-    settings: Settings,
-    indexed_counts: list[int],
-    skipped_counts: list[int],
-    failed_counts: list[int],
+    settings: "Settings",
     pyav_version: str,
-) -> tuple[int, int]:
-    """Extract frames from one video, embed them, and upsert into Qdrant.
+) -> Iterator[tuple[Path, str, "Image.Image", dict, Path]]:
+    """Yield ``(virtual_path, frame_hash, pil, vmeta, source_video_path)`` for every
+    frame across all videos, streaming across video boundaries so the caller can
+    batch frames from multiple videos into a single GPU batch with ``batched()``.
 
-    Returns (frames_indexed, frames_skipped) across all models.
+    Video file hashing and frame-extraction errors are logged and recorded in
+    *records*; the per-video SHA-256/MD5 is written to the record before the
+    first frame of that video is yielded so it is always available for the CSV
+    report even if the caller never consumes the full stream.
     """
-    rec = records[video_path]
-
-    # Hash the video file in chunks — avoids loading multi-GB files into RAM.
-    try:
-        video_hash = hash_file(video_path)
-        video_hash_md5 = hash_file_md5(video_path)
-    except OSError as exc:
-        typer.echo(f"[WARN] Cannot read video {video_path.name}: {exc}", err=True)
-        rec.status = _S_FAIL_READ
-        rec.reason = f"read error: {exc}"
-        return 0, 0
-
-    rec.sha256 = video_hash
-    rec.md5 = video_hash_md5
-
-    video_abs_path = str(video_path.resolve())
-
-    def _vmeta(frame) -> dict:
-        return {
-            "video_hash": video_hash,
-            "video_path": video_abs_path,
-            "frame_timecode_ms": frame.timecode_ms,
-            "frame_index": frame.frame_index,
-            "extraction_fps": settings.video_fps,
-            "pyav_version": pyav_version,
-        }
-
-    # Shared metadata is the same for all frames / all batches.
-    shared_meta_per_spec = [
-        {
-            "model_name": embedder.model_name,
-            "model_hash": model_hash,
-            "embedding_dim": embedder.embedding_dim,
-            "normalize_size": embedder.normalize_size,
-            "inference_dtype": embedder.inference_dtype,
-            "library_versions": get_library_versions(),
-        }
-        for embedder, _, model_hash in specs
-    ]
-
-    frames_indexed = 0  # spec_idx==0 only — used in return value / summary
-    frames_indexed_any = 0  # any spec — used to determine rec.status
-    frames_skipped = 0
-    total_frames_seen = 0
-
-    # Stream frames in batches of batch_size — keeps peak memory bounded to
-    # O(batch_size * frame_pixels) regardless of max_frames.
-    try:
-        frame_gen = extract_frames(
-            video_path, fps=settings.video_fps, max_frames=settings.video_max_frames
-        )
-        frame_batch_gen = batched(frame_gen, settings.batch_size)
-    except Exception as exc:  # noqa: BLE001
-        typer.echo(f"[WARN] Frame extraction setup failed for {video_path.name}: {exc}", err=True)
-        rec.status = _S_FAIL_PRE
-        rec.reason = f"frame extraction error: {exc}"
-        return 0, 0
-
-    any_frames = False
-    try:
-        for raw_batch in frame_batch_gen:
-            frames = list(raw_batch)
-            if not frames:
-                continue
-            any_frames = True
-            total_frames_seen += len(frames)
-
-            virtual_paths = [Path(make_virtual_path(video_path, f)) for f in frames]
-            frame_hashes = [f.frame_hash for f in frames]
-            frame_images = [f.image for f in frames]
-
-            # Thumbnails
-            if settings.thumbnail_dir is not None:
-                for frame, fhash in zip(frames, frame_hashes):
-                    thumb_path = settings.thumbnail_dir / f"{fhash}.jpg"
-                    if not thumb_path.exists():
-                        try:
-                            _write_thumbnail(frame.image, thumb_path, settings.thumbnail_size)
-                        except Exception as exc:  # noqa: BLE001
-                            typer.echo(
-                                f"[WARN] Thumbnail failed for frame {frame.frame_index} of "
-                                f"{video_path.name}: {exc}",
-                                err=True,
-                            )
-
-            for spec_idx, (embedder, indexer, _) in enumerate(specs):
-                # Dedup by virtual path (video identity + timecode)
-                vpath_strings = [str(p) for p in virtual_paths]
-                already = indexer.get_indexed_paths(vpath_strings)
-                to_embed_idx = [i for i, p in enumerate(vpath_strings) if p not in already]
-                if spec_idx == 0:
-                    frames_skipped += len(frames) - len(to_embed_idx)
-
-                if not to_embed_idx:
-                    continue
-
-                pre = preprocess_pil_batch([frame_images[i] for i in to_embed_idx])
-                embed_paths = [virtual_paths[i] for i in to_embed_idx]
-                embed_hashes = [frame_hashes[i] for i in to_embed_idx]
-                embed_vmeta = [_vmeta(frames[i]) for i in to_embed_idx]
-
-                try:
-                    norm = embedder.normalize_batch_bytes(pre)
-                    embeddings = embedder.embed_images(norm)
-                except Exception as exc:  # noqa: BLE001
-                    typer.echo(
-                        f"[WARN] Embedding failed for {len(pre)} frames of "
-                        f"{video_path.name} [{type(embedder).__name__}]: {exc}",
-                        err=True,
-                    )
-                    failed_counts[spec_idx] += len(pre)
-                    continue
-
-                indexer.upsert_batch(
-                    embed_paths,
-                    embed_hashes,
-                    embeddings,
-                    shared_meta_per_spec[spec_idx],
-                    video_metadata=embed_vmeta,
-                )
-                indexed_counts[spec_idx] += len(pre)
-                frames_indexed_any += len(pre)
-                if spec_idx == 0:
-                    frames_indexed += len(pre)
-
-    except Exception as exc:  # noqa: BLE001
-        typer.echo(f"[WARN] Frame extraction failed for {video_path.name}: {exc}", err=True)
-        rec.status = _S_FAIL_PRE
-        rec.reason = f"frame extraction error: {exc}"
-        return frames_indexed, frames_skipped
-
-    if not any_frames:
-        typer.echo(f"  [WARN] No frames extracted from {video_path.name}", err=True)
-        rec.status = _S_UNSUPPORTED
-        rec.reason = "no frames extracted"
-        return 0, 0
-
-    # frames_skipped tracks only spec_idx==0 (symmetric with frames_indexed).
-    n_skip = frames_skipped
-
-    if frames_indexed_any > 0:
-        rec.status = _S_INDEXED
-        rec.reason = f"{total_frames_seen} frames extracted"
-    elif n_skip >= total_frames_seen:
-        rec.status = _S_SKIP_IDX
-        rec.reason = f"all {total_frames_seen} extracted frames already indexed"
-    else:
-        rec.status = _S_FAIL_EMB
-        rec.reason = f"{total_frames_seen} frames extracted but no new vectors were indexed"
-    typer.echo(
-        f"  video {v_idx}/{v_total} [{video_path.name}]: "
-        f"{total_frames_seen} frames, {frames_indexed} embedded, {n_skip} skipped (dup)"
-    )
-    return frames_indexed, n_skip
+    for video_path in video_paths:
+        rec = records[video_path]
+        try:
+            video_hash = hash_file(video_path)
+            video_hash_md5 = hash_file_md5(video_path)
+        except OSError as exc:
+            typer.echo(f"[WARN] Cannot read video {video_path.name}: {exc}", err=True)
+            rec.status = _S_FAIL_READ
+            rec.reason = f"read error: {exc}"
+            continue
+        rec.sha256 = video_hash
+        rec.md5 = video_hash_md5
+        video_abs_path = str(video_path.resolve())
+        try:
+            for frame in extract_frames(
+                video_path, fps=settings.video_fps, max_frames=settings.video_max_frames
+            ):
+                virtual_path = Path(make_virtual_path(video_path, frame))
+                vmeta = {
+                    "video_hash": video_hash,
+                    "video_path": video_abs_path,
+                    "frame_timecode_ms": frame.timecode_ms,
+                    "frame_index": frame.frame_index,
+                    "extraction_fps": settings.video_fps,
+                    "pyav_version": pyav_version,
+                }
+                yield virtual_path, frame.frame_hash, frame.image, vmeta, video_path
+        except RuntimeError as exc:
+            typer.echo(f"[WARN] Frame extraction failed for {video_path.name}: {exc}", err=True)
+            if rec.status not in (_S_FAIL_READ, _S_INDEXED, _S_SKIP_IDX):
+                rec.status = _S_FAIL_PRE
+                rec.reason = f"frame extraction error: {exc}"
 
 
 def index(
@@ -774,21 +652,178 @@ def index(
     if video_paths:
         pyav_version = get_pyav_version()
         typer.echo(f"\nProcessing {len(video_paths):,} video file(s) (PyAV {pyav_version}) ...")
-        for v_idx, video_path in enumerate(video_paths, 1):
-            vi, vs = _index_video(
-                video_path=video_path,
-                v_idx=v_idx,
-                v_total=len(video_paths),
-                records=records,
-                specs=specs,
-                settings=settings,
-                indexed_counts=indexed_counts,
-                skipped_counts=skipped_counts,
-                failed_counts=failed_counts,
-                pyav_version=pyav_version,
-            )
-            n_video_frames_indexed += vi
-            n_video_frames_skipped += vs
+
+        # Per-video frame counters — used after all batches to finalise file-level status.
+        # Tracked at spec_idx==0 only, symmetric with image-batch skipped/indexed counts.
+        vf_total: dict[Path, int] = {vp: 0 for vp in video_paths}
+        vf_indexed: dict[Path, int] = {vp: 0 for vp in video_paths}
+        vf_skipped: dict[Path, int] = {vp: 0 for vp in video_paths}
+
+        for raw_frame_batch in batched(
+            _frame_stream(video_paths, records, settings, pyav_version), settings.batch_size
+        ):
+            batch_num += 1
+            batch_wall_t0 = perf_counter()
+
+            frames_batch = list(raw_frame_batch)
+            n_items = len(frames_batch)
+
+            virtual_paths = [t[0] for t in frames_batch]
+            frame_hashes = [t[1] for t in frames_batch]
+            frame_images_raw = [t[2] for t in frames_batch]
+            frame_vmetas = [t[3] for t in frames_batch]
+            source_vpaths = [t[4] for t in frames_batch]
+
+            for sv in source_vpaths:
+                vf_total[sv] += 1
+
+            # ── Preprocess: cap short side (same transform as preprocess_batch) ──
+            t0 = perf_counter()
+            pre_images = preprocess_pil_batch(frame_images_raw)
+            pre_s = perf_counter() - t0
+
+            # ── Thumbnails ────────────────────────────────────────────────────
+            if settings.thumbnail_dir is not None:
+                for fhash, img in zip(frame_hashes, pre_images):
+                    thumb_path = settings.thumbnail_dir / f"{fhash}.jpg"
+                    if not thumb_path.exists():
+                        try:
+                            _write_thumbnail(img, thumb_path, settings.thumbnail_size)
+                        except Exception as exc:  # noqa: BLE001
+                            typer.echo(f"[WARN] Thumbnail failed for frame: {exc}", err=True)
+
+            # ── Per-model loop: dedup → normalize → embed → collect upsert ───
+            model_segments: list[str] = []
+            upsert_jobs: list = []
+
+            for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
+                # Dedup by virtual path (video identity + timecode) — same role as
+                # hash-based dedup for regular images.
+                vpath_strs = [str(vp) for vp in virtual_paths]
+                already = indexer.get_indexed_paths(vpath_strs)
+                to_embed_idx = [i for i, s in enumerate(vpath_strs) if s not in already]
+                n_skipped = n_items - len(to_embed_idx)
+                skipped_counts[spec_idx] += n_skipped
+
+                if spec_idx == 0:
+                    n_video_frames_skipped += n_skipped
+                    skipped_set = set(range(n_items)) - set(to_embed_idx)
+                    for i in skipped_set:
+                        vf_skipped[source_vpaths[i]] += 1
+
+                backend = type(embedder).__name__
+
+                if not to_embed_idx:
+                    model_segments.append(f"{backend} all skipped ({n_skipped})")
+                    continue
+
+                embed_vpaths = [virtual_paths[i] for i in to_embed_idx]
+                embed_hashes = [frame_hashes[i] for i in to_embed_idx]
+                embed_pil = [pre_images[i] for i in to_embed_idx]
+                embed_vmetas = [frame_vmetas[i] for i in to_embed_idx]
+                embed_src = [source_vpaths[i] for i in to_embed_idx]
+                n = len(to_embed_idx)
+
+                # ── Normalize ────────────────────────────────────────────────
+                t0 = perf_counter()
+                try:
+                    norm_images = embedder.normalize_batch_bytes(embed_pil)
+                except Exception as exc:  # noqa: BLE001
+                    typer.echo(
+                        f"[ERROR] Normalization failed for frame batch [{backend}]: {exc}",
+                        err=True,
+                    )
+                    failed_counts[spec_idx] += n
+                    continue
+                norm_s = perf_counter() - t0
+
+                # ── Embed ─────────────────────────────────────────────────────
+                t0 = perf_counter()
+                try:
+                    embeddings = embedder.embed_images(norm_images)
+                except Exception as exc:  # noqa: BLE001
+                    typer.echo(
+                        f"[WARN] Embedding failed for {n} frames [{backend}]: {exc}", err=True
+                    )
+                    failed_counts[spec_idx] += n
+                    continue
+                embed_s = perf_counter() - t0
+
+                indexed_counts[spec_idx] += n
+                if spec_idx == 0:
+                    n_video_frames_indexed += n
+                    for sv in embed_src:
+                        vf_indexed[sv] += 1
+
+                model_segments.append(
+                    f"{backend} norm {norm_s:.2f}s"
+                    f"  embed {embed_s:.2f}s ({_fmt_rate(n, embed_s, 'img')})"
+                    f"  +{n}"
+                )
+
+                shared_metadata = {
+                    "model_name": embedder.model_name,
+                    "model_hash": model_hash,
+                    "embedding_dim": embedder.embedding_dim,
+                    "normalize_size": embedder.normalize_size,
+                    "inference_dtype": embedder.inference_dtype,
+                    "library_versions": get_library_versions(),
+                }
+
+                def _make_frame_upsert(idx, eps, ehs, embs, meta, vmetas):
+                    def _job():
+                        idx.upsert_batch(eps, ehs, embs, meta, video_metadata=vmetas)
+
+                    return _job
+
+                upsert_jobs.append(
+                    _make_frame_upsert(
+                        indexer,
+                        embed_vpaths,
+                        embed_hashes,
+                        embeddings,
+                        shared_metadata,
+                        embed_vmetas,
+                    )
+                )
+
+            # ── Parallel upserts ──────────────────────────────────────────────
+            upsert_wall_s = 0.0
+            if upsert_jobs:
+                t0 = perf_counter()
+                with ThreadPoolExecutor(max_workers=len(upsert_jobs)) as pool:
+                    list(pool.map(lambda j: j(), upsert_jobs))
+                upsert_wall_s = perf_counter() - t0
+
+            if model_segments:
+                wall_s = perf_counter() - batch_wall_t0
+                upsert_str = f"  |  upsert {upsert_wall_s:.2f}s" if upsert_jobs else ""
+                typer.echo(
+                    f"  batch {batch_num} [{n_items} imgs  0.0 MB"
+                    f"  {_fmt_rate(n_items, wall_s, 'img')} total]"
+                    f"  read 0.00s  hash 0.00s  pre {pre_s:.2f}s"
+                    f"  |  " + "  |  ".join(model_segments) + upsert_str
+                )
+
+        # ── Finalise per-video file records from accumulated frame counts ─────
+        for vp in video_paths:
+            rec = records[vp]
+            if rec.status in (_S_FAIL_READ, _S_FAIL_PRE):
+                continue  # already set by _frame_stream
+            total = vf_total[vp]
+            if total == 0:
+                typer.echo(f"  [WARN] No frames extracted from {vp.name}", err=True)
+                rec.status = _S_UNSUPPORTED
+                rec.reason = "no frames extracted"
+            elif vf_indexed[vp] > 0:
+                rec.status = _S_INDEXED
+                rec.reason = f"{total} frames extracted"
+            elif vf_skipped[vp] >= total:
+                rec.status = _S_SKIP_IDX
+                rec.reason = f"all {total} extracted frames already indexed"
+            else:
+                rec.status = _S_FAIL_EMB
+                rec.reason = f"{total} frames extracted but no new vectors were indexed"
 
     # ── Write CSV report ──────────────────────────────────────────────────────
     _write_csv(records, csv_path)
