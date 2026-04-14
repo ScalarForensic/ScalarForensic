@@ -78,6 +78,72 @@ def _fmt_duration(seconds: float) -> str:
     return f"{h}h {m:02d}m {s:02d}s"
 
 
+def _progress_bar(pct: float, width: int = 28) -> str:
+    """Unicode block-element progress bar."""
+    filled = round(width * min(max(pct, 0.0), 100.0) / 100)
+    return "█" * filled + "░" * (width - filled)
+
+
+class _ETATracker:
+    """Kalman-filtered throughput estimator.
+
+    Models true throughput as a random walk observed with noise:
+
+        x_k  =  x_{k-1} + w_k       w ~ N(0, Q)   (process noise)
+        z_k  =  x_k     + v_k       v ~ N(0, R)   (measurement noise)
+
+    At every batch the Kalman gain K = P⁻ / (P⁻ + R) weights new evidence
+    against accumulated history.  With Q = R/2 the steady-state gain
+    converges to K_∞ = 0.5, giving equal weight to prediction and
+    measurement — a natural equilibrium reached after ~4 batches.
+
+    First-order error propagation converts rate uncertainty σ_x into ETA
+    uncertainty:  σ_η = (N_remaining / x̂²) · σ_x
+    so both the expected completion time and its ±1σ confidence band
+    are reported.
+    """
+
+    _Q: float = 50.0    # process-noise variance  (img/s)²
+    _R: float = 100.0   # measurement-noise variance (img/s)²
+
+    def __init__(self) -> None:
+        self._x: float | None = None  # current rate estimate (img/s)
+        self._P: float = 1e8          # estimate error variance (very uncertain at start)
+        self._n: int = 0              # number of updates applied
+
+    def update(self, n_imgs: int, elapsed_s: float) -> None:
+        """Incorporate a new batch observation."""
+        if elapsed_s <= 0 or n_imgs <= 0:
+            return
+        z = n_imgs / elapsed_s
+        self._n += 1
+        if self._x is None:
+            self._x = z
+            self._P = self._R  # initialise certainty = measurement quality
+            return
+        p_pred = self._P + self._Q          # predict
+        k = p_pred / (p_pred + self._R)     # Kalman gain
+        self._x = self._x + k * (z - self._x)
+        self._P = (1.0 - k) * p_pred
+
+    @property
+    def rate(self) -> float | None:
+        return self._x
+
+    @property
+    def rate_std(self) -> float:
+        """1σ uncertainty on the current rate estimate (img/s)."""
+        return self._P ** 0.5
+
+    def eta(self, remaining: int) -> tuple[float, float] | None:
+        """Return ``(eta_seconds, sigma_seconds)`` or ``None`` if not enough data."""
+        if self._x is None or self._x <= 0 or self._n < 2:
+            return None
+        eta_s = remaining / self._x
+        sigma_s = (remaining / self._x ** 2) * self.rate_std
+        return eta_s, sigma_s
+
+
 def _apply_dedup(
     pairs: list[tuple[Path, str]],
     indexer: Indexer,
@@ -403,8 +469,8 @@ def index(
     total_bytes = 0
     batch_num = 0
     imgs_processed_so_far = 0
-    image_loop_start_t = perf_counter()
     total_image_count = len(image_paths)
+    tracker = _ETATracker()
 
     for batch_paths in batched(iter(image_paths), settings.batch_size):
         batch_num += 1
@@ -656,9 +722,10 @@ def index(
         if model_segments:
             wall_s = perf_counter() - batch_wall_t0
             n_imgs = len(path_hash_pairs)
+            tracker.update(n_imgs, wall_s)
             upsert_str = f"  │  upsert {upsert_wall_s:.2f}s" if upsert_jobs else ""
             shared = (
-                f"  batch {batch_num:>4}  {n_imgs} imgs  {batch_bytes / 1e6:.1f} MB"
+                f"  ▸ {batch_num:04d}  {n_imgs} imgs  {batch_bytes / 1e6:.1f} MB"
                 f"  {_fmt_rate(n_imgs, wall_s, 'img')}"
                 f"  │  read {read_s:.2f}s ({_fmt_mbps(batch_bytes, read_s)})"
                 f"  hash {hash_s:.2f}s  pre {pre_s:.2f}s"
@@ -666,19 +733,18 @@ def index(
             typer.echo(shared + "  │  " + "  │  ".join(model_segments) + upsert_str)
 
             if batch_num % 10 == 0 and total_image_count > 0:
-                elapsed = perf_counter() - image_loop_start_t
-                if elapsed > 0:
-                    avg_rate = imgs_processed_so_far / elapsed
-                    remaining = total_image_count - imgs_processed_so_far
+                result = tracker.eta(total_image_count - imgs_processed_so_far)
+                if result is not None:
+                    eta_s, sigma_s = result
                     pct = imgs_processed_so_far / total_image_count * 100
-                    eta_str = (
-                        f"ETA ~{_fmt_duration(remaining / avg_rate)}"
-                        if avg_rate > 0 and remaining > 0
-                        else "almost done"
-                    )
+                    bar = _progress_bar(pct)
                     typer.echo(
-                        f"  ── {imgs_processed_so_far:,}/{total_image_count:,} imgs"
-                        f" ({pct:.1f}%)  avg {avg_rate:.1f} img/s  {eta_str} ──"
+                        f"  {'─' * 68}\n"
+                        f"  [{bar}] {imgs_processed_so_far:,} / {total_image_count:,}"
+                        f"  ({pct:.1f}%)"
+                        f"  ·  {tracker.rate:.1f} ±{tracker.rate_std:.1f} img/s"
+                        f"  ·  ETA ~{_fmt_duration(eta_s)} ±{_fmt_duration(sigma_s)}\n"
+                        f"  {'─' * 68}"
                     )
 
     # ── Video processing pass ─────────────────────────────────────────────────
@@ -885,7 +951,7 @@ def index(
                 wall_s = perf_counter() - batch_wall_t0
                 upsert_str = f"  │  upsert {upsert_wall_s:.2f}s" if upsert_jobs else ""
                 typer.echo(
-                    f"  batch {batch_num:>4}  {n_items} frames"
+                    f"  ▸ {batch_num:04d}  {n_items} frames"
                     f"  {_fmt_rate(n_items, wall_s, 'img')}"
                     f"  │  pre {pre_s:.2f}s"
                     f"  │  " + "  │  ".join(model_segments) + upsert_str
