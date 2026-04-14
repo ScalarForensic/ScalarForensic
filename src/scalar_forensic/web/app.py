@@ -79,19 +79,22 @@ _IMAGE_EXTENSIONS = frozenset(
 
 
 def _check_allowed_path(p: Path) -> None:
-    """Raise 403 if SFN_INPUT_DIR is configured and *p* is not under it.
+    """Raise 403 unless *p* is under the configured SFN_INPUT_DIR root.
 
-    When input_dir is not set we have no allowed-root to enforce, so the
-    check is skipped (callers still validate extension, existence, and that
-    the path is absolute).
+    File-serving endpoints require an explicit allowed root.  When SFN_INPUT_DIR
+    is not configured we fail closed rather than serving arbitrary host paths.
     """
     settings = Settings()
-    if settings.input_dir is not None:
-        allowed = settings.input_dir.resolve()
-        try:
-            p.relative_to(allowed)
-        except ValueError:
-            raise HTTPException(status_code=403, detail="Path is outside the allowed directory")
+    if settings.input_dir is None:
+        raise HTTPException(
+            status_code=403,
+            detail="File serving is disabled: SFN_INPUT_DIR is not configured",
+        )
+    allowed = settings.input_dir.resolve()
+    try:
+        p.relative_to(allowed)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Path is outside the allowed directory")
 
 
 # Cached PCA-projected point cloud, computed once at startup.
@@ -413,9 +416,10 @@ async def hit_image(path: str) -> Response:
         return StreamingResponse(buf, media_type="image/jpeg")
 
     # Regular image path
-    p = Path(path).resolve()
-    if not p.is_absolute():
+    raw = Path(path)
+    if not raw.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
+    p = raw.resolve()
     _check_allowed_path(p)
     if p.suffix.lower() not in _IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not an image file")
@@ -562,8 +566,11 @@ async def hit_metadata(path: str) -> JSONResponse:
         return JSONResponse(meta)
 
     # Regular image path
-    p = Path(path).resolve()
-    if not p.is_absolute() or p.suffix.lower() not in _IMAGE_EXTENSIONS:
+    raw = Path(path)
+    if not raw.is_absolute():
+        raise HTTPException(status_code=400, detail="Invalid path")
+    p = raw.resolve()
+    if p.suffix.lower() not in _IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Invalid path")
     _check_allowed_path(p)
     if not p.exists() or not p.is_file():
@@ -590,9 +597,10 @@ async def video_frame(path: str, timecode_ms: int) -> StreamingResponse:
     ``path`` must be an absolute filesystem path to a video file.
     ``timecode_ms`` is the target timecode in milliseconds.
     """
-    p = Path(path).resolve()
-    if not p.is_absolute():
+    raw = Path(path)
+    if not raw.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
+    p = raw.resolve()
     _check_allowed_path(p)
     if p.suffix.lower() not in VIDEO_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not a video file")

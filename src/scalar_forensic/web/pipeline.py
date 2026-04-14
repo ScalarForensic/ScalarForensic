@@ -515,13 +515,21 @@ def query_session(
             if entry.dino_embedding:
                 dino_vecs.append((entry.dino_embedding, None))
 
+        # Pre-index vectors by timecode for O(n) per-frame dispatch.
+        sscd_by_qtc: dict[int | None, list[list[float]]] = {}
+        for vec, tc in sscd_vecs:
+            sscd_by_qtc.setdefault(tc, []).append(vec)
+        dino_by_qtc: dict[int | None, list[list[float]]] = {}
+        for vec, tc in dino_vecs:
+            dino_by_qtc.setdefault(tc, []).append(vec)
+
         # Collect all unique query timecodes (insertion-ordered).
         seen_qtcs: set = set()
         all_qtcs: list[int | None] = []
-        for _, qtc in sscd_vecs + dino_vecs:
-            if qtc not in seen_qtcs:
-                all_qtcs.append(qtc)
-                seen_qtcs.add(qtc)
+        for _, tc in sscd_vecs + dino_vecs:
+            if tc not in seen_qtcs:
+                all_qtcs.append(tc)
+                seen_qtcs.add(tc)
 
         # Query each timecode (frame or image) in complete isolation.
         # Within one query entity, altered and semantic hits for the same
@@ -537,9 +545,7 @@ def query_session(
             frame_unmerged: list[Hit] = []  # used when unify=False
 
             if "altered" in modes:
-                for vec, tc in sscd_vecs:
-                    if tc != qtc:
-                        continue
+                for vec in sscd_by_qtc.get(qtc, []):
                     hits, errs = _query_vector(
                         client,
                         collection=settings.collection_sscd,
@@ -558,9 +564,7 @@ def query_session(
                     file_result.errors.extend(errs)
 
             if "semantic" in modes:
-                for vec, tc in dino_vecs:
-                    if tc != qtc:
-                        continue
+                for vec in dino_by_qtc.get(qtc, []):
                     hits, errs = _query_vector(
                         client,
                         collection=settings.collection_dino,

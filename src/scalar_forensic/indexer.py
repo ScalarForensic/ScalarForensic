@@ -106,6 +106,19 @@ class Indexer:
         )
         return {r.payload["image_hash"] for r in results}
 
+    def is_video_indexed(self, video_hash: str) -> bool:
+        """Return True if any frame from this video is already in the collection."""
+        results, _ = self.client.scroll(
+            collection_name=self.collection,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
+            ),
+            limit=1,
+            with_payload=False,
+            with_vectors=False,
+        )
+        return bool(results)
+
     def get_indexed_paths(self, paths: list[str]) -> set[str]:
         """Return the subset of absolute path strings already stored in the collection."""
         if not paths:

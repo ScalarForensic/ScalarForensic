@@ -123,13 +123,14 @@ def _print_summary(
     indexed_counts: list[int],
     skipped_counts: list[int],
     failed_counts: list[int],
+    n_images: int = 0,
     n_videos: int = 0,
     n_video_frames_indexed: int = 0,
     n_video_frames_skipped: int = 0,
 ) -> None:
     counts = Counter(r.status for r in records.values())
     total = len(records)
-    n_image = total - counts[_S_UNSUPPORTED] - n_videos
+    n_image = n_images
 
     # Per-model breakdown
     typer.echo("\nDone.")
@@ -176,28 +177,30 @@ def _frame_stream(
     records: dict[Path, "_FileRecord"],
     settings: "Settings",
     pyav_version: str,
+    pre_hashes: dict[Path, str] | None = None,
 ) -> Iterator[tuple[Path, str, "Image.Image", dict, Path]]:
     """Yield ``(virtual_path, frame_hash, pil, vmeta, source_video_path)`` for every
     frame across all videos, streaming across video boundaries so the caller can
     batch frames from multiple videos into a single GPU batch with ``batched()``.
 
-    Video file hashing and frame-extraction errors are logged and recorded in
-    *records*; the per-video SHA-256/MD5 is written to the record before the
-    first frame of that video is yielded so it is always available for the CSV
-    report even if the caller never consumes the full stream.
+    When *pre_hashes* is provided (populated by the video pre-check pass) the
+    per-video SHA-256 is taken from there instead of being recomputed here.
     """
     for video_path in video_paths:
         rec = records[video_path]
-        try:
-            video_hash = hash_file(video_path)
-            video_hash_md5 = hash_file_md5(video_path)
-        except OSError as exc:
-            typer.echo(f"[WARN] Cannot read video {video_path.name}: {exc}", err=True)
-            rec.status = _S_FAIL_READ
-            rec.reason = f"read error: {exc}"
-            continue
-        rec.sha256 = video_hash
-        rec.md5 = video_hash_md5
+        if pre_hashes is not None and video_path in pre_hashes:
+            video_hash = pre_hashes[video_path]
+        else:
+            try:
+                video_hash = hash_file(video_path)
+                video_hash_md5 = hash_file_md5(video_path)
+            except OSError as exc:
+                typer.echo(f"[WARN] Cannot read video {video_path.name}: {exc}", err=True)
+                rec.status = _S_FAIL_READ
+                rec.reason = f"read error: {exc}"
+                continue
+            rec.sha256 = video_hash
+            rec.md5 = video_hash_md5
         video_abs_path = str(video_path.resolve())
         try:
             for frame in extract_frames(
@@ -328,11 +331,12 @@ def index(
             typer.echo(f"[ERROR] {exc}", err=True)
             raise typer.Exit(1)
         fp16 = embedder.device == "cuda"
+        compiled = getattr(embedder, "compiled", False)
         typer.echo(
             f"  backend={type(embedder).__name__}  dim={embedder.embedding_dim}"
-            f"  device={embedder.device}  fp16={fp16}  compiled=True"
+            f"  device={embedder.device}  fp16={fp16}  compiled={compiled}"
         )
-        if fp16:
+        if compiled:
             typer.echo("  (first batch will be slow — torch.compile warm-up)")
 
         typer.echo(f"Connecting to Qdrant  collection={collection!r} ...")
@@ -653,14 +657,51 @@ def index(
         pyav_version = get_pyav_version()
         typer.echo(f"\nProcessing {len(video_paths):,} video file(s) (PyAV {pyav_version}) ...")
 
-        # Per-video frame counters — used after all batches to finalise file-level status.
-        # Tracked at spec_idx==0 only, symmetric with image-batch skipped/indexed counts.
-        vf_total: dict[Path, int] = {vp: 0 for vp in video_paths}
-        vf_indexed: dict[Path, int] = {vp: 0 for vp in video_paths}
-        vf_skipped: dict[Path, int] = {vp: 0 for vp in video_paths}
+        # ── Pre-check: skip videos already fully indexed ───────────────────────
+        # Hash each video once and query each model's collection at the video level.
+        # If all models already have the video, skip frame extraction entirely.
+        # If only some models have it, only those models skip during the batch loop.
+        pre_hashes: dict[Path, str] = {}         # vpath → sha256
+        skip_by_spec: dict[Path, set[int]] = {}  # vpath → spec indices that already have it
+
+        for vp in video_paths:
+            rec = records[vp]
+            try:
+                vh = hash_file(vp)
+                vm = hash_file_md5(vp)
+            except OSError as exc:
+                typer.echo(f"[WARN] Cannot read video {vp.name}: {exc}", err=True)
+                rec.status = _S_FAIL_READ
+                rec.reason = f"read error: {exc}"
+                continue
+            rec.sha256 = vh
+            rec.md5 = vm
+            pre_hashes[vp] = vh
+
+            already_in = {
+                spec_idx
+                for spec_idx, (_, indexer, _) in enumerate(specs)
+                if indexer.is_video_indexed(vh)
+            }
+            if already_in:
+                skip_by_spec[vp] = already_in
+            if len(already_in) == len(specs):
+                rec.status = _S_SKIP_IDX
+                rec.reason = "video already indexed"
+
+        videos_to_process = [
+            vp for vp in video_paths
+            if vp in pre_hashes and records[vp].status not in (_S_FAIL_READ, _S_SKIP_IDX)
+        ]
+
+        # Per-video frame counters — only for videos being processed this run.
+        vf_total: dict[Path, int] = {vp: 0 for vp in videos_to_process}
+        vf_indexed: dict[Path, int] = {vp: 0 for vp in videos_to_process}
+        vf_skipped: dict[Path, int] = {vp: 0 for vp in videos_to_process}
 
         for raw_frame_batch in batched(
-            _frame_stream(video_paths, records, settings, pyav_version), settings.batch_size
+            _frame_stream(videos_to_process, records, settings, pyav_version, pre_hashes),
+            settings.batch_size,
         ):
             batch_num += 1
             batch_wall_t0 = perf_counter()
@@ -697,18 +738,19 @@ def index(
             upsert_jobs: list = []
 
             for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
-                # Dedup by virtual path (video identity + timecode) — same role as
-                # hash-based dedup for regular images.
-                vpath_strs = [str(vp) for vp in virtual_paths]
-                already = indexer.get_indexed_paths(vpath_strs)
-                to_embed_idx = [i for i, s in enumerate(vpath_strs) if s not in already]
+                # Skip frames from videos already indexed for this model.
+                # The pre-check pass determined which spec indices have each video;
+                # no per-frame Qdrant query needed.
+                to_embed_idx = [
+                    i for i in range(n_items)
+                    if spec_idx not in skip_by_spec.get(source_vpaths[i], set())
+                ]
                 n_skipped = n_items - len(to_embed_idx)
                 skipped_counts[spec_idx] += n_skipped
 
                 if spec_idx == 0:
                     n_video_frames_skipped += n_skipped
-                    skipped_set = set(range(n_items)) - set(to_embed_idx)
-                    for i in skipped_set:
+                    for i in set(range(n_items)) - set(to_embed_idx):
                         vf_skipped[source_vpaths[i]] += 1
 
                 backend = type(embedder).__name__
@@ -808,8 +850,8 @@ def index(
         # ── Finalise per-video file records from accumulated frame counts ─────
         for vp in video_paths:
             rec = records[vp]
-            if rec.status in (_S_FAIL_READ, _S_FAIL_PRE):
-                continue  # already set by _frame_stream
+            if rec.status in (_S_FAIL_READ, _S_FAIL_PRE, _S_SKIP_IDX):
+                continue  # already set by pre-check or _frame_stream
             total = vf_total[vp]
             if total == 0:
                 typer.echo(f"  [WARN] No frames extracted from {vp.name}", err=True)
@@ -837,6 +879,7 @@ def index(
         indexed_counts,
         skipped_counts,
         failed_counts,
+        n_images=len(image_paths),
         n_videos=len(video_paths),
         n_video_frames_indexed=n_video_frames_indexed,
         n_video_frames_skipped=n_video_frames_skipped,
