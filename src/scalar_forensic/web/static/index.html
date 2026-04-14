@@ -449,7 +449,7 @@
           <button class="btn-secondary" @click.stop="$refs.fileInput.click()">🖼 Select Files</button>
         </div>
         <div class="file-count-badge" x-show="pendingFiles.length > 0">
-          <span x-text="pendingFiles.length"></span> image<span x-show="pendingFiles.length !== 1">s</span> queued
+          <span x-text="pendingFiles.length"></span> file<span x-show="pendingFiles.length !== 1">s</span> queued
         </div>
         <div class="upload-actions">
           <button class="btn-secondary" @click.stop="pendingFiles = []" x-show="pendingFiles.length > 0">Clear</button>
@@ -1183,8 +1183,12 @@ function sfn() {
     },
 
     addFiles(fileList) {
-      const exts = new Set(['.jpg','.jpeg','.png','.bmp','.tiff','.tif','.webp',
-                             '.gif','.jp2','.ico','.psd','.heic','.heif']);
+      const exts = new Set([
+        '.jpg','.jpeg','.png','.bmp','.tiff','.tif','.webp',
+        '.gif','.jp2','.ico','.psd','.heic','.heif',
+        '.mp4','.avi','.mov','.mkv','.wmv','.flv','.webm',
+        '.m4v','.mpg','.mpeg','.3gp','.ts','.mts',
+      ]);
       for (const f of fileList) {
         const dot = f.name.lastIndexOf('.');
         const ext = dot >= 0 ? f.name.slice(dot).toLowerCase() : '';
