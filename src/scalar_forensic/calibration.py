@@ -33,14 +33,14 @@ if TYPE_CHECKING:
 
 _CACHE_FILE = Path("data/sfn_batch_cache.json")
 _EFFICIENCY_TARGET = 0.95  # fraction of T_max to accept as "optimal"
-_MAX_BATCH = 512           # hard ceiling for exponential probe
-_MIN_WARMUP_IMAGES = 16    # warm-up images — fixed, never scales with probe_b
-_MAX_MEASURE_IMAGES = 40   # measurement window cap — keeps each probe fast;
-                           #   the shuffle ensures these 40 are representative
-_MIN_GAIN = 0.03           # converged: positive gain < 3 % → saturation reached
-_PEAK_FRAC = 0.70          # post-peak guard: stop after this many consecutive
-_POST_PEAK_DROPS = 3       #   measurements below _PEAK_FRAC × best seen so far
-_BAR_WIDTH = 30            # characters for the throughput bar
+_MAX_BATCH = 512  # hard ceiling for exponential probe
+_MIN_WARMUP_IMAGES = 16  # warm-up images — fixed, never scales with probe_b
+_MAX_MEASURE_IMAGES = 40  # measurement window cap — keeps each probe fast;
+#   the shuffle ensures these 40 are representative
+_MIN_GAIN = 0.03  # converged: positive gain < 3 % → saturation reached
+_PEAK_FRAC = 0.70  # post-peak guard: stop after this many consecutive
+_POST_PEAK_DROPS = 3  #   measurements below _PEAK_FRAC × best seen so far
+_BAR_WIDTH = 30  # characters for the throughput bar
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +125,7 @@ def _probe(
     on an identical image distribution — critical when the sample set contains
     images of varying sizes.
     """
-    _run_batches(embedder, warmup_bytes, batch_size)   # warm-up (discarded)
+    _run_batches(embedder, warmup_bytes, batch_size)  # warm-up (discarded)
     t0 = perf_counter()
     _run_batches(embedder, measure_bytes, batch_size)  # timed window
     elapsed = perf_counter() - t0
@@ -188,6 +188,7 @@ def calibrate(
     # batch sizes and large images to large ones, making throughput numbers
     # incomparable across probes.
     import random as _random
+
     _random.Random(0).shuffle(raw_bytes)
 
     # ── Header ────────────────────────────────────────────────────────────
@@ -195,10 +196,7 @@ def calibrate(
     typer.echo("")
     typer.echo("SFN_BATCH_SIZE unset — calibrating optimal batch size")
     typer.echo("  T(b) = T_max·b / (b+K)  [Michaelis-Menten saturation]")
-    typer.echo(
-        f"  sample: {sample_dir}  ({n_samples} images)"
-        f"  ·  device: {embedder.device}"
-    )
+    typer.echo(f"  sample: {sample_dir}  ({n_samples} images)  ·  device: {embedder.device}")
     typer.echo(sep)
 
     # ── Exponential probe ─────────────────────────────────────────────────
@@ -220,9 +218,7 @@ def calibrate(
         try:
             tp = _probe(embedder, warmup_bytes, measure_bytes, probe_b)
         except Exception:  # noqa: BLE001 — catches CUDA/ROCm OOM and JIT errors
-            typer.echo(
-                f"  batch={probe_b:>4}  {'':>{_BAR_WIDTH + 2}}  out of memory — stopped"
-            )
+            typer.echo(f"  batch={probe_b:>4}  {'':>{_BAR_WIDTH + 2}}  out of memory — stopped")
             break
 
         if tp <= 0:
@@ -287,7 +283,7 @@ def calibrate(
         denom = n * sxx - sx * sx
         if denom != 0:
             a = (n * sxy - sx * sy) / denom  # 1 / T_max
-            c = (sy - a * sx) / n            # K / T_max
+            c = (sy - a * sx) / n  # K / T_max
             if a > 0:
                 t_max_fit = 1.0 / a
                 k_half_fit = max(c / a, 0.0)
@@ -308,10 +304,7 @@ def calibrate(
     # ── Summary ────────────────────────────────────────────────────────────
     typer.echo(sep)
     if t_max_fit > 0 and b_star >= 1.0:
-        typer.echo(
-            f"  Fitted:   T_max = {t_max_fit:.1f} img/s"
-            f"  ·  K_½ = {k_half_fit:.1f}"
-        )
+        typer.echo(f"  Fitted:   T_max = {t_max_fit:.1f} img/s  ·  K_½ = {k_half_fit:.1f}")
         typer.echo(
             f"  Target:   {int(_EFFICIENCY_TARGET * 100)}% of T_max"
             f"  →  b* = {b_star:.1f}"

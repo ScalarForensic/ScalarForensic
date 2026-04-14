@@ -475,8 +475,7 @@ def index(
             settings.batch_size = min(sizes)
             if len(sizes) > 1:
                 per = "  ".join(
-                    f"{type(emb).__name__}={sz}"
-                    for (emb, _, _), sz in zip(specs, sizes)
+                    f"{type(emb).__name__}={sz}" for (emb, _, _), sz in zip(specs, sizes)
                 )
                 typer.echo(f"  ({per}  →  using minimum)")
         else:
