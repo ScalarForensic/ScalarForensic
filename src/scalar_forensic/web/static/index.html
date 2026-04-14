@@ -535,11 +535,63 @@
       </div>
       <div class="file-list matched-list">
         <template x-for="(r, idx) in matchedFiles.slice(0, LIST_CAP)" :key="r.file_id">
-          <div class="file-item" :class="{selected: selectedFileId===r.file_id}"
-               :style="`animation-delay:${idx*15}ms`"
-               @click="selectFile(r.file_id)">
-            <span class="file-name" :title="r.filename" x-text="shortName(r.filename)"></span>
-            <span class="hit-count" x-text="r.hits.length"></span>
+          <div>
+            <!-- ── Video file: collapsible parent + frame children ── -->
+            <template x-if="isVideoFile(r.filename)">
+              <div>
+                <!-- Parent row -->
+                <div class="file-item"
+                     :class="{selected: selectedFileId===r.file_id && selectedFrameTimecode===null}"
+                     :style="`animation-delay:${idx*15}ms`"
+                     @click="selectFile(r.file_id)">
+                  <button class="video-expand-btn"
+                          @click.stop="toggleVideoExpanded(r.file_id)"
+                          :title="videoExpanded[r.file_id] ? 'Collapse frames' : 'Expand frames'"
+                          x-text="videoExpanded[r.file_id] ? '▾' : '▸'"></button>
+                  <!-- Dual thumbnail: best query frame → best dataset match -->
+                  <div class="video-thumb-pair">
+                    <img class="video-thumb-small"
+                         :src="sessionId && _bestFrameTimecodeForResult(r) !== null
+                           ? `/api/query-frame/${sessionId}/${r.file_id}?timecode_ms=${_bestFrameTimecodeForResult(r)}`
+                           : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"
+                         loading="lazy" alt="">
+                    <span class="vthumb-arrow">→</span>
+                    <img class="video-thumb-small"
+                         :src="_bestHitImageHash(r)
+                           ? `/api/thumbnail/${_bestHitImageHash(r)}`
+                           : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"
+                         loading="lazy" alt="">
+                  </div>
+                  <span class="file-name" :title="r.filename" x-text="shortName(r.filename)"></span>
+                  <span class="hit-count" x-text="r.hits.length"></span>
+                </div>
+                <!-- Frame children (lazy-loaded when expanded) -->
+                <div class="frame-children" x-show="videoExpanded[r.file_id]">
+                  <template x-for="frame in (videoFramesCache[r.file_id] ?? [])" :key="frame.timecode_ms">
+                    <div class="file-item frame-child-item"
+                         :class="{selected: selectedFileId===r.file_id && selectedFrameTimecode===frame.timecode_ms}"
+                         @click="selectQueryFrame(r.file_id, frame.timecode_ms)">
+                      <span class="frame-child-tc"
+                            x-text="`t\u202f=\u202f${(frame.timecode_ms/1000).toFixed(2)}s`"></span>
+                      <span class="hit-count"
+                            :class="{zero: frameHitCount(r, frame.timecode_ms) === 0}"
+                            x-text="frameHitCount(r, frame.timecode_ms)"></span>
+                    </div>
+                  </template>
+                  <div x-show="videoExpanded[r.file_id] && !videoFramesCache[r.file_id]"
+                       class="empty-list-msg">Loading frames…</div>
+                </div>
+              </div>
+            </template>
+            <!-- ── Regular image file ── -->
+            <template x-if="!isVideoFile(r.filename)">
+              <div class="file-item" :class="{selected: selectedFileId===r.file_id}"
+                   :style="`animation-delay:${idx*15}ms`"
+                   @click="selectFile(r.file_id)">
+                <span class="file-name" :title="r.filename" x-text="shortName(r.filename)"></span>
+                <span class="hit-count" x-text="r.hits.length"></span>
+              </div>
+            </template>
           </div>
         </template>
         <div class="list-overflow-msg" x-show="matchedFiles.length > LIST_CAP"
@@ -635,6 +687,17 @@
               <span class="sub-label">File</span>
               <span class="sub-val" x-text="shortName(selectedFile?.filename ?? '')"></span>
             </div>
+            <!-- Frame timecode row — shown whenever a video frame is in view -->
+            <template x-if="isVideoUpload && (selectedFrameTimecode !== null || currentQueryFrame)">
+              <div class="sub-row">
+                <span class="sub-label">Frame</span>
+                <span class="sub-val mono"
+                      x-text="selectedFrameTimecode !== null
+                        ? `t\u202f=\u202f${(selectedFrameTimecode/1000).toFixed(3)}\u202fs`
+                        : `t\u202f=\u202f${(currentQueryFrame.timecode_ms/1000).toFixed(3)}\u202fs`">
+                </span>
+              </div>
+            </template>
             <div class="sub-row">
               <span class="sub-label">Path</span>
               <span class="sub-val mono" x-text="folderOf(selectedFile?.filename ?? '') || '(root)'"></span>
@@ -979,8 +1042,16 @@
                 </button>
                 <div x-show="expandedHits[hitKey(hit)]" class="hit-frames-list">
                   <template x-for="mf in hit.matched_frames" :key="mf.timecode_ms">
-                    <div class="hit-frame-row">
-                      <span x-text="`t = ${(mf.timecode_ms / 1000).toFixed(2)}s`"></span>
+                    <div class="hit-frame-row"
+                         :class="{selected: isSelectedMatchedFrame(hit, mf)}"
+                         @click.stop="selectMatchedFrame(hit, mf)">
+                      <img class="hit-frame-thumb"
+                           :src="mf.frame_hash
+                             ? `/api/thumbnail/${mf.frame_hash}`
+                             : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"
+                           loading="lazy" alt="">
+                      <span class="hit-frame-tc"
+                            x-text="`t\u202f=\u202f${(mf.timecode_ms/1000).toFixed(2)}s`"></span>
                       <span class="hit-frame-scores">
                         <template x-for="[mode, score] in Object.entries(mf.scores)" :key="mode">
                           <span :class="`badge badge-${mode}`" style="font-size:9px"
@@ -1053,6 +1124,15 @@ function sfn() {
     queryFrames: null,    // [{frame_index, timecode_ms, frame_hash}, …] from /api/query-frames
     queryFrameIdx: 0,     // index into queryFrames currently shown
 
+    // Video file-item expansion state in left panel  {fileId: boolean}
+    videoExpanded: {},
+    // Cached frame lists per video file  {fileId: [{frame_index, timecode_ms, frame_hash}]}
+    videoFramesCache: {},
+    // When a specific query frame child is selected, its timecode_ms; null when parent selected
+    selectedFrameTimecode: null,
+    // When a specific dataset video frame row is selected in the hits panel
+    selectedMatchedFrameKey: null,
+
     // Hit card expansion state  {hitKey: true|false}
     expandedHits: {},
 
@@ -1095,21 +1175,18 @@ function sfn() {
     },
     get isVideoUpload() {
       const f = this.selectedFile;
-      if (!f) return false;
-      const dot = f.filename.lastIndexOf('.');
-      const ext = dot >= 0 ? f.filename.slice(dot).toLowerCase() : '';
-      return ['.mp4','.avi','.mov','.mkv','.wmv','.flv','.webm','.m4v','.mpg','.mpeg','.3gp','.ts','.mts'].includes(ext);
+      return f ? this.isVideoFile(f.filename) : false;
     },
     get currentQueryFrame() {
       if (!this.queryFrames || !this.queryFrames.length) return null;
       return this.queryFrames[this.queryFrameIdx] ?? null;
     },
     // Timecode of the currently shown query frame, or null when not in video mode.
-    // Used to dim hits that weren't generated by this frame.
+    // Used to dim hits that weren't generated by this frame (parent mode only).
     get activeQueryTimecode() {
-      return (this.isVideoUpload && this.currentQueryFrame)
-        ? this.currentQueryFrame.timecode_ms
-        : null;
+      if (!this.isVideoUpload) return null;
+      if (this.selectedFrameTimecode !== null) return this.selectedFrameTimecode;
+      return this.currentQueryFrame ? this.currentQueryFrame.timecode_ms : null;
     },
     get matchedFiles() {
       return this.results.filter(r => r.hits.length > 0 && !(r.errors?.length > 0));
@@ -1130,13 +1207,18 @@ function sfn() {
     },
     get filteredHits() {
       if (!this.selectedFile) return [];
-      return this.selectedFile.hits.filter(h => {
+      let hits = this.selectedFile.hits.filter(h => {
         // Keep if any active-mode score is present
         if ('exact' in h.scores) return true;
         if ('altered' in h.scores && this.hitsFilterAltered) return true;
         if ('semantic' in h.scores && this.hitsFilterSemantic) return true;
         return false;
       });
+      // When a specific query frame child is selected, show only that frame's hits
+      if (this.selectedFrameTimecode !== null) {
+        hits = hits.filter(h => h.query_timecodes?.includes(this.selectedFrameTimecode));
+      }
+      return hits;
     },
     get auditIntegrity() {
       if (!this.auditQueryLibVersions) return null;
@@ -1158,6 +1240,31 @@ function sfn() {
     folderOf(filename) {
       const parts = filename.replace(/\\/g, '/').split('/');
       return parts.length > 1 ? parts.slice(0, -1).join('/') : '';
+    },
+    isVideoFile(filename) {
+      if (!filename) return false;
+      const dot = filename.lastIndexOf('.');
+      const ext = dot >= 0 ? filename.slice(dot).toLowerCase() : '';
+      return ['.mp4','.avi','.mov','.mkv','.wmv','.flv','.webm','.m4v','.mpg','.mpeg','.3gp','.ts','.mts'].includes(ext);
+    },
+    frameHitCount(r, timecode_ms) {
+      return r.hits.filter(h => h.query_timecodes?.includes(timecode_ms)).length;
+    },
+    _bestFrameTimecodeForResult(r) {
+      // The timecode that generated the highest-scored hit
+      let bestTimecode = null, bestScore = -1;
+      for (const hit of r.hits) {
+        if (!hit.query_timecodes?.length) continue;
+        const maxScore = Object.values(hit.scores).reduce((a, b) => Math.max(a, b), 0);
+        if (maxScore > bestScore) { bestScore = maxScore; bestTimecode = hit.query_timecodes[0]; }
+      }
+      return bestTimecode;
+    },
+    _bestHitImageHash(r) {
+      return r.hits[0]?.image_hash ?? null;
+    },
+    isSelectedMatchedFrame(hit, mf) {
+      return this.selectedMatchedFrameKey === `${hit.path}:${mf.timecode_ms}`;
     },
     openLightbox(src) {
       if (!src) return;
@@ -1412,6 +1519,8 @@ function sfn() {
 
       this.selectedFileId = fileId;
       this.selectedHitKey = null;
+      this.selectedFrameTimecode = null;
+      this.selectedMatchedFrameKey = null;
       this.queryMeta = null;
       this.matchMeta = null;
       this.queryZoom = 1.0;
@@ -1446,10 +1555,21 @@ function sfn() {
         const r = await fetch(`/api/query-frames/${this.sessionId}/${fileId}`);
         if (!r.ok) return;
         const d = await r.json();
-        this.queryFrames = d.frames ?? [];
+        const frames = d.frames ?? [];
+        this.videoFramesCache = { ...this.videoFramesCache, [fileId]: frames };
         // Guard: user may have navigated away before the fetch completed
-        if (this.queryFrames.length && this.selectedFileId === fileId) {
-          this.querySrc = `/api/query-frame/${this.sessionId}/${fileId}?timecode_ms=${this.queryFrames[0].timecode_ms}`;
+        if (this.selectedFileId === fileId) {
+          this.queryFrames = frames;
+          // Only update querySrc when in parent mode (not when a specific frame child is selected)
+          if (this.selectedFrameTimecode === null && frames.length) {
+            // Show best-matching frame in parent mode, fall back to first frame
+            const result = this.results.find(res => res.file_id === fileId);
+            const bestTimecode = result ? this._bestFrameTimecodeForResult(result) : null;
+            const showTimecode = bestTimecode ?? frames[0].timecode_ms;
+            const idx = frames.findIndex(f => f.timecode_ms === showTimecode);
+            if (idx >= 0) this.queryFrameIdx = idx;
+            this.querySrc = `/api/query-frame/${this.sessionId}/${fileId}?timecode_ms=${showTimecode}`;
+          }
         }
       } catch { /* fall through — querySrc stays null */ }
     },
@@ -1457,16 +1577,94 @@ function sfn() {
     goQueryFrame(idx) {
       if (!this.queryFrames || idx < 0 || idx >= this.queryFrames.length) return;
       this.queryFrameIdx = idx;
-      this.querySrc = `/api/query-frame/${this.sessionId}/${this.selectedFileId}?timecode_ms=${this.queryFrames[idx].timecode_ms}`;
+      const frame = this.queryFrames[idx];
+      this.querySrc = `/api/query-frame/${this.sessionId}/${this.selectedFileId}?timecode_ms=${frame.timecode_ms}`;
+      // If a frame child is selected, keep frame-child mode in sync with nav
+      if (this.selectedFrameTimecode !== null) {
+        this.selectedFrameTimecode = frame.timecode_ms;
+        this.selectedMatchedFrameKey = null;
+        // Auto-select best hit for the new frame
+        this.selectedHitKey = null;
+        const bestHit = this.filteredHits[0];
+        if (bestHit) {
+          this.selectedHitKey = this.hitKey(bestHit);
+          this.matchSrc = `/api/hit-image?path=${encodeURIComponent(bestHit.path)}`;
+          this._loadMatchMeta();
+        } else {
+          this.matchSrc = null;
+        }
+      }
     },
 
     toggleHitExpanded(key) {
       this.expandedHits = { ...this.expandedHits, [key]: !this.expandedHits[key] };
     },
 
+    async toggleVideoExpanded(fileId) {
+      const isExpanding = !this.videoExpanded[fileId];
+      this.videoExpanded = { ...this.videoExpanded, [fileId]: isExpanding };
+      // Lazy-load frame list when expanding for the first time
+      if (isExpanding && !this.videoFramesCache[fileId] && this.sessionId) {
+        const r = await fetch(`/api/query-frames/${this.sessionId}/${fileId}`).catch(() => null);
+        if (r?.ok) {
+          const d = await r.json();
+          const frames = d.frames ?? [];
+          this.videoFramesCache = { ...this.videoFramesCache, [fileId]: frames };
+          if (this.selectedFileId === fileId) this.queryFrames = frames;
+        }
+      }
+    },
+
+    async selectQueryFrame(fileId, timecode_ms) {
+      clearTimeout(this._matchImgTimer);
+      if (this.selectedFileId !== fileId) {
+        // Switching to a different video file — full reset
+        this.selectedFileId = fileId;
+        this.selectedHitKey = null;
+        this.queryMeta = null;
+        this.matchMeta = null;
+        this.queryZoom = 1.0;
+        this.matchZoom = 1.0;
+        this.expandedHits = {};
+        this.queryFrames = this.videoFramesCache[fileId] ?? null;
+        if (!this.queryFrames && this.sessionId) this._loadQueryFrames(fileId);
+      }
+      this.selectedFrameTimecode = timecode_ms;
+      this.selectedMatchedFrameKey = null;
+      this.querySrc = `/api/query-frame/${this.sessionId}/${fileId}?timecode_ms=${timecode_ms}`;
+      // Sync frame-nav index
+      const frames = this.queryFrames ?? this.videoFramesCache[fileId];
+      if (frames) {
+        const idx = frames.findIndex(f => f.timecode_ms === timecode_ms);
+        if (idx >= 0) this.queryFrameIdx = idx;
+      }
+      // Auto-select best hit for this frame
+      const bestHit = this.filteredHits[0];
+      if (bestHit) {
+        this.selectedHitKey = this.hitKey(bestHit);
+        this.matchSrc = `/api/hit-image?path=${encodeURIComponent(bestHit.path)}`;
+      } else {
+        this.selectedHitKey = null;
+        this.matchSrc = null;
+      }
+      await Promise.all([this._loadQueryMeta(), this._loadMatchMeta()]);
+    },
+
+    async selectMatchedFrame(hit, mf) {
+      this.selectedHitKey = this.hitKey(hit);
+      this.selectedMatchedFrameKey = `${hit.path}:${mf.timecode_ms}`;
+      this.matchZoom = 1.0;
+      this.matchMeta = null;
+      // Construct virtual path for this specific dataset frame
+      const virtualPath = `${hit.video_path}::frame_000000_t=${mf.timecode_ms}ms`;
+      this.matchSrc = `/api/hit-image?path=${encodeURIComponent(virtualPath)}`;
+      await this._loadMatchMetaFor(virtualPath);
+    },
+
     async selectHit(hit) {
       clearTimeout(this._matchImgTimer);
       this.selectedHitKey = this.hitKey(hit);
+      this.selectedMatchedFrameKey = null;
       this.matchZoom = 1.0;
       this.matchMeta = null;
       this.videoTimeline = null;
