@@ -311,16 +311,18 @@ def _unmerged_sort_key(h: Hit) -> tuple:
 
 
 def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
-    """Merge a hit into the per-query-entity accumulator.
+    """Merge a hit into a path-keyed accumulator.
 
-    Only ever called within a single query entity's (one image or one video
-    frame) isolated context.  The only purpose is to combine ALTER and SEMAN
-    scores for the same dataset path onto one hit card, so both measurements
-    from that single comparison are visible side by side.
+    Used in two contexts:
+    1. Per-query-entity (within one image or video frame): combines ALTER and
+       SEMAN scores for the same dataset path onto one card.
+    2. Final unify pass (video queries only): folds hits for the same dataset
+       path across different query frames; query_timecodes and matched_frames
+       are unioned so the resulting card shows all matching query timecodes
+       and all database frames found across those queries.
 
-    The max() here is safe: both scores come from the *same* query→dataset
-    pair measured by two different models (SSCD, DINOv2).  It is never used
-    to combine scores from different query frames or different images.
+    Scores are kept at their highest observed value (max) so a later, lower
+    score for the same mode never downgrades an earlier, higher one.
     """
     if h.path in dest:
         existing = dest[h.path]
@@ -338,6 +340,16 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
                 for tc in h.query_timecodes:
                     if tc not in existing.query_timecodes:
                         existing.query_timecodes.append(tc)
+        if h.matched_frames:
+            if existing.matched_frames is None:
+                existing.matched_frames = list(h.matched_frames)
+            else:
+                existing_tcs = {mf.timecode_ms for mf in existing.matched_frames}
+                for mf in h.matched_frames:
+                    if mf.timecode_ms not in existing_tcs:
+                        existing.matched_frames.append(mf)
+                        existing_tcs.add(mf.timecode_ms)
+                existing.matched_frames.sort(key=lambda mf: mf.timecode_ms)
     else:
         dest[h.path] = h
 
@@ -451,9 +463,16 @@ def query_session(
 
         # Exact hash matches are file-level (not frame-level).  Collect once
         # and pass through without merging with embedding-based results.
+        # For video uploads use video_hash (file SHA-256); for images use
+        # image_hash (pixel hash).  The two hash spaces never collide.
         all_flat_hits: list[Hit] = []
         if "exact" in modes and entry.file_hash:
-            exact_hits, errs = _query_exact(client, entry.file_hash, entry.file_hash_md5, settings)
+            if entry.is_video:
+                exact_hits, errs = _query_exact_video(client, entry.file_hash, settings)
+            else:
+                exact_hits, errs = _query_exact(
+                    client, entry.file_hash, entry.file_hash_md5, settings
+                )
             all_flat_hits.extend(exact_hits)
             file_result.errors.extend(errs)
 
@@ -677,6 +696,107 @@ def _query_exact(
             else:
                 logger.warning("Exact query failed on %s: %s", collection, exc)
                 errors.append(f"exact query failed: {type(exc).__name__}")
+    return hits, errors
+
+
+def _query_exact_video(
+    client: QdrantClient,
+    video_hash: str,
+    settings: Settings,
+) -> tuple[list[Hit], list[str]]:
+    """Return exact video-hash matches for a video query.
+
+    Searches both collections for indexed frames whose ``video_hash`` equals
+    the query video's SHA-256, groups them by ``video_path`` into one Hit per
+    matching database video, and populates ``matched_frames`` with all matched
+    frames sorted by timecode.  Each matching database video gets score
+    ``{"exact": 1.0}``.
+    """
+    hits: list[Hit] = []
+    errors: list[str] = []
+    collection_mode = {
+        settings.collection_sscd: "altered",
+        settings.collection_dino: "semantic",
+    }
+    # video_path → {timecode_ms → payload dict}, provenance dict
+    video_frames: dict[str, dict[int, dict]] = {}
+    video_provenance: dict[str, dict] = {}
+    video_video_hash: dict[str, str] = {}
+
+    for collection in (settings.collection_sscd, settings.collection_dino):
+        mode_key = collection_mode[collection]
+        try:
+            records, _ = client.scroll(
+                collection_name=collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
+                ),
+                # video_max_frames defaults to 500; 2000 is a safe ceiling for
+                # any single video while keeping the call bounded.
+                limit=2000,
+                with_payload=[
+                    "image_path",
+                    "image_hash",
+                    "video_path",
+                    "video_hash",
+                    "frame_timecode_ms",
+                    "model_name",
+                    "model_hash",
+                ],
+                with_vectors=False,
+            )
+            for r in records:
+                vpath = r.payload.get("video_path", "")
+                if not vpath:
+                    continue
+                if vpath not in video_frames:
+                    video_frames[vpath] = {}
+                    video_provenance[vpath] = {}
+                    video_video_hash[vpath] = r.payload.get("video_hash", video_hash)
+                mn = r.payload.get("model_name", "")
+                mh = r.payload.get("model_hash", "")
+                if (mn or mh) and mode_key not in video_provenance[vpath]:
+                    video_provenance[vpath][mode_key] = {"name": mn, "hash": mh}
+                tc: int = r.payload.get("frame_timecode_ms") or 0
+                if tc not in video_frames[vpath]:
+                    video_frames[vpath][tc] = {
+                        "timecode_ms": tc,
+                        "frame_hash": r.payload.get("image_hash", ""),
+                        "image_path": r.payload.get("image_path", ""),
+                    }
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc).lower()
+            if "not found" in msg or "doesn't exist" in msg:
+                logger.debug("Exact video query skipped non-existent collection %s", collection)
+            else:
+                logger.warning("Exact video query failed on %s: %s", collection, exc)
+                errors.append(f"exact video query failed: {type(exc).__name__}")
+
+    for vpath, frames_by_tc in video_frames.items():
+        sorted_frames = sorted(frames_by_tc.values(), key=lambda f: f["timecode_ms"])
+        representative = sorted_frames[0] if sorted_frames else {}
+        matched = [
+            MatchedVideoFrame(
+                timecode_ms=f["timecode_ms"],
+                frame_hash=f["frame_hash"],
+                scores={"exact": 1.0},
+            )
+            for f in sorted_frames
+        ]
+        hits.append(
+            Hit(
+                path=representative.get("image_path", vpath),
+                scores={"exact": 1.0},
+                image_hash=representative.get("frame_hash"),
+                model_provenance=video_provenance.get(vpath, {}),
+                is_video_frame=True,
+                video_path=vpath,
+                video_hash=video_video_hash.get(vpath, video_hash),
+                frame_timecode_ms=representative.get("timecode_ms"),
+                matched_frames=matched,
+            )
+        )
+
     return hits, errors
 
 

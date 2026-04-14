@@ -226,7 +226,8 @@ def _index_video(
         for embedder, _, model_hash in specs
     ]
 
-    frames_indexed = 0
+    frames_indexed = 0  # spec_idx==0 only — used in return value / summary
+    frames_indexed_any = 0  # any spec — used to determine rec.status
     frames_skipped = 0
     total_frames_seen = 0
 
@@ -306,6 +307,7 @@ def _index_video(
                     video_metadata=embed_vmeta,
                 )
                 indexed_counts[spec_idx] += len(pre)
+                frames_indexed_any += len(pre)
                 if spec_idx == 0:
                     frames_indexed += len(pre)
 
@@ -324,7 +326,7 @@ def _index_video(
     # frames_skipped tracks only spec_idx==0 (symmetric with frames_indexed).
     n_skip = frames_skipped
 
-    if frames_indexed > 0:
+    if frames_indexed_any > 0:
         rec.status = _S_INDEXED
         rec.reason = f"{total_frames_seen} frames extracted"
     elif n_skip >= total_frames_seen:

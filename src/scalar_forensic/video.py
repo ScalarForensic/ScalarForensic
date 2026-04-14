@@ -55,8 +55,8 @@ class ExtractedFrame:
     image: Image.Image
     timecode_ms: int  # position in video in milliseconds
     frame_index: int  # ordinal among yielded unique frames (0-based)
-    frame_hash: str  # SHA-256 of PNG-encoded frame bytes
-    frame_bytes: bytes  # PNG bytes used for hashing + thumbnail generation
+    frame_hash: str  # SHA-256 of width/height-prefixed raw RGB pixel bytes
+    frame_bytes: bytes  # PNG-encoded bytes for thumbnail/storage only; not used for hashing
 
     # Needed so the frozen dataclass can hold a non-hashable Image.Image
     def __hash__(self) -> int:  # type: ignore[override]
