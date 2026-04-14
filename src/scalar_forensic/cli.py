@@ -112,28 +112,30 @@ class _ETATracker:
         yields a calibrated uncertainty estimate at no extra cost.
     """
 
-    _Q: float = 50.0    # process-noise variance  (img/s)²
-    _R: float = 100.0   # measurement-noise variance (img/s)²
+    _Q: float = 50.0  # process-noise variance  (img/s)²
+    _R: float = 100.0  # measurement-noise variance (img/s)²
 
     def __init__(self) -> None:
         self._x: float | None = None  # x̂: current rate estimate (img/s)
-        self._P: float = 1e8          # P: estimate error variance (diffuse prior)
-        self._n: int = 0              # number of updates applied
+        self._P: float = 1e8  # P: estimate error variance (diffuse prior)
+        self._k: float = 1.0  # Kₜ: Kalman gain at last update (1 = full trust)
+        self._n: int = 0  # number of updates applied
 
     def update(self, n_imgs: int, elapsed_s: float) -> None:
         """Incorporate a new batch observation.  Θ(1) — scalar predict-update cycle."""
         if elapsed_s <= 0 or n_imgs <= 0:
             return
-        z = n_imgs / elapsed_s                  # zₜ: observed throughput
+        z = n_imgs / elapsed_s  # zₜ: observed throughput
         self._n += 1
         if self._x is None:
             self._x = z
-            self._P = self._R                   # P₁ = R: certainty = measurement quality
+            self._P = self._R  # P₁ = R: certainty = measurement quality
             return
-        p_pred = self._P + self._Q              # Pₜ⁻ = Pₜ₋₁ + Q
-        k = p_pred / (p_pred + self._R)         # Kₜ = Pₜ⁻(Pₜ⁻ + R)⁻¹
+        p_pred = self._P + self._Q  # Pₜ⁻ = Pₜ₋₁ + Q
+        k = p_pred / (p_pred + self._R)  # Kₜ = Pₜ⁻(Pₜ⁻ + R)⁻¹
         self._x = self._x + k * (z - self._x)  # x̂ₜ = x̂ₜ⁻ + Kₜ(zₜ − x̂ₜ⁻)
-        self._P = (1.0 - k) * p_pred            # Pₜ = (1 − Kₜ)Pₜ⁻
+        self._P = (1.0 - k) * p_pred  # Pₜ = (1 − Kₜ)Pₜ⁻
+        self._k = k
 
     @property
     def rate(self) -> float | None:
@@ -143,7 +145,14 @@ class _ETATracker:
     @property
     def rate_std(self) -> float:
         """√Pₜ — 1σ uncertainty on the rate estimate (img/s)."""
-        return self._P ** 0.5
+        return self._P**0.5
+
+    @property
+    def kalman_gain(self) -> float:
+        """Kₜ — Kalman gain at the most recent update.
+        Converges toward K∞ = ½ at steady state (Q = R/2).
+        """
+        return self._k
 
     def eta(self, remaining: int) -> tuple[float, float] | None:
         """Return (η̂, σ_η) in seconds, or None if not enough data.
@@ -154,8 +163,8 @@ class _ETATracker:
         """
         if self._x is None or self._x <= 0 or self._n < 2:
             return None
-        eta_s = remaining / self._x                         # η̂
-        sigma_s = remaining * self.rate_std / self._x ** 2  # σ_η
+        eta_s = remaining / self._x  # η̂
+        sigma_s = remaining * self.rate_std / self._x**2  # σ_η
         return eta_s, sigma_s
 
 
@@ -487,6 +496,14 @@ def index(
     total_image_count = len(image_paths)
     tracker = _ETATracker()
 
+    if total_image_count > 0:
+        typer.echo(
+            f"  ETA  x̂ₜ = x̂ₜ⁻ + Kₜ(zₜ − x̂ₜ⁻)"
+            f"  ·  Kₜ = Pₜ⁻(Pₜ⁻ + R)⁻¹"
+            f"  ·  σ_η = N_rem · √Pₜ / x̂²"
+            f"  [Θ(1) Kalman]"
+        )
+
     for batch_paths in batched(iter(image_paths), settings.batch_size):
         batch_num += 1
         batch_wall_t0 = perf_counter()
@@ -755,13 +772,17 @@ def index(
                     eta_s, sigma_s = result
                     pct = imgs_processed_so_far / total_image_count * 100
                     bar = _progress_bar(pct)
+                    sep = "─" * 68
                     typer.echo(
-                        f"  {'─' * 68}\n"
-                        f"  [{bar}] {imgs_processed_so_far:,} / {total_image_count:,}"
-                        f"  ({pct:.1f}%)"
-                        f"  ·  {tracker.rate:.1f} ±{tracker.rate_std:.1f} img/s"
-                        f"  ·  ETA ~{_fmt_duration(eta_s)} ±{_fmt_duration(sigma_s)}\n"
-                        f"  {'─' * 68}"
+                        f"  {sep}\n"
+                        f"  [{bar}]  {imgs_processed_so_far:,} / {total_image_count:,}"
+                        f"  ({pct:.1f}%)\n"
+                        f"  x̂ = {tracker.rate:.1f} img/s"
+                        f"  √P = {tracker.rate_std:.1f}"
+                        f"  K = {tracker.kalman_gain:.3f}"
+                        f"  ·  η̂ ~ {_fmt_duration(eta_s)}"
+                        f"  σ_η ± {_fmt_duration(sigma_s)}\n"
+                        f"  {sep}"
                     )
 
     # ── Video processing pass ─────────────────────────────────────────────────
