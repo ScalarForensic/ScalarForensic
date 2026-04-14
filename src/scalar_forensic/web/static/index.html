@@ -440,6 +440,9 @@
         </div>
         <div class="drop-zone-progress-filename"
              x-text="progress.filename"></div>
+        <div x-show="progress.frameCount > 0"
+             style="font-size:11px;color:#a78bfa;margin-top:4px"
+             x-text="`▶ ${progress.frameCount} frames processed`"></div>
       </div>
 
       <div x-show="phase !== 'analyzing'">
@@ -601,11 +604,16 @@
       <template x-if="selectedFileId">
         <div class="image-panel-inner">
           <div class="image-box">
-            <img x-show="querySrc"
+            <img x-show="querySrc && !isVideoUpload"
                  :src="querySrc"
                  :style="`transform: scale(${queryZoom})`"
                  @click="openLightbox(querySrc)"
                  alt="Query image">
+            <video x-show="querySrc && isVideoUpload"
+                   :src="querySrc"
+                   controls muted
+                   :style="`transform: scale(${queryZoom}); max-width:100%; max-height:100%; object-fit:contain`"
+                   preload="metadata"></video>
             <div class="image-zoom-btns">
               <button class="zoom-btn" @click.stop="queryZoom = Math.min(4, queryZoom + 0.25)" title="Zoom in">+</button>
               <button class="zoom-btn" @click.stop="queryZoom = Math.max(0.2, queryZoom - 0.25)" title="Zoom out">−</button>
@@ -1039,6 +1047,13 @@ function sfn() {
     get selectedFile() {
       return this.results.find(r => r.file_id === this.selectedFileId) ?? null;
     },
+    get isVideoUpload() {
+      const f = this.selectedFile;
+      if (!f) return false;
+      const dot = f.filename.lastIndexOf('.');
+      const ext = dot >= 0 ? f.filename.slice(dot).toLowerCase() : '';
+      return ['.mp4','.avi','.mov','.mkv','.wmv','.flv','.webm','.m4v','.mpg','.mpeg','.3gp','.ts','.mts'].includes(ext);
+    },
     get matchedFiles() {
       return this.results.filter(r => r.hits.length > 0 && !(r.errors?.length > 0));
     },
@@ -1244,7 +1259,7 @@ function sfn() {
       if (_vc && _vc._stopViz) _vc._stopViz();
       this.analysisRunModes = [...this.selectedModes];
       this.phase = 'analyzing';
-      this.progress = { current: 0, total: this.pendingFiles.length, filename: '' };
+      this.progress = { current: 0, total: this.pendingFiles.length, filename: '', frameCount: 0 };
 
       const fd = new FormData();
       for (const f of this.pendingFiles) fd.append('files', f, f.webkitRelativePath || f.name);
@@ -1269,7 +1284,9 @@ function sfn() {
           let evt;
           try { evt = JSON.parse(line.slice(6)); } catch { continue; }
           if (['progress','file_done','error'].includes(evt.type))
-            this.progress = { current: evt.current, total: evt.total, filename: evt.filename };
+            this.progress = { current: evt.current, total: evt.total, filename: evt.filename, frameCount: 0 };
+          if (evt.type === 'video_progress')
+            this.progress = { ...this.progress, frameCount: evt.current };
           if (evt.type === 'done') {
             this.sessionId = evt.session_id;
             await this.runQuery();

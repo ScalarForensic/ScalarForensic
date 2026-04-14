@@ -34,6 +34,7 @@ from scalar_forensic.video import (
     parse_virtual_path,
 )
 from scalar_forensic.web.pipeline import (
+    ProgressEvent,
     QueryProvenance,
     analyze_session,
     get_available_modes,
@@ -158,10 +159,35 @@ async def analyze(
         session.files.append(FileEntry(file_id=file_id, filename=filename, temp_path=dest))
 
     async def event_stream():
-        for event in analyze_session(session, mode_list, settings):
+        # Run the analysis (CPU-intensive) in a thread pool so the event loop
+        # stays free to flush SSE chunks to the client in real time.  Without
+        # this the loop is blocked between yields and the browser sees no
+        # progress until an entire batch finishes.
+        queue: asyncio.Queue[ProgressEvent | None] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def _run_analysis() -> None:
+            try:
+                for event in analyze_session(session, mode_list, settings):
+                    loop.call_soon_threadsafe(queue.put_nowait, event)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+
+        task = asyncio.create_task(asyncio.to_thread(_run_analysis))
+
+        while True:
+            event = await queue.get()
+            if event is None:
+                break
             yield f"data: {json.dumps(event.__dict__)}\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+        await task  # re-raise any unexpected exception from the thread
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ---------------------------------------------------------------------------

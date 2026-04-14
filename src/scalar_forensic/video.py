@@ -118,7 +118,9 @@ def extract_frames(
     try:
         video_streams = container.streams.video
         if not video_streams:
-            raise RuntimeError(f"No video stream found in {video_path}")
+            raise RuntimeError(
+                f"No video stream found in {video_path.name} — file may be audio-only"
+            )
 
         video_stream = video_streams[0]
         time_base = float(video_stream.time_base)

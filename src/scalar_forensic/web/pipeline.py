@@ -114,7 +114,10 @@ def analyze_session(
             file_id=entry.file_id,
         )
         try:
-            _analyze_file(entry, embedders)
+            if Path(entry.filename).suffix.lower() in VIDEO_EXTENSIONS:
+                yield from _analyze_video_file(entry, embedders)
+            else:
+                _analyze_file(entry, embedders)
             yield ProgressEvent(
                 type="file_done",
                 current=i + 1,
@@ -137,11 +140,6 @@ def analyze_session(
 
 
 def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
-    ext = Path(entry.filename).suffix.lower()
-    if ext in VIDEO_EXTENSIONS:
-        _analyze_video_file(entry, embedders)
-        return
-
     data = entry.temp_path.read_bytes()
     entry.file_hash = hash_bytes(data)
     entry.file_hash_md5 = hash_bytes_md5(data)
@@ -164,13 +162,18 @@ def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
 _VIDEO_FRAME_BATCH = 32  # frames processed per embedding batch in the web pipeline
 
 
-def _analyze_video_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
+def _analyze_video_file(
+    entry: FileEntry, embedders: dict[str, AnyEmbedder]
+) -> Generator[ProgressEvent, None, None]:
     """Extract frames from an uploaded video temp file and embed each one.
 
     Frames are extracted via the seek-based generator and processed in batches
     of ``_VIDEO_FRAME_BATCH`` so peak memory is bounded regardless of video
     length.  The video file is hashed in a streaming pass rather than loaded
     into RAM.
+
+    Yields ``video_progress`` ProgressEvents after each batch so the web UI
+    can show how many frames have been processed while a long video is running.
     """
     from itertools import batched as _batched
 
@@ -215,6 +218,14 @@ def _analyze_video_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> 
                         fe.sscd_embedding = emb
                     else:
                         fe.dino_embedding = emb
+
+            yield ProgressEvent(
+                type="video_progress",
+                current=len(frame_entries),
+                total=settings.video_max_frames,
+                filename=entry.filename,
+                file_id=entry.file_id,
+            )
 
     except Exception as exc:
         raise RuntimeError(f"Video frame extraction failed: {exc}") from exc
