@@ -42,6 +42,11 @@ def _make_entry(
     entry.file_hash_md5 = "md5abc"
     entry.dino_embedding = [0.1] * 1024 if dino else None
     entry.sscd_embedding = [0.2] * 512 if sscd else None
+    # Explicitly mark as non-video so the pipeline takes the image path, not
+    # the video-frame iteration branch (MagicMock attributes are truthy by
+    # default, which would silently bypass all vector queries).
+    entry.is_video = False
+    entry.video_frames = None
     return entry
 
 

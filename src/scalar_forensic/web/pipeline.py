@@ -542,12 +542,16 @@ def query_session(
             )
             all_flat_hits.extend(_group_video_hits(frame_hits))
 
-        # Sort all hits.  For image queries apply the global limit (each query
-        # produced one set of results).  For video queries Qdrant already
-        # limited each frame's results independently, so no global cap —
-        # every frame's evidence is preserved for the per-frame child views.
+        # Final merge pass (unify only): exact hits and vector hits for the
+        # same dataset path must end up on one row.  Exact hits were added to
+        # all_flat_hits before the per-qtc loop; vector hits were appended
+        # after it.  _merge_hit folds both into one Hit per path — every score
+        # still originates from its own independent 1:1 comparison.
         if unify:
-            sorted_hits = sorted(all_flat_hits, key=_hit_sort_key)
+            final_merged: dict[str, Hit] = {}
+            for h in all_flat_hits:
+                _merge_hit(h, final_merged)
+            sorted_hits = sorted(final_merged.values(), key=_hit_sort_key)
             file_result.hits = (
                 sorted_hits if entry.is_video else sorted_hits[:limit]
             )
