@@ -253,10 +253,13 @@ def _index_video(
     frames_skipped = 0
 
     for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
-        # Dedup: skip frames already in Qdrant by image_hash
-        already_indexed = indexer.get_indexed_hashes(frame_hashes)
-        to_embed_idx = [i for i, h in enumerate(frame_hashes) if h not in already_indexed]
-        frames_skipped += len(frame_hashes) - len(to_embed_idx)
+        # Dedup: skip frames already in Qdrant by their virtual path (encodes
+        # video identity + timecode), not by frame content hash alone — two
+        # different videos can share identical frames but must be indexed separately.
+        vpath_strings = [str(p) for p in virtual_paths]
+        already_indexed_paths = indexer.get_indexed_paths(vpath_strings)
+        to_embed_idx = [i for i, p in enumerate(vpath_strings) if p not in already_indexed_paths]
+        frames_skipped += len(virtual_paths) - len(to_embed_idx)
 
         if not to_embed_idx:
             continue

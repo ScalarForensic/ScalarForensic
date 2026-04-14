@@ -203,7 +203,8 @@ def _analyze_video_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> 
 
     entry.video_frames = frame_entries
 
-    # Use the best-scoring frame embedding as the top-level embedding for backward compat
+    # Use the first extracted frame's embedding as the top-level entry-point embedding.
+    # query_session() will query with each frame's embedding individually via video_frames.
     if frame_entries:
         entry.sscd_embedding = frame_entries[0].sscd_embedding
         entry.dino_embedding = frame_entries[0].dino_embedding

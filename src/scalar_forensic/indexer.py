@@ -163,7 +163,12 @@ class Indexer:
                 # Forensic identifiers
                 "image_hash": image_hash,
                 **({"image_hash_md5": image_hashes_md5[i]} if image_hashes_md5 else {}),
-                "image_path": str(image_path),  # virtual path for video frames
+                # Video frames carry a virtual path string (already absolute).
+                # Regular images are resolved to an absolute path so that
+                # get_indexed_paths() and /api/hit-image lookups always match.
+                "image_path": (
+                    str(image_path) if vmeta is not None else str(Path(image_path).resolve())
+                ),
                 "indexed_at": indexed_at,
                 # Model & library provenance
                 "model_name": shared_metadata["model_name"],
