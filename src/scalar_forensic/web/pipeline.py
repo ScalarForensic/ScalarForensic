@@ -269,6 +269,10 @@ class Hit:
     # A merged hit (after the final unify pass) may be associated with multiple
     # query frames, so this list can contain more than one timecode.
     query_timecodes: list[int] | None = None
+    # Timecode (ms) of the query frame whose score was the highest among all
+    # query frames that contributed to this hit.  Useful for the frontend to
+    # auto-navigate to the most relevant query frame for a merged video hit.
+    best_query_timecode_ms: int | None = None
 
     def best_score(self) -> float:
         return max(self.scores.values(), default=0.0)
@@ -326,31 +330,49 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
     """
     if h.path in dest:
         existing = dest[h.path]
+        pre_merge_best = existing.best_score()
+
         for mode, score in h.scores.items():
             if mode not in existing.scores or score > existing.scores[mode]:
                 existing.scores[mode] = score
                 if mode in h.model_provenance:
                     existing.model_provenance[mode] = h.model_provenance[mode]
+
         if h.image_hash and not existing.image_hash:
             existing.image_hash = h.image_hash
+
         if h.query_timecodes:
+            tc = h.query_timecodes[0]
             if existing.query_timecodes is None:
-                existing.query_timecodes = list(h.query_timecodes)
+                existing.query_timecodes = [tc]
+                existing.best_query_timecode_ms = tc
             else:
-                for tc in h.query_timecodes:
-                    if tc not in existing.query_timecodes:
-                        existing.query_timecodes.append(tc)
+                if tc not in existing.query_timecodes:
+                    existing.query_timecodes.append(tc)
+                # Update best_query_timecode_ms when the incoming hit contributes
+                # a score higher than the current maximum across all modes.
+                if h.best_score() > pre_merge_best:
+                    existing.best_query_timecode_ms = tc
+
         if h.matched_frames:
             if existing.matched_frames is None:
                 existing.matched_frames = list(h.matched_frames)
             else:
-                existing_tcs = {mf.timecode_ms for mf in existing.matched_frames}
+                # Merge by timecode: for duplicate timecodes keep the max score
+                # per mode rather than discarding the new entry entirely.
+                tc_to_mf = {mf.timecode_ms: mf for mf in existing.matched_frames}
                 for mf in h.matched_frames:
-                    if mf.timecode_ms not in existing_tcs:
-                        existing.matched_frames.append(mf)
-                        existing_tcs.add(mf.timecode_ms)
-                existing.matched_frames.sort(key=lambda mf: mf.timecode_ms)
+                    if mf.timecode_ms not in tc_to_mf:
+                        tc_to_mf[mf.timecode_ms] = mf
+                    else:
+                        existing_mf = tc_to_mf[mf.timecode_ms]
+                        for mode, score in mf.scores.items():
+                            if mode not in existing_mf.scores or score > existing_mf.scores[mode]:
+                                existing_mf.scores[mode] = score
+                existing.matched_frames = sorted(tc_to_mf.values(), key=lambda mf: mf.timecode_ms)
     else:
+        if h.query_timecodes:
+            h.best_query_timecode_ms = h.query_timecodes[0]
         dest[h.path] = h
 
 
@@ -723,47 +745,55 @@ def _query_exact_video(
     video_provenance: dict[str, dict] = {}
     video_video_hash: dict[str, str] = {}
 
+    # Page size: use video_max_frames when set (0 = no cap → fall back to 2000).
+    _page_size = settings.video_max_frames if settings.video_max_frames > 0 else 2000
+
     for collection in (settings.collection_sscd, settings.collection_dino):
         mode_key = collection_mode[collection]
         try:
-            records, _ = client.scroll(
-                collection_name=collection,
-                scroll_filter=Filter(
-                    must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
-                ),
-                # video_max_frames defaults to 500; 2000 is a safe ceiling for
-                # any single video while keeping the call bounded.
-                limit=2000,
-                with_payload=[
-                    "image_path",
-                    "image_hash",
-                    "video_path",
-                    "video_hash",
-                    "frame_timecode_ms",
-                    "model_name",
-                    "model_hash",
-                ],
-                with_vectors=False,
+            scroll_filter = Filter(
+                must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
             )
-            for r in records:
-                vpath = r.payload.get("video_path", "")
-                if not vpath:
-                    continue
-                if vpath not in video_frames:
-                    video_frames[vpath] = {}
-                    video_provenance[vpath] = {}
-                    video_video_hash[vpath] = r.payload.get("video_hash", video_hash)
-                mn = r.payload.get("model_name", "")
-                mh = r.payload.get("model_hash", "")
-                if (mn or mh) and mode_key not in video_provenance[vpath]:
-                    video_provenance[vpath][mode_key] = {"name": mn, "hash": mh}
-                tc: int = r.payload.get("frame_timecode_ms") or 0
-                if tc not in video_frames[vpath]:
-                    video_frames[vpath][tc] = {
-                        "timecode_ms": tc,
-                        "frame_hash": r.payload.get("image_hash", ""),
-                        "image_path": r.payload.get("image_path", ""),
-                    }
+            payload_fields = [
+                "image_path",
+                "image_hash",
+                "video_path",
+                "video_hash",
+                "frame_timecode_ms",
+                "model_name",
+                "model_hash",
+            ]
+            offset = None
+            while True:
+                records, offset = client.scroll(
+                    collection_name=collection,
+                    scroll_filter=scroll_filter,
+                    limit=_page_size,
+                    offset=offset,
+                    with_payload=payload_fields,
+                    with_vectors=False,
+                )
+                for r in records:
+                    vpath = r.payload.get("video_path", "")
+                    if not vpath:
+                        continue
+                    if vpath not in video_frames:
+                        video_frames[vpath] = {}
+                        video_provenance[vpath] = {}
+                        video_video_hash[vpath] = r.payload.get("video_hash", video_hash)
+                    mn = r.payload.get("model_name", "")
+                    mh = r.payload.get("model_hash", "")
+                    if (mn or mh) and mode_key not in video_provenance[vpath]:
+                        video_provenance[vpath][mode_key] = {"name": mn, "hash": mh}
+                    tc: int = r.payload.get("frame_timecode_ms") or 0
+                    if tc not in video_frames[vpath]:
+                        video_frames[vpath][tc] = {
+                            "timecode_ms": tc,
+                            "frame_hash": r.payload.get("image_hash", ""),
+                            "image_path": r.payload.get("image_path", ""),
+                        }
+                if not records or offset is None:
+                    break
         except Exception as exc:  # noqa: BLE001
             msg = str(exc).lower()
             if "not found" in msg or "doesn't exist" in msg:

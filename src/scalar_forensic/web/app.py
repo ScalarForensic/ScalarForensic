@@ -395,6 +395,8 @@ async def hit_image(path: str) -> Response:
     parsed = parse_virtual_path(path)
     if parsed is not None:
         video_path, timecode_ms = parsed
+        if not video_path.is_absolute():
+            raise HTTPException(status_code=400, detail="Virtual path must be absolute")
         video_path = video_path.resolve()
         _check_allowed_path(video_path)
         if not video_path.exists() or not video_path.is_file():
@@ -493,6 +495,8 @@ async def hit_metadata(path: str) -> JSONResponse:
     parsed = parse_virtual_path(path)
     if parsed is not None:
         video_path, timecode_ms = parsed
+        if not video_path.is_absolute():
+            raise HTTPException(status_code=400, detail="Virtual path must be absolute")
         video_path = video_path.resolve()
         _check_allowed_path(video_path)
         if not video_path.exists() or not video_path.is_file():
