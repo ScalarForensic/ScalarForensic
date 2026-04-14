@@ -6,7 +6,9 @@ pipeline unchanged.
 
 Forensic reproducibility guarantee: given the same video file and the same
 extraction parameters (fps, max_frames), this module always produces frames
-with identical content, timecodes, and SHA-256 hashes.
+with identical content, timecodes, and SHA-256 hashes.  Hashes are derived
+from raw RGB pixel bytes (width + height prefix), not from PNG-encoded bytes,
+so they are stable across Pillow and zlib versions.
 """
 
 from __future__ import annotations
@@ -44,9 +46,10 @@ class ExtractedFrame:
     """A single frame extracted from a video file.
 
     All fields are immutable to ensure accidental mutation is caught early.
-    ``frame_bytes`` is PNG-encoded (lossless, deterministic) and is the
-    canonical byte representation used for SHA-256 hashing and thumbnail
-    generation.  ``image`` is the decoded PIL RGB Image for embedding.
+    ``frame_hash`` is SHA-256 of raw RGB pixel bytes (width + height prefix),
+    stable across Pillow/zlib versions.  ``frame_bytes`` is PNG-encoded for
+    thumbnail storage only.  ``image`` is the decoded PIL RGB Image for
+    embedding.
     """
 
     image: Image.Image
@@ -66,10 +69,26 @@ class ExtractedFrame:
 
 
 def _png_encode(image: Image.Image) -> bytes:
-    """Encode a PIL Image to PNG bytes (lossless, deterministic across platforms)."""
+    """Encode a PIL Image to PNG bytes for thumbnail storage."""
     buf = io.BytesIO()
     image.save(buf, format="PNG", optimize=False)
     return buf.getvalue()
+
+
+def _frame_pixel_hash(image: Image.Image) -> str:
+    """SHA-256 of width || height || raw RGB pixel bytes.
+
+    Hashing raw pixel data rather than PNG-encoded bytes makes the hash
+    stable across Pillow and zlib versions: PNG output can vary between
+    encoder versions even when pixel content is identical, which would
+    silently change ``frame_hash`` and break the reproducibility guarantee.
+    The width/height prefix disambiguates images of different dimensions
+    that happen to share an identical pixel sequence.
+    """
+    rgb = image.convert("RGB") if image.mode != "RGB" else image
+    w, h = rgb.size
+    header = w.to_bytes(4, "little") + h.to_bytes(4, "little")
+    return hashlib.sha256(header + rgb.tobytes()).hexdigest()
 
 
 def extract_frames(
@@ -178,7 +197,7 @@ def _make_frame(
     """Decode, PNG-encode, and hash one PyAV video frame."""
     pil_image = av_frame.to_image()
     frame_bytes = _png_encode(pil_image)
-    frame_hash = hashlib.sha256(frame_bytes).hexdigest()
+    frame_hash = _frame_pixel_hash(pil_image)
     pts_s = float(av_frame.pts) * time_base
     return ExtractedFrame(
         image=pil_image,
