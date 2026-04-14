@@ -130,6 +130,22 @@ class Indexer:
         return (
             payload.get("extraction_fps") == extraction_fps
             and payload.get("max_frames_cap") == max_frames_cap
+            and "video_frames_total" in payload  # written by mark_video_complete after full index
+        )
+
+    def mark_video_complete(self, video_hash: str, frame_count: int) -> None:
+        """Set video_frames_total on every frame of this video as a completion marker.
+
+        Called after all frames have been successfully upserted.  Its absence
+        tells is_video_complete() that a previous run was interrupted and the
+        video must be re-indexed.
+        """
+        self.client.set_payload(
+            collection_name=self.collection,
+            payload={"video_frames_total": frame_count},
+            filter=Filter(
+                must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
+            ),
         )
 
     def get_indexed_paths(self, paths: list[str]) -> set[str]:

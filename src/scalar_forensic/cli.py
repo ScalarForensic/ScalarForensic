@@ -662,7 +662,7 @@ def index(
         # Hash each video once and query each model's collection at the video level.
         # If all models already have the video, skip frame extraction entirely.
         # If only some models have it, only those models skip during the batch loop.
-        pre_hashes: dict[Path, str] = {}         # vpath → sha256
+        pre_hashes: dict[Path, str] = {}  # vpath → sha256
         skip_by_spec: dict[Path, set[int]] = {}  # vpath → spec indices that already have it
 
         for vp in video_paths:
@@ -691,7 +691,8 @@ def index(
                 rec.reason = "video already indexed"
 
         videos_to_process = [
-            vp for vp in video_paths
+            vp
+            for vp in video_paths
             if vp in pre_hashes and records[vp].status not in (_S_FAIL_READ, _S_SKIP_IDX)
         ]
 
@@ -699,6 +700,11 @@ def index(
         vf_total: dict[Path, int] = {vp: 0 for vp in videos_to_process}
         vf_indexed: dict[Path, int] = {vp: 0 for vp in videos_to_process}
         vf_skipped: dict[Path, int] = {vp: 0 for vp in videos_to_process}
+        # Per-spec, per-video indexed counts — used after the batch loop to
+        # call mark_video_complete() only for specs that fully indexed a video.
+        vf_indexed_by_spec: dict[int, dict[Path, int]] = {
+            si: {vp: 0 for vp in videos_to_process} for si in range(len(specs))
+        }
 
         for raw_frame_batch in batched(
             _frame_stream(videos_to_process, records, settings, pyav_version, pre_hashes),
@@ -743,7 +749,8 @@ def index(
                 # The pre-check pass determined which spec indices have each video;
                 # no per-frame Qdrant query needed.
                 to_embed_idx = [
-                    i for i in range(n_items)
+                    i
+                    for i in range(n_items)
                     if spec_idx not in skip_by_spec.get(source_vpaths[i], set())
                 ]
                 n_skipped = n_items - len(to_embed_idx)
@@ -801,6 +808,7 @@ def index(
                 # indexed by spec 1 (not spec 0) is still marked as _S_INDEXED.
                 for sv in embed_src:
                     vf_indexed[sv] += 1
+                    vf_indexed_by_spec[spec_idx][sv] += 1
 
                 model_segments.append(
                     f"{backend} norm {norm_s:.2f}s"
@@ -851,6 +859,23 @@ def index(
                     f"  read 0.00s  hash 0.00s  pre {pre_s:.2f}s"
                     f"  |  " + "  |  ".join(model_segments) + upsert_str
                 )
+
+        # ── Mark videos as fully indexed (per spec) ──────────────────────────
+        # Called only when all frames of a video were successfully embedded and
+        # upserted by a given spec.  Writes video_frames_total onto every frame
+        # payload so is_video_complete() can distinguish a finished index from
+        # an interrupted partial one.
+        for vp in videos_to_process:
+            total = vf_total.get(vp, 0)
+            if total == 0:
+                continue
+            vh = pre_hashes[vp]
+            already_done = skip_by_spec.get(vp, set())
+            for spec_idx, (_, indexer, _) in enumerate(specs):
+                if spec_idx in already_done:
+                    continue  # was complete before this run
+                if vf_indexed_by_spec[spec_idx].get(vp, 0) >= total:
+                    indexer.mark_video_complete(vh, total)
 
         # ── Finalise per-video file records from accumulated frame counts ─────
         for vp in video_paths:
