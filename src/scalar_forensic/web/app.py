@@ -149,7 +149,10 @@ async def analyze(
     for upload in files:
         file_id = str(uuid.uuid4())
         filename = upload.filename or "unknown"
-        dest = tmp_dir / file_id
+        # Preserve the original extension so container-detection libraries
+        # (PyAV, Pillow) can identify the format from the filename.
+        suffix = Path(filename).suffix
+        dest = tmp_dir / (file_id + suffix)
         data = await upload.read()
         dest.write_bytes(data)
         session.files.append(FileEntry(file_id=file_id, filename=filename, temp_path=dest))
