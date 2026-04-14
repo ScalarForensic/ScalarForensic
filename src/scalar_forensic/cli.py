@@ -67,6 +67,107 @@ def _fmt_mbps(bytes_total: int, seconds: float) -> str:
     return f"{bytes_total / 1e6 / seconds:.1f} MB/s"
 
 
+def _fmt_duration(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m {s:02d}s"
+
+
+def _progress_bar(pct: float, width: int = 28) -> str:
+    """Unicode block-element progress bar."""
+    filled = round(width * min(max(pct, 0.0), 100.0) / 100)
+    return "█" * filled + "░" * (width - filled)
+
+
+class _ETATracker:
+    """Kalman-filtered throughput estimator — Θ(1) time and space per update.
+
+    State space: x ∈ ℝ₊ (throughput, img/s), A = H = 1 (scalar random walk):
+
+        Predict:  x̂ₜ⁻  = x̂ₜ₋₁                         Φ := 1
+                  Pₜ⁻  = Pₜ₋₁ + Q,    Q ∈ ℝ₊
+
+        Update:   Kₜ   = Pₜ⁻ (Pₜ⁻ + R)⁻¹               Kₜ ∈ (0, 1)
+                  x̂ₜ   = x̂ₜ⁻ + Kₜ(zₜ − x̂ₜ⁻)
+                  Pₜ   = (1 − Kₜ)Pₜ⁻                   (Joseph form, H = 1)
+
+        DARE (t → ∞, unique ℝ₊ root of P∞² + QP∞ − QR = 0):
+                  P∞   = ½(√(Q² + 4QR) − Q)
+                  K∞   = Q / (Q + √(Q² + 4QR))
+          ∀ Q = R/2 :  K∞ = ½                           equal-weight equilibrium ✓
+
+        δ-method (first-order error propagation, η̂ := N_rem / x̂):
+                  Var[η̂] ≈ (∂η/∂x)²|_{x=x̂} · Pₜ
+                           = (N_rem · x̂⁻²)² · Pₜ
+                  σ_η    = N_rem · √Pₜ / x̂²            ±1σ confidence band
+
+        Contrast with a rolling-window mean (O(w) space, no variance) or a
+        simple EWMA (O(1) space, but no principled variance propagation):
+        the Kalman formulation is optimal under Gaussian assumptions and
+        yields a calibrated uncertainty estimate at no extra cost.
+    """
+
+    _Q: float = 50.0  # process-noise variance  (img/s)²
+    _R: float = 100.0  # measurement-noise variance (img/s)²
+
+    def __init__(self) -> None:
+        self._x: float | None = None  # x̂: current rate estimate (img/s)
+        self._P: float = 1e8  # P: estimate error variance (diffuse prior)
+        self._k: float = 1.0  # Kₜ: Kalman gain at last update (1 = full trust)
+        self._n: int = 0  # number of updates applied
+
+    def update(self, n_imgs: int, elapsed_s: float) -> None:
+        """Incorporate a new batch observation.  Θ(1) — scalar predict-update cycle."""
+        if elapsed_s <= 0 or n_imgs <= 0:
+            return
+        z = n_imgs / elapsed_s  # zₜ: observed throughput
+        self._n += 1
+        if self._x is None:
+            self._x = z
+            self._P = self._R  # P₁ = R: certainty = measurement quality
+            return
+        p_pred = self._P + self._Q  # Pₜ⁻ = Pₜ₋₁ + Q
+        k = p_pred / (p_pred + self._R)  # Kₜ = Pₜ⁻(Pₜ⁻ + R)⁻¹
+        self._x = self._x + k * (z - self._x)  # x̂ₜ = x̂ₜ⁻ + Kₜ(zₜ − x̂ₜ⁻)
+        self._P = (1.0 - k) * p_pred  # Pₜ = (1 − Kₜ)Pₜ⁻
+        self._k = k
+
+    @property
+    def rate(self) -> float | None:
+        """x̂ₜ — current optimal rate estimate (img/s)."""
+        return self._x
+
+    @property
+    def rate_std(self) -> float:
+        """√Pₜ — 1σ uncertainty on the rate estimate (img/s)."""
+        return self._P**0.5
+
+    @property
+    def kalman_gain(self) -> float:
+        """Kₜ — Kalman gain at the most recent update.
+        Converges toward K∞ = ½ at steady state (Q = R/2).
+        """
+        return self._k
+
+    def eta(self, remaining: int) -> tuple[float, float] | None:
+        """Return (η̂, σ_η) in seconds, or None if not enough data.
+
+        Θ(1) — closed-form δ-method propagation:
+            η̂   = N_rem / x̂
+            σ_η = N_rem · √Pₜ / x̂²
+        """
+        if self._x is None or self._x <= 0 or self._n < 2:
+            return None
+        eta_s = remaining / self._x  # η̂
+        sigma_s = remaining * self.rate_std / self._x**2  # σ_η
+        return eta_s, sigma_s
+
+
 def _apply_dedup(
     pairs: list[tuple[Path, str]],
     indexer: Indexer,
@@ -391,6 +492,17 @@ def index(
     total_read_s = total_hash_s = 0.0
     total_bytes = 0
     batch_num = 0
+    imgs_processed_so_far = 0
+    total_image_count = len(image_paths)
+    tracker = _ETATracker()
+
+    if total_image_count > 0:
+        typer.echo(
+            "  ETA  x̂ₜ = x̂ₜ⁻ + Kₜ(zₜ − x̂ₜ⁻)"
+            "  ·  Kₜ = Pₜ⁻(Pₜ⁻ + R)⁻¹"
+            "  ·  σ_η = N_rem · √Pₜ / x̂²"
+            "  [Θ(1) Kalman]"
+        )
 
     for batch_paths in batched(iter(image_paths), settings.batch_size):
         batch_num += 1
@@ -412,6 +524,9 @@ def index(
         read_s = perf_counter() - t0
         total_read_s += read_s
         total_bytes += batch_bytes
+        # Count after reading so the denominator reflects files we actually
+        # attempted to open — not files we merely iterated over in the plan.
+        imgs_processed_so_far += len(batch_paths)
 
         if not raw:
             continue
@@ -641,14 +756,34 @@ def index(
         if model_segments:
             wall_s = perf_counter() - batch_wall_t0
             n_imgs = len(path_hash_pairs)
-            upsert_str = f"  |  upsert {upsert_wall_s:.2f}s" if upsert_jobs else ""
+            tracker.update(n_imgs, wall_s)
+            upsert_str = f"  │  upsert {upsert_wall_s:.2f}s" if upsert_jobs else ""
             shared = (
-                f"  batch {batch_num} [{n_imgs} imgs  {batch_bytes / 1e6:.1f} MB"
-                f"  {_fmt_rate(n_imgs, wall_s, 'img')} total]"
-                f"  read {read_s:.2f}s ({_fmt_mbps(batch_bytes, read_s)})"
+                f"  ▸ {batch_num:04d}  {n_imgs} imgs  {batch_bytes / 1e6:.1f} MB"
+                f"  {_fmt_rate(n_imgs, wall_s, 'img')}"
+                f"  │  read {read_s:.2f}s ({_fmt_mbps(batch_bytes, read_s)})"
                 f"  hash {hash_s:.2f}s  pre {pre_s:.2f}s"
             )
-            typer.echo(shared + "  |  " + "  |  ".join(model_segments) + upsert_str)
+            typer.echo(shared + "  │  " + "  │  ".join(model_segments) + upsert_str)
+
+            if batch_num % 10 == 0 and total_image_count > 0:
+                result = tracker.eta(total_image_count - imgs_processed_so_far)
+                if result is not None:
+                    eta_s, sigma_s = result
+                    pct = imgs_processed_so_far / total_image_count * 100
+                    bar = _progress_bar(pct)
+                    sep = "─" * 68
+                    typer.echo(
+                        f"  {sep}\n"
+                        f"  [{bar}]  {imgs_processed_so_far:,} / {total_image_count:,}"
+                        f"  ({pct:.1f}%)\n"
+                        f"  x̂ = {tracker.rate:.1f} img/s"
+                        f"  √P = {tracker.rate_std:.1f}"
+                        f"  K = {tracker.kalman_gain:.3f}"
+                        f"  ·  η̂ ~ {_fmt_duration(eta_s)}"
+                        f"  σ_η ± {_fmt_duration(sigma_s)}\n"
+                        f"  {sep}"
+                    )
 
     # ── Video processing pass ─────────────────────────────────────────────────
     n_video_frames_indexed = 0
@@ -852,12 +987,12 @@ def index(
 
             if model_segments:
                 wall_s = perf_counter() - batch_wall_t0
-                upsert_str = f"  |  upsert {upsert_wall_s:.2f}s" if upsert_jobs else ""
+                upsert_str = f"  │  upsert {upsert_wall_s:.2f}s" if upsert_jobs else ""
                 typer.echo(
-                    f"  batch {batch_num} [{n_items} imgs  0.0 MB"
-                    f"  {_fmt_rate(n_items, wall_s, 'img')} total]"
-                    f"  read 0.00s  hash 0.00s  pre {pre_s:.2f}s"
-                    f"  |  " + "  |  ".join(model_segments) + upsert_str
+                    f"  ▸ {batch_num:04d}  {n_items} frames"
+                    f"  {_fmt_rate(n_items, wall_s, 'frame')}"
+                    f"  │  pre {pre_s:.2f}s"
+                    f"  │  " + "  │  ".join(model_segments) + upsert_str
                 )
 
         # ── Mark videos as fully indexed (per spec) ──────────────────────────
