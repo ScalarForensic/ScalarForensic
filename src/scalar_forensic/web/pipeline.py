@@ -345,10 +345,14 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
             tc = h.query_timecodes[0]
             if existing.query_timecodes is None:
                 existing.query_timecodes = [tc]
+                existing._query_timecodes_seen: set = {tc}  # type: ignore[attr-defined]
                 existing.best_query_timecode_ms = tc
             else:
-                if tc not in existing.query_timecodes:
+                seen: set = getattr(existing, "_query_timecodes_seen", set(existing.query_timecodes))
+                if tc not in seen:
                     existing.query_timecodes.append(tc)
+                    seen.add(tc)
+                    existing._query_timecodes_seen = seen  # type: ignore[attr-defined]
                 # Update best_query_timecode_ms when the incoming hit contributes
                 # a score higher than the current maximum across all modes.
                 if h.best_score() > pre_merge_best:
@@ -360,6 +364,7 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
             else:
                 # Merge by timecode: for duplicate timecodes keep the max score
                 # per mode rather than discarding the new entry entirely.
+                # Defer sort — caller is responsible for sorting after all merges.
                 tc_to_mf = {mf.timecode_ms: mf for mf in existing.matched_frames}
                 for mf in h.matched_frames:
                     if mf.timecode_ms not in tc_to_mf:
@@ -369,7 +374,7 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
                         for mode, score in mf.scores.items():
                             if mode not in existing_mf.scores or score > existing_mf.scores[mode]:
                                 existing_mf.scores[mode] = score
-                existing.matched_frames = sorted(tc_to_mf.values(), key=lambda mf: mf.timecode_ms)
+                existing.matched_frames = list(tc_to_mf.values())
     else:
         if h.query_timecodes:
             h.best_query_timecode_ms = h.query_timecodes[0]
@@ -610,6 +615,10 @@ def query_session(
             final_merged: dict[str, Hit] = {}
             for h in all_flat_hits:
                 _merge_hit(h, final_merged)
+            # Sort matched_frames once after all merges (deferred from _merge_hit).
+            for h in final_merged.values():
+                if h.matched_frames:
+                    h.matched_frames.sort(key=lambda mf: mf.timecode_ms)
             sorted_hits = sorted(final_merged.values(), key=_hit_sort_key)
             # Video queries: do not apply limit — each Hit represents one
             # distinct query-frame × database-video match, and forensic
