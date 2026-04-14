@@ -924,6 +924,14 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   color: var(--text2);
   border-color: rgba(154,163,178,0.15);
 }
+/* Query-frame provenance tag on hit cards */
+.hit-qtc-tag {
+  background: rgba(29,78,137,0.18);
+  color: #7fa5d4;
+  border-color: rgba(74,120,200,0.2);
+  font-size: 9px;
+  letter-spacing: 0.01em;
+}
 
 /* ── Right panel: hits ── */
 .right-panel {
