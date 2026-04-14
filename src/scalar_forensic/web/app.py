@@ -473,7 +473,7 @@ async def hit_provenance(image_hash: str) -> JSONResponse:
 
 @app.get("/api/query-metadata/{session_id}/{file_id}")
 async def query_metadata(session_id: str, file_id: str) -> JSONResponse:
-    """Detailed metadata for an uploaded query image."""
+    """Detailed metadata for an uploaded query file (image or video)."""
     session = get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -481,11 +481,22 @@ async def query_metadata(session_id: str, file_id: str) -> JSONResponse:
     if entry is None or not entry.temp_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
-    data = entry.temp_path.read_bytes()
-    meta = extract_exif_detailed(data)
-    meta["filename"] = entry.filename
-    meta["hash_sha256"] = entry.file_hash or hashlib.sha256(data).hexdigest()
-    meta["hash_md5"] = entry.file_hash_md5 or hashlib.md5(data).hexdigest()  # noqa: S324
+    if entry.is_video:
+        # For videos: use PyAV container metadata — never read the full file into
+        # memory.  Hashes were already computed during analysis via streaming I/O.
+        meta = get_video_info(entry.temp_path)
+        meta["filename"] = entry.filename
+        meta["size_bytes"] = entry.temp_path.stat().st_size
+        if entry.file_hash:
+            meta["hash_sha256"] = entry.file_hash
+        if entry.file_hash_md5:
+            meta["hash_md5"] = entry.file_hash_md5
+    else:
+        data = entry.temp_path.read_bytes()
+        meta = extract_exif_detailed(data)
+        meta["filename"] = entry.filename
+        meta["hash_sha256"] = entry.file_hash or hashlib.sha256(data).hexdigest()
+        meta["hash_md5"] = entry.file_hash_md5 or hashlib.md5(data).hexdigest()  # noqa: S324
     return JSONResponse(meta)
 
 

@@ -4,11 +4,12 @@ Treats video files as containers: extracts representative frames via uniform
 temporal sampling and feeds each frame through the existing image embedding
 pipeline unchanged.
 
-Forensic reproducibility guarantee: given the same video file and the same
-extraction parameters (fps, max_frames), this module always produces frames
-with identical content, timecodes, and SHA-256 hashes.  Hashes are derived
-from raw RGB pixel bytes (width + height prefix), not from PNG-encoded bytes,
-so they are stable across Pillow and zlib versions.
+Forensic identity is established at the file level: the SHA-256 of the video
+file itself (computed via streaming I/O during ingest) is the authoritative
+hash for chain-of-custody purposes.  Per-frame hashes (``frame_hash`` in
+:class:`ExtractedFrame`) are an internal deduplication mechanism — they
+prevent re-indexing content-identical frames — and are not presented as
+forensic artifacts.
 """
 
 from __future__ import annotations
@@ -45,9 +46,10 @@ class ExtractedFrame:
     """A single frame extracted from a video file.
 
     All fields are immutable to ensure accidental mutation is caught early.
-    ``frame_hash`` is SHA-256 of raw RGB pixel bytes (width + height prefix),
-    stable across Pillow/zlib versions.  ``image`` is the decoded PIL RGB
-    Image for embedding.
+    ``frame_hash`` is SHA-256 of raw RGB pixel bytes (width + height prefix)
+    used internally to deduplicate identical frames within the same video;
+    it is not a forensic artifact.  ``image`` is the decoded PIL RGB Image
+    for embedding.
     """
 
     image: Image.Image
@@ -68,12 +70,10 @@ class ExtractedFrame:
 def _frame_pixel_hash(image: Image.Image) -> str:
     """SHA-256 of width || height || raw RGB pixel bytes.
 
-    Hashing raw pixel data rather than PNG-encoded bytes makes the hash
-    stable across Pillow and zlib versions: PNG output can vary between
-    encoder versions even when pixel content is identical, which would
-    silently change ``frame_hash`` and break the reproducibility guarantee.
-    The width/height prefix disambiguates images of different dimensions
-    that happen to share an identical pixel sequence.
+    Used only for within-video deduplication.  Raw pixel bytes (rather than
+    PNG output) are hashed so the result is stable across Pillow and zlib
+    versions; the width/height prefix disambiguates images of different
+    dimensions that happen to share an identical pixel sequence.
     """
     rgb = image.convert("RGB") if image.mode != "RGB" else image
     w, h = rgb.size
@@ -94,9 +94,9 @@ def extract_frames(
     static title card or freeze frame) so that storage is not wasted on
     content-identical segments.
 
-    Forensic reproducibility: the same video file + same (fps, max_frames)
+    Deterministic extraction: the same video file + same (fps, max_frames)
     arguments always produces the same sequence of frames with identical
-    content, timecodes, and SHA-256 hashes.
+    content, timecodes, and per-frame deduplication hashes.
 
     Performance: uses seek-based extraction — for each target timestamp the
     container is seeked to the nearest keyframe before the target, then frames
