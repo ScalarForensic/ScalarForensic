@@ -12,14 +12,13 @@ with identical content, timecodes, and SHA-256 hashes.
 from __future__ import annotations
 
 import hashlib
-import io
 import importlib.metadata
+import io
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image
-
 
 VIDEO_EXTENSIONS: frozenset[str] = frozenset(
     {

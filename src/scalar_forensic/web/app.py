@@ -27,7 +27,12 @@ from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import extract_exif_detailed, get_library_versions
-from scalar_forensic.video import VIDEO_EXTENSIONS, extract_frame_at, get_video_info, parse_virtual_path
+from scalar_forensic.video import (
+    VIDEO_EXTENSIONS,
+    extract_frame_at,
+    get_video_info,
+    parse_virtual_path,
+)
 from scalar_forensic.web.pipeline import (
     QueryProvenance,
     analyze_session,

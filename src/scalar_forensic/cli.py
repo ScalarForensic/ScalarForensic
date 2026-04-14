@@ -28,7 +28,6 @@ from scalar_forensic.embedder import (
 from scalar_forensic.indexer import Indexer
 from scalar_forensic.scanner import _HEIF_AVAILABLE, scan_all_files
 from scalar_forensic.video import (
-    ExtractedFrame,
     extract_frames,
     get_pyav_version,
     make_virtual_path,
