@@ -34,8 +34,9 @@ if TYPE_CHECKING:
 _CACHE_FILE = Path("data/sfn_batch_cache.json")
 _EFFICIENCY_TARGET = 0.95  # fraction of T_max to accept as "optimal"
 _MAX_BATCH = 512           # hard ceiling for exponential probe
-_MIN_WARMUP_IMAGES = 16    # warm-up image count (≥ 2 full batches at any probe size)
-_MIN_MEASURE_BATCHES = 3   # min full batches in measurement window (fair comparison floor)
+_MIN_WARMUP_IMAGES = 16    # warm-up images — fixed, never scales with probe_b
+_MAX_MEASURE_IMAGES = 40   # measurement window cap — keeps each probe fast;
+                           #   the shuffle ensures these 40 are representative
 _MIN_GAIN = 0.03           # converged: positive gain < 3 % → saturation reached
 _PEAK_FRAC = 0.70          # post-peak guard: stop after this many consecutive
 _POST_PEAK_DROPS = 3       #   measurements below _PEAK_FRAC × best seen so far
@@ -206,18 +207,15 @@ def calibrate(
 
     probe_b = 1
     while probe_b <= _MAX_BATCH:
-        # Measurement window: at least all sample images AND at least
-        # _MIN_MEASURE_BATCHES full batches — whichever is larger.  Round up
-        # to a whole number of batches so the last batch is always full.
-        measure_count = max(n_samples, probe_b * _MIN_MEASURE_BATCHES)
-        measure_count = ((measure_count + probe_b - 1) // probe_b) * probe_b
+        # Measurement window: capped at _MAX_MEASURE_IMAGES for speed, but
+        # always at least probe_b so large batch sizes get one full batch.
+        # The fixed shuffle above ensures any subset is representative.
+        measure_count = max(min(n_samples, _MAX_MEASURE_IMAGES), probe_b)
         reps_m = (measure_count // n_samples) + 1
         measure_bytes = (raw_bytes * reps_m)[:measure_count]
 
-        # Warm-up window: at least _MIN_WARMUP_IMAGES, at least 2 full batches.
-        warmup_count = max(_MIN_WARMUP_IMAGES, probe_b * 2)
-        reps_w = (warmup_count // n_samples) + 1
-        warmup_bytes = (raw_bytes * reps_w)[:warmup_count]
+        # Warm-up: fixed size — does NOT scale with probe_b.
+        warmup_bytes = (raw_bytes * 2)[:_MIN_WARMUP_IMAGES]
 
         try:
             tp = _probe(embedder, warmup_bytes, measure_bytes, probe_b)
