@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
-import io
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,16 +46,14 @@ class ExtractedFrame:
 
     All fields are immutable to ensure accidental mutation is caught early.
     ``frame_hash`` is SHA-256 of raw RGB pixel bytes (width + height prefix),
-    stable across Pillow/zlib versions.  ``frame_bytes`` is PNG-encoded for
-    thumbnail storage only.  ``image`` is the decoded PIL RGB Image for
-    embedding.
+    stable across Pillow/zlib versions.  ``image`` is the decoded PIL RGB
+    Image for embedding.
     """
 
     image: Image.Image
     timecode_ms: int  # position in video in milliseconds
     frame_index: int  # ordinal among yielded unique frames (0-based)
     frame_hash: str  # SHA-256 of width/height-prefixed raw RGB pixel bytes
-    frame_bytes: bytes  # PNG-encoded bytes for thumbnail/storage only; not used for hashing
 
     # Needed so the frozen dataclass can hold a non-hashable Image.Image
     def __hash__(self) -> int:  # type: ignore[override]
@@ -66,13 +63,6 @@ class ExtractedFrame:
         if not isinstance(other, ExtractedFrame):
             return NotImplemented
         return self.frame_hash == other.frame_hash
-
-
-def _png_encode(image: Image.Image) -> bytes:
-    """Encode a PIL Image to PNG bytes for thumbnail storage."""
-    buf = io.BytesIO()
-    image.save(buf, format="PNG", optimize=False)
-    return buf.getvalue()
 
 
 def _frame_pixel_hash(image: Image.Image) -> str:
@@ -194,9 +184,8 @@ def _make_frame(
     time_base: float,
     frame_index: int,
 ) -> ExtractedFrame:
-    """Decode, PNG-encode, and hash one PyAV video frame."""
+    """Decode and hash one PyAV video frame."""
     pil_image = av_frame.to_image()
-    frame_bytes = _png_encode(pil_image)
     frame_hash = _frame_pixel_hash(pil_image)
     pts_s = float(av_frame.pts) * time_base
     return ExtractedFrame(
@@ -204,7 +193,6 @@ def _make_frame(
         timecode_ms=int(pts_s * 1000),
         frame_index=frame_index,
         frame_hash=frame_hash,
-        frame_bytes=frame_bytes,
     )
 
 

@@ -287,6 +287,7 @@ async def query(
                             if h.matched_frames
                             else None,
                             "query_timecodes": h.query_timecodes,
+                            "best_query_timecode_ms": h.best_query_timecode_ms,
                         }
                         for h in r.hits
                     ],
