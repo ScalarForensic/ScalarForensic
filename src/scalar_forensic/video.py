@@ -89,6 +89,14 @@ def extract_frames(
     arguments always produces the same sequence of frames with identical
     content, timecodes, and SHA-256 hashes.
 
+    Performance: uses seek-based extraction — for each target timestamp the
+    container is seeked to the nearest keyframe before the target, then frames
+    are decoded only until the target is reached.  This scales with the number
+    of extracted frames rather than total video frames, which gives large
+    speed-ups for long or high-frame-rate videos sampled at low fps.  Falls
+    back to sequential decoding automatically for containers that do not
+    support seeking (e.g. some live-stream recordings).
+
     Args:
         video_path: Absolute path to the video file (read-only access).
         fps: Frames to extract per second of video (default 1.0).
@@ -100,9 +108,7 @@ def extract_frames(
     import av  # local import: PyAV is optional at the module level
 
     frame_interval_s = 1.0 / fps
-    next_target_s = 0.0
     seen_hashes: set[str] = set()
-    frame_index = 0  # ordinal of yielded unique frames
 
     try:
         container = av.open(str(video_path))
@@ -117,42 +123,143 @@ def extract_frames(
         video_stream = video_streams[0]
         time_base = float(video_stream.time_base)
 
+        # Resolve total duration (seconds) — used as loop termination guard.
+        duration_s: float | None = None
+        if container.duration is not None:
+            duration_s = container.duration / av.time_base
+        elif video_stream.duration is not None:
+            duration_s = float(video_stream.duration) * time_base
+
+        # Probe whether the container supports reliable seeking by attempting
+        # a single seek to t=0.  If it raises or the stream reports no_seek,
+        # fall back to the sequential (full-decode) path.
+        seekable = not getattr(video_stream, "no_seek", False)
+        if seekable:
+            try:
+                container.seek(0, backward=True, any_frame=False, stream=video_stream)
+            except Exception:
+                seekable = False
+
+        if seekable:
+            yield from _extract_frames_seek(
+                container, video_stream, time_base, duration_s,
+                frame_interval_s, seen_hashes, max_frames,
+            )
+        else:
+            yield from _extract_frames_sequential(
+                container, video_stream, time_base,
+                frame_interval_s, seen_hashes, max_frames,
+            )
+    finally:
+        container.close()
+
+
+def _make_frame(
+    av_frame,  # av.VideoFrame
+    time_base: float,
+    frame_index: int,
+) -> ExtractedFrame:
+    """Decode, PNG-encode, and hash one PyAV video frame."""
+    pil_image = av_frame.to_image()
+    frame_bytes = _png_encode(pil_image)
+    frame_hash = hashlib.sha256(frame_bytes).hexdigest()
+    pts_s = float(av_frame.pts) * time_base
+    return ExtractedFrame(
+        image=pil_image,
+        timecode_ms=int(pts_s * 1000),
+        frame_index=frame_index,
+        frame_hash=frame_hash,
+        frame_bytes=frame_bytes,
+    )
+
+
+def _extract_frames_seek(
+    container,
+    video_stream,
+    time_base: float,
+    duration_s: float | None,
+    frame_interval_s: float,
+    seen_hashes: set[str],
+    max_frames: int,
+) -> Iterator[ExtractedFrame]:
+    """Seek-based frame extraction — O(extracted_frames) decoder work."""
+    frame_index = 0
+    target_s = 0.0
+
+    while True:
+        if max_frames > 0 and frame_index >= max_frames:
+            break
+        if duration_s is not None and target_s > duration_s + frame_interval_s:
+            break
+
+        target_pts = int(target_s / time_base)
+        try:
+            container.seek(target_pts, backward=True, any_frame=False, stream=video_stream)
+        except Exception:
+            break  # container stopped accepting seeks
+
+        found: ExtractedFrame | None = None
         for av_frame in container.decode(video=0):
             if av_frame.pts is None:
                 continue
-            pts_s = av_frame.pts * time_base
+            pts_s = float(av_frame.pts) * time_base
+            if pts_s < target_s:
+                continue  # still before target — decode forward from keyframe
 
-            if pts_s < next_target_s:
-                continue
+            # First frame at or after target_s
+            ef = _make_frame(av_frame, time_base, frame_index)
+            if ef.frame_hash not in seen_hashes:
+                seen_hashes.add(ef.frame_hash)
+                yield ef
+                frame_index += 1
+            else:
+                # Deduplicated — don't increment frame_index so ordinals stay
+                # contiguous, but do advance the target.
+                pass
+            found = ef
+            break
 
-            # Convert to PIL RGB Image (zero-copy where supported by PyAV)
-            pil_image = av_frame.to_image()
+        if found is None:
+            break  # no frame found past target → end of stream
 
-            # PNG-encode for deterministic, lossless hashing
-            frame_bytes = _png_encode(pil_image)
-            frame_hash = hashlib.sha256(frame_bytes).hexdigest()
+        # Advance to the next target, skipping over the frame we just returned.
+        target_s = max(target_s + frame_interval_s, found.timecode_ms / 1000.0 + frame_interval_s)
 
-            # Within-video hash dedup: skip static/identical frames
-            if frame_hash in seen_hashes:
-                next_target_s = pts_s + frame_interval_s
-                continue
 
-            seen_hashes.add(frame_hash)
-            yield ExtractedFrame(
-                image=pil_image,
-                timecode_ms=int(pts_s * 1000),
-                frame_index=frame_index,
-                frame_hash=frame_hash,
-                frame_bytes=frame_bytes,
-            )
-            frame_index += 1
+def _extract_frames_sequential(
+    container,
+    video_stream,
+    time_base: float,
+    frame_interval_s: float,
+    seen_hashes: set[str],
+    max_frames: int,
+) -> Iterator[ExtractedFrame]:
+    """Sequential fallback — decodes every frame; used when seeking is unavailable."""
+    next_target_s = 0.0
+    frame_index = 0
 
-            if max_frames > 0 and frame_index >= max_frames:
-                break
+    for av_frame in container.decode(video=0):
+        if av_frame.pts is None:
+            continue
+        pts_s = float(av_frame.pts) * time_base
 
+        if pts_s < next_target_s:
+            continue
+
+        ef = _make_frame(av_frame, time_base, frame_index)
+
+        if ef.frame_hash in seen_hashes:
             next_target_s = pts_s + frame_interval_s
-    finally:
-        container.close()
+            continue
+
+        seen_hashes.add(ef.frame_hash)
+        yield ef
+        frame_index += 1
+
+        if max_frames > 0 and frame_index >= max_frames:
+            break
+
+        next_target_s = pts_s + frame_interval_s
 
 
 def extract_frame_at(video_path: Path, timecode_ms: int) -> Image.Image | None:

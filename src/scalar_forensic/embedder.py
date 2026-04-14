@@ -95,6 +95,34 @@ def hash_bytes_md5(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()  # noqa: S324
 
 
+def hash_file(path: Path, chunk_size: int = 1 << 20) -> str:
+    """Return SHA-256 hex digest of a file, reading it in chunks.
+
+    Uses O(chunk_size) memory regardless of file size — suitable for large
+    video files where ``read_bytes()`` would cause a memory spike.
+    """
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            buf = fh.read(chunk_size)
+            if not buf:
+                break
+            h.update(buf)
+    return h.hexdigest()
+
+
+def hash_file_md5(path: Path, chunk_size: int = 1 << 20) -> str:
+    """Return MD5 hex digest of a file, reading it in chunks."""
+    h = hashlib.md5()  # noqa: S324
+    with path.open("rb") as fh:
+        while True:
+            buf = fh.read(chunk_size)
+            if not buf:
+                break
+            h.update(buf)
+    return h.hexdigest()
+
+
 class ExifInfo(TypedDict):
     exif: bool
     exif_geo_data: bool

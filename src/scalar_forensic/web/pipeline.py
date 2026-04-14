@@ -20,6 +20,8 @@ from scalar_forensic.embedder import (
     AnyEmbedder,
     hash_bytes,
     hash_bytes_md5,
+    hash_file,
+    hash_file_md5,
     load_embedder,
     preprocess_batch,
     preprocess_pil_batch,
@@ -159,36 +161,43 @@ def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
             entry.dino_embedding = emb
 
 
+_VIDEO_FRAME_BATCH = 32  # frames processed per embedding batch in the web pipeline
+
+
 def _analyze_video_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
-    """Extract frames from an uploaded video temp file and embed each one."""
+    """Extract frames from an uploaded video temp file and embed each one.
+
+    Frames are extracted via the seek-based generator and processed in batches
+    of ``_VIDEO_FRAME_BATCH`` so peak memory is bounded regardless of video
+    length.  The video file is hashed in a streaming pass rather than loaded
+    into RAM.
+    """
+    from itertools import batched as _batched
+
     from scalar_forensic.config import Settings
 
-    data = entry.temp_path.read_bytes()
-    entry.file_hash = hash_bytes(data)
-    entry.file_hash_md5 = hash_bytes_md5(data)
+    # Chunked hash — avoids reading the whole upload into memory just to hash it
+    entry.file_hash = hash_file(entry.temp_path)
+    entry.file_hash_md5 = hash_file_md5(entry.temp_path)
     entry.is_video = True
 
     settings = Settings()
-    try:
-        frames = list(
-            extract_frames(
-                entry.temp_path, fps=settings.video_fps, max_frames=settings.video_max_frames
-            )
-        )
-    except Exception as exc:
-        raise RuntimeError(f"Video frame extraction failed: {exc}") from exc
-
-    if not frames:
-        raise RuntimeError("No frames could be extracted from the video")
-
     frame_entries: list[VideoFrameEntry] = []
-    pil_images = preprocess_pil_batch([f.image for f in frames])
 
-    for key, embedder in embedders.items():
-        norm_images = embedder.normalize_batch_bytes(pil_images)
-        embeddings = embedder.embed_images(norm_images)
-        for i, (frame, emb) in enumerate(zip(frames, embeddings)):
-            if len(frame_entries) <= i:
+    try:
+        gen = extract_frames(
+            entry.temp_path, fps=settings.video_fps, max_frames=settings.video_max_frames
+        )
+        for raw_batch in _batched(gen, _VIDEO_FRAME_BATCH):
+            frames = list(raw_batch)
+            if not frames:
+                continue
+
+            pil_images = preprocess_pil_batch([f.image for f in frames])
+
+            # Create / extend frame_entries for this batch
+            batch_start = len(frame_entries)
+            for frame in frames:
                 frame_entries.append(
                     VideoFrameEntry(
                         frame_index=frame.frame_index,
@@ -196,18 +205,29 @@ def _analyze_video_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> 
                         frame_hash=frame.frame_hash,
                     )
                 )
-            if key == "sscd":
-                frame_entries[i].sscd_embedding = emb
-            else:
-                frame_entries[i].dino_embedding = emb
+
+            for key, embedder in embedders.items():
+                norm_images = embedder.normalize_batch_bytes(pil_images)
+                embeddings = embedder.embed_images(norm_images)
+                for j, emb in enumerate(embeddings):
+                    fe = frame_entries[batch_start + j]
+                    if key == "sscd":
+                        fe.sscd_embedding = emb
+                    else:
+                        fe.dino_embedding = emb
+
+    except Exception as exc:
+        raise RuntimeError(f"Video frame extraction failed: {exc}") from exc
+
+    if not frame_entries:
+        raise RuntimeError("No frames could be extracted from the video")
 
     entry.video_frames = frame_entries
 
-    # Use the first extracted frame's embedding as the top-level entry-point embedding.
-    # query_session() will query with each frame's embedding individually via video_frames.
-    if frame_entries:
-        entry.sscd_embedding = frame_entries[0].sscd_embedding
-        entry.dino_embedding = frame_entries[0].dino_embedding
+    # The first frame's embeddings serve as the entry's top-level vector.
+    # query_session() iterates entry.video_frames to query with each frame.
+    entry.sscd_embedding = frame_entries[0].sscd_embedding
+    entry.dino_embedding = frame_entries[0].dino_embedding
 
 
 # ---------------------------------------------------------------------------
@@ -393,37 +413,56 @@ def query_session(
                     unmerged.append(h)
             file_result.errors.extend(errs)
 
-        if "altered" in modes and entry.sscd_embedding:
-            hits, errs = _query_vector(
-                client,
-                collection=settings.collection_sscd,
-                vector=entry.sscd_embedding,
-                mode="altered",
-                threshold=threshold_altered,
-                limit=limit,
-            )
-            for h in hits:
-                if unify:
-                    _merge_hit(h, merged)
-                else:
-                    unmerged.append(h)
-            file_result.errors.extend(errs)
+        # For video uploads query with every frame's embedding so all relevant
+        # matches surface, not just matches for the first frame.
+        # For images use the single top-level embedding as before.
+        sscd_vectors: list[list[float]] = []
+        dino_vectors: list[list[float]] = []
+        if entry.is_video and entry.video_frames:
+            for vf in entry.video_frames:
+                if vf.sscd_embedding:
+                    sscd_vectors.append(vf.sscd_embedding)
+                if vf.dino_embedding:
+                    dino_vectors.append(vf.dino_embedding)
+        else:
+            if entry.sscd_embedding:
+                sscd_vectors.append(entry.sscd_embedding)
+            if entry.dino_embedding:
+                dino_vectors.append(entry.dino_embedding)
 
-        if "semantic" in modes and entry.dino_embedding:
-            hits, errs = _query_vector(
-                client,
-                collection=settings.collection_dino,
-                vector=entry.dino_embedding,
-                mode="semantic",
-                threshold=threshold_semantic,
-                limit=limit,
-            )
-            for h in hits:
-                if unify:
-                    _merge_hit(h, merged)
-                else:
-                    unmerged.append(h)
-            file_result.errors.extend(errs)
+        if "altered" in modes:
+            for vec in sscd_vectors:
+                hits, errs = _query_vector(
+                    client,
+                    collection=settings.collection_sscd,
+                    vector=vec,
+                    mode="altered",
+                    threshold=threshold_altered,
+                    limit=limit,
+                )
+                for h in hits:
+                    if unify:
+                        _merge_hit(h, merged)
+                    else:
+                        unmerged.append(h)
+                file_result.errors.extend(errs)
+
+        if "semantic" in modes:
+            for vec in dino_vectors:
+                hits, errs = _query_vector(
+                    client,
+                    collection=settings.collection_dino,
+                    vector=vec,
+                    mode="semantic",
+                    threshold=threshold_semantic,
+                    limit=limit,
+                )
+                for h in hits:
+                    if unify:
+                        _merge_hit(h, merged)
+                    else:
+                        unmerged.append(h)
+                file_result.errors.extend(errs)
 
         if unify:
             flat_hits = sorted(merged.values(), key=_hit_sort_key)[:limit]

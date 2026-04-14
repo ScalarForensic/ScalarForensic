@@ -382,16 +382,44 @@ async def hit_metadata(path: str) -> JSONResponse:
         if not video_path.exists() or not video_path.is_file():
             raise HTTPException(status_code=404, detail="Video file not found")
         info = get_video_info(video_path)
-        video_bytes = video_path.read_bytes()
+
+        # Retrieve the already-computed hashes from Qdrant rather than
+        # re-reading the (potentially large) video file just to hash it.
+        sha256: str | None = None
+        md5: str | None = None
+        try:
+            settings_inner = Settings()
+            _client = QdrantClient(
+                url=settings_inner.qdrant_url, api_key=settings_inner.qdrant_api_key
+            )
+            for coll in (settings_inner.collection_sscd, settings_inner.collection_dino):
+                records, _ = _client.scroll(
+                    collection_name=coll,
+                    scroll_filter=Filter(
+                        must=[FieldCondition(key="image_path", match=MatchValue(value=path))]
+                    ),
+                    limit=1,
+                    with_payload=["video_hash", "image_hash_md5"],
+                    with_vectors=False,
+                )
+                if records:
+                    sha256 = records[0].payload.get("video_hash")
+                    md5 = records[0].payload.get("image_hash_md5")
+                    break
+        except Exception:  # noqa: BLE001
+            pass  # fall through — hashes will be omitted rather than blocking
+
         meta: dict = {
             "filename": video_path.name,
             "path": str(video_path),
-            "hash_sha256": hashlib.sha256(video_bytes).hexdigest(),
-            "hash_md5": hashlib.md5(video_bytes).hexdigest(),  # noqa: S324
             "is_video_frame": True,
             "frame_timecode_ms": timecode_ms,
             **{f"video_{k}": v for k, v in info.items()},
         }
+        if sha256:
+            meta["hash_sha256"] = sha256
+        if md5:
+            meta["hash_md5"] = md5
         return JSONResponse(meta)
 
     # Regular image path

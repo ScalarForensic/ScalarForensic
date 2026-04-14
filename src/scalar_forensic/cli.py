@@ -21,6 +21,8 @@ from scalar_forensic.embedder import (
     get_library_versions,
     hash_bytes,
     hash_bytes_md5,
+    hash_file,
+    hash_file_md5,
     load_embedder,
     preprocess_batch,
     preprocess_pil_batch,
@@ -186,102 +188,34 @@ def _index_video(
     """
     rec = records[video_path]
 
-    # Hash the raw video file bytes for provenance
+    # Hash the video file in chunks — avoids loading multi-GB files into RAM.
     try:
-        video_bytes = video_path.read_bytes()
+        video_hash = hash_file(video_path)
+        video_hash_md5 = hash_file_md5(video_path)
     except OSError as exc:
         typer.echo(f"[WARN] Cannot read video {video_path.name}: {exc}", err=True)
         rec.status = _S_FAIL_READ
         rec.reason = f"read error: {exc}"
         return 0, 0
 
-    video_hash = hash_bytes(video_bytes)
-    video_hash_md5 = hash_bytes_md5(video_bytes)
     rec.sha256 = video_hash
     rec.md5 = video_hash_md5
 
-    # Extract frames as a streaming generator
-    try:
-        frames = list(
-            extract_frames(video_path, fps=settings.video_fps, max_frames=settings.video_max_frames)
-        )
-    except Exception as exc:  # noqa: BLE001
-        typer.echo(f"[WARN] Frame extraction failed for {video_path.name}: {exc}", err=True)
-        rec.status = _S_FAIL_PRE
-        rec.reason = f"frame extraction error: {exc}"
-        return 0, 0
+    video_abs_path = str(video_path.resolve())
 
-    if not frames:
-        typer.echo(f"  [WARN] No frames extracted from {video_path.name}", err=True)
-        rec.status = _S_UNSUPPORTED
-        rec.reason = "no frames extracted"
-        return 0, 0
-
-    # Build virtual paths and collect frame metadata
-    virtual_paths = [Path(make_virtual_path(video_path, f)) for f in frames]
-    frame_hashes = [f.frame_hash for f in frames]
-    frame_images = [f.image for f in frames]
-
-    # Write thumbnails for new frames
-    if settings.thumbnail_dir is not None:
-        for frame, fhash in zip(frames, frame_hashes):
-            thumb_path = settings.thumbnail_dir / f"{fhash}.jpg"
-            if not thumb_path.exists():
-                try:
-                    _write_thumbnail(frame.image, thumb_path, settings.thumbnail_size)
-                except Exception as exc:  # noqa: BLE001
-                    typer.echo(
-                        f"[WARN] Thumbnail failed for frame {frame.frame_index} of "
-                        f"{video_path.name}: {exc}",
-                        err=True,
-                    )
-
-    # Build per-frame video_metadata dicts
-    video_meta_list: list[dict] = [
-        {
+    def _vmeta(frame) -> dict:
+        return {
             "video_hash": video_hash,
-            "video_path": str(video_path.resolve()),
-            "frame_timecode_ms": f.timecode_ms,
-            "frame_index": f.frame_index,
+            "video_path": video_abs_path,
+            "frame_timecode_ms": frame.timecode_ms,
+            "frame_index": frame.frame_index,
             "extraction_fps": settings.video_fps,
             "pyav_version": pyav_version,
         }
-        for f in frames
-    ]
 
-    frames_indexed = 0
-    frames_skipped = 0
-
-    for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
-        # Dedup: skip frames already in Qdrant by their virtual path (encodes
-        # video identity + timecode), not by frame content hash alone — two
-        # different videos can share identical frames but must be indexed separately.
-        vpath_strings = [str(p) for p in virtual_paths]
-        already_indexed_paths = indexer.get_indexed_paths(vpath_strings)
-        to_embed_idx = [i for i, p in enumerate(vpath_strings) if p not in already_indexed_paths]
-        frames_skipped += len(virtual_paths) - len(to_embed_idx)
-
-        if not to_embed_idx:
-            continue
-
-        batch_images = preprocess_pil_batch([frame_images[i] for i in to_embed_idx])
-        batch_paths = [virtual_paths[i] for i in to_embed_idx]
-        batch_hashes = [frame_hashes[i] for i in to_embed_idx]
-        batch_vmeta = [video_meta_list[i] for i in to_embed_idx]
-
-        try:
-            norm_images = embedder.normalize_batch_bytes(batch_images)
-            embeddings = embedder.embed_images(norm_images)
-        except Exception as exc:  # noqa: BLE001
-            typer.echo(
-                f"[WARN] Embedding failed for {len(batch_images)} frames of "
-                f"{video_path.name} [{type(embedder).__name__}]: {exc}",
-                err=True,
-            )
-            failed_counts[spec_idx] += len(batch_images)
-            continue
-
-        shared_metadata = {
+    # Shared metadata is the same for all frames / all batches.
+    shared_meta_per_spec = [
+        {
             "model_name": embedder.model_name,
             "model_hash": model_hash,
             "embedding_dim": embedder.embedding_dim,
@@ -289,25 +223,110 @@ def _index_video(
             "inference_dtype": embedder.inference_dtype,
             "library_versions": get_library_versions(),
         }
-        indexer.upsert_batch(
-            batch_paths,
-            batch_hashes,
-            embeddings,
-            shared_metadata,
-            video_metadata=batch_vmeta,
+        for embedder, _, model_hash in specs
+    ]
+
+    frames_indexed = 0
+    frames_skipped = 0
+    total_frames_seen = 0
+
+    # Stream frames in batches of batch_size — keeps peak memory bounded to
+    # O(batch_size * frame_pixels) regardless of max_frames.
+    try:
+        frame_gen = extract_frames(
+            video_path, fps=settings.video_fps, max_frames=settings.video_max_frames
         )
-        indexed_counts[spec_idx] += len(batch_images)
-        if spec_idx == 0:
-            frames_indexed += len(batch_images)
+        frame_batch_gen = batched(frame_gen, settings.batch_size)
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"[WARN] Frame extraction setup failed for {video_path.name}: {exc}", err=True)
+        rec.status = _S_FAIL_PRE
+        rec.reason = f"frame extraction error: {exc}"
+        return 0, 0
+
+    any_frames = False
+    try:
+        for raw_batch in frame_batch_gen:
+            frames = list(raw_batch)
+            if not frames:
+                continue
+            any_frames = True
+            total_frames_seen += len(frames)
+
+            virtual_paths = [Path(make_virtual_path(video_path, f)) for f in frames]
+            frame_hashes = [f.frame_hash for f in frames]
+            frame_images = [f.image for f in frames]
+
+            # Thumbnails
+            if settings.thumbnail_dir is not None:
+                for frame, fhash in zip(frames, frame_hashes):
+                    thumb_path = settings.thumbnail_dir / f"{fhash}.jpg"
+                    if not thumb_path.exists():
+                        try:
+                            _write_thumbnail(frame.image, thumb_path, settings.thumbnail_size)
+                        except Exception as exc:  # noqa: BLE001
+                            typer.echo(
+                                f"[WARN] Thumbnail failed for frame {frame.frame_index} of "
+                                f"{video_path.name}: {exc}",
+                                err=True,
+                            )
+
+            for spec_idx, (embedder, indexer, _) in enumerate(specs):
+                # Dedup by virtual path (video identity + timecode)
+                vpath_strings = [str(p) for p in virtual_paths]
+                already = indexer.get_indexed_paths(vpath_strings)
+                to_embed_idx = [i for i, p in enumerate(vpath_strings) if p not in already]
+                frames_skipped += len(frames) - len(to_embed_idx)
+
+                if not to_embed_idx:
+                    continue
+
+                pre = preprocess_pil_batch([frame_images[i] for i in to_embed_idx])
+                embed_paths = [virtual_paths[i] for i in to_embed_idx]
+                embed_hashes = [frame_hashes[i] for i in to_embed_idx]
+                embed_vmeta = [_vmeta(frames[i]) for i in to_embed_idx]
+
+                try:
+                    norm = embedder.normalize_batch_bytes(pre)
+                    embeddings = embedder.embed_images(norm)
+                except Exception as exc:  # noqa: BLE001
+                    typer.echo(
+                        f"[WARN] Embedding failed for {len(pre)} frames of "
+                        f"{video_path.name} [{type(embedder).__name__}]: {exc}",
+                        err=True,
+                    )
+                    failed_counts[spec_idx] += len(pre)
+                    continue
+
+                indexer.upsert_batch(
+                    embed_paths,
+                    embed_hashes,
+                    embeddings,
+                    shared_meta_per_spec[spec_idx],
+                    video_metadata=embed_vmeta,
+                )
+                indexed_counts[spec_idx] += len(pre)
+                if spec_idx == 0:
+                    frames_indexed += len(pre)
+
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"[WARN] Frame extraction failed for {video_path.name}: {exc}", err=True)
+        rec.status = _S_FAIL_PRE
+        rec.reason = f"frame extraction error: {exc}"
+        return frames_indexed, frames_skipped
+
+    if not any_frames:
+        typer.echo(f"  [WARN] No frames extracted from {video_path.name}", err=True)
+        rec.status = _S_UNSUPPORTED
+        rec.reason = "no frames extracted"
+        return 0, 0
 
     rec.status = _S_INDEXED
-    rec.reason = f"{len(frames)} frames extracted"
+    rec.reason = f"{total_frames_seen} frames extracted"
 
-    n_new = frames_indexed
     n_skip = frames_skipped // max(len(specs), 1)
     typer.echo(
         f"  video {v_idx}/{v_total} [{video_path.name}]: "
-        f"{len(frames)} frames, {n_new} embedded, {n_skip} skipped (dup)"
+        f"{total_frames_seen} frames, {frames_indexed} embedded, {n_skip} skipped (dup)"
     )
     return frames_indexed, frames_skipped
 
