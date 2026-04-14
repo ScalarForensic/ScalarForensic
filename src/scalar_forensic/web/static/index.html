@@ -604,22 +604,32 @@
       <template x-if="selectedFileId">
         <div class="image-panel-inner">
           <div class="image-box">
-            <img x-show="querySrc && !isVideoUpload"
+            <img x-show="querySrc"
                  :src="querySrc"
                  :style="`transform: scale(${queryZoom})`"
-                 @click="openLightbox(querySrc)"
+                 @click="!isVideoUpload && openLightbox(querySrc)"
                  alt="Query image">
-            <video x-show="querySrc && isVideoUpload"
-                   :src="querySrc"
-                   controls muted
-                   :style="`transform: scale(${queryZoom}); max-width:100%; max-height:100%; object-fit:contain`"
-                   preload="metadata"></video>
             <div class="image-zoom-btns">
               <button class="zoom-btn" @click.stop="queryZoom = Math.min(4, queryZoom + 0.25)" title="Zoom in">+</button>
               <button class="zoom-btn" @click.stop="queryZoom = Math.max(0.2, queryZoom - 0.25)" title="Zoom out">−</button>
               <button class="zoom-btn" @click.stop="queryZoom = 1" title="Reset" style="font-size:10px">⊡</button>
             </div>
           </div>
+          <!-- Frame navigation (video uploads only) -->
+          <template x-if="isVideoUpload && queryFrames && queryFrames.length > 0">
+            <div class="frame-nav-row">
+              <button class="frame-nav-btn" @click.stop="goQueryFrame(queryFrameIdx - 1)"
+                      :disabled="queryFrameIdx === 0">◀</button>
+              <span class="frame-nav-info">
+                <span x-text="`${queryFrameIdx + 1} / ${queryFrames.length}`"></span>
+                <template x-if="currentQueryFrame">
+                  <span x-text="` · t = ${(currentQueryFrame.timecode_ms / 1000).toFixed(2)}s`"></span>
+                </template>
+              </span>
+              <button class="frame-nav-btn" @click.stop="goQueryFrame(queryFrameIdx + 1)"
+                      :disabled="queryFrameIdx >= queryFrames.length - 1">▶</button>
+            </div>
+          </template>
           <div class="image-subs">
             <div class="sub-row">
               <span class="sub-label">File</span>
@@ -911,7 +921,11 @@
 
       <div class="hits-list" x-show="filteredHits.length > 0">
         <template x-for="hit in filteredHits" :key="hitKey(hit)">
-          <div class="hit-card" :class="{selected: hitKey(hit) === selectedHitKey}"
+          <div class="hit-card"
+               :class="{
+                 selected: hitKey(hit) === selectedHitKey,
+                 'hit-dim': activeQueryTimecode !== null && hit.query_timecodes != null && !hit.query_timecodes.includes(activeQueryTimecode)
+               }"
                @click="selectHit(hit)">
             <img class="hit-thumb"
                  :src="hit.image_hash ? `/api/thumbnail/${hit.image_hash}` : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"
@@ -948,13 +962,38 @@
               </div>
               <div class="hit-dirpath" x-text="hit.is_video_frame && hit.video_path ? hit.video_path.split('/').slice(0,-1).join('/') : hit.path.split('/').slice(0,-1).join('/')"></div>
               <div class="hit-meta-row">
-                <span x-show="hit.is_video_frame && hit.matched_frames && hit.matched_frames.length > 1"
-                      class="meta-tag" style="background:#7c3aed;color:#fff"
-                      x-text="hit.matched_frames ? hit.matched_frames.length + ' frames' : ''"></span>
                 <span x-show="hit.exif_geo_data" class="meta-tag">GPS</span>
                 <span x-show="hit.exif && !hit.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
               </div>
             </div>
+            <!-- Matched-frames expansion (video hits only) -->
+            <template x-if="hit.matched_frames && hit.matched_frames.length > 0">
+              <div class="hit-frames-section" @click.stop>
+                <button class="hit-frames-toggle" @click="toggleHitExpanded(hitKey(hit))">
+                  <span x-text="expandedHits[hitKey(hit)] ? '▼' : '▶'"></span>
+                  <span x-text="`${hit.matched_frames.length} matched frame${hit.matched_frames.length !== 1 ? 's' : ''}`"></span>
+                  <template x-if="hit.query_timecodes && activeQueryTimecode !== null">
+                    <span style="color:#a78bfa;margin-left:4px"
+                          x-text="hit.query_timecodes.includes(activeQueryTimecode) ? '✓ this frame' : ''"></span>
+                  </template>
+                </button>
+                <div x-show="expandedHits[hitKey(hit)]" class="hit-frames-list">
+                  <template x-for="mf in hit.matched_frames" :key="mf.timecode_ms">
+                    <div class="hit-frame-row">
+                      <span x-text="`t = ${(mf.timecode_ms / 1000).toFixed(2)}s`"></span>
+                      <span class="hit-frame-scores">
+                        <template x-for="[mode, score] in Object.entries(mf.scores)" :key="mode">
+                          <span :class="`badge badge-${mode}`" style="font-size:9px"
+                                x-text="mode.slice(0,3).toUpperCase()"></span>
+                          <span :class="`pill-score pill-score-${mode}`" style="font-size:10px"
+                                x-text="score.toFixed(3)"></span>
+                        </template>
+                      </span>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </template>
           </div>
         </template>
       </div>
@@ -1010,6 +1049,13 @@ function sfn() {
     queryError: '',
     _queryTimer: null,
 
+    // Query-video slideshow
+    queryFrames: null,    // [{frame_index, timecode_ms, frame_hash}, …] from /api/query-frames
+    queryFrameIdx: 0,     // index into queryFrames currently shown
+
+    // Hit card expansion state  {hitKey: true|false}
+    expandedHits: {},
+
     // Video timeline
     videoTimeline: null,
 
@@ -1053,6 +1099,17 @@ function sfn() {
       const dot = f.filename.lastIndexOf('.');
       const ext = dot >= 0 ? f.filename.slice(dot).toLowerCase() : '';
       return ['.mp4','.avi','.mov','.mkv','.wmv','.flv','.webm','.m4v','.mpg','.mpeg','.3gp','.ts','.mts'].includes(ext);
+    },
+    get currentQueryFrame() {
+      if (!this.queryFrames || !this.queryFrames.length) return null;
+      return this.queryFrames[this.queryFrameIdx] ?? null;
+    },
+    // Timecode of the currently shown query frame, or null when not in video mode.
+    // Used to dim hits that weren't generated by this frame.
+    get activeQueryTimecode() {
+      return (this.isVideoUpload && this.currentQueryFrame)
+        ? this.currentQueryFrame.timecode_ms
+        : null;
     },
     get matchedFiles() {
       return this.results.filter(r => r.hits.length > 0 && !(r.errors?.length > 0));
@@ -1359,7 +1416,17 @@ function sfn() {
       this.matchMeta = null;
       this.queryZoom = 1.0;
       this.matchZoom = 1.0;
-      this.querySrc = this.sessionId ? `/api/query-image/${this.sessionId}/${fileId}` : null;
+      this.queryFrames = null;
+      this.queryFrameIdx = 0;
+      this.expandedHits = {};
+
+      // For video uploads, seed the slideshow; for images use the raw file.
+      if (this.isVideoUpload && this.sessionId) {
+        this.querySrc = null;  // shown as placeholder until first frame loads
+        this._loadQueryFrames(fileId);
+      } else {
+        this.querySrc = this.sessionId ? `/api/query-image/${this.sessionId}/${fileId}` : null;
+      }
 
       // Auto-select best hit: set matchSrc immediately, or clear it if no hits.
       const bestHit = this.selectedHit; // filteredHits[0] since selectedHitKey is null
@@ -1371,6 +1438,30 @@ function sfn() {
       }
 
       await Promise.all([this._loadQueryMeta(), this._loadMatchMeta()]);
+    },
+
+    async _loadQueryFrames(fileId) {
+      if (!this.sessionId) return;
+      try {
+        const r = await fetch(`/api/query-frames/${this.sessionId}/${fileId}`);
+        if (!r.ok) return;
+        const d = await r.json();
+        this.queryFrames = d.frames ?? [];
+        // Guard: user may have navigated away before the fetch completed
+        if (this.queryFrames.length && this.selectedFileId === fileId) {
+          this.querySrc = `/api/query-frame/${this.sessionId}/${fileId}?timecode_ms=${this.queryFrames[0].timecode_ms}`;
+        }
+      } catch { /* fall through — querySrc stays null */ }
+    },
+
+    goQueryFrame(idx) {
+      if (!this.queryFrames || idx < 0 || idx >= this.queryFrames.length) return;
+      this.queryFrameIdx = idx;
+      this.querySrc = `/api/query-frame/${this.sessionId}/${this.selectedFileId}?timecode_ms=${this.queryFrames[idx].timecode_ms}`;
+    },
+
+    toggleHitExpanded(key) {
+      this.expandedHits = { ...this.expandedHits, [key]: !this.expandedHits[key] };
     },
 
     async selectHit(hit) {
@@ -1630,6 +1721,9 @@ function sfn() {
       this.queryMeta = null;
       this.matchMeta = null;
       this.queryError = '';
+      this.queryFrames = null;
+      this.queryFrameIdx = 0;
+      this.expandedHits = {};
       this.provenance = null;
       this.showProvenance = false;
       this.showPasteArea = false;

@@ -256,6 +256,7 @@ async def query(
                                 }
                                 for mf in h.matched_frames
                             ] if h.matched_frames else None,
+                            "query_timecodes": h.query_timecodes,
                         }
                         for h in r.hits
                     ],
@@ -280,6 +281,61 @@ async def query_image(session_id: str, file_id: str) -> FileResponse:
     if entry is None or not entry.temp_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(entry.temp_path, filename=Path(entry.filename).name)
+
+
+@app.get("/api/query-frames/{session_id}/{file_id}")
+async def query_video_frames(session_id: str, file_id: str) -> JSONResponse:
+    """Return the list of frames extracted from an uploaded query video.
+
+    Each entry has ``frame_index``, ``timecode_ms``, and ``frame_hash``.
+    Used by the frontend to drive the frame slideshow in the query panel.
+    """
+    session = get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    entry = next((e for e in session.files if e.file_id == file_id), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    if not entry.is_video or not entry.video_frames:
+        raise HTTPException(status_code=400, detail="Not a video upload or no frames extracted")
+    return JSONResponse(
+        {
+            "frames": [
+                {
+                    "frame_index": f.frame_index,
+                    "timecode_ms": f.timecode_ms,
+                    "frame_hash": f.frame_hash,
+                }
+                for f in entry.video_frames
+            ]
+        }
+    )
+
+
+@app.get("/api/query-frame/{session_id}/{file_id}")
+async def query_video_frame(
+    session_id: str, file_id: str, timecode_ms: int
+) -> StreamingResponse:
+    """Re-extract and serve a single frame from an uploaded query video as JPEG.
+
+    Called by the slideshow on every navigation step; no frames are cached on
+    disk — PyAV re-seeks and decodes on each request.
+    """
+    session = get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    entry = next((e for e in session.files if e.file_id == file_id), None)
+    if entry is None or not entry.temp_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    if not entry.is_video:
+        raise HTTPException(status_code=400, detail="Not a video file")
+    img = await asyncio.to_thread(extract_frame_at, entry.temp_path, timecode_ms)
+    if img is None:
+        raise HTTPException(status_code=404, detail="Frame not found at given timecode")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/jpeg")
 
 
 @app.get("/api/thumbnail/{sha256}")

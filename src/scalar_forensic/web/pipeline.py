@@ -268,6 +268,9 @@ class Hit:
     frame_timecode_ms: int | None = None
     # After grouping: one Hit per video with all matched frames attached
     matched_frames: list[MatchedVideoFrame] | None = None
+    # Query-video frame timecodes (ms) that generated this hit.  Set only for
+    # video uploads; None for single-image queries and exact-hash matches.
+    query_timecodes: list[int] | None = None
 
     def best_score(self) -> float:
         return max(self.scores.values(), default=0.0)
@@ -315,6 +318,7 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
     Scores are merged with max() so a later, lower score for the same mode
     never downgrades an earlier, higher one.  Model provenance uses setdefault
     so the first-seen value is kept; it doesn't change across duplicate points.
+    query_timecodes are accumulated (union, insertion-ordered).
     """
     if h.path in dest:
         existing = dest[h.path]
@@ -324,6 +328,13 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
             existing.image_hash = h.image_hash
         for mode, provenance in h.model_provenance.items():
             existing.model_provenance.setdefault(mode, provenance)
+        if h.query_timecodes:
+            if existing.query_timecodes is None:
+                existing.query_timecodes = list(h.query_timecodes)
+            else:
+                for tc in h.query_timecodes:
+                    if tc not in existing.query_timecodes:
+                        existing.query_timecodes.append(tc)
     else:
         dest[h.path] = h
 
@@ -356,6 +367,12 @@ def _group_video_hits(hits: list[Hit]) -> list[Hit]:
             )
             for h in sorted(group, key=lambda h: h.frame_timecode_ms or 0)
         ]
+        # Union of query-frame timecodes across every hit in the group
+        all_qtc: list[int] = []
+        for h in group:
+            for tc in h.query_timecodes or []:
+                if tc not in all_qtc:
+                    all_qtc.append(tc)
         grouped_video.append(
             Hit(
                 path=representative.path,
@@ -369,6 +386,7 @@ def _group_video_hits(hits: list[Hit]) -> list[Hit]:
                 video_hash=representative.video_hash,
                 frame_timecode_ms=representative.frame_timecode_ms,
                 matched_frames=matched,
+                query_timecodes=all_qtc if all_qtc else None,
             )
         )
 
@@ -427,22 +445,23 @@ def query_session(
         # For video uploads query with every frame's embedding so all relevant
         # matches surface, not just matches for the first frame.
         # For images use the single top-level embedding as before.
-        sscd_vectors: list[list[float]] = []
-        dino_vectors: list[list[float]] = []
+        # Each entry is (vector, query_timecode_ms); timecode is None for images.
+        sscd_vecs: list[tuple[list[float], int | None]] = []
+        dino_vecs: list[tuple[list[float], int | None]] = []
         if entry.is_video and entry.video_frames:
             for vf in entry.video_frames:
                 if vf.sscd_embedding:
-                    sscd_vectors.append(vf.sscd_embedding)
+                    sscd_vecs.append((vf.sscd_embedding, vf.timecode_ms))
                 if vf.dino_embedding:
-                    dino_vectors.append(vf.dino_embedding)
+                    dino_vecs.append((vf.dino_embedding, vf.timecode_ms))
         else:
             if entry.sscd_embedding:
-                sscd_vectors.append(entry.sscd_embedding)
+                sscd_vecs.append((entry.sscd_embedding, None))
             if entry.dino_embedding:
-                dino_vectors.append(entry.dino_embedding)
+                dino_vecs.append((entry.dino_embedding, None))
 
         if "altered" in modes:
-            for vec in sscd_vectors:
+            for vec, qtc in sscd_vecs:
                 hits, errs = _query_vector(
                     client,
                     collection=settings.collection_sscd,
@@ -452,6 +471,8 @@ def query_session(
                     limit=limit,
                 )
                 for h in hits:
+                    if qtc is not None:
+                        h.query_timecodes = [qtc]
                     if unify:
                         _merge_hit(h, merged)
                     else:
@@ -459,7 +480,7 @@ def query_session(
                 file_result.errors.extend(errs)
 
         if "semantic" in modes:
-            for vec in dino_vectors:
+            for vec, qtc in dino_vecs:
                 hits, errs = _query_vector(
                     client,
                     collection=settings.collection_dino,
@@ -469,6 +490,8 @@ def query_session(
                     limit=limit,
                 )
                 for h in hits:
+                    if qtc is not None:
+                        h.query_timecodes = [qtc]
                     if unify:
                         _merge_hit(h, merged)
                     else:

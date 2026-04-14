@@ -611,6 +611,40 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 }
 .zoom-btn:hover { color: var(--text); border-color: var(--accent); }
 
+/* ── Query-video frame navigation row ── */
+.frame-nav-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.frame-nav-btn {
+  width: 26px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  color: var(--text2);
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+  user-select: none;
+}
+.frame-nav-btn:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.frame-nav-btn:disabled { opacity: 0.3; cursor: default; }
+.frame-nav-info {
+  font-size: 11px;
+  color: var(--text2);
+  font-family: var(--mono);
+  text-align: center;
+}
+
 /* ── Image subtitles ── */
 .image-subs {
   padding: 8px 12px;
@@ -947,6 +981,49 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   gap: 4px;
   margin-top: 1px;
 }
+
+/* Hit dimmed when it doesn't match the currently viewed query frame */
+.hit-dim { opacity: 0.25; transition: opacity 0.15s; }
+.hit-dim:hover { opacity: 0.6; }
+
+/* Per-hit frame expansion (spans the full card width) */
+.hit-frames-section {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--border);
+}
+.hit-frames-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 4px 8px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 10px;
+  font-family: var(--mono);
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.1s;
+}
+.hit-frames-toggle:hover { color: var(--text2); }
+.hit-frames-list {
+  border-top: 1px solid var(--border);
+  max-height: 160px;
+  overflow-y: auto;
+}
+.hit-frame-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  font-family: var(--mono);
+  color: var(--text2);
+}
+.hit-frame-row:last-child { border-bottom: none; }
+.hit-frame-scores { display: flex; align-items: center; gap: 3px; }
 
 .no-hits-msg {
   display: flex;
