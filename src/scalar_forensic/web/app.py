@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import contextlib
 import hashlib
+import io
 import json
 import logging
 import os
@@ -19,13 +20,21 @@ from pathlib import Path
 import torch
 import uvicorn
 from fastapi import FastAPI, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from qdrant_client import QdrantClient
+from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import extract_exif_detailed, get_library_versions
+from scalar_forensic.video import (
+    VIDEO_EXTENSIONS,
+    extract_frame_at,
+    get_video_info,
+    parse_virtual_path,
+)
 from scalar_forensic.web.pipeline import (
+    ProgressEvent,
     QueryProvenance,
     analyze_session,
     get_available_modes,
@@ -67,6 +76,26 @@ def _render_viz_html(data: dict) -> str:
 _IMAGE_EXTENSIONS = frozenset(
     {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp", ".gif", ".jp2", ".ico", ".psd"}
 )
+
+
+def _check_allowed_path(p: Path) -> None:
+    """Raise 403 unless *p* is under the configured SFN_INPUT_DIR root.
+
+    File-serving endpoints require an explicit allowed root.  When SFN_INPUT_DIR
+    is not configured we fail closed rather than serving arbitrary host paths.
+    """
+    settings = Settings()
+    if settings.input_dir is None:
+        raise HTTPException(
+            status_code=403,
+            detail="File serving is disabled: SFN_INPUT_DIR is not configured",
+        )
+    allowed = settings.input_dir.resolve()
+    try:
+        p.relative_to(allowed)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Path is outside the allowed directory")
+
 
 # Cached PCA-projected point cloud, computed once at startup.
 _points3d_cache: dict | None = None
@@ -141,16 +170,55 @@ async def analyze(
     for upload in files:
         file_id = str(uuid.uuid4())
         filename = upload.filename or "unknown"
-        dest = tmp_dir / file_id
-        data = await upload.read()
-        dest.write_bytes(data)
+        # Preserve the original extension so container-detection libraries
+        # (PyAV, Pillow) can identify the format from the filename.
+        suffix = Path(filename).suffix
+        dest = tmp_dir / (file_id + suffix)
+        with dest.open("wb") as fout:
+            while True:
+                chunk = await upload.read(1024 * 1024)  # 1 MB chunks
+                if not chunk:
+                    break
+                fout.write(chunk)
         session.files.append(FileEntry(file_id=file_id, filename=filename, temp_path=dest))
 
     async def event_stream():
-        for event in analyze_session(session, mode_list, settings):
-            yield f"data: {json.dumps(event.__dict__)}\n\n"
+        # Run the analysis (CPU-intensive) in a thread pool so the event loop
+        # stays free to flush SSE chunks to the client in real time.  Without
+        # this the loop is blocked between yields and the browser sees no
+        # progress until an entire batch finishes.
+        queue: asyncio.Queue[ProgressEvent | None] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+        def _run_analysis() -> None:
+            try:
+                for event in analyze_session(session, mode_list, settings):
+                    loop.call_soon_threadsafe(queue.put_nowait, event)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+
+        task = asyncio.create_task(asyncio.to_thread(_run_analysis))
+
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield f"data: {json.dumps(event.__dict__)}\n\n"
+
+            await task  # re-raise any unexpected exception from the thread
+        finally:
+            # Cancel the task if the client disconnects so the asyncio Future
+            # is not orphaned.  The underlying thread pool thread cannot be
+            # forcibly interrupted, but it will be ignored once the task is
+            # cancelled and its result will be discarded.
+            task.cancel()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +275,22 @@ async def query(
                             "exif_geo_data": h.exif_geo_data,
                             "image_hash": h.image_hash,
                             "model_provenance": h.model_provenance,
+                            "is_video_frame": h.is_video_frame,
+                            "video_path": h.video_path,
+                            "video_hash": h.video_hash,
+                            "frame_timecode_ms": h.frame_timecode_ms,
+                            "matched_frames": [
+                                {
+                                    "timecode_ms": mf.timecode_ms,
+                                    "frame_hash": mf.frame_hash,
+                                    "scores": mf.scores,
+                                }
+                                for mf in h.matched_frames
+                            ]
+                            if h.matched_frames
+                            else None,
+                            "query_timecodes": h.query_timecodes,
+                            "best_query_timecode_ms": h.best_query_timecode_ms,
                         }
                         for h in r.hits
                     ],
@@ -233,6 +317,61 @@ async def query_image(session_id: str, file_id: str) -> FileResponse:
     return FileResponse(entry.temp_path, filename=Path(entry.filename).name)
 
 
+@app.get("/api/query-frames/{session_id}/{file_id}")
+async def query_video_frames(session_id: str, file_id: str) -> JSONResponse:
+    """Return the list of frames extracted from an uploaded query video.
+
+    Each entry has ``frame_index``, ``timecode_ms``, and ``frame_hash``.
+    Used by the frontend to drive the frame slideshow in the query panel.
+    """
+    session = get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    entry = next((e for e in session.files if e.file_id == file_id), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    if not entry.is_video or not entry.video_frames:
+        raise HTTPException(status_code=400, detail="Not a video upload or no frames extracted")
+    return JSONResponse(
+        {
+            "frames": [
+                {
+                    "frame_index": f.frame_index,
+                    "timecode_ms": f.timecode_ms,
+                    "frame_hash": f.frame_hash,
+                }
+                for f in entry.video_frames
+            ]
+        }
+    )
+
+
+@app.get("/api/query-frame/{session_id}/{file_id}")
+async def query_video_frame(session_id: str, file_id: str, timecode_ms: int) -> StreamingResponse:
+    """Re-extract and serve a single frame from an uploaded query video as JPEG.
+
+    Called by the slideshow on every navigation step; no frames are cached on
+    disk — PyAV re-seeks and decodes on each request.
+    """
+    session = get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    entry = next((e for e in session.files if e.file_id == file_id), None)
+    if entry is None or not entry.temp_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    if not entry.is_video:
+        raise HTTPException(status_code=400, detail="Not a video file")
+    if timecode_ms < 0:
+        raise HTTPException(status_code=400, detail="timecode_ms must be >= 0")
+    img = await asyncio.to_thread(extract_frame_at, entry.temp_path, timecode_ms)
+    if img is None:
+        raise HTTPException(status_code=404, detail="Frame not found at given timecode")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/jpeg")
+
+
 @app.get("/api/thumbnail/{sha256}")
 async def thumbnail(sha256: str) -> FileResponse:
     """Serve a pre-generated thumbnail by SHA-256 hash.
@@ -252,14 +391,38 @@ async def thumbnail(sha256: str) -> FileResponse:
 
 
 @app.get("/api/hit-image")
-async def hit_image(path: str) -> FileResponse:
-    """Serve a hit image from the server filesystem.
+async def hit_image(path: str) -> Response:
+    """Serve a hit image (or video frame) from the server filesystem.
 
-    Security: only image extensions, resolved absolute path.
+    Accepts both regular image paths and virtual video frame paths
+    (``/abs/path/video.mp4::frame_000001_t=1000ms``).
     """
-    p = Path(path).resolve()
-    if not p.is_absolute():
+    # Virtual video frame path
+    parsed = parse_virtual_path(path)
+    if parsed is not None:
+        video_path, timecode_ms = parsed
+        if not video_path.is_absolute():
+            raise HTTPException(status_code=400, detail="Virtual path must be absolute")
+        video_path = video_path.resolve()
+        _check_allowed_path(video_path)
+        if not video_path.exists() or not video_path.is_file():
+            raise HTTPException(status_code=404, detail="Video file not found")
+        if video_path.suffix.lower() not in VIDEO_EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Not a video file")
+        img = await asyncio.to_thread(extract_frame_at, video_path, timecode_ms)
+        if img is None:
+            raise HTTPException(status_code=404, detail="Frame not found at given timecode")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="image/jpeg")
+
+    # Regular image path
+    raw = Path(path)
+    if not raw.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
+    p = raw.resolve()
+    _check_allowed_path(p)
     if p.suffix.lower() not in _IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not an image file")
     if not p.exists() or not p.is_file():
@@ -316,7 +479,7 @@ async def hit_provenance(image_hash: str) -> JSONResponse:
 
 @app.get("/api/query-metadata/{session_id}/{file_id}")
 async def query_metadata(session_id: str, file_id: str) -> JSONResponse:
-    """Detailed metadata for an uploaded query image."""
+    """Detailed metadata for an uploaded query file (image or video)."""
     session = get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -324,20 +487,94 @@ async def query_metadata(session_id: str, file_id: str) -> JSONResponse:
     if entry is None or not entry.temp_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
-    data = entry.temp_path.read_bytes()
-    meta = extract_exif_detailed(data)
-    meta["filename"] = entry.filename
-    meta["hash_sha256"] = entry.file_hash or hashlib.sha256(data).hexdigest()
-    meta["hash_md5"] = entry.file_hash_md5 or hashlib.md5(data).hexdigest()  # noqa: S324
+    if entry.is_video:
+        # For videos: use PyAV container metadata — never read the full file into
+        # memory.  Hashes were already computed during analysis via streaming I/O.
+        meta = get_video_info(entry.temp_path)
+        meta["filename"] = entry.filename
+        meta["size_bytes"] = entry.temp_path.stat().st_size
+        if entry.file_hash:
+            meta["hash_sha256"] = entry.file_hash
+        if entry.file_hash_md5:
+            meta["hash_md5"] = entry.file_hash_md5
+    else:
+        data = entry.temp_path.read_bytes()
+        meta = extract_exif_detailed(data)
+        meta["filename"] = entry.filename
+        meta["hash_sha256"] = entry.file_hash or hashlib.sha256(data).hexdigest()
+        meta["hash_md5"] = entry.file_hash_md5 or hashlib.md5(data).hexdigest()  # noqa: S324
     return JSONResponse(meta)
 
 
 @app.get("/api/metadata")
 async def hit_metadata(path: str) -> JSONResponse:
-    """Detailed metadata for a hit image (filesystem path)."""
-    p = Path(path).resolve()
-    if not p.is_absolute() or p.suffix.lower() not in _IMAGE_EXTENSIONS:
+    """Detailed metadata for a hit image or video frame (filesystem path)."""
+    # Virtual video frame path
+    parsed = parse_virtual_path(path)
+    if parsed is not None:
+        video_path, timecode_ms = parsed
+        if not video_path.is_absolute():
+            raise HTTPException(status_code=400, detail="Virtual path must be absolute")
+        video_path = video_path.resolve()
+        _check_allowed_path(video_path)
+        if not video_path.exists() or not video_path.is_file():
+            raise HTTPException(status_code=404, detail="Video file not found")
+        if video_path.suffix.lower() not in VIDEO_EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Not a video file")
+        info = get_video_info(video_path)
+
+        # Retrieve the already-computed hashes from Qdrant rather than
+        # re-reading the (potentially large) video file just to hash it.
+        sha256: str | None = None
+        try:
+            settings_inner = Settings()
+            _client = QdrantClient(
+                url=settings_inner.qdrant_url, api_key=settings_inner.qdrant_api_key
+            )
+            for coll in (settings_inner.collection_sscd, settings_inner.collection_dino):
+                records, _ = _client.scroll(
+                    collection_name=coll,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="video_path",
+                                match=MatchValue(value=str(video_path)),
+                            ),
+                            FieldCondition(
+                                key="frame_timecode_ms",
+                                match=MatchValue(value=timecode_ms),
+                            ),
+                        ]
+                    ),
+                    limit=1,
+                    with_payload=["video_hash"],
+                    with_vectors=False,
+                )
+                if records:
+                    sha256 = records[0].payload.get("video_hash")
+                    break
+        except Exception:  # noqa: BLE001
+            pass  # fall through — hashes will be omitted rather than blocking
+
+        meta: dict = {
+            "filename": video_path.name,
+            "path": str(video_path),
+            "is_video_frame": True,
+            "frame_timecode_ms": timecode_ms,
+            **{f"video_{k}": v for k, v in info.items()},
+        }
+        if sha256:
+            meta["hash_sha256"] = sha256
+        return JSONResponse(meta)
+
+    # Regular image path
+    raw = Path(path)
+    if not raw.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
+    p = raw.resolve()
+    if p.suffix.lower() not in _IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    _check_allowed_path(p)
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -348,6 +585,98 @@ async def hit_metadata(path: str) -> JSONResponse:
     meta["hash_sha256"] = hashlib.sha256(data).hexdigest()
     meta["hash_md5"] = hashlib.md5(data).hexdigest()  # noqa: S324
     return JSONResponse(meta)
+
+
+# ---------------------------------------------------------------------------
+# Video frame serving
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/video-frame")
+async def video_frame(path: str, timecode_ms: int) -> StreamingResponse:
+    """Re-extract and serve a single video frame as JPEG.
+
+    ``path`` must be an absolute filesystem path to a video file.
+    ``timecode_ms`` is the target timecode in milliseconds.
+    """
+    if timecode_ms < 0:
+        raise HTTPException(status_code=400, detail="timecode_ms must be >= 0")
+    raw = Path(path)
+    if not raw.is_absolute():
+        raise HTTPException(status_code=400, detail="Invalid path")
+    p = raw.resolve()
+    if p.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Not a video file")
+    _check_allowed_path(p)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    img = await asyncio.to_thread(extract_frame_at, p, timecode_ms)
+    if img is None:
+        raise HTTPException(status_code=404, detail="Frame not found at given timecode")
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/jpeg")
+
+
+@app.get("/api/video-timeline")
+async def video_timeline(video_hash: str) -> JSONResponse:
+    """Return all indexed frame timecodes for a given video hash.
+
+    Scrolls Qdrant (SSCD collection first, then DINOv2) for points with a
+    matching ``video_hash`` payload field.  Returns timecodes, frame hashes,
+    and virtual paths so the frontend can render the timeline bar.
+    """
+    if not re.fullmatch(r"[0-9a-f]{64}", video_hash):
+        raise HTTPException(status_code=400, detail="Invalid video hash")
+
+    settings = Settings()
+    client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+
+    frames: dict[int, dict] = {}  # timecode_ms → frame info
+    for collection in (settings.collection_sscd, settings.collection_dino):
+        try:
+            offset = None
+            while True:
+                records, offset = client.scroll(
+                    collection_name=collection,
+                    scroll_filter=Filter(
+                        must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
+                    ),
+                    limit=256,
+                    offset=offset,
+                    with_payload=[
+                        "image_path",
+                        "image_hash",
+                        "frame_timecode_ms",
+                        "frame_index",
+                        "video_path",
+                    ],
+                    with_vectors=False,
+                )
+                for r in records:
+                    tc = r.payload.get("frame_timecode_ms")
+                    if tc is not None and tc not in frames:
+                        frames[tc] = {
+                            "timecode_ms": tc,
+                            "frame_hash": r.payload.get("image_hash"),
+                            "frame_index": r.payload.get("frame_index"),
+                            "virtual_path": r.payload.get("image_path"),
+                            "video_path": r.payload.get("video_path"),
+                        }
+                if offset is None:
+                    break
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("video-timeline: could not scroll %r: %s", collection, exc)
+
+    return JSONResponse(
+        {
+            "video_hash": video_hash,
+            "frames": sorted(frames.values(), key=lambda f: f["timecode_ms"]),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,9 @@
-"""Recursive image file discovery."""
+"""Recursive image and video file discovery."""
 
 from collections.abc import Iterator
 from pathlib import Path
+
+from scalar_forensic.video import VIDEO_EXTENSIONS
 
 IMAGE_EXTENSIONS = frozenset(
     {
@@ -45,12 +47,18 @@ def scan_images(root: Path) -> Iterator[Path]:
             yield path
 
 
-def scan_all_files(root: Path) -> Iterator[tuple[Path, bool]]:
-    """Recursively yield *(path, is_image)* for every regular file under *root*.
+def scan_all_files(root: Path) -> Iterator[tuple[Path, str]]:
+    """Recursively yield *(path, file_type)* for every regular file under *root*.
 
-    ``is_image`` is True when the file extension is in the supported set.
+    ``file_type`` is one of ``"image"``, ``"video"``, or ``"unsupported"``.
     """
-    extensions = IMAGE_EXTENSIONS | (_HEIF_EXTENSIONS if _HEIF_AVAILABLE else frozenset())
+    image_extensions = IMAGE_EXTENSIONS | (_HEIF_EXTENSIONS if _HEIF_AVAILABLE else frozenset())
     for path in root.rglob("*"):
         if path.is_file():
-            yield path, path.suffix.lower() in extensions
+            ext = path.suffix.lower()
+            if ext in image_extensions:
+                yield path, "image"
+            elif ext in VIDEO_EXTENSIONS:
+                yield path, "video"
+            else:
+                yield path, "unsupported"

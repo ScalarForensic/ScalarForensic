@@ -75,7 +75,7 @@ _EXIF_GPS_IFD_TAG = 34853  # PIL ExifTags.Base.GPSInfo
 
 
 def get_library_versions() -> dict[str, str]:
-    libs = ["torch", "transformers", "torchvision", "qdrant-client", "Pillow"]
+    libs = ["torch", "transformers", "torchvision", "qdrant-client", "Pillow", "av"]
     versions: dict[str, str] = {"python": sys.version}
     for lib in libs:
         try:
@@ -93,6 +93,34 @@ def hash_bytes(data: bytes) -> str:
 def hash_bytes_md5(data: bytes) -> str:
     """Return MD5 hex digest of already-loaded bytes."""
     return hashlib.md5(data).hexdigest()  # noqa: S324
+
+
+def hash_file(path: Path, chunk_size: int = 1 << 20) -> str:
+    """Return SHA-256 hex digest of a file, reading it in chunks.
+
+    Uses O(chunk_size) memory regardless of file size — suitable for large
+    video files where ``read_bytes()`` would cause a memory spike.
+    """
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            buf = fh.read(chunk_size)
+            if not buf:
+                break
+            h.update(buf)
+    return h.hexdigest()
+
+
+def hash_file_md5(path: Path, chunk_size: int = 1 << 20) -> str:
+    """Return MD5 hex digest of a file, reading it in chunks."""
+    h = hashlib.md5()  # noqa: S324
+    with path.open("rb") as fh:
+        while True:
+            buf = fh.read(chunk_size)
+            if not buf:
+                break
+            h.update(buf)
+    return h.hexdigest()
 
 
 class ExifInfo(TypedDict):
@@ -206,6 +234,19 @@ def preprocess_batch(image_data: list[bytes]) -> list[Image.Image | Exception]:
         return results
 
 
+def preprocess_pil_batch(images: list[Image.Image]) -> list[Image.Image]:
+    """Apply ``_cap_short_side`` to already-decoded PIL Images.
+
+    Video frames arrive from PyAV as PIL Images, so there is no I/O or
+    format-decoding step.  This function provides the same size-capping that
+    ``preprocess_batch`` applies internally, without the bytes-open overhead.
+
+    Unlike ``preprocess_batch``, this function never returns exceptions —
+    callers are responsible for ensuring all inputs are valid RGB Images.
+    """
+    return [_cap_short_side(img) for img in images]
+
+
 # ---------------------------------------------------------------------------
 # DINOv2
 # ---------------------------------------------------------------------------
@@ -230,7 +271,12 @@ class DINOv2Embedder:
             model_name, dtype=dtype, local_files_only=local_files_only
         ).to(self.device)
         self.model.eval()
-        if self.device == "cuda":
+        # torch.compile has known issues on ROCm for certain GPU architectures (e.g. gfx1201):
+        # 'KernelMetadata' object has no attribute 'cluster_dims' (TorchDynamo bug in ROCm builds).
+        # Detect ROCm via torch.version.hip and skip compilation to avoid silent batch failures.
+        _is_rocm = getattr(torch.version, "hip", None) is not None
+        self.compiled = self.device == "cuda" and not _is_rocm
+        if self.compiled:
             self.model = torch.compile(self.model)
         self._model_hash: str | None = None
 
@@ -309,7 +355,9 @@ class SSCDEmbedder:
             )
         self._model = torch.jit.load(model_name, map_location=self.device)
         self._model.eval()
-        if self.device == "cuda":
+        _is_rocm = getattr(torch.version, "hip", None) is not None
+        self.compiled = self.device == "cuda" and not _is_rocm
+        if self.compiled:
             # NOTE: .half() produces degenerate constant vectors with this TorchScript checkpoint.
             # Keep SSCD in fp32 even on CUDA; torch.compile still gives a meaningful speedup.
             self._model = torch.compile(self._model)
