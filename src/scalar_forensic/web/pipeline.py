@@ -270,11 +270,9 @@ class Hit:
     matched_frames: list[MatchedVideoFrame] | None = None
     # Query-video frame timecodes (ms) that generated this hit.  Set only for
     # video uploads; None for single-image queries and exact-hash matches.
+    # Each hit is produced by exactly one query frame, so this list has at
+    # most one element — it exists as a list only for the UI filter lookup.
     query_timecodes: list[int] | None = None
-    # Per-query-frame scores: timecode_ms → {mode: score}.  Preserves each
-    # query frame's individual score before scores are merged with max().
-    # Populated only when unify=True and the query is a video upload.
-    per_frame_scores: dict[int, dict[str, float]] | None = None
 
     def best_score(self) -> float:
         return max(self.scores.values(), default=0.0)
@@ -317,15 +315,16 @@ def _unmerged_sort_key(h: Hit) -> tuple:
 
 
 def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
-    """Merge a hit into the accumulator, combining scores from multiple modes.
+    """Merge a hit into the per-query-entity accumulator.
 
-    Scores are merged with max() so a later, lower score for the same mode
-    never downgrades an earlier, higher one.  Model provenance uses setdefault
-    so the first-seen value is kept; it doesn't change across duplicate points.
-    query_timecodes are accumulated (union, insertion-ordered).
-    per_frame_scores records each query frame's individual score before the
-    max()-merge so the UI can show the frame-specific value when a frame child
-    is selected.
+    Only ever called within a single query entity's (one image or one video
+    frame) isolated context.  The only purpose is to combine ALTER and SEMAN
+    scores for the same dataset path onto one hit card, so both measurements
+    from that single comparison are visible side by side.
+
+    The max() here is safe: both scores come from the *same* query→dataset
+    pair measured by two different models (SSCD, DINOv2).  It is never used
+    to combine scores from different query frames or different images.
     """
     if h.path in dest:
         existing = dest[h.path]
@@ -342,27 +341,20 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
                 for tc in h.query_timecodes:
                     if tc not in existing.query_timecodes:
                         existing.query_timecodes.append(tc)
-            # Accumulate per-query-frame scores (merge each timecode with max)
-            pfs = existing.per_frame_scores or {}
-            for tc in h.query_timecodes:
-                tc_scores = pfs.get(tc, {})
-                for mode, score in h.scores.items():
-                    tc_scores[mode] = max(tc_scores.get(mode, 0.0), score)
-                pfs[tc] = tc_scores
-            existing.per_frame_scores = pfs
     else:
-        # Seed per_frame_scores from this hit's own timecode + scores
-        if h.query_timecodes:
-            h.per_frame_scores = {tc: dict(h.scores) for tc in h.query_timecodes}
         dest[h.path] = h
 
 
 def _group_video_hits(hits: list[Hit]) -> list[Hit]:
-    """Collapse multiple video-frame hits from the same source video into one Hit.
+    """Collapse dataset video-frame hits from the same source video into one Hit.
 
-    Non-video hits pass through unchanged.  For each unique ``video_path``,
-    keeps the frame with the best score as the representative Hit and attaches
-    all matched frames in ``matched_frames`` for the timeline UI.
+    Called once per query entity (one image or one video frame), so all hits
+    in ``hits`` come from a single query vector.  Non-video hits pass through
+    unchanged.  For each unique ``video_path`` the frame with the highest
+    score becomes the representative; its score is the exact Qdrant similarity
+    for that one comparison — nothing is mathematically combined.  All matched
+    dataset frames are preserved in ``matched_frames`` with their individual
+    exact scores.
     """
     non_video: list[Hit] = []
     video_groups: dict[str, list[Hit]] = {}
@@ -375,32 +367,20 @@ def _group_video_hits(hits: list[Hit]) -> list[Hit]:
 
     grouped_video: list[Hit] = []
     for vpath, group in video_groups.items():
-        # Best frame = highest best_score
+        # Representative = frame with highest score for this query entity.
+        # The score kept is that frame's exact Qdrant similarity — no combination.
         representative = max(group, key=lambda h: h.best_score())
         matched = [
             MatchedVideoFrame(
                 timecode_ms=h.frame_timecode_ms or 0,
                 frame_hash=h.image_hash or "",
-                scores=h.scores,
+                scores=h.scores,  # exact score from this one comparison
             )
             for h in sorted(group, key=lambda h: h.frame_timecode_ms or 0)
         ]
-        # Union of query-frame timecodes across every hit in the group
-        all_qtc: list[int] = []
-        for h in group:
-            for tc in h.query_timecodes or []:
-                if tc not in all_qtc:
-                    all_qtc.append(tc)
-        # Merge per_frame_scores across all dataset frames in the group.
-        # For each query timecode, keep the best score it achieved against
-        # any frame of this dataset video.
-        merged_pfs: dict[int, dict[str, float]] = {}
-        for h in group:
-            for tc, tc_scores in (h.per_frame_scores or {}).items():
-                existing = merged_pfs.get(tc, {})
-                for mode, score in tc_scores.items():
-                    existing[mode] = max(existing.get(mode, 0.0), score)
-                merged_pfs[tc] = existing
+        # query_timecodes: all hits in this group come from the same query
+        # entity so they share the same single timecode (or None for images).
+        qtc = representative.query_timecodes
         grouped_video.append(
             Hit(
                 path=representative.path,
@@ -414,8 +394,7 @@ def _group_video_hits(hits: list[Hit]) -> list[Hit]:
                 video_hash=representative.video_hash,
                 frame_timecode_ms=representative.frame_timecode_ms,
                 matched_frames=matched,
-                query_timecodes=all_qtc if all_qtc else None,
-                per_frame_scores=merged_pfs if merged_pfs else None,
+                query_timecodes=qtc,
             )
         )
 
@@ -459,22 +438,18 @@ def query_session(
             continue
 
         file_result = FileResult(file_id=entry.file_id, filename=entry.filename)
-        merged: dict[str, Hit] = {}
-        unmerged: list[Hit] = []
 
+        # Exact hash matches are file-level (not frame-level).  Collect once
+        # and pass through without merging with embedding-based results.
+        all_flat_hits: list[Hit] = []
         if "exact" in modes and entry.file_hash:
             exact_hits, errs = _query_exact(client, entry.file_hash, entry.file_hash_md5, settings)
-            for h in exact_hits:
-                if unify:
-                    _merge_hit(h, merged)
-                else:
-                    unmerged.append(h)
+            all_flat_hits.extend(exact_hits)
             file_result.errors.extend(errs)
 
-        # For video uploads query with every frame's embedding so all relevant
-        # matches surface, not just matches for the first frame.
-        # For images use the single top-level embedding as before.
-        # Each entry is (vector, query_timecode_ms); timecode is None for images.
+        # Build (vector, query_timecode_ms) pairs.
+        # For images timecode is None; for video uploads each frame contributes
+        # its own pair so every frame is queried independently.
         sscd_vecs: list[tuple[list[float], int | None]] = []
         dino_vecs: list[tuple[list[float], int | None]] = []
         if entry.is_video and entry.video_frames:
@@ -489,49 +464,87 @@ def query_session(
             if entry.dino_embedding:
                 dino_vecs.append((entry.dino_embedding, None))
 
-        if "altered" in modes:
-            for vec, qtc in sscd_vecs:
-                hits, errs = _query_vector(
-                    client,
-                    collection=settings.collection_sscd,
-                    vector=vec,
-                    mode="altered",
-                    threshold=threshold_altered,
-                    limit=limit,
-                )
-                for h in hits:
-                    if qtc is not None:
-                        h.query_timecodes = [qtc]
-                    if unify:
-                        _merge_hit(h, merged)
-                    else:
-                        unmerged.append(h)
-                file_result.errors.extend(errs)
+        # Collect all unique query timecodes (insertion-ordered).
+        seen_qtcs: set = set()
+        all_qtcs: list[int | None] = []
+        for _, qtc in sscd_vecs + dino_vecs:
+            if qtc not in seen_qtcs:
+                all_qtcs.append(qtc)
+                seen_qtcs.add(qtc)
 
-        if "semantic" in modes:
-            for vec, qtc in dino_vecs:
-                hits, errs = _query_vector(
-                    client,
-                    collection=settings.collection_dino,
-                    vector=vec,
-                    mode="semantic",
-                    threshold=threshold_semantic,
-                    limit=limit,
-                )
-                for h in hits:
-                    if qtc is not None:
-                        h.query_timecodes = [qtc]
-                    if unify:
-                        _merge_hit(h, merged)
-                    else:
-                        unmerged.append(h)
-                file_result.errors.extend(errs)
+        # Query each timecode (frame or image) in complete isolation.
+        # Within one query entity, altered and semantic hits for the same
+        # dataset path are combined onto one hit card (unify=True) so both
+        # measurements are visible side by side — both scores originate from
+        # the exact same query→dataset pair, just via different models.
+        # No scores from different query frames are ever combined.
+        for qtc in all_qtcs:
+            frame_merged: dict[str, Hit] = {}   # used when unify=True
+            frame_unmerged: list[Hit] = []       # used when unify=False
 
+            if "altered" in modes:
+                for vec, tc in sscd_vecs:
+                    if tc != qtc:
+                        continue
+                    hits, errs = _query_vector(
+                        client,
+                        collection=settings.collection_sscd,
+                        vector=vec,
+                        mode="altered",
+                        threshold=threshold_altered,
+                        limit=limit,
+                    )
+                    for h in hits:
+                        if qtc is not None:
+                            h.query_timecodes = [qtc]
+                        if unify:
+                            _merge_hit(h, frame_merged)
+                        else:
+                            frame_unmerged.append(h)
+                    file_result.errors.extend(errs)
+
+            if "semantic" in modes:
+                for vec, tc in dino_vecs:
+                    if tc != qtc:
+                        continue
+                    hits, errs = _query_vector(
+                        client,
+                        collection=settings.collection_dino,
+                        vector=vec,
+                        mode="semantic",
+                        threshold=threshold_semantic,
+                        limit=limit,
+                    )
+                    for h in hits:
+                        if qtc is not None:
+                            h.query_timecodes = [qtc]
+                        if unify:
+                            _merge_hit(h, frame_merged)
+                        else:
+                            frame_unmerged.append(h)
+                    file_result.errors.extend(errs)
+
+            # Group dataset-video frames found by this query entity, then
+            # append to the shared results list.  Because grouping is done
+            # per query entity, a dataset video appears as a separate Hit for
+            # each query frame that matched it — scores are never combined.
+            frame_hits = (
+                list(frame_merged.values()) if unify else frame_unmerged
+            )
+            all_flat_hits.extend(_group_video_hits(frame_hits))
+
+        # Sort all hits.  For image queries apply the global limit (each query
+        # produced one set of results).  For video queries Qdrant already
+        # limited each frame's results independently, so no global cap —
+        # every frame's evidence is preserved for the per-frame child views.
         if unify:
-            flat_hits = sorted(merged.values(), key=_hit_sort_key)[:limit]
+            sorted_hits = sorted(all_flat_hits, key=_hit_sort_key)
+            file_result.hits = (
+                sorted_hits if entry.is_video else sorted_hits[:limit]
+            )
         else:
-            flat_hits = sorted(unmerged, key=_unmerged_sort_key)
-        file_result.hits = _group_video_hits(flat_hits)
+            file_result.hits = sorted(all_flat_hits, key=_unmerged_sort_key)
+
         results.append(file_result)
 
     # Collect model provenance for the embedders currently loaded in this process
