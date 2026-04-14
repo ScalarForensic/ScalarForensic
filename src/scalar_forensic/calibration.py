@@ -36,7 +36,9 @@ _EFFICIENCY_TARGET = 0.95  # fraction of T_max to accept as "optimal"
 _MAX_BATCH = 512           # hard ceiling for exponential probe
 _WARMUP_BATCHES = 2        # warm-up batches (results discarded)
 _MEASURE_BATCHES = 5       # timed measurement batches
-_MIN_GAIN = 0.03           # early-stop: relative Δ throughput < 3 %
+_MIN_GAIN = 0.03           # converged: positive gain < 3 % → saturation reached
+_PEAK_FRAC = 0.70          # post-peak guard: stop after this many consecutive
+_POST_PEAK_DROPS = 3       #   measurements below _PEAK_FRAC × best seen so far
 _BAR_WIDTH = 30            # characters for the throughput bar
 
 
@@ -204,14 +206,33 @@ def calibrate(
         max_tp = max(t for _, t in measurements)
         bar_fill = round(_BAR_WIDTH * tp / max_tp)
         bar = "█" * bar_fill + "░" * (_BAR_WIDTH - bar_fill)
-        gain_str = f"  Δ+{(tp / prev_tp - 1) * 100:5.1f}%" if prev_tp else ""
+        if prev_tp:
+            gain_pct = (tp / prev_tp - 1) * 100
+            gain_str = f"  Δ{gain_pct:+6.1f}%"
+        else:
+            gain_str = ""
 
-        if prev_tp and (tp - prev_tp) / prev_tp < _MIN_GAIN:
+        # ── Stopping conditions ───────────────────────────────────────────
+        # 1. Saturation: small *positive* gain — throughput has plateaued.
+        if prev_tp and 0.0 <= (tp - prev_tp) / prev_tp < _MIN_GAIN:
             typer.echo(
                 f"  batch={probe_b:>4}  {bar}  {tp:7.1f} img/s{gain_str}"
-                f"  ← Δ < {_MIN_GAIN * 100:.0f}%, stopped"
+                f"  ← Δ < {_MIN_GAIN * 100:.0f}%, converged"
             )
             break
+
+        # 2. Post-peak decay: several consecutive measurements well below the
+        #    running best (covers noise spikes and genuine GPU memory pressure).
+        if len(measurements) >= _POST_PEAK_DROPS:
+            recent_below = sum(
+                1 for _, t in measurements[-_POST_PEAK_DROPS:] if t < max_tp * _PEAK_FRAC
+            )
+            if recent_below == _POST_PEAK_DROPS:
+                typer.echo(
+                    f"  batch={probe_b:>4}  {bar}  {tp:7.1f} img/s{gain_str}"
+                    f"  ← {_POST_PEAK_DROPS}× below peak, stopped"
+                )
+                break
 
         typer.echo(f"  batch={probe_b:>4}  {bar}  {tp:7.1f} img/s{gain_str}")
         prev_tp = tp
