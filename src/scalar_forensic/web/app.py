@@ -196,13 +196,20 @@ async def analyze(
 
         task = asyncio.create_task(asyncio.to_thread(_run_analysis))
 
-        while True:
-            event = await queue.get()
-            if event is None:
-                break
-            yield f"data: {json.dumps(event.__dict__)}\n\n"
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield f"data: {json.dumps(event.__dict__)}\n\n"
 
-        await task  # re-raise any unexpected exception from the thread
+            await task  # re-raise any unexpected exception from the thread
+        finally:
+            # Cancel the task if the client disconnects so the asyncio Future
+            # is not orphaned.  The underlying thread pool thread cannot be
+            # forcibly interrupted, but it will be ignored once the task is
+            # cancelled and its result will be discarded.
+            task.cancel()
 
     return StreamingResponse(
         event_stream(),
@@ -486,8 +493,11 @@ async def hit_metadata(path: str) -> JSONResponse:
     if parsed is not None:
         video_path, timecode_ms = parsed
         video_path = video_path.resolve()
+        _check_allowed_path(video_path)
         if not video_path.exists() or not video_path.is_file():
             raise HTTPException(status_code=404, detail="Video file not found")
+        if video_path.suffix.lower() not in VIDEO_EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Not a video file")
         info = get_video_info(video_path)
 
         # Retrieve the already-computed hashes from Qdrant rather than

@@ -321,11 +321,20 @@ def _index_video(
         rec.reason = "no frames extracted"
         return 0, 0
 
-    rec.status = _S_INDEXED
-    rec.reason = f"{total_frames_seen} frames extracted"
-
     # frames_skipped tracks only spec_idx==0 (symmetric with frames_indexed).
     n_skip = frames_skipped
+
+    if frames_indexed > 0:
+        rec.status = _S_INDEXED
+        rec.reason = f"{total_frames_seen} frames extracted"
+    elif n_skip >= total_frames_seen:
+        rec.status = _S_SKIP_IDX
+        rec.reason = f"all {total_frames_seen} extracted frames already indexed"
+    else:
+        rec.status = _S_FAIL_EMB
+        rec.reason = (
+            f"{total_frames_seen} frames extracted but no new vectors were indexed"
+        )
     typer.echo(
         f"  video {v_idx}/{v_total} [{video_path.name}]: "
         f"{total_frames_seen} frames, {frames_indexed} embedded, {n_skip} skipped (dup)"
