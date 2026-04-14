@@ -271,7 +271,12 @@ class DINOv2Embedder:
             model_name, dtype=dtype, local_files_only=local_files_only
         ).to(self.device)
         self.model.eval()
-        if self.device == "cuda":
+        # torch.compile has known issues on ROCm for certain GPU architectures (e.g. gfx1201):
+        # 'KernelMetadata' object has no attribute 'cluster_dims' (TorchDynamo bug in ROCm builds).
+        # Detect ROCm via torch.version.hip and skip compilation to avoid silent batch failures.
+        _is_rocm = getattr(torch.version, "hip", None) is not None
+        self.compiled = self.device == "cuda" and not _is_rocm
+        if self.compiled:
             self.model = torch.compile(self.model)
         self._model_hash: str | None = None
 
@@ -350,7 +355,9 @@ class SSCDEmbedder:
             )
         self._model = torch.jit.load(model_name, map_location=self.device)
         self._model.eval()
-        if self.device == "cuda":
+        _is_rocm = getattr(torch.version, "hip", None) is not None
+        self.compiled = self.device == "cuda" and not _is_rocm
+        if self.compiled:
             # NOTE: .half() produces degenerate constant vectors with this TorchScript checkpoint.
             # Keep SSCD in fp32 even on CUDA; torch.compile still gives a meaningful speedup.
             self._model = torch.compile(self._model)
