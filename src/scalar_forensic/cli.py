@@ -85,62 +85,77 @@ def _progress_bar(pct: float, width: int = 28) -> str:
 
 
 class _ETATracker:
-    """Kalman-filtered throughput estimator.
+    """Kalman-filtered throughput estimator — Θ(1) time and space per update.
 
-    Models true throughput as a random walk observed with noise:
+    State space: x ∈ ℝ₊ (throughput, img/s), A = H = 1 (scalar random walk):
 
-        x_k  =  x_{k-1} + w_k       w ~ N(0, Q)   (process noise)
-        z_k  =  x_k     + v_k       v ~ N(0, R)   (measurement noise)
+        Predict:  x̂ₜ⁻  = x̂ₜ₋₁                         Φ := 1
+                  Pₜ⁻  = Pₜ₋₁ + Q,    Q ∈ ℝ₊
 
-    At every batch the Kalman gain K = P⁻ / (P⁻ + R) weights new evidence
-    against accumulated history.  With Q = R/2 the steady-state gain
-    converges to K_∞ = 0.5, giving equal weight to prediction and
-    measurement — a natural equilibrium reached after ~4 batches.
+        Update:   Kₜ   = Pₜ⁻ (Pₜ⁻ + R)⁻¹               Kₜ ∈ (0, 1)
+                  x̂ₜ   = x̂ₜ⁻ + Kₜ(zₜ − x̂ₜ⁻)
+                  Pₜ   = (1 − Kₜ)Pₜ⁻                   (Joseph form, H = 1)
 
-    First-order error propagation converts rate uncertainty σ_x into ETA
-    uncertainty:  σ_η = (N_remaining / x̂²) · σ_x
-    so both the expected completion time and its ±1σ confidence band
-    are reported.
+        DARE (t → ∞, unique ℝ₊ root of P∞² + QP∞ − QR = 0):
+                  P∞   = ½(√(Q² + 4QR) − Q)
+                  K∞   = Q / (Q + √(Q² + 4QR))
+          ∀ Q = R/2 :  K∞ = ½                           equal-weight equilibrium ✓
+
+        δ-method (first-order error propagation, η̂ := N_rem / x̂):
+                  Var[η̂] ≈ (∂η/∂x)²|_{x=x̂} · Pₜ
+                           = (N_rem · x̂⁻²)² · Pₜ
+                  σ_η    = N_rem · √Pₜ / x̂²            ±1σ confidence band
+
+        Contrast with a rolling-window mean (O(w) space, no variance) or a
+        simple EWMA (O(1) space, but no principled variance propagation):
+        the Kalman formulation is optimal under Gaussian assumptions and
+        yields a calibrated uncertainty estimate at no extra cost.
     """
 
     _Q: float = 50.0    # process-noise variance  (img/s)²
     _R: float = 100.0   # measurement-noise variance (img/s)²
 
     def __init__(self) -> None:
-        self._x: float | None = None  # current rate estimate (img/s)
-        self._P: float = 1e8          # estimate error variance (very uncertain at start)
+        self._x: float | None = None  # x̂: current rate estimate (img/s)
+        self._P: float = 1e8          # P: estimate error variance (diffuse prior)
         self._n: int = 0              # number of updates applied
 
     def update(self, n_imgs: int, elapsed_s: float) -> None:
-        """Incorporate a new batch observation."""
+        """Incorporate a new batch observation.  Θ(1) — scalar predict-update cycle."""
         if elapsed_s <= 0 or n_imgs <= 0:
             return
-        z = n_imgs / elapsed_s
+        z = n_imgs / elapsed_s                  # zₜ: observed throughput
         self._n += 1
         if self._x is None:
             self._x = z
-            self._P = self._R  # initialise certainty = measurement quality
+            self._P = self._R                   # P₁ = R: certainty = measurement quality
             return
-        p_pred = self._P + self._Q          # predict
-        k = p_pred / (p_pred + self._R)     # Kalman gain
-        self._x = self._x + k * (z - self._x)
-        self._P = (1.0 - k) * p_pred
+        p_pred = self._P + self._Q              # Pₜ⁻ = Pₜ₋₁ + Q
+        k = p_pred / (p_pred + self._R)         # Kₜ = Pₜ⁻(Pₜ⁻ + R)⁻¹
+        self._x = self._x + k * (z - self._x)  # x̂ₜ = x̂ₜ⁻ + Kₜ(zₜ − x̂ₜ⁻)
+        self._P = (1.0 - k) * p_pred            # Pₜ = (1 − Kₜ)Pₜ⁻
 
     @property
     def rate(self) -> float | None:
+        """x̂ₜ — current optimal rate estimate (img/s)."""
         return self._x
 
     @property
     def rate_std(self) -> float:
-        """1σ uncertainty on the current rate estimate (img/s)."""
+        """√Pₜ — 1σ uncertainty on the rate estimate (img/s)."""
         return self._P ** 0.5
 
     def eta(self, remaining: int) -> tuple[float, float] | None:
-        """Return ``(eta_seconds, sigma_seconds)`` or ``None`` if not enough data."""
+        """Return (η̂, σ_η) in seconds, or None if not enough data.
+
+        Θ(1) — closed-form δ-method propagation:
+            η̂   = N_rem / x̂
+            σ_η = N_rem · √Pₜ / x̂²
+        """
         if self._x is None or self._x <= 0 or self._n < 2:
             return None
-        eta_s = remaining / self._x
-        sigma_s = (remaining / self._x ** 2) * self.rate_std
+        eta_s = remaining / self._x                         # η̂
+        sigma_s = remaining * self.rate_std / self._x ** 2  # σ_η
         return eta_s, sigma_s
 
 
@@ -474,7 +489,6 @@ def index(
 
     for batch_paths in batched(iter(image_paths), settings.batch_size):
         batch_num += 1
-        imgs_processed_so_far += len(batch_paths)
         batch_wall_t0 = perf_counter()
 
         # ── Read (shared) ────────────────────────────────────────────────────
@@ -493,6 +507,9 @@ def index(
         read_s = perf_counter() - t0
         total_read_s += read_s
         total_bytes += batch_bytes
+        # Count after reading so the denominator reflects files we actually
+        # attempted to open — not files we merely iterated over in the plan.
+        imgs_processed_so_far += len(batch_paths)
 
         if not raw:
             continue
@@ -952,7 +969,7 @@ def index(
                 upsert_str = f"  │  upsert {upsert_wall_s:.2f}s" if upsert_jobs else ""
                 typer.echo(
                     f"  ▸ {batch_num:04d}  {n_items} frames"
-                    f"  {_fmt_rate(n_items, wall_s, 'img')}"
+                    f"  {_fmt_rate(n_items, wall_s, 'frame')}"
                     f"  │  pre {pre_s:.2f}s"
                     f"  │  " + "  │  ".join(model_segments) + upsert_str
                 )
