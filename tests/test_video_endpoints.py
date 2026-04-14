@@ -91,8 +91,9 @@ class TestQueryFramesList:
     def test_video_entry_no_frames_returns_400(self, client, tmp_path):
         p = tmp_path / "vid.mp4"
         p.write_bytes(b"x")
-        entry = FileEntry(file_id="v1", filename="v.mp4", temp_path=p, is_video=True,
-                          video_frames=None)
+        entry = FileEntry(
+            file_id="v1", filename="v.mp4", temp_path=p, is_video=True, video_frames=None
+        )
         sess = _mock_session([entry])
         with patch("scalar_forensic.web.app.get_session", return_value=sess):
             r = client.get("/api/query-frames/s1/v1")
@@ -148,6 +149,7 @@ class TestQueryFrameImage:
 
     def test_valid_frame_returns_jpeg(self, client, tmp_path):
         from PIL import Image
+
         img = Image.new("RGB", (64, 64), color=(200, 100, 50))
         entry = _video_entry(tmp_path=tmp_path)
         sess = _mock_session([entry])
@@ -186,6 +188,7 @@ class TestVideoFrame:
 
     def test_valid_frame_returns_jpeg(self, client, tmp_path):
         from PIL import Image
+
         img = Image.new("RGB", (32, 32), color=(0, 128, 255))
         p = tmp_path / "clip.mp4"
         p.write_bytes(b"fake")
@@ -264,8 +267,7 @@ class TestThumbnail:
         thumb = tmp_path / f"{self._VALID_HASH}.jpg"
         # minimal valid JPEG header
         thumb.write_bytes(
-            b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
-            b"\xff\xd9"
+            b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
         )
         with patch("scalar_forensic.web.app.Settings", return_value=settings_mock):
             r = client.get(f"/api/thumbnail/{self._VALID_HASH}")

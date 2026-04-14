@@ -93,6 +93,7 @@ def _check_allowed_path(p: Path) -> None:
         except ValueError:
             raise HTTPException(status_code=403, detail="Path is outside the allowed directory")
 
+
 # Cached PCA-projected point cloud, computed once at startup.
 _points3d_cache: dict | None = None
 
@@ -275,7 +276,9 @@ async def query(
                                     "scores": mf.scores,
                                 }
                                 for mf in h.matched_frames
-                            ] if h.matched_frames else None,
+                            ]
+                            if h.matched_frames
+                            else None,
                             "query_timecodes": h.query_timecodes,
                         }
                         for h in r.hits
@@ -333,9 +336,7 @@ async def query_video_frames(session_id: str, file_id: str) -> JSONResponse:
 
 
 @app.get("/api/query-frame/{session_id}/{file_id}")
-async def query_video_frame(
-    session_id: str, file_id: str, timecode_ms: int
-) -> StreamingResponse:
+async def query_video_frame(session_id: str, file_id: str, timecode_ms: int) -> StreamingResponse:
     """Re-extract and serve a single frame from an uploaded query video as JPEG.
 
     Called by the slideshow on every navigation step; no frames are cached on

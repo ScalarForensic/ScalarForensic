@@ -183,9 +183,7 @@ def test_grouped_hit_model_provenance_follows_best_score_per_mode():
 
     result = _group_video_hits([low_alter, high_alter])
     prov = result[0].model_provenance.get("altered", {})
-    assert prov.get("hash") == "new", (
-        "provenance must come from the best-scoring ALTER frame"
-    )
+    assert prov.get("hash") == "new", "provenance must come from the best-scoring ALTER frame"
 
 
 # ---------------------------------------------------------------------------

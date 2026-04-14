@@ -489,8 +489,8 @@ def query_session(
         # the exact same query→dataset pair, just via different models.
         # No scores from different query frames are ever combined.
         for qtc in all_qtcs:
-            frame_merged: dict[str, Hit] = {}   # used when unify=True
-            frame_unmerged: list[Hit] = []       # used when unify=False
+            frame_merged: dict[str, Hit] = {}  # used when unify=True
+            frame_unmerged: list[Hit] = []  # used when unify=False
 
             if "altered" in modes:
                 for vec, tc in sscd_vecs:
@@ -538,9 +538,7 @@ def query_session(
             # append to the shared results list.  Because grouping is done
             # per query entity, a dataset video appears as a separate Hit for
             # each query frame that matched it — scores are never combined.
-            frame_hits = (
-                list(frame_merged.values()) if unify else frame_unmerged
-            )
+            frame_hits = list(frame_merged.values()) if unify else frame_unmerged
             all_flat_hits.extend(_group_video_hits(frame_hits))
 
         # Final merge pass (unify only): exact hits and vector hits for the
@@ -553,9 +551,7 @@ def query_session(
             for h in all_flat_hits:
                 _merge_hit(h, final_merged)
             sorted_hits = sorted(final_merged.values(), key=_hit_sort_key)
-            file_result.hits = (
-                sorted_hits if entry.is_video else sorted_hits[:limit]
-            )
+            file_result.hits = sorted_hits if entry.is_video else sorted_hits[:limit]
         else:
             file_result.hits = sorted(all_flat_hits, key=_unmerged_sort_key)
 

@@ -149,13 +149,22 @@ def extract_frames(
 
         if seekable:
             yield from _extract_frames_seek(
-                container, video_stream, time_base, duration_s,
-                frame_interval_s, seen_hashes, max_frames,
+                container,
+                video_stream,
+                time_base,
+                duration_s,
+                frame_interval_s,
+                seen_hashes,
+                max_frames,
             )
         else:
             yield from _extract_frames_sequential(
-                container, video_stream, time_base,
-                frame_interval_s, seen_hashes, max_frames,
+                container,
+                video_stream,
+                time_base,
+                frame_interval_s,
+                seen_hashes,
+                max_frames,
             )
     finally:
         container.close()
