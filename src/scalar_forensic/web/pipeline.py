@@ -271,6 +271,10 @@ class Hit:
     # Query-video frame timecodes (ms) that generated this hit.  Set only for
     # video uploads; None for single-image queries and exact-hash matches.
     query_timecodes: list[int] | None = None
+    # Per-query-frame scores: timecode_ms → {mode: score}.  Preserves each
+    # query frame's individual score before scores are merged with max().
+    # Populated only when unify=True and the query is a video upload.
+    per_frame_scores: dict[int, dict[str, float]] | None = None
 
     def best_score(self) -> float:
         return max(self.scores.values(), default=0.0)
@@ -319,6 +323,9 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
     never downgrades an earlier, higher one.  Model provenance uses setdefault
     so the first-seen value is kept; it doesn't change across duplicate points.
     query_timecodes are accumulated (union, insertion-ordered).
+    per_frame_scores records each query frame's individual score before the
+    max()-merge so the UI can show the frame-specific value when a frame child
+    is selected.
     """
     if h.path in dest:
         existing = dest[h.path]
@@ -335,7 +342,18 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
                 for tc in h.query_timecodes:
                     if tc not in existing.query_timecodes:
                         existing.query_timecodes.append(tc)
+            # Accumulate per-query-frame scores (merge each timecode with max)
+            pfs = existing.per_frame_scores or {}
+            for tc in h.query_timecodes:
+                tc_scores = pfs.get(tc, {})
+                for mode, score in h.scores.items():
+                    tc_scores[mode] = max(tc_scores.get(mode, 0.0), score)
+                pfs[tc] = tc_scores
+            existing.per_frame_scores = pfs
     else:
+        # Seed per_frame_scores from this hit's own timecode + scores
+        if h.query_timecodes:
+            h.per_frame_scores = {tc: dict(h.scores) for tc in h.query_timecodes}
         dest[h.path] = h
 
 
@@ -373,6 +391,16 @@ def _group_video_hits(hits: list[Hit]) -> list[Hit]:
             for tc in h.query_timecodes or []:
                 if tc not in all_qtc:
                     all_qtc.append(tc)
+        # Merge per_frame_scores across all dataset frames in the group.
+        # For each query timecode, keep the best score it achieved against
+        # any frame of this dataset video.
+        merged_pfs: dict[int, dict[str, float]] = {}
+        for h in group:
+            for tc, tc_scores in (h.per_frame_scores or {}).items():
+                existing = merged_pfs.get(tc, {})
+                for mode, score in tc_scores.items():
+                    existing[mode] = max(existing.get(mode, 0.0), score)
+                merged_pfs[tc] = existing
         grouped_video.append(
             Hit(
                 path=representative.path,
@@ -387,6 +415,7 @@ def _group_video_hits(hits: list[Hit]) -> list[Hit]:
                 frame_timecode_ms=representative.frame_timecode_ms,
                 matched_frames=matched,
                 query_timecodes=all_qtc if all_qtc else None,
+                per_frame_scores=merged_pfs if merged_pfs else None,
             )
         )
 

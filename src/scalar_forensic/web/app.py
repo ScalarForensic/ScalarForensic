@@ -257,6 +257,13 @@ async def query(
                                 for mf in h.matched_frames
                             ] if h.matched_frames else None,
                             "query_timecodes": h.query_timecodes,
+                            # Per-query-frame scores: each query frame's individual
+                            # similarity to this hit (before max()-merge).
+                            # Keys are timecode_ms as strings (JSON requires string keys).
+                            "per_frame_scores": {
+                                str(tc): scores
+                                for tc, scores in h.per_frame_scores.items()
+                            } if h.per_frame_scores else None,
                         }
                         for h in r.hits
                     ],

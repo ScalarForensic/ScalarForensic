@@ -1002,13 +1002,15 @@
                   <span class="badge badge-exact">EXACT</span>
                   <span class="pill-score pill-score-exact">✓</span>
                 </div>
-                <!-- Fixed slot 2: reserved when altered mode was run -->
+                <!-- Fixed slot 2: reserved when altered mode was run.
+                     hitDisplayScores() returns the frame-specific score when a
+                     query frame child is selected, otherwise the merged max. -->
                 <div class="pill-group"
                      x-show="analysisRunModes.includes('altered')"
                      :style="'altered' in hit.scores && hitsFilterAltered ? '' : 'visibility:hidden'">
                   <span class="badge badge-altered">ALTER</span>
                   <span class="pill-score pill-score-altered"
-                        x-text="'altered' in hit.scores ? hit.scores.altered.toFixed(3) : ''"></span>
+                        x-text="hitDisplayScores(hit).altered != null ? hitDisplayScores(hit).altered.toFixed(3) : ''"></span>
                 </div>
                 <!-- Fixed slot 3: reserved when semantic mode was run -->
                 <div class="pill-group"
@@ -1016,7 +1018,7 @@
                      :style="'semantic' in hit.scores && hitsFilterSemantic ? '' : 'visibility:hidden'">
                   <span class="badge badge-semantic">SEMAN</span>
                   <span class="pill-score pill-score-semantic"
-                        x-text="'semantic' in hit.scores ? hit.scores.semantic.toFixed(3) : ''"></span>
+                        x-text="hitDisplayScores(hit).semantic != null ? hitDisplayScores(hit).semantic.toFixed(3) : ''"></span>
                 </div>
               </div>
               <div class="hit-filename">
@@ -1265,6 +1267,17 @@ function sfn() {
     },
     isSelectedMatchedFrame(hit, mf) {
       return this.selectedMatchedFrameKey === `${hit.path}:${mf.timecode_ms}`;
+    },
+    // Returns the forensically accurate scores to display for a hit.
+    // When a specific query frame is selected, uses per_frame_scores for that
+    // timecode so the displayed value reflects that frame's actual similarity,
+    // not the max across all query frames (which is what hit.scores contains).
+    hitDisplayScores(hit) {
+      if (this.selectedFrameTimecode !== null && hit.per_frame_scores) {
+        const tc = String(this.selectedFrameTimecode);
+        if (hit.per_frame_scores[tc]) return hit.per_frame_scores[tc];
+      }
+      return hit.scores;
     },
     openLightbox(src) {
       if (!src) return;
