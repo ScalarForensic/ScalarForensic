@@ -30,8 +30,9 @@ class Settings:
             "SFN_MODEL_SSCD", "models/sscd_disc_mixup.torchscript.pt"
         )
         self.normalize_size: int = self._parse_int("SFN_NORMALIZE_SIZE", 512)
-        # None means "auto": the pipeline will calibrate on first run and cache the result.
-        # Set SFN_BATCH_SIZE explicitly to override the calibration cache.
+        # None means "auto": the CLI will calibrate on first run and cache the result.
+        # The web pipeline reads the cache; both fall back to 32 if no cache exists.
+        # Set SFN_BATCH_SIZE explicitly to override auto/cached behavior.
         self.batch_size: int | None = self._parse_optional_int("SFN_BATCH_SIZE")
         self.device: str = os.environ.get("SFN_DEVICE", "auto")
         self.input_dir: Path | None = self._parse_optional_path("SFN_INPUT_DIR")
@@ -95,9 +96,12 @@ class Settings:
         if raw is None:
             return None
         try:
-            return int(raw)
+            value = int(raw)
         except ValueError:
             raise ValueError(f"{key}={raw!r} is not a valid integer") from None
+        if value <= 0:
+            raise ValueError(f"{key}={raw!r} must be a positive integer")
+        return value
 
     def _parse_int(self, key: str, default: int) -> int:
         raw = os.environ.get(key)

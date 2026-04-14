@@ -469,7 +469,16 @@ def index(
             settings.batch_size = cached
             typer.echo(f"Batch size: {cached}  (calibration cache)")
         elif _sample_dir.is_dir():
-            settings.batch_size = calibrate(specs[0][0], _sample_dir)
+            # Calibrate each loaded embedder; use the minimum so the chosen
+            # batch size is safe for every model that will run in production.
+            sizes = [calibrate(emb, _sample_dir) for emb, _, _ in specs]
+            settings.batch_size = min(sizes)
+            if len(sizes) > 1:
+                per = "  ".join(
+                    f"{type(emb).__name__}={sz}"
+                    for (emb, _, _), sz in zip(specs, sizes)
+                )
+                typer.echo(f"  ({per}  →  using minimum)")
         else:
             settings.batch_size = 32
             typer.echo(

@@ -171,8 +171,8 @@ def calibrate(
     for p in image_paths:
         try:
             raw_bytes.append(p.read_bytes())
-        except OSError:
-            pass
+        except OSError as exc:
+            typer.echo(f"[WARN] Skipping unreadable sample image {p.name}: {exc}", err=True)
 
     if not raw_bytes:
         typer.echo(
@@ -222,6 +222,12 @@ def calibrate(
         except Exception:  # noqa: BLE001 — catches CUDA/ROCm OOM and JIT errors
             typer.echo(
                 f"  batch={probe_b:>4}  {'':>{_BAR_WIDTH + 2}}  out of memory — stopped"
+            )
+            break
+
+        if tp <= 0:
+            typer.echo(
+                f"  batch={probe_b:>4}  {'':>{_BAR_WIDTH + 2}}  non-positive throughput — stopped"
             )
             break
 
@@ -285,8 +291,8 @@ def calibrate(
             if a > 0:
                 t_max_fit = 1.0 / a
                 k_half_fit = max(c / a, 0.0)
-                η = _EFFICIENCY_TARGET
-                b_star = k_half_fit * η / (1.0 - η)
+                eta = _EFFICIENCY_TARGET
+                b_star = k_half_fit * eta / (1.0 - eta)
 
     if b_star >= 1.0:
         # Largest power-of-2 ≤ b*
