@@ -413,6 +413,7 @@ async def hit_image(path: str) -> Response:
     p = Path(path).resolve()
     if not p.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
+    _check_allowed_path(p)
     if p.suffix.lower() not in _IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not an image file")
     if not p.exists() or not p.is_file():
@@ -548,6 +549,7 @@ async def hit_metadata(path: str) -> JSONResponse:
     p = Path(path).resolve()
     if not p.is_absolute() or p.suffix.lower() not in _IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Invalid path")
+    _check_allowed_path(p)
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 
