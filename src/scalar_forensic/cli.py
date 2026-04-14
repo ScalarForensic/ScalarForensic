@@ -498,10 +498,10 @@ def index(
 
     if total_image_count > 0:
         typer.echo(
-            f"  ETA  x̂ₜ = x̂ₜ⁻ + Kₜ(zₜ − x̂ₜ⁻)"
-            f"  ·  Kₜ = Pₜ⁻(Pₜ⁻ + R)⁻¹"
-            f"  ·  σ_η = N_rem · √Pₜ / x̂²"
-            f"  [Θ(1) Kalman]"
+            "  ETA  x̂ₜ = x̂ₜ⁻ + Kₜ(zₜ − x̂ₜ⁻)"
+            "  ·  Kₜ = Pₜ⁻(Pₜ⁻ + R)⁻¹"
+            "  ·  σ_η = N_rem · √Pₜ / x̂²"
+            "  [Θ(1) Kalman]"
         )
 
     for batch_paths in batched(iter(image_paths), settings.batch_size):
