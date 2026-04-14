@@ -77,6 +77,22 @@ _IMAGE_EXTENSIONS = frozenset(
     {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp", ".gif", ".jp2", ".ico", ".psd"}
 )
 
+
+def _check_allowed_path(p: Path) -> None:
+    """Raise 403 if SFN_INPUT_DIR is configured and *p* is not under it.
+
+    When input_dir is not set we have no allowed-root to enforce, so the
+    check is skipped (callers still validate extension, existence, and that
+    the path is absolute).
+    """
+    settings = Settings()
+    if settings.input_dir is not None:
+        allowed = settings.input_dir.resolve()
+        try:
+            p.relative_to(allowed)
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Path is outside the allowed directory")
+
 # Cached PCA-projected point cloud, computed once at startup.
 _points3d_cache: dict | None = None
 
@@ -372,6 +388,7 @@ async def hit_image(path: str) -> FileResponse:
     if parsed is not None:
         video_path, timecode_ms = parsed
         video_path = video_path.resolve()
+        _check_allowed_path(video_path)
         if not video_path.exists() or not video_path.is_file():
             raise HTTPException(status_code=404, detail="Video file not found")
         if video_path.suffix.lower() not in VIDEO_EXTENSIONS:
@@ -485,7 +502,16 @@ async def hit_metadata(path: str) -> JSONResponse:
                 records, _ = _client.scroll(
                     collection_name=coll,
                     scroll_filter=Filter(
-                        must=[FieldCondition(key="image_path", match=MatchValue(value=path))]
+                        must=[
+                            FieldCondition(
+                                key="video_path",
+                                match=MatchValue(value=str(video_path)),
+                            ),
+                            FieldCondition(
+                                key="frame_timecode_ms",
+                                match=MatchValue(value=timecode_ms),
+                            ),
+                        ]
                     ),
                     limit=1,
                     with_payload=["video_hash"],
@@ -539,6 +565,7 @@ async def video_frame(path: str, timecode_ms: int) -> StreamingResponse:
     p = Path(path).resolve()
     if not p.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
+    _check_allowed_path(p)
     if p.suffix.lower() not in VIDEO_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Not a video file")
     if not p.exists() or not p.is_file():

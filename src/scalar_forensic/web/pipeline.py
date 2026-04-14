@@ -266,8 +266,8 @@ class Hit:
     matched_frames: list[MatchedVideoFrame] | None = None
     # Query-video frame timecodes (ms) that generated this hit.  Set only for
     # video uploads; None for single-image queries and exact-hash matches.
-    # Each hit is produced by exactly one query frame, so this list has at
-    # most one element — it exists as a list only for the UI filter lookup.
+    # A merged hit (after the final unify pass) may be associated with multiple
+    # query frames, so this list can contain more than one timecode.
     query_timecodes: list[int] | None = None
 
     def best_score(self) -> float:
@@ -325,11 +325,12 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
     if h.path in dest:
         existing = dest[h.path]
         for mode, score in h.scores.items():
-            existing.scores[mode] = max(existing.scores.get(mode, score), score)
+            if mode not in existing.scores or score > existing.scores[mode]:
+                existing.scores[mode] = score
+                if mode in h.model_provenance:
+                    existing.model_provenance[mode] = h.model_provenance[mode]
         if h.image_hash and not existing.image_hash:
             existing.image_hash = h.image_hash
-        for mode, provenance in h.model_provenance.items():
-            existing.model_provenance.setdefault(mode, provenance)
         if h.query_timecodes:
             if existing.query_timecodes is None:
                 existing.query_timecodes = list(h.query_timecodes)

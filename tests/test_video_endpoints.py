@@ -10,14 +10,12 @@ Covered endpoints:
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-import scalar_forensic.web.app as app_module
 from scalar_forensic.web.app import app
 from scalar_forensic.web.session import FileEntry, VideoFrameEntry
 

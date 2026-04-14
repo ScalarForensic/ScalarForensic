@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from scalar_forensic.web.pipeline import Hit, MatchedVideoFrame, _group_video_hits
+from scalar_forensic.web.pipeline import Hit, _group_video_hits
 
 # ---------------------------------------------------------------------------
 # Helpers
