@@ -19,7 +19,6 @@ from fastapi.testclient import TestClient
 from scalar_forensic.web.app import app
 from scalar_forensic.web.session import FileEntry, VideoFrameEntry
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

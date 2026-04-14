@@ -492,7 +492,6 @@ async def hit_metadata(path: str) -> JSONResponse:
         # Retrieve the already-computed hashes from Qdrant rather than
         # re-reading the (potentially large) video file just to hash it.
         sha256: str | None = None
-        md5: str | None = None
         try:
             settings_inner = Settings()
             _client = QdrantClient(
