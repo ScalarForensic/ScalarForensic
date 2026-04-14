@@ -538,8 +538,20 @@ def query_session(
             # append to the shared results list.  Because grouping is done
             # per query entity, a dataset video appears as a separate Hit for
             # each query frame that matched it — scores are never combined.
-            frame_hits = list(frame_merged.values()) if unify else frame_unmerged
-            all_flat_hits.extend(_group_video_hits(frame_hits))
+            if unify:
+                all_flat_hits.extend(_group_video_hits(list(frame_merged.values())))
+            else:
+                # unify=False: keep modes separate — group video frames per mode
+                # independently so a database video can appear once per mode,
+                # consistent with unify=False semantics for image hits.
+                # Calling _group_video_hits on the mixed list would silently
+                # re-unify altered and semantic scores despite unify=False.
+                for mode_hits in (
+                    [h for h in frame_unmerged if "altered" in h.scores],
+                    [h for h in frame_unmerged if "semantic" in h.scores],
+                ):
+                    if mode_hits:
+                        all_flat_hits.extend(_group_video_hits(mode_hits))
 
         # Final merge pass (unify only): exact hits and vector hits for the
         # same dataset path must end up on one row.  Exact hits were added to
@@ -551,6 +563,9 @@ def query_session(
             for h in all_flat_hits:
                 _merge_hit(h, final_merged)
             sorted_hits = sorted(final_merged.values(), key=_hit_sort_key)
+            # Video queries: do not apply limit — each Hit represents one
+            # distinct query-frame × database-video match, and forensic
+            # review requires every match to be visible, not just the top N.
             file_result.hits = sorted_hits if entry.is_video else sorted_hits[:limit]
         else:
             file_result.hits = sorted(all_flat_hits, key=_unmerged_sort_key)
