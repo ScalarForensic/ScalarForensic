@@ -34,8 +34,8 @@ if TYPE_CHECKING:
 _CACHE_FILE = Path("data/sfn_batch_cache.json")
 _EFFICIENCY_TARGET = 0.95  # fraction of T_max to accept as "optimal"
 _MAX_BATCH = 512           # hard ceiling for exponential probe
-_WARMUP_BATCHES = 2        # warm-up batches (results discarded)
-_MEASURE_BATCHES = 5       # timed measurement batches
+_MIN_WARMUP_IMAGES = 16    # warm-up image count (≥ 2 full batches at any probe size)
+_MIN_MEASURE_BATCHES = 3   # min full batches in measurement window (fair comparison floor)
 _MIN_GAIN = 0.03           # converged: positive gain < 3 % → saturation reached
 _PEAK_FRAC = 0.70          # post-peak guard: stop after this many consecutive
 _POST_PEAK_DROPS = 3       #   measurements below _PEAK_FRAC × best seen so far
@@ -88,37 +88,47 @@ def save_cached_batch_size(
 # ---------------------------------------------------------------------------
 
 
-def _probe(
+def _run_batches(
     embedder: AnyEmbedder,
-    tiled_bytes: list[bytes],
+    images: list[bytes],
     batch_size: int,
-) -> float:
-    """Run warm-up then timed measurement; return images/second.
+) -> None:
+    """Pass *images* through the full pipeline in batches of *batch_size*.
 
     Mirrors the real ingestion pipeline: hash → preprocess → normalize → embed.
-    Warm-up batches ensure GPU/JIT caches are hot before timing begins.
+    Return value is intentionally omitted; callers time this externally.
     """
     from scalar_forensic.embedder import hash_bytes, hash_bytes_md5, preprocess_batch
 
-    warmup_end = _WARMUP_BATCHES * batch_size
+    for i in range(0, len(images), batch_size):
+        chunk = images[i : i + batch_size]
+        for data in chunk:
+            hash_bytes(data)
+            hash_bytes_md5(data)
+        pils = [r for r in preprocess_batch(chunk) if not isinstance(r, Exception)]
+        if pils:
+            norm = embedder.normalize_batch_bytes(pils)
+            embedder.embed_images(norm)
 
-    def _run_slice(start: int, end: int) -> None:
-        for i in range(start, end, batch_size):
-            chunk = tiled_bytes[i : min(i + batch_size, end)]
-            for data in chunk:
-                hash_bytes(data)
-                hash_bytes_md5(data)
-            pils = [r for r in preprocess_batch(chunk) if not isinstance(r, Exception)]
-            if pils:
-                norm = embedder.normalize_batch_bytes(pils)
-                embedder.embed_images(norm)
 
-    _run_slice(0, warmup_end)          # warm-up (discarded)
+def _probe(
+    embedder: AnyEmbedder,
+    warmup_bytes: list[bytes],
+    measure_bytes: list[bytes],
+    batch_size: int,
+) -> float:
+    """Warm up then time *measure_bytes*; return images/second.
+
+    Keeping warmup and measure windows separate (and always the same
+    *measure_bytes* across all probes) ensures every batch size is measured
+    on an identical image distribution — critical when the sample set contains
+    images of varying sizes.
+    """
+    _run_batches(embedder, warmup_bytes, batch_size)   # warm-up (discarded)
     t0 = perf_counter()
-    _run_slice(warmup_end, len(tiled_bytes))  # measurement window
+    _run_batches(embedder, measure_bytes, batch_size)  # timed window
     elapsed = perf_counter() - t0
-    measured_imgs = len(tiled_bytes) - warmup_end
-    return measured_imgs / elapsed if elapsed > 0 else 0.0
+    return len(measure_bytes) / elapsed if elapsed > 0 else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +182,13 @@ def calibrate(
 
     n_samples = len(raw_bytes)
 
+    # Shuffle once with a fixed seed so every probe sees the same image
+    # distribution.  Without this, sorted filenames give small images to small
+    # batch sizes and large images to large ones, making throughput numbers
+    # incomparable across probes.
+    import random as _random
+    _random.Random(0).shuffle(raw_bytes)
+
     # ── Header ────────────────────────────────────────────────────────────
     sep = "─" * 62
     typer.echo("")
@@ -189,12 +206,21 @@ def calibrate(
 
     probe_b = 1
     while probe_b <= _MAX_BATCH:
-        total_needed = (_WARMUP_BATCHES + _MEASURE_BATCHES) * probe_b
-        reps = (total_needed // n_samples) + 1
-        tiled = (raw_bytes * reps)[:total_needed]
+        # Measurement window: at least all sample images AND at least
+        # _MIN_MEASURE_BATCHES full batches — whichever is larger.  Round up
+        # to a whole number of batches so the last batch is always full.
+        measure_count = max(n_samples, probe_b * _MIN_MEASURE_BATCHES)
+        measure_count = ((measure_count + probe_b - 1) // probe_b) * probe_b
+        reps_m = (measure_count // n_samples) + 1
+        measure_bytes = (raw_bytes * reps_m)[:measure_count]
+
+        # Warm-up window: at least _MIN_WARMUP_IMAGES, at least 2 full batches.
+        warmup_count = max(_MIN_WARMUP_IMAGES, probe_b * 2)
+        reps_w = (warmup_count // n_samples) + 1
+        warmup_bytes = (raw_bytes * reps_w)[:warmup_count]
 
         try:
-            tp = _probe(embedder, tiled, probe_b)
+            tp = _probe(embedder, warmup_bytes, measure_bytes, probe_b)
         except Exception:  # noqa: BLE001 — catches CUDA/ROCm OOM and JIT errors
             typer.echo(
                 f"  batch={probe_b:>4}  {'':>{_BAR_WIDTH + 2}}  out of memory — stopped"
