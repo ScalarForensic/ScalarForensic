@@ -127,13 +127,10 @@ class Indexer:
         if not results:
             return False
         payload = results[0].payload or {}
-        if payload.get("extraction_fps") != extraction_fps:
-            return False
-        stored_cap = payload.get("max_frames_cap")
-        # Treat absent max_frames_cap as matching (pre-migration payloads lack the field).
-        if stored_cap is not None and stored_cap != max_frames_cap:
-            return False
-        return True
+        return (
+            payload.get("extraction_fps") == extraction_fps
+            and payload.get("max_frames_cap") == max_frames_cap
+        )
 
     def get_indexed_paths(self, paths: list[str]) -> set[str]:
         """Return the subset of absolute path strings already stored in the collection."""
