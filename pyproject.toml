@@ -37,7 +37,7 @@ heif = [
 web = [
     "fastapi>=0.111",
     "uvicorn>=0.29",
-    "python-multipart>=0.0.9",
+    "python-multipart>=0.0.26",
 ]
 
 # --- PyTorch backend selection ---
