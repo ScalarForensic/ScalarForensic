@@ -10,6 +10,7 @@ import logging
 import statistics as _statistics
 from collections.abc import Generator
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
@@ -21,8 +22,10 @@ from scalar_forensic.embedder import (
     hash_bytes_md5,
     load_embedder,
     preprocess_batch,
+    preprocess_pil_batch,
 )
-from scalar_forensic.web.session import FileEntry, Session
+from scalar_forensic.video import VIDEO_EXTENSIONS, extract_frames
+from scalar_forensic.web.session import FileEntry, Session, VideoFrameEntry
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +135,11 @@ def analyze_session(
 
 
 def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
+    ext = Path(entry.filename).suffix.lower()
+    if ext in VIDEO_EXTENSIONS:
+        _analyze_video_file(entry, embedders)
+        return
+
     data = entry.temp_path.read_bytes()
     entry.file_hash = hash_bytes(data)
     entry.file_hash_md5 = hash_bytes_md5(data)
@@ -151,9 +159,66 @@ def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
             entry.dino_embedding = emb
 
 
+def _analyze_video_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
+    """Extract frames from an uploaded video temp file and embed each one."""
+    from scalar_forensic.config import Settings
+
+    data = entry.temp_path.read_bytes()
+    entry.file_hash = hash_bytes(data)
+    entry.file_hash_md5 = hash_bytes_md5(data)
+    entry.is_video = True
+
+    settings = Settings()
+    try:
+        frames = list(
+            extract_frames(
+                entry.temp_path, fps=settings.video_fps, max_frames=settings.video_max_frames
+            )
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Video frame extraction failed: {exc}") from exc
+
+    if not frames:
+        raise RuntimeError("No frames could be extracted from the video")
+
+    frame_entries: list[VideoFrameEntry] = []
+    pil_images = preprocess_pil_batch([f.image for f in frames])
+
+    for key, embedder in embedders.items():
+        norm_images = embedder.normalize_batch_bytes(pil_images)
+        embeddings = embedder.embed_images(norm_images)
+        for i, (frame, emb) in enumerate(zip(frames, embeddings)):
+            if len(frame_entries) <= i:
+                frame_entries.append(
+                    VideoFrameEntry(
+                        frame_index=frame.frame_index,
+                        timecode_ms=frame.timecode_ms,
+                        frame_hash=frame.frame_hash,
+                    )
+                )
+            if key == "sscd":
+                frame_entries[i].sscd_embedding = emb
+            else:
+                frame_entries[i].dino_embedding = emb
+
+    entry.video_frames = frame_entries
+
+    # Use the best-scoring frame embedding as the top-level embedding for backward compat
+    if frame_entries:
+        entry.sscd_embedding = frame_entries[0].sscd_embedding
+        entry.dino_embedding = frame_entries[0].dino_embedding
+
+
 # ---------------------------------------------------------------------------
 # Phase 2: Query
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class MatchedVideoFrame:
+    timecode_ms: int
+    frame_hash: str
+    scores: dict  # mode → score
 
 
 @dataclass
@@ -164,6 +229,13 @@ class Hit:
     exif_geo_data: bool | None = None
     image_hash: str | None = None  # SHA-256, used to request /api/thumbnail/{hash}
     model_provenance: dict = field(default_factory=dict)  # mode → {name, hash} from Qdrant payload
+    # Video-frame fields (only set when is_video_frame is True)
+    is_video_frame: bool = False
+    video_path: str | None = None
+    video_hash: str | None = None
+    frame_timecode_ms: int | None = None
+    # After grouping: one Hit per video with all matched frames attached
+    matched_frames: list[MatchedVideoFrame] | None = None
 
     def best_score(self) -> float:
         return max(self.scores.values(), default=0.0)
@@ -222,6 +294,54 @@ def _merge_hit(h: Hit, dest: dict[str, Hit]) -> None:
             existing.model_provenance.setdefault(mode, provenance)
     else:
         dest[h.path] = h
+
+
+def _group_video_hits(hits: list[Hit]) -> list[Hit]:
+    """Collapse multiple video-frame hits from the same source video into one Hit.
+
+    Non-video hits pass through unchanged.  For each unique ``video_path``,
+    keeps the frame with the best score as the representative Hit and attaches
+    all matched frames in ``matched_frames`` for the timeline UI.
+    """
+    non_video: list[Hit] = []
+    video_groups: dict[str, list[Hit]] = {}
+
+    for h in hits:
+        if h.is_video_frame and h.video_path:
+            video_groups.setdefault(h.video_path, []).append(h)
+        else:
+            non_video.append(h)
+
+    grouped_video: list[Hit] = []
+    for vpath, group in video_groups.items():
+        # Best frame = highest best_score
+        representative = max(group, key=lambda h: h.best_score())
+        matched = [
+            MatchedVideoFrame(
+                timecode_ms=h.frame_timecode_ms or 0,
+                frame_hash=h.image_hash or "",
+                scores=h.scores,
+            )
+            for h in sorted(group, key=lambda h: h.frame_timecode_ms or 0)
+        ]
+        grouped_video.append(
+            Hit(
+                path=representative.path,
+                scores=representative.scores,
+                exif=representative.exif,
+                exif_geo_data=representative.exif_geo_data,
+                image_hash=representative.image_hash,
+                model_provenance=representative.model_provenance,
+                is_video_frame=True,
+                video_path=vpath,
+                video_hash=representative.video_hash,
+                frame_timecode_ms=representative.frame_timecode_ms,
+                matched_frames=matched,
+            )
+        )
+
+    # Re-sort combined list
+    return sorted(non_video + grouped_video, key=_hit_sort_key)
 
 
 def query_session(
@@ -305,9 +425,10 @@ def query_session(
             file_result.errors.extend(errs)
 
         if unify:
-            file_result.hits = sorted(merged.values(), key=_hit_sort_key)[:limit]
+            flat_hits = sorted(merged.values(), key=_hit_sort_key)[:limit]
         else:
-            file_result.hits = sorted(unmerged, key=_unmerged_sort_key)
+            flat_hits = sorted(unmerged, key=_unmerged_sort_key)
+        file_result.hits = _group_video_hits(flat_hits)
         results.append(file_result)
 
     # Collect model provenance for the embedders currently loaded in this process
@@ -436,6 +557,10 @@ def _query_vector(
                 "exif_geo_data",
                 "model_name",
                 "model_hash",
+                "is_video_frame",
+                "video_path",
+                "video_hash",
+                "frame_timecode_ms",
             ],
         )
         hits = []
@@ -453,6 +578,10 @@ def _query_vector(
                     exif_geo_data=r.payload.get("exif_geo_data"),
                     image_hash=r.payload.get("image_hash"),
                     model_provenance=mp,
+                    is_video_frame=bool(r.payload.get("is_video_frame")),
+                    video_path=r.payload.get("video_path"),
+                    video_hash=r.payload.get("video_hash"),
+                    frame_timecode_ms=r.payload.get("frame_timecode_ms"),
                 )
             )
         return hits, []

@@ -66,6 +66,18 @@ class Indexer:
                 field_name="image_hash_md5",
                 field_schema=PayloadSchemaType.KEYWORD,
             )
+        if "video_hash" not in schema:
+            self.client.create_payload_index(
+                collection_name=self.collection,
+                field_name="video_hash",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+        if "video_path" not in schema:
+            self.client.create_payload_index(
+                collection_name=self.collection,
+                field_name="video_path",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
 
     def get_indexed_hashes(self, hashes: list[str]) -> set[str]:
         """Return the subset of hashes that are already in the collection."""
@@ -105,8 +117,18 @@ class Indexer:
         shared_metadata: dict,
         exif_payloads: dict[Path, dict] | None = None,
         image_hashes_md5: list[str] | None = None,
+        video_metadata: list[dict | None] | None = None,
     ) -> None:
-        """Upsert vectors with full forensic metadata payload."""
+        """Upsert vectors with full forensic metadata payload.
+
+        For video frames, pass ``video_metadata`` as a list of per-point dicts
+        (or ``None`` entries for non-video points in a mixed batch).  When a
+        dict is present for point ``i`` it must contain: ``video_hash``,
+        ``video_path``, ``frame_timecode_ms``, ``frame_index``,
+        ``extraction_fps``, ``pyav_version``.  The point ID is derived from
+        ``video_hash + ":" + str(frame_timecode_ms)`` to ensure per-video-frame
+        uniqueness across different source files with identical frame content.
+        """
         if not len(image_paths) == len(image_hashes) == len(embeddings):
             raise ValueError(
                 f"Batch length mismatch: paths={len(image_paths)}, "
@@ -117,29 +139,52 @@ class Indexer:
                 f"MD5 hash list length mismatch: "
                 f"sha256={len(image_hashes)}, md5={len(image_hashes_md5)}"
             )
+        if video_metadata is not None and len(video_metadata) != len(image_hashes):
+            raise ValueError(
+                f"video_metadata length mismatch: "
+                f"expected={len(image_hashes)}, got={len(video_metadata)}"
+            )
         indexed_at = datetime.now(UTC).isoformat()
-        points = [
-            PointStruct(
-                id=str(uuid.uuid5(uuid.NAMESPACE_URL, image_hash)),
-                vector=embedding,
-                payload={
-                    # Forensic identifiers
-                    "image_hash": image_hash,
-                    **({"image_hash_md5": image_hashes_md5[i]} if image_hashes_md5 else {}),
-                    "image_path": str(image_path.resolve()),
-                    "indexed_at": indexed_at,
-                    # Model & library provenance
-                    "model_name": shared_metadata["model_name"],
-                    "model_hash": shared_metadata["model_hash"],
-                    "embedding_dim": shared_metadata["embedding_dim"],
-                    "normalize_size": shared_metadata["normalize_size"],
-                    "library_versions": shared_metadata["library_versions"],
-                    # EXIF flags (only present when extraction is enabled)
-                    **(exif_payloads.get(image_path, {}) if exif_payloads else {}),
-                },
-            )
-            for i, (image_path, image_hash, embedding) in enumerate(
-                zip(image_paths, image_hashes, embeddings)
-            )
-        ]
+        points = []
+        for i, (image_path, image_hash, embedding) in enumerate(
+            zip(image_paths, image_hashes, embeddings)
+        ):
+            vmeta = video_metadata[i] if video_metadata is not None else None
+
+            # Video frames get a unique ID per video+timecode so two different
+            # videos with an identical frame produce two separate Qdrant points.
+            if vmeta is not None:
+                point_id_key = vmeta["video_hash"] + ":" + str(vmeta["frame_timecode_ms"])
+            else:
+                point_id_key = image_hash
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, point_id_key))
+
+            payload: dict = {
+                # Forensic identifiers
+                "image_hash": image_hash,
+                **({"image_hash_md5": image_hashes_md5[i]} if image_hashes_md5 else {}),
+                "image_path": str(image_path),  # virtual path for video frames
+                "indexed_at": indexed_at,
+                # Model & library provenance
+                "model_name": shared_metadata["model_name"],
+                "model_hash": shared_metadata["model_hash"],
+                "embedding_dim": shared_metadata["embedding_dim"],
+                "normalize_size": shared_metadata["normalize_size"],
+                "library_versions": shared_metadata["library_versions"],
+                # EXIF flags (only present when extraction is enabled)
+                **(exif_payloads.get(image_path, {}) if exif_payloads else {}),
+            }
+
+            # Video-frame provenance fields
+            if vmeta is not None:
+                payload["is_video_frame"] = True
+                payload["video_hash"] = vmeta["video_hash"]
+                payload["video_path"] = vmeta["video_path"]
+                payload["frame_timecode_ms"] = vmeta["frame_timecode_ms"]
+                payload["frame_index"] = vmeta["frame_index"]
+                payload["extraction_fps"] = vmeta["extraction_fps"]
+                payload["pyav_version"] = vmeta["pyav_version"]
+
+            points.append(PointStruct(id=point_id, vector=embedding, payload=payload))
+
         self.client.upsert(collection_name=self.collection, points=points)

@@ -68,6 +68,24 @@ class Settings:
         self.embedding_model: str | None = os.environ.get("SFN_EMBEDDING_MODEL") or None
         self.embedding_dim: int = self._parse_int("SFN_EMBEDDING_DIM", 0)
 
+        # --- Video frame extraction ---
+        # SFN_VIDEO_FPS: how many frames to extract per second of video (default 1).
+        # SFN_VIDEO_MAX_FRAMES: hard cap on frames yielded per video file (0 = no cap).
+        self.video_fps: float = self._parse_float("SFN_VIDEO_FPS", 1.0)
+        self.video_max_frames: int = self._parse_int("SFN_VIDEO_MAX_FRAMES", 500)
+
+    def _parse_float(self, key: str, default: float) -> float:
+        raw = os.environ.get(key)
+        if raw is None:
+            return default
+        try:
+            value = float(raw)
+        except ValueError:
+            raise ValueError(f"{key}={raw!r} is not a valid float") from None
+        if value <= 0:
+            raise ValueError(f"{key}={raw!r} must be a positive number")
+        return value
+
     def _parse_int(self, key: str, default: int) -> int:
         raw = os.environ.get(key)
         if raw is None:

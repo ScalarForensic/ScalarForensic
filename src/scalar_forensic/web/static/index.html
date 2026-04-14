@@ -459,7 +459,7 @@
         </div>
       </div>
 
-      <input type="file" multiple accept="image/*" style="display:none" x-ref="fileInput"
+      <input type="file" multiple accept="image/*,video/*,.mp4,.avi,.mov,.mkv,.wmv,.flv,.webm,.m4v,.mpg,.mpeg,.3gp,.ts,.mts" style="display:none" x-ref="fileInput"
              @change="addFiles($event.target.files); $event.target.value=''">
       <input type="file" multiple style="display:none" x-ref="folderInput" webkitdirectory
              @change="addFiles($event.target.files); $event.target.value=''">
@@ -791,6 +791,70 @@
               </template>
             </div>
           </div>
+
+          <!-- Video info + timeline (only for video frame hits) -->
+          <template x-if="selectedHit?.is_video_frame">
+            <div class="meta-box">
+              <div class="meta-box-hdr">▶ Video Frame</div>
+              <div class="meta-grid">
+                <div class="meta-item">
+                  <span class="meta-k">File</span>
+                  <span class="meta-v" x-text="selectedHit.video_path ? selectedHit.video_path.split('/').pop() : '—'"></span>
+                </div>
+                <div class="meta-item">
+                  <span class="meta-k">Timecode</span>
+                  <span class="meta-v" x-text="selectedHit.frame_timecode_ms != null ? (selectedHit.frame_timecode_ms / 1000).toFixed(2) + 's' : '—'"></span>
+                </div>
+                <template x-if="matchMeta?.video_duration_s">
+                  <div class="meta-item">
+                    <span class="meta-k">Duration</span>
+                    <span class="meta-v" x-text="matchMeta.video_duration_s.toFixed(1) + 's'"></span>
+                  </div>
+                </template>
+                <template x-if="matchMeta?.video_codec">
+                  <div class="meta-item">
+                    <span class="meta-k">Codec</span>
+                    <span class="meta-v" x-text="matchMeta.video_codec"></span>
+                  </div>
+                </template>
+                <template x-if="matchMeta?.video_width">
+                  <div class="meta-item">
+                    <span class="meta-k">Resolution</span>
+                    <span class="meta-v" x-text="`${matchMeta.video_width}×${matchMeta.video_height}`"></span>
+                  </div>
+                </template>
+                <template x-if="selectedHit.matched_frames && selectedHit.matched_frames.length > 0">
+                  <div class="meta-item">
+                    <span class="meta-k">Matched frames</span>
+                    <span class="meta-v" x-text="selectedHit.matched_frames.length"></span>
+                  </div>
+                </template>
+              </div>
+
+              <!-- Timeline bar -->
+              <template x-if="videoTimeline && videoTimeline.frames && videoTimeline.frames.length > 0 && matchMeta?.video_duration_s > 0">
+                <div style="margin-top:8px">
+                  <div style="font-size:10px;color:#888;margin-bottom:4px">Timeline (indexed frames)</div>
+                  <div style="position:relative;height:18px;background:#1a1a1a;border-radius:3px;overflow:hidden">
+                    <template x-for="f in videoTimeline.frames" :key="f.timecode_ms">
+                      <div style="position:absolute;top:0;bottom:0;width:3px;background:#7c3aed;border-radius:1px;opacity:0.6"
+                           :style="`left:${(f.timecode_ms / (matchMeta.video_duration_s * 1000) * 100).toFixed(2)}%`"
+                           :title="`${(f.timecode_ms/1000).toFixed(2)}s`"></div>
+                    </template>
+                    <!-- Highlight matched frames -->
+                    <template x-if="selectedHit.matched_frames">
+                      <template x-for="mf in selectedHit.matched_frames" :key="mf.timecode_ms">
+                        <div style="position:absolute;top:0;bottom:0;width:4px;background:#a78bfa;border-radius:1px;opacity:1;box-shadow:0 0 4px #a78bfa"
+                             :style="`left:${(mf.timecode_ms / (matchMeta.video_duration_s * 1000) * 100).toFixed(2)}%`"
+                             :title="`matched: ${(mf.timecode_ms/1000).toFixed(2)}s`"></div>
+                      </template>
+                    </template>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+
         </div>
       </template>
     </div>
@@ -870,9 +934,15 @@
                         x-text="'semantic' in hit.scores ? hit.scores.semantic.toFixed(3) : ''"></span>
                 </div>
               </div>
-              <div class="hit-filename" x-text="hit.path.split('/').pop()"></div>
-              <div class="hit-dirpath" x-text="hit.path.split('/').slice(0,-1).join('/')"></div>
+              <div class="hit-filename">
+                <span x-show="hit.is_video_frame" class="meta-tag" style="background:#7c3aed;color:#fff;margin-right:4px" title="Video frame">▶</span>
+                <span x-text="hit.is_video_frame && hit.video_path ? hit.video_path.split('/').pop() : hit.path.split('/').pop()"></span>
+              </div>
+              <div class="hit-dirpath" x-text="hit.is_video_frame && hit.video_path ? hit.video_path.split('/').slice(0,-1).join('/') : hit.path.split('/').slice(0,-1).join('/')"></div>
               <div class="hit-meta-row">
+                <span x-show="hit.is_video_frame && hit.matched_frames && hit.matched_frames.length > 1"
+                      class="meta-tag" style="background:#7c3aed;color:#fff"
+                      x-text="hit.matched_frames ? hit.matched_frames.length + ' frames' : ''"></span>
                 <span x-show="hit.exif_geo_data" class="meta-tag">GPS</span>
                 <span x-show="hit.exif && !hit.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
               </div>
@@ -931,6 +1001,9 @@ function sfn() {
     matchMeta: null,
     queryError: '',
     _queryTimer: null,
+
+    // Video timeline
+    videoTimeline: null,
 
     // Semantic stats modal
     semanticStats: null,
@@ -1284,8 +1357,15 @@ function sfn() {
       this.selectedHitKey = this.hitKey(hit);
       this.matchZoom = 1.0;
       this.matchMeta = null;
+      this.videoTimeline = null;
       this.matchSrc = `/api/hit-image?path=${encodeURIComponent(hit.path)}`;
-      await this._loadMatchMetaFor(hit.path);
+      const metaPath = hit.is_video_frame && hit.video_path
+        ? `${hit.video_path}::frame_000000_t=${hit.frame_timecode_ms ?? 0}ms`
+        : hit.path;
+      await this._loadMatchMetaFor(metaPath);
+      if (hit.is_video_frame && hit.video_hash) {
+        this._loadVideoTimeline(hit.video_hash);
+      }
     },
 
     // ── Metadata loading ──────────────────────────────────────────────────
@@ -1310,6 +1390,14 @@ function sfn() {
           `/api/metadata?path=${encodeURIComponent(path)}`
         ).then(r => r.json());
       } catch { this.matchMeta = null; }
+    },
+
+    async _loadVideoTimeline(videoHash) {
+      try {
+        this.videoTimeline = await fetch(
+          `/api/video-timeline?video_hash=${encodeURIComponent(videoHash)}`
+        ).then(r => r.json());
+      } catch { this.videoTimeline = null; }
     },
 
     // ── Semantic stats ────────────────────────────────────────────────────

@@ -16,15 +16,15 @@ Large-scale image vector indexer for forensic use. Embeds images into a Qdrant v
 
 ## What it does
 
-ScalarForensic indexes a directory of images into a Qdrant vector database using two complementary neural models, then lets you query that database through a web UI to find matches.
+ScalarForensic indexes a directory of images and videos into a Qdrant vector database using two complementary neural models, then lets you query that database through a web UI to find matches.
 
 ### Indexing (CLI)
 
 ```bash
-uv run sfn <image-dir> --dino --sscd
+uv run sfn <media-dir> --dino --sscd
 ```
 
-Scans a directory recursively, hashes each image to skip duplicates, and upserts embeddings into Qdrant. Both models can be run in a single pass — images are read and decoded once.
+Scans a directory recursively, hashes each file to skip duplicates, and upserts embeddings into Qdrant. Both models can be run in a single pass — files are read and decoded once. Images are embedded directly; videos are temporally sampled (default: 1 frame/second, capped at 500 frames) and each frame is passed through the same pipeline.
 
 ### Querying (Web UI)
 
@@ -32,7 +32,7 @@ Scans a directory recursively, hashes each image to skip duplicates, and upserts
 uv run sfn-web   # → http://localhost:8080
 ```
 
-Upload one or more query images, select search modes, and explore results with threshold and result-count sliders. Hit images are streamed from the server filesystem on demand.
+Upload one or more query images or videos, select search modes, and explore results with threshold and result-count sliders. Hit images are streamed from the server filesystem on demand. Video hits are grouped by source file — the best-matching frame is shown as the thumbnail, with a timeline bar marking all indexed and matched frame positions.
 
 ---
 
@@ -51,6 +51,8 @@ Modes are automatically disabled in the UI if the corresponding collection has n
 ## Features
 
 **Supported image formats:** `.jpg` `.jpeg` `.png` `.bmp` `.tiff` `.tif` `.webp` `.gif` `.jp2` `.ico` `.psd` — plus `.heic`/`.heif` via an optional dependency group.
+
+**Supported video formats:** `.mp4` `.avi` `.mov` `.mkv` `.wmv` `.flv` `.webm` `.m4v` `.mpg` `.mpeg` `.3gp` `.ts` `.mts` — decoded via [PyAV](https://pyav.org) (FFmpeg, bundled in the wheel, no system dependency). Frame extraction rate and per-file frame cap are configurable via `SFN_VIDEO_FPS` and `SFN_VIDEO_MAX_FRAMES`.
 
 **Deduplication modes** (controlled by `SFN_DUPLICATE_CHECK_MODE`):
 

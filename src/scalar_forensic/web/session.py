@@ -10,6 +10,17 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class VideoFrameEntry:
+    """Stores per-frame embeddings for a video uploaded through the web UI."""
+
+    frame_index: int
+    timecode_ms: int
+    frame_hash: str
+    sscd_embedding: list[float] | None = None
+    dino_embedding: list[float] | None = None
+
+
+@dataclass
 class FileEntry:
     file_id: str
     filename: str  # original name, may include relative path from webkitdirectory
@@ -19,6 +30,8 @@ class FileEntry:
     sscd_embedding: list[float] | None = None
     dino_embedding: list[float] | None = None
     error: str | None = None
+    is_video: bool = False
+    video_frames: list[VideoFrameEntry] | None = None
 
 
 @dataclass

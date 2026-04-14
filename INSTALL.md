@@ -103,6 +103,8 @@ there. Environment variables already set in the shell take precedence over the f
 | `SFN_DUPLICATE_CHECK_MODE` | `hash` | Dedup strategy: `hash` \| `filepath` \| `both` |
 | `SFN_EXTRACT_EXIF` | `false` | Store EXIF presence flags in the database |
 | `SFN_ALLOW_ONLINE` | `false` | Allow HuggingFace Hub connections (for first-time model downloads only) |
+| `SFN_VIDEO_FPS` | `1.0` | Frames to extract per second of video |
+| `SFN_VIDEO_MAX_FRAMES` | `500` | Hard cap on frames extracted per video file (0 = no cap) |
 
 ## Model setup (one-time)
 
@@ -169,6 +171,25 @@ SFN_ALLOW_ONLINE=true sfn-web
 
 Once models are cached locally and `SFN_MODEL_DINO` points to a local directory, remove
 `--allow-online` and leave `SFN_ALLOW_ONLINE=false` (or unset) for all subsequent runs.
+
+## Video support
+
+Video files are processed automatically — no extra setup required. PyAV (FFmpeg bundled as a wheel) is a mandatory dependency and is installed by `uv sync`.
+
+Supported containers: `.mp4` `.avi` `.mov` `.mkv` `.wmv` `.flv` `.webm` `.m4v` `.mpg` `.mpeg` `.3gp` `.ts` `.mts`.
+
+**How it works:** `sfn` extracts frames by uniform temporal sampling — one frame every `1/SFN_VIDEO_FPS` seconds (default: 1 fps). Within each video, identical frames (e.g. static title cards or freeze frames) are deduplicated by SHA-256 before embedding. Each unique frame is embedded and stored with full provenance: video file hash, source path, timecode, extraction fps, and PyAV version. Re-running `sfn` on the same video skips already-indexed frames.
+
+**Tuning extraction:**
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `SFN_VIDEO_FPS` | `1.0` | Higher values extract more frames and increase indexing time proportionally |
+| `SFN_VIDEO_MAX_FRAMES` | `500` | Caps frames per file regardless of duration; set to `0` to disable the cap |
+
+**Web UI:** upload a video the same way you upload an image. The analysis pipeline extracts frames, embeds each one, and searches with each frame's embedding. Results are grouped by source video — the best-matching frame is shown as the card thumbnail, and a timeline bar in the detail panel marks all indexed and matched frame positions.
+
+**Forensic reproducibility:** the same video file + the same `SFN_VIDEO_FPS` + `SFN_VIDEO_MAX_FRAMES` values always produces the same set of frames with identical SHA-256 hashes. This allows cross-run deduplication and makes results reproducible across re-indexes.
 
 ## HEIC/HEIF support
 

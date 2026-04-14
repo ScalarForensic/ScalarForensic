@@ -23,9 +23,16 @@ from scalar_forensic.embedder import (
     hash_bytes_md5,
     load_embedder,
     preprocess_batch,
+    preprocess_pil_batch,
 )
 from scalar_forensic.indexer import Indexer
 from scalar_forensic.scanner import _HEIF_AVAILABLE, scan_all_files
+from scalar_forensic.video import (
+    ExtractedFrame,
+    extract_frames,
+    get_pyav_version,
+    make_virtual_path,
+)
 
 # ── file-level status codes ──────────────────────────────────────────────────
 _S_INDEXED = "indexed"
@@ -114,10 +121,13 @@ def _print_summary(
     indexed_counts: list[int],
     skipped_counts: list[int],
     failed_counts: list[int],
+    n_videos: int = 0,
+    n_video_frames_indexed: int = 0,
+    n_video_frames_skipped: int = 0,
 ) -> None:
     counts = Counter(r.status for r in records.values())
     total = len(records)
-    n_image = total - counts[_S_UNSUPPORTED]
+    n_image = total - counts[_S_UNSUPPORTED] - n_videos
 
     # Per-model breakdown
     typer.echo("\nDone.")
@@ -131,9 +141,10 @@ def _print_summary(
     sep = "─" * 52
     typer.echo(f"\nIngestion summary  ({resolved_input})")
     typer.echo(sep)
-    rows = [
+    rows: list[tuple[str, int | None]] = [
         ("Total files found", total),
         ("  image files", n_image),
+        ("  video files", n_videos),
         ("  non-image files (unsupported)", counts[_S_UNSUPPORTED]),
         ("", None),
         ("Indexed (new)", counts[_S_INDEXED]),
@@ -143,6 +154,12 @@ def _print_summary(
         ("Failed  — preprocessing", counts[_S_FAIL_PRE]),
         ("Failed  — embedding", counts[_S_FAIL_EMB]),
     ]
+    if n_videos > 0:
+        rows += [
+            ("", None),
+            ("Video frames indexed (new)", n_video_frames_indexed),
+            ("Video frames skipped (dup)", n_video_frames_skipped),
+        ]
     for label, value in rows:
         if value is None:
             typer.echo("")
@@ -150,6 +167,147 @@ def _print_summary(
             typer.echo(f"  {label:<36} {value:>6,}")
     typer.echo(sep)
     typer.echo(f"  CSV report → {csv_path}")
+
+
+def _index_video(
+    video_path: Path,
+    v_idx: int,
+    v_total: int,
+    records: dict[Path, "_FileRecord"],
+    specs: list,
+    settings: Settings,
+    indexed_counts: list[int],
+    skipped_counts: list[int],
+    failed_counts: list[int],
+    pyav_version: str,
+) -> tuple[int, int]:
+    """Extract frames from one video, embed them, and upsert into Qdrant.
+
+    Returns (frames_indexed, frames_skipped) across all models.
+    """
+    rec = records[video_path]
+
+    # Hash the raw video file bytes for provenance
+    try:
+        video_bytes = video_path.read_bytes()
+    except OSError as exc:
+        typer.echo(f"[WARN] Cannot read video {video_path.name}: {exc}", err=True)
+        rec.status = _S_FAIL_READ
+        rec.reason = f"read error: {exc}"
+        return 0, 0
+
+    video_hash = hash_bytes(video_bytes)
+    video_hash_md5 = hash_bytes_md5(video_bytes)
+    rec.sha256 = video_hash
+    rec.md5 = video_hash_md5
+
+    # Extract frames as a streaming generator
+    try:
+        frames = list(
+            extract_frames(video_path, fps=settings.video_fps, max_frames=settings.video_max_frames)
+        )
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"[WARN] Frame extraction failed for {video_path.name}: {exc}", err=True)
+        rec.status = _S_FAIL_PRE
+        rec.reason = f"frame extraction error: {exc}"
+        return 0, 0
+
+    if not frames:
+        typer.echo(f"  [WARN] No frames extracted from {video_path.name}", err=True)
+        rec.status = _S_UNSUPPORTED
+        rec.reason = "no frames extracted"
+        return 0, 0
+
+    # Build virtual paths and collect frame metadata
+    virtual_paths = [Path(make_virtual_path(video_path, f)) for f in frames]
+    frame_hashes = [f.frame_hash for f in frames]
+    frame_images = [f.image for f in frames]
+
+    # Write thumbnails for new frames
+    if settings.thumbnail_dir is not None:
+        for frame, fhash in zip(frames, frame_hashes):
+            thumb_path = settings.thumbnail_dir / f"{fhash}.jpg"
+            if not thumb_path.exists():
+                try:
+                    _write_thumbnail(frame.image, thumb_path, settings.thumbnail_size)
+                except Exception as exc:  # noqa: BLE001
+                    typer.echo(
+                        f"[WARN] Thumbnail failed for frame {frame.frame_index} of "
+                        f"{video_path.name}: {exc}",
+                        err=True,
+                    )
+
+    # Build per-frame video_metadata dicts
+    video_meta_list: list[dict] = [
+        {
+            "video_hash": video_hash,
+            "video_path": str(video_path.resolve()),
+            "frame_timecode_ms": f.timecode_ms,
+            "frame_index": f.frame_index,
+            "extraction_fps": settings.video_fps,
+            "pyav_version": pyav_version,
+        }
+        for f in frames
+    ]
+
+    frames_indexed = 0
+    frames_skipped = 0
+
+    for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
+        # Dedup: skip frames already in Qdrant by image_hash
+        already_indexed = indexer.get_indexed_hashes(frame_hashes)
+        to_embed_idx = [i for i, h in enumerate(frame_hashes) if h not in already_indexed]
+        frames_skipped += len(frame_hashes) - len(to_embed_idx)
+
+        if not to_embed_idx:
+            continue
+
+        batch_images = preprocess_pil_batch([frame_images[i] for i in to_embed_idx])
+        batch_paths = [virtual_paths[i] for i in to_embed_idx]
+        batch_hashes = [frame_hashes[i] for i in to_embed_idx]
+        batch_vmeta = [video_meta_list[i] for i in to_embed_idx]
+
+        try:
+            norm_images = embedder.normalize_batch_bytes(batch_images)
+            embeddings = embedder.embed_images(norm_images)
+        except Exception as exc:  # noqa: BLE001
+            typer.echo(
+                f"[WARN] Embedding failed for {len(batch_images)} frames of "
+                f"{video_path.name} [{type(embedder).__name__}]: {exc}",
+                err=True,
+            )
+            failed_counts[spec_idx] += len(batch_images)
+            continue
+
+        shared_metadata = {
+            "model_name": embedder.model_name,
+            "model_hash": model_hash,
+            "embedding_dim": embedder.embedding_dim,
+            "normalize_size": embedder.normalize_size,
+            "inference_dtype": embedder.inference_dtype,
+            "library_versions": get_library_versions(),
+        }
+        indexer.upsert_batch(
+            batch_paths,
+            batch_hashes,
+            embeddings,
+            shared_metadata,
+            video_metadata=batch_vmeta,
+        )
+        indexed_counts[spec_idx] += len(batch_images)
+        if spec_idx == 0:
+            frames_indexed += len(batch_images)
+
+    rec.status = _S_INDEXED
+    rec.reason = f"{len(frames)} frames extracted"
+
+    n_new = frames_indexed
+    n_skip = frames_skipped // max(len(specs), 1)
+    typer.echo(
+        f"  video {v_idx}/{v_total} [{video_path.name}]: "
+        f"{len(frames)} frames, {n_new} embedded, {n_skip} skipped (dup)"
+    )
+    return frames_indexed, frames_skipped
 
 
 def index(
@@ -285,23 +443,29 @@ def index(
 
         specs.append((embedder, indexer, model_hash))
 
-    # ── Pre-scan: collect all files and classify image vs. non-image ─────────
+    # ── Pre-scan: collect all files and classify image / video / unsupported ──
     typer.echo(f"Scanning {resolved_input} ...")
     records: dict[Path, _FileRecord] = {}
     image_paths: list[Path] = []
-    for path, is_image in scan_all_files(resolved_input):
+    video_paths: list[Path] = []
+    for path, file_type in scan_all_files(resolved_input):
         rec = _FileRecord(path=path)
         records[path] = rec
-        if is_image:
+        if file_type == "image":
             image_paths.append(path)
+        elif file_type == "video":
+            video_paths.append(path)
+            rec.status = _S_UNSUPPORTED  # placeholder — overwritten after video processing
+            rec.reason = "video (pending)"
         else:
             ext = path.suffix.lower() or "(no extension)"
             rec.status = _S_UNSUPPORTED
             rec.reason = f"unsupported extension: {ext}"
 
-    n_unsupported = len(records) - len(image_paths)
+    n_unsupported = len(records) - len(image_paths) - len(video_paths)
     typer.echo(
-        f"  {len(records):,} files found  ({len(image_paths):,} image, {n_unsupported:,} non-image)"
+        f"  {len(records):,} files found  "
+        f"({len(image_paths):,} image, {len(video_paths):,} video, {n_unsupported:,} other)"
     )
 
     # ── Per-model counters ────────────────────────────────────────────────────
@@ -571,12 +735,44 @@ def index(
             )
             typer.echo(shared + "  |  " + "  |  ".join(model_segments) + upsert_str)
 
+    # ── Video processing pass ─────────────────────────────────────────────────
+    n_video_frames_indexed = 0
+    n_video_frames_skipped = 0
+
+    if video_paths:
+        pyav_version = get_pyav_version()
+        typer.echo(f"\nProcessing {len(video_paths):,} video file(s) (PyAV {pyav_version}) ...")
+        for v_idx, video_path in enumerate(video_paths, 1):
+            vi, vs = _index_video(
+                video_path=video_path,
+                v_idx=v_idx,
+                v_total=len(video_paths),
+                records=records,
+                specs=specs,
+                settings=settings,
+                indexed_counts=indexed_counts,
+                skipped_counts=skipped_counts,
+                failed_counts=failed_counts,
+                pyav_version=pyav_version,
+            )
+            n_video_frames_indexed += vi
+            n_video_frames_skipped += vs
+
     # ── Write CSV report ──────────────────────────────────────────────────────
     _write_csv(records, csv_path)
 
     # ── Print summary table ───────────────────────────────────────────────────
     _print_summary(
-        records, resolved_input, csv_path, specs, indexed_counts, skipped_counts, failed_counts
+        records,
+        resolved_input,
+        csv_path,
+        specs,
+        indexed_counts,
+        skipped_counts,
+        failed_counts,
+        n_videos=len(video_paths),
+        n_video_frames_indexed=n_video_frames_indexed,
+        n_video_frames_skipped=n_video_frames_skipped,
     )
 
 

@@ -75,7 +75,7 @@ _EXIF_GPS_IFD_TAG = 34853  # PIL ExifTags.Base.GPSInfo
 
 
 def get_library_versions() -> dict[str, str]:
-    libs = ["torch", "transformers", "torchvision", "qdrant-client", "Pillow"]
+    libs = ["torch", "transformers", "torchvision", "qdrant-client", "Pillow", "av"]
     versions: dict[str, str] = {"python": sys.version}
     for lib in libs:
         try:
@@ -204,6 +204,19 @@ def preprocess_batch(image_data: list[bytes]) -> list[Image.Image | Exception]:
             except Exception as exc:  # noqa: BLE001
                 results.append(exc)
         return results
+
+
+def preprocess_pil_batch(images: list[Image.Image]) -> list[Image.Image]:
+    """Apply ``_cap_short_side`` to already-decoded PIL Images.
+
+    Video frames arrive from PyAV as PIL Images, so there is no I/O or
+    format-decoding step.  This function provides the same size-capping that
+    ``preprocess_batch`` applies internally, without the bytes-open overhead.
+
+    Unlike ``preprocess_batch``, this function never returns exceptions —
+    callers are responsible for ensuring all inputs are valid RGB Images.
+    """
+    return [_cap_short_side(img) for img in images]
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import contextlib
 import hashlib
+import io
 import json
 import logging
 import os
@@ -22,9 +23,11 @@ from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from qdrant_client import QdrantClient
+from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import extract_exif_detailed, get_library_versions
+from scalar_forensic.video import VIDEO_EXTENSIONS, extract_frame_at, get_video_info, parse_virtual_path
 from scalar_forensic.web.pipeline import (
     QueryProvenance,
     analyze_session,
@@ -207,6 +210,18 @@ async def query(
                             "exif_geo_data": h.exif_geo_data,
                             "image_hash": h.image_hash,
                             "model_provenance": h.model_provenance,
+                            "is_video_frame": h.is_video_frame,
+                            "video_path": h.video_path,
+                            "video_hash": h.video_hash,
+                            "frame_timecode_ms": h.frame_timecode_ms,
+                            "matched_frames": [
+                                {
+                                    "timecode_ms": mf.timecode_ms,
+                                    "frame_hash": mf.frame_hash,
+                                    "scores": mf.scores,
+                                }
+                                for mf in h.matched_frames
+                            ] if h.matched_frames else None,
                         }
                         for h in r.hits
                     ],
@@ -253,10 +268,29 @@ async def thumbnail(sha256: str) -> FileResponse:
 
 @app.get("/api/hit-image")
 async def hit_image(path: str) -> FileResponse:
-    """Serve a hit image from the server filesystem.
+    """Serve a hit image (or video frame) from the server filesystem.
 
-    Security: only image extensions, resolved absolute path.
+    Accepts both regular image paths and virtual video frame paths
+    (``/abs/path/video.mp4::frame_000001_t=1000ms``).
     """
+    # Virtual video frame path
+    parsed = parse_virtual_path(path)
+    if parsed is not None:
+        video_path, timecode_ms = parsed
+        video_path = video_path.resolve()
+        if not video_path.exists() or not video_path.is_file():
+            raise HTTPException(status_code=404, detail="Video file not found")
+        if video_path.suffix.lower() not in VIDEO_EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Not a video file")
+        img = await asyncio.to_thread(extract_frame_at, video_path, timecode_ms)
+        if img is None:
+            raise HTTPException(status_code=404, detail="Frame not found at given timecode")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="image/jpeg")
+
+    # Regular image path
     p = Path(path).resolve()
     if not p.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
@@ -334,7 +368,28 @@ async def query_metadata(session_id: str, file_id: str) -> JSONResponse:
 
 @app.get("/api/metadata")
 async def hit_metadata(path: str) -> JSONResponse:
-    """Detailed metadata for a hit image (filesystem path)."""
+    """Detailed metadata for a hit image or video frame (filesystem path)."""
+    # Virtual video frame path
+    parsed = parse_virtual_path(path)
+    if parsed is not None:
+        video_path, timecode_ms = parsed
+        video_path = video_path.resolve()
+        if not video_path.exists() or not video_path.is_file():
+            raise HTTPException(status_code=404, detail="Video file not found")
+        info = get_video_info(video_path)
+        video_bytes = video_path.read_bytes()
+        meta: dict = {
+            "filename": video_path.name,
+            "path": str(video_path),
+            "hash_sha256": hashlib.sha256(video_bytes).hexdigest(),
+            "hash_md5": hashlib.md5(video_bytes).hexdigest(),  # noqa: S324
+            "is_video_frame": True,
+            "frame_timecode_ms": timecode_ms,
+            **{f"video_{k}": v for k, v in info.items()},
+        }
+        return JSONResponse(meta)
+
+    # Regular image path
     p = Path(path).resolve()
     if not p.is_absolute() or p.suffix.lower() not in _IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Invalid path")
@@ -348,6 +403,94 @@ async def hit_metadata(path: str) -> JSONResponse:
     meta["hash_sha256"] = hashlib.sha256(data).hexdigest()
     meta["hash_md5"] = hashlib.md5(data).hexdigest()  # noqa: S324
     return JSONResponse(meta)
+
+
+# ---------------------------------------------------------------------------
+# Video frame serving
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/video-frame")
+async def video_frame(path: str, timecode_ms: int) -> StreamingResponse:
+    """Re-extract and serve a single video frame as JPEG.
+
+    ``path`` must be an absolute filesystem path to a video file.
+    ``timecode_ms`` is the target timecode in milliseconds.
+    """
+    p = Path(path).resolve()
+    if not p.is_absolute():
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if p.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Not a video file")
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    img = await asyncio.to_thread(extract_frame_at, p, timecode_ms)
+    if img is None:
+        raise HTTPException(status_code=404, detail="Frame not found at given timecode")
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/jpeg")
+
+
+@app.get("/api/video-timeline")
+async def video_timeline(video_hash: str) -> JSONResponse:
+    """Return all indexed frame timecodes for a given video hash.
+
+    Scrolls Qdrant (SSCD collection first, then DINOv2) for points with a
+    matching ``video_hash`` payload field.  Returns timecodes, frame hashes,
+    and virtual paths so the frontend can render the timeline bar.
+    """
+    if not re.fullmatch(r"[0-9a-f]{64}", video_hash):
+        raise HTTPException(status_code=400, detail="Invalid video hash")
+
+    settings = Settings()
+    client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+
+    frames: dict[int, dict] = {}  # timecode_ms → frame info
+    for collection in (settings.collection_sscd, settings.collection_dino):
+        try:
+            offset = None
+            while True:
+                records, offset = client.scroll(
+                    collection_name=collection,
+                    scroll_filter=Filter(
+                        must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
+                    ),
+                    limit=256,
+                    offset=offset,
+                    with_payload=[
+                        "image_path",
+                        "image_hash",
+                        "frame_timecode_ms",
+                        "frame_index",
+                        "video_path",
+                    ],
+                    with_vectors=False,
+                )
+                for r in records:
+                    tc = r.payload.get("frame_timecode_ms")
+                    if tc is not None and tc not in frames:
+                        frames[tc] = {
+                            "timecode_ms": tc,
+                            "frame_hash": r.payload.get("image_hash"),
+                            "frame_index": r.payload.get("frame_index"),
+                            "virtual_path": r.payload.get("image_path"),
+                            "video_path": r.payload.get("video_path"),
+                        }
+                if offset is None:
+                    break
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("video-timeline: could not scroll %r: %s", collection, exc)
+
+    return JSONResponse(
+        {
+            "video_hash": video_hash,
+            "frames": sorted(frames.values(), key=lambda f: f["timecode_ms"]),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
