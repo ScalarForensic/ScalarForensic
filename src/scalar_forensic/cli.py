@@ -939,7 +939,7 @@ def index(
                         except Exception as exc:  # noqa: BLE001
                             typer.echo(f"[WARN] Thumbnail failed for frame: {exc}", err=True)
 
-            # ── Frame store (full-res cache for cross-host thumbnail regen) ──
+            # ── Frame store (size-capped cache for cross-host thumbnail regen) ──
             if settings.frame_store_dir is not None:
                 for fhash, raw_img in zip(frame_hashes, frame_images_raw):
                     frame_path = settings.frame_store_dir / f"{fhash}.jpg"
