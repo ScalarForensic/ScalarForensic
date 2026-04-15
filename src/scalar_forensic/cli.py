@@ -2,7 +2,7 @@
 
 import csv
 import os
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -576,12 +576,15 @@ def index(
         )
 
     # ── Pipelined batch loop ──────────────────────────────────────────────────
-    # Phase A (read / hash / dedup) for batch N+1 submits a preprocessing
-    # Future immediately, then _finish_batch() for batch N runs the GPU work
-    # while that Future executes on CPU threads — so preprocessing of the next
-    # batch is always overlapped with embedding of the current batch.
+    # Pipeline depth = 2: Phase A (read / hash / dedup) runs up to two batches
+    # ahead of the GPU.  Each Phase A immediately submits a preprocessing Future
+    # so CPU pre-processing starts as early as possible.  _finish_batch() (the
+    # GPU embed step) is called only when the pipeline is full, meaning Phase A
+    # for batches N+1 and N+2 overlaps with embed(N) regardless of whether CPU
+    # or GPU is the bottleneck.
     _effective_cap = max(_SSCD_SCALE, settings.normalize_size)
-    _pending: _BatchCtx | None = None
+    _PIPELINE_DEPTH = 2
+    _pipeline: deque[_BatchCtx] = deque()
 
     def _finish_batch(ctx: _BatchCtx) -> None:
         """Resolve the preprocessing Future and run embed + upsert for *ctx*."""
@@ -871,28 +874,32 @@ def index(
                 else None
             )
 
-            # ── Finish the PREVIOUS batch (GPU overlaps with pre_future above) ─
-            if _pending is not None:
-                _finish_batch(_pending)
-            _pending = _BatchCtx(
-                batch_num=batch_num,
-                batch_bytes=batch_bytes,
-                read_s=read_s,
-                hash_s=hash_s,
-                imgs_at_batch=imgs_processed_so_far,
-                path_hash_pairs=path_hash_pairs,
-                path_hash_pairs_full=path_hash_pairs_full,
-                md5_by_sha256=md5_by_sha256,
-                unique_pairs=unique_pairs,
-                to_embed_per_spec=to_embed_per_spec,
-                exif_data=exif_data,
-                paths_to_pre=paths_to_pre,
-                pre_future=pre_future,
+            # ── Drain oldest batch when pipeline is full ─────────────────────
+            # Phase A for this batch (and the one before it) has already run,
+            # so embed(oldest) overlaps with both of those Phase A passes.
+            if len(_pipeline) >= _PIPELINE_DEPTH:
+                _finish_batch(_pipeline.popleft())
+            _pipeline.append(
+                _BatchCtx(
+                    batch_num=batch_num,
+                    batch_bytes=batch_bytes,
+                    read_s=read_s,
+                    hash_s=hash_s,
+                    imgs_at_batch=imgs_processed_so_far,
+                    path_hash_pairs=path_hash_pairs,
+                    path_hash_pairs_full=path_hash_pairs_full,
+                    md5_by_sha256=md5_by_sha256,
+                    unique_pairs=unique_pairs,
+                    to_embed_per_spec=to_embed_per_spec,
+                    exif_data=exif_data,
+                    paths_to_pre=paths_to_pre,
+                    pre_future=pre_future,
+                )
             )
 
-        # ── Finish the last batch ─────────────────────────────────────────────
-        if _pending is not None:
-            _finish_batch(_pending)
+        # ── Drain remaining batches ───────────────────────────────────────────
+        while _pipeline:
+            _finish_batch(_pipeline.popleft())
 
     # ── Video processing pass ─────────────────────────────────────────────────
     n_video_frames_indexed = 0
