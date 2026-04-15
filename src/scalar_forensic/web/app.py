@@ -105,6 +105,21 @@ _points3d_cache: dict | None = None
 async def lifespan(_app: FastAPI):
     global _points3d_cache
     settings = Settings()
+
+    # Log effective batch size so operators know which value is in use.
+    if settings.batch_size is not None:
+        logging.getLogger(__name__).info("Batch size: %d (SFN_BATCH_SIZE)", settings.batch_size)
+    else:
+        from scalar_forensic.calibration import load_cached_batch_size
+
+        cached = load_cached_batch_size()
+        if cached is not None:
+            logging.getLogger(__name__).info("Batch size: %d (calibration cache)", cached)
+        else:
+            logging.getLogger(__name__).info(
+                "Batch size: 32 (default — run `sfn` once to auto-calibrate)"
+            )
+
     if settings.viz_max_points > 0:
         sscd_pts, dino_pts = await asyncio.gather(
             asyncio.to_thread(

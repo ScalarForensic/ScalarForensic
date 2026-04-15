@@ -207,7 +207,8 @@ marimo/_lsp/
 __marimo__/
 
 
-data/
+data/thumbnails/
+data/sfn_batch_cache.json
 models/
 qdrant
 analysis_test/

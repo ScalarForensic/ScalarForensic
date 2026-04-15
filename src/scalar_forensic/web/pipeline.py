@@ -159,7 +159,16 @@ def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
             entry.dino_embedding = emb
 
 
-_VIDEO_FRAME_BATCH = 32  # frames processed per embedding batch in the web pipeline
+def _video_frame_batch(settings: Settings) -> int:
+    """Return the effective video-frame batch size.
+
+    Resolution order: explicit ``SFN_BATCH_SIZE`` > calibration cache > 32.
+    """
+    if settings.batch_size is not None:
+        return settings.batch_size
+    from scalar_forensic.calibration import load_cached_batch_size
+
+    return load_cached_batch_size() or 32
 
 
 def _analyze_video_file(
@@ -168,9 +177,10 @@ def _analyze_video_file(
     """Extract frames from an uploaded video temp file and embed each one.
 
     Frames are extracted via the seek-based generator and processed in batches
-    of ``_VIDEO_FRAME_BATCH`` so peak memory is bounded regardless of video
-    length.  The video file is hashed in a streaming pass rather than loaded
-    into RAM.
+    whose size is resolved via :func:`_video_frame_batch` (explicit config,
+    calibration cache, or default 32) so peak memory is bounded regardless of
+    video length.  The video file is hashed in a streaming pass rather than
+    loaded into RAM.
 
     Yields ``video_progress`` ProgressEvents after each batch so the web UI
     can show how many frames have been processed while a long video is running.
@@ -182,12 +192,13 @@ def _analyze_video_file(
     entry.file_hash_md5 = hash_file_md5(entry.temp_path)
     entry.is_video = True
     frame_entries: list[VideoFrameEntry] = []
+    _batch_sz = _video_frame_batch(settings)
 
     try:
         gen = extract_frames(
             entry.temp_path, fps=settings.video_fps, max_frames=settings.video_max_frames
         )
-        for raw_batch in _batched(gen, _VIDEO_FRAME_BATCH):
+        for raw_batch in _batched(gen, _batch_sz):
             frames = list(raw_batch)
             if not frames:
                 continue

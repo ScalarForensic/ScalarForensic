@@ -12,9 +12,12 @@ Forensic correctness requirements verified here:
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
-from scalar_forensic.web.pipeline import Hit, _group_video_hits
+from scalar_forensic.config import Settings
+from scalar_forensic.web.pipeline import Hit, _group_video_hits, _video_frame_batch
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -237,3 +240,38 @@ def test_mixed_hits_video_and_image():
     assert "semantic" in grouped.scores
     assert "altered" in grouped.scores
     assert len(grouped.matched_frames) == 2
+
+
+# ---------------------------------------------------------------------------
+# _video_frame_batch resolution order
+# ---------------------------------------------------------------------------
+
+
+def test_video_frame_batch_explicit_setting():
+    """Explicit SFN_BATCH_SIZE takes precedence over cache and default."""
+    settings = Settings.__new__(Settings)
+    settings.batch_size = 64
+    assert _video_frame_batch(settings) == 64
+
+
+def test_video_frame_batch_cache_hit():
+    """Returns cached value when settings.batch_size is None and cache exists."""
+    settings = Settings.__new__(Settings)
+    settings.batch_size = None
+
+    with patch("scalar_forensic.calibration.load_cached_batch_size", return_value=16) as mock_load:
+        result = _video_frame_batch(settings)
+
+    mock_load.assert_called_once()
+    assert result == 16
+
+
+def test_video_frame_batch_cache_miss_returns_default():
+    """Falls back to 32 when settings.batch_size is None and no cache exists."""
+    settings = Settings.__new__(Settings)
+    settings.batch_size = None
+
+    with patch("scalar_forensic.calibration.load_cached_batch_size", return_value=None):
+        result = _video_frame_batch(settings)
+
+    assert result == 32

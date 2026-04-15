@@ -459,6 +459,70 @@ def index(
 
         specs.append((embedder, indexer, model_hash))
 
+    # ── Batch size: explicit config > calibration cache > auto-calibrate ─────
+    if settings.batch_size is None:
+        from scalar_forensic.calibration import (
+            calibrate,
+            load_cached_batch_size,
+            save_cached_batch_size,
+        )
+
+        _sample_dir = Path("data/sample_images")
+        cached = load_cached_batch_size()
+        if cached is not None:
+            settings.batch_size = cached
+            typer.echo(f"Batch size: {cached}  (calibration cache)")
+        elif _sample_dir.is_dir():
+            from scalar_forensic.embedder import RemoteEmbedder
+
+            # RemoteEmbedder calibration would send every sample image to the
+            # remote endpoint on each probe iteration — expensive and surprising.
+            # Skip it and require an explicit SFN_BATCH_SIZE in remote mode.
+            local_specs = [
+                (emb, idx, mh) for emb, idx, mh in specs if not isinstance(emb, RemoteEmbedder)
+            ]
+            if not local_specs:
+                settings.batch_size = 32
+                typer.echo(
+                    "[WARN] Auto-calibration skipped for remote embedder — "
+                    "set SFN_BATCH_SIZE explicitly.  Defaulting to batch_size=32.",
+                    err=True,
+                )
+            else:
+                # Calibrate each local embedder; use the minimum so the chosen
+                # batch size is safe for every model that will run in production.
+                # When multiple embedders are active, suppress per-embedder cache
+                # writes (cache_file=None) and write a single entry for the safe
+                # minimum after all probes complete — prevents the last embedder's
+                # (potentially larger) value from overwriting the minimum.
+                if len(local_specs) == 1:
+                    sizes = [calibrate(local_specs[0][0], _sample_dir)]
+                else:
+                    sizes = [
+                        calibrate(emb, _sample_dir, cache_file=None) for emb, _, _ in local_specs
+                    ]
+                    save_cached_batch_size(min(sizes))
+                settings.batch_size = min(sizes)
+                if len(local_specs) > 1:
+                    per = "  ".join(
+                        f"{type(emb).__name__}={sz}" for (emb, _, _), sz in zip(local_specs, sizes)
+                    )
+                    typer.echo(f"  ({per}  →  using minimum)")
+            if len(sizes) > 1:
+                per = "  ".join(
+                    f"{type(emb).__name__}={sz}" for (emb, _, _), sz in zip(specs, sizes)
+                )
+                typer.echo(f"  ({per}  →  using minimum)")
+        else:
+            settings.batch_size = 32
+            typer.echo(
+                f"[WARN] {_sample_dir} not found — using batch_size=32. "
+                "Add sample images there to enable auto-calibration.",
+                err=True,
+            )
+    else:
+        typer.echo(f"Batch size: {settings.batch_size}  (SFN_BATCH_SIZE)")
+
     # ── Pre-scan: collect all files and classify image / video / unsupported ──
     typer.echo(f"Scanning {resolved_input} ...")
     records: dict[Path, _FileRecord] = {}
