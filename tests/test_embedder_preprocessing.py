@@ -112,30 +112,29 @@ class TestOpenRgbExifOrientation:
 
 
 # ---------------------------------------------------------------------------
-# Group B & C: _open_rgb — ICC profile handling
+# Group B & C: _open_rgb — ICC profile metadata is ignored (no conversion)
 # ---------------------------------------------------------------------------
 
 
 class TestOpenRgbIccProfile:
     def test_valid_srgb_icc_no_error(self):
-        """Image with valid sRGB ICC profile is opened without error."""
+        """Image with embedded sRGB ICC profile opens without error (profile ignored)."""
         icc = _srgb_icc_bytes()
         data = _make_png_with_icc(64, 64, icc)
         result = _open_rgb(data)
         assert result.mode == "RGB"
         assert result.size == (64, 64)
 
-    def test_malformed_icc_graceful_fallback(self):
-        """Malformed ICC bytes trigger a graceful fallback, not an exception."""
+    def test_malformed_icc_no_error(self):
+        """Malformed ICC bytes in metadata do not raise — profile is ignored."""
         bad_icc = b"\xff\xfe\x00garbage data that is not a valid ICC profile"
         data = _make_png_with_icc(64, 64, bad_icc)
-        # Must not raise; should return a valid RGB image.
         result = _open_rgb(data)
         assert result.mode == "RGB"
         assert result.size == (64, 64)
 
-    def test_truncated_icc_graceful_fallback(self):
-        """Truncated ICC bytes (first 8 bytes of a valid profile) fall back gracefully."""
+    def test_truncated_icc_no_error(self):
+        """Truncated ICC bytes in metadata do not raise — profile is ignored."""
         icc = _srgb_icc_bytes()[:8]  # header only
         data = _make_png_with_icc(64, 64, icc)
         result = _open_rgb(data)

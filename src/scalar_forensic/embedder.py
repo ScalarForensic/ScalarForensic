@@ -15,7 +15,7 @@ from typing import TypedDict
 
 import torch
 import torch.nn.functional as F
-from PIL import Image, ImageCms, ImageOps
+from PIL import Image, ImageOps
 from torchvision import transforms
 from transformers import AutoImageProcessor, AutoModel
 
@@ -24,19 +24,6 @@ _SSCD_INPUT_SIZE = 288
 _SSCD_SCALE = 331
 # Backward-compat alias — callers that don't pass an explicit cap still get 331 px.
 _SHARED_CAP = _SSCD_SCALE
-
-# Lazy-initialised sRGB profile for ICC colour-space conversion.
-# Deferred to first use so an absent lcms2 library only fails at image-open time,
-# not at import time.
-_SRGB_PROFILE: "ImageCms.ImageCmsProfile | None" = None
-
-
-def _get_srgb_profile() -> "ImageCms.ImageCmsProfile":
-    global _SRGB_PROFILE  # noqa: PLW0603
-    if _SRGB_PROFILE is None:
-        _SRGB_PROFILE = ImageCms.createProfile("sRGB")
-    return _SRGB_PROFILE
-
 
 _MAX_IMAGE_PIXELS_ENV = "SFN_MAX_IMAGE_PIXELS"
 _LEGACY_MAX_IMAGE_PIXELS_ENV = "SCALAR_FORENSIC_MAX_IMAGE_PIXELS"
@@ -215,37 +202,17 @@ def _resolve_device(device: str) -> str:
 def _open_rgb(data: bytes) -> Image.Image:
     """Decode image bytes to a normalised RGB PIL Image.
 
-    Three corrections are applied in order:
+    ICC colour profiles are ignored — images are treated as sRGB regardless of
+    any embedded profile.  Wide-gamut sources (AdobeRGB, ProPhoto) would
+    produce slightly shifted pixel values, but such images are rare in forensic
+    datasets and the semantic embedding models are robust to small colour shifts.
 
-    1. **ICC colour profile → sRGB** — images from wide-gamut cameras (AdobeRGB,
-       ProPhoto, etc.) are colour-converted to sRGB before stripping the profile.
-       Without this step, identical scenes captured with different colour spaces
-       produce systematically different pixel values and therefore different
-       embeddings.  Malformed or unsupported profiles fall through silently.
-
-    2. **EXIF orientation transpose** — rotates/flips the canvas to match the
-       orientation the user sees in any viewer.  Without this, a phone photo
-       stored with ``Orientation=6`` (90° CW) is embedded sideways, making it
-       unmatchable against a correctly-oriented copy.
-
-    3. **RGB conversion** — strips alpha, palette, and any remaining colour
-       metadata so downstream code always receives a plain ``RGB`` image.
+    EXIF orientation is applied so that phone photos stored with a non-trivial
+    Orientation tag are embedded in the orientation the user sees, not the raw
+    sensor orientation.
     """
     img = Image.open(io.BytesIO(data))
-
-    # 1. ICC colour profile → sRGB
-    icc_bytes = img.info.get("icc_profile")
-    if icc_bytes:
-        try:
-            src_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_bytes))
-            img = ImageCms.profileToProfile(img, src_profile, _get_srgb_profile(), outputMode="RGB")
-        except Exception:  # noqa: BLE001 — malformed / unsupported profile
-            pass  # fall through to plain convert below
-
-    # 2. EXIF orientation (must happen before convert so geometry is correct)
     img = ImageOps.exif_transpose(img)
-
-    # 3. Final RGB conversion
     return img.convert("RGB")
 
 
@@ -317,7 +284,7 @@ class DINOv2Embedder:
         self,
         model_name: str,
         device: str = "auto",
-        normalize_size: int = 512,
+        normalize_size: int = 224,
         local_files_only: bool = False,
     ) -> None:
         self.model_name = model_name
@@ -540,7 +507,7 @@ class RemoteEmbedder:
         model_name: str,
         embedding_dim: int,
         api_key: str | None = None,
-        normalize_size: int = 512,
+        normalize_size: int = 224,
     ) -> None:
         self.endpoint = endpoint.rstrip("/")
         self.model_name = model_name
@@ -638,7 +605,7 @@ def load_embedder(
     model: str,
     use_sscd: bool,
     device: str = "auto",
-    normalize_size: int = 512,
+    normalize_size: int = 224,
     *,
     remote_endpoint: str | None = None,
     remote_api_key: str | None = None,

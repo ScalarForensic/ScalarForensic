@@ -73,9 +73,9 @@ The effective cap is computed as `max(_SSCD_SCALE, normalize_size)`:
 
 | `SFN_NORMALIZE_SIZE` | SSCD requirement | Effective cap |
 |---|---|---|
-| 512 (default) | 331 px | **512 px** |
+| 224 (default) | 331 px | **331 px** |
 | 448 | 331 px | **448 px** |
-| 224 | 331 px | **331 px** |
+| 512 | 331 px | **512 px** |
 
 This ensures DINOv2 receives images at its configured resolution while SSCD always gets at least 331 px on the short side.
 
@@ -85,7 +85,7 @@ This ensures DINOv2 receives images at its configured resolution while SSCD alwa
 
 ### DINOv2
 
-DINOv2 was trained at 518×518 resolution, not the 224×224 commonly assumed from ImageNet conventions. The `AutoImageProcessor` is configured with `SFN_NORMALIZE_SIZE` (default 512) for both `size` and `crop_size`:
+DINOv2 was trained at 518×518 resolution, not the 224×224 commonly assumed from ImageNet conventions. The `AutoImageProcessor` is configured with `SFN_NORMALIZE_SIZE` (default 224) for both `size` and `crop_size`:
 
 ```
 Input (short side ≤ effective cap)
@@ -107,7 +107,7 @@ DINOv2 uses a Vision Transformer (ViT) architecture. Attention cost scales as O(
 | 512 | ~36 × 36 | ~1296 | ~26× |
 | 518 (training) | 37 × 37 | 1369 | ~28× |
 
-The default `SFN_NORMALIZE_SIZE=512` is close to DINOv2's training resolution and produces the highest embedding quality. It requires a GPU with sufficient VRAM (≥16 GB for batch sizes > 8) and noticeably increases inference time compared to 224 px. Reduce `SFN_NORMALIZE_SIZE` if throughput is the primary constraint.
+The default `SFN_NORMALIZE_SIZE=224` matches the ImageNet convention and offers the best throughput. Raising it toward DINOv2's training resolution of 518 px can improve embedding fidelity for large, detail-rich images but increases inference cost quadratically — set `SFN_NORMALIZE_SIZE=512` if quality is the primary constraint and hardware permits.
 
 ---
 
@@ -162,7 +162,7 @@ All five improvements introduced in this pipeline revision alter embedding value
 |---|---|---|
 | EXIF orientation correction | Any image with non-trivial EXIF Orientation tag | Embeddings now match the display orientation |
 | ICC profile conversion | Images with non-sRGB ICC profiles | Colour values now correspond to sRGB appearance |
-| DINOv2 resolution increase | All images (512 px vs. previously 224 px via model default) | Higher-fidelity embeddings |
+| DINOv2 resolution wired in | All images (processor now respects SFN_NORMALIZE_SIZE; default 224 px) | Embeddings now match configured resolution |
 | SSCD crop restructuring | No change for n_crops=1; new capability for n_crops=5 | Multi-crop embeddings are averaged |
 | Remote PNG encoding | Images sent to remote endpoints | No re-compression artefacts |
 
@@ -176,6 +176,6 @@ Changing `SFN_SSCD_N_CROPS` between indexing runs also requires a full re-index 
 
 | Variable | Default | Description |
 |---|---|---|
-| `SFN_NORMALIZE_SIZE` | `512` | DINOv2 input resolution (px). Also sets the preprocessing cap floor above SSCD's 331 px requirement. |
+| `SFN_NORMALIZE_SIZE` | `224` | DINOv2 input resolution (px). Also sets the preprocessing cap floor above SSCD's 331 px requirement. Set to 512 for higher embedding fidelity at the cost of ~26× more ViT attention compute. |
 | `SFN_SSCD_N_CROPS` | `1` | SSCD spatial crops per image. `1` = center only; `5` = center + 4 corners (recommended for forensic use if hardware permits). |
 | `SFN_BATCH_SIZE` | auto | Override automatic batch-size calibration. Halve this value if using `SFN_SSCD_N_CROPS=5`. |

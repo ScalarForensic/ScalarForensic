@@ -29,7 +29,7 @@ class Settings:
         self.model_sscd: str = os.environ.get(
             "SFN_MODEL_SSCD", "models/sscd_disc_mixup.torchscript.pt"
         )
-        self.normalize_size: int = self._parse_int("SFN_NORMALIZE_SIZE", 512)
+        self.normalize_size: int = self._parse_int("SFN_NORMALIZE_SIZE", 224)
         # None means "auto": the CLI will calibrate on first run and cache the result.
         # The web pipeline reads the cache; both fall back to 32 if no cache exists.
         # Set SFN_BATCH_SIZE explicitly to override auto/cached behavior.

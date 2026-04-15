@@ -467,7 +467,6 @@ def index(
         from scalar_forensic.calibration import (
             calibrate,
             load_cached_batch_size,
-            save_cached_batch_size,
         )
 
         _sample_dir = Path("data/sample_images")
@@ -481,10 +480,8 @@ def index(
             # RemoteEmbedder calibration would send every sample image to the
             # remote endpoint on each probe iteration — expensive and surprising.
             # Skip it and require an explicit SFN_BATCH_SIZE in remote mode.
-            local_specs = [
-                (emb, idx, mh) for emb, idx, mh in specs if not isinstance(emb, RemoteEmbedder)
-            ]
-            if not local_specs:
+            local_embedders = [emb for emb, _, _ in specs if not isinstance(emb, RemoteEmbedder)]
+            if not local_embedders:
                 settings.batch_size = 32
                 typer.echo(
                     "[WARN] Auto-calibration skipped for remote embedder — "
@@ -492,30 +489,13 @@ def index(
                     err=True,
                 )
             else:
-                # Calibrate each local embedder; use the minimum so the chosen
-                # batch size is safe for every model that will run in production.
-                # When multiple embedders are active, suppress per-embedder cache
-                # writes (cache_file=None) and write a single entry for the safe
-                # minimum after all probes complete — prevents the last embedder's
-                # (potentially larger) value from overwriting the minimum.
-                if len(local_specs) == 1:
-                    sizes = [calibrate(local_specs[0][0], _sample_dir)]
-                else:
-                    sizes = [
-                        calibrate(emb, _sample_dir, cache_file=None) for emb, _, _ in local_specs
-                    ]
-                    save_cached_batch_size(min(sizes))
-                settings.batch_size = min(sizes)
-                if len(local_specs) > 1:
-                    per = "  ".join(
-                        f"{type(emb).__name__}={sz}" for (emb, _, _), sz in zip(local_specs, sizes)
-                    )
-                    typer.echo(f"  ({per}  →  using minimum)")
-            if len(sizes) > 1:
-                per = "  ".join(
-                    f"{type(emb).__name__}={sz}" for (emb, _, _), sz in zip(specs, sizes)
-                )
-                typer.echo(f"  ({per}  →  using minimum)")
+                # Calibrate the full combined pipeline in one pass: all local
+                # embedders share a single preprocess_batch call per probe batch,
+                # then each model runs normalize + embed in sequence — exactly
+                # mirroring what the indexer does.  This captures true combined
+                # VRAM pressure rather than underestimating it by probing models
+                # in isolation.
+                settings.batch_size = calibrate(local_embedders, _sample_dir)
         else:
             settings.batch_size = 32
             typer.echo(
