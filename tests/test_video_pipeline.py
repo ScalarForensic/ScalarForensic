@@ -262,9 +262,7 @@ def test_video_frame_batch_cache_hit(tmp_path):
     settings = Settings.__new__(Settings)
     settings.batch_size = None
 
-    with patch(
-        "scalar_forensic.calibration.load_cached_batch_size", return_value=16
-    ) as mock_load:
+    with patch("scalar_forensic.calibration.load_cached_batch_size", return_value=16) as mock_load:
         result = _video_frame_batch(settings)
 
     mock_load.assert_called_once()
@@ -276,9 +274,7 @@ def test_video_frame_batch_cache_miss_returns_default():
     settings = Settings.__new__(Settings)
     settings.batch_size = None
 
-    with patch(
-        "scalar_forensic.calibration.load_cached_batch_size", return_value=None
-    ):
+    with patch("scalar_forensic.calibration.load_cached_batch_size", return_value=None):
         result = _video_frame_batch(settings)
 
     assert result == 32
