@@ -254,11 +254,8 @@ def test_video_frame_batch_explicit_setting():
     assert _video_frame_batch(settings) == 64
 
 
-def test_video_frame_batch_cache_hit(tmp_path):
+def test_video_frame_batch_cache_hit():
     """Returns cached value when settings.batch_size is None and cache exists."""
-    cache = tmp_path / "sfn_batch_cache.json"
-    cache.write_text('{"batch_size": 16}', encoding="utf-8")
-
     settings = Settings.__new__(Settings)
     settings.batch_size = None
 

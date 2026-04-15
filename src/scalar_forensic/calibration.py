@@ -305,9 +305,11 @@ def calibrate(
                 b_star = k_half_fit * eta / (1.0 - eta)
 
     if b_star >= 1.0:
-        # Largest power-of-2 ≤ b*
+        # Largest power-of-2 ≤ b*, capped to the largest successfully probed
+        # batch size so we never return an untested value that could OOM.
+        max_probed = max(b for b, _ in measurements)
         p2 = 1
-        while p2 * 2 <= b_star:
+        while p2 * 2 <= b_star and p2 * 2 <= max_probed:
             p2 *= 2
         optimal = p2
     elif measurements:
