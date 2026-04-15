@@ -143,7 +143,7 @@ class Indexer:
         self.client.set_payload(
             collection_name=self.collection,
             payload={"video_frames_total": frame_count},
-            filter=Filter(
+            points=Filter(
                 must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
             ),
         )

@@ -226,6 +226,7 @@ def _update_video_paths(
         # image_path for video frames looks like:  /old/video.mp4::frame_...
         # We replace only the part before ::.
         old_img_prefix = old_vid + _FRAME_SEP
+        new_img_prefix = new_vid + _FRAME_SEP
         # Scroll all frames for this video to patch image_path individually.
         frame_points, _ = client.scroll(
             collection_name=collection,
@@ -238,8 +239,8 @@ def _update_video_paths(
         )
         for fp in frame_points:
             old_ip = (fp.payload or {}).get("image_path", "")
-            if old_ip.startswith(old_vid + _FRAME_SEP):
-                new_ip = new_vid + _FRAME_SEP + old_ip[len(old_vid) + len(_FRAME_SEP):]
+            if old_ip.startswith(old_img_prefix):
+                new_ip = new_img_prefix + old_ip[len(old_img_prefix):]
                 client.set_payload(
                     collection_name=collection,
                     payload={"image_path": new_ip},
