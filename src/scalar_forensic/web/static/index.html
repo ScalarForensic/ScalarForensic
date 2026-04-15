@@ -1713,8 +1713,14 @@ function sfn() {
 
     async _loadMatchMeta() {
       const hit = this.selectedHit;
-      if (hit) await this._loadMatchMetaFor(hit.path);
-      else this.matchMeta = null;
+      if (hit) {
+        const metaPath = hit.is_video_frame && hit.video_path
+          ? `${hit.video_path}::frame_000000_t=${hit.frame_timecode_ms ?? 0}ms`
+          : hit.path;
+        await this._loadMatchMetaFor(metaPath);
+      } else {
+        this.matchMeta = null;
+      }
     },
 
     async _loadMatchMetaFor(path) {
