@@ -430,7 +430,20 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
         if thumb.mode not in ("RGB", "L"):
             thumb = thumb.convert("RGB")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        thumb.save(dest, format="JPEG", quality=85, optimize=True)
+        # Write atomically so concurrent requests never read a half-written file.
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                delete=False, dir=dest.parent, suffix=dest.suffix or ".jpg"
+            ) as tmp_file:
+                tmp_path = Path(tmp_file.name)
+            thumb.save(tmp_path, format="JPEG", quality=85, optimize=True)
+            os.replace(tmp_path, dest)
+        except Exception:
+            if tmp_path is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    tmp_path.unlink()
+            raise
         _log.info("thumbnail regen: saved %s from %s", sha256[:12], source_label)
 
     try:
@@ -448,8 +461,9 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
                 return
 
         # ── Slow path: look up source path in Qdrant, then load/re-extract ───
-        def _scroll_qdrant() -> dict | None:
+        def _scroll_qdrant() -> list[dict]:
             client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+            payloads: list[dict] = []
             for collection in (settings.collection_sscd, settings.collection_dino):
                 try:
                     records, _ = client.scroll(
@@ -457,51 +471,84 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
                         scroll_filter=Filter(
                             must=[FieldCondition(key="image_hash", match=MatchValue(value=sha256))]
                         ),
-                        limit=1,
+                        limit=4,
                         with_payload=True,
                         with_vectors=False,
                     )
-                    if records:
-                        return records[0].payload
+                    payloads.extend(r.payload for r in records if r.payload)
                 except Exception as exc:  # noqa: BLE001
                     _log.debug("thumbnail regen: could not scroll %r: %s", collection, exc)
-            return None
+            return payloads
 
-        payload = await asyncio.to_thread(_scroll_qdrant)
+        payloads = await asyncio.to_thread(_scroll_qdrant)
 
-        if payload is None:
+        if not payloads:
             _log.debug("thumbnail regen: no Qdrant record found for hash %s", sha256[:12])
             return
 
-        image_path: str | None = payload.get("image_path")
-        if not image_path:
-            _log.debug("thumbnail regen: no image_path in payload for hash %s", sha256[:12])
+        # Validate paths against the configured input dir before reading anything.
+        if settings.input_dir is None:
+            _log.debug("thumbnail regen: SFN_INPUT_DIR not set, skipping path-based regen")
             return
+        allowed = settings.input_dir.resolve()
+        image_extensions = {ext.lower() for ext in Image.registered_extensions()}
 
-        def _load() -> Image.Image | None:
+        def _allowed(p: Path, kind: str) -> bool:
+            try:
+                p.relative_to(allowed)
+                return True
+            except ValueError:
+                _log.warning("thumbnail regen: %s path outside allowed dir: %s", kind, p)
+                return False
+
+        def _load(image_path: str) -> Image.Image | None:
             parsed = parse_virtual_path(image_path)
             if parsed is not None:
                 video_path, timecode_ms = parsed
+                if not video_path.is_absolute():
+                    _log.warning("thumbnail regen: video path not absolute: %s", video_path)
+                    return None
+                video_path = video_path.resolve()
+                if not _allowed(video_path, "video"):
+                    return None
+                if video_path.suffix.lower() not in VIDEO_EXTENSIONS:
+                    _log.warning("thumbnail regen: unsupported video extension: %s", video_path)
+                    return None
                 if not video_path.exists():
                     _log.warning("thumbnail regen: video not found: %s", video_path)
                     return None
                 return extract_frame_at(video_path, timecode_ms)
             raw = Path(image_path)
+            if not raw.is_absolute():
+                _log.warning("thumbnail regen: image path not absolute: %s", raw)
+                return None
+            raw = raw.resolve()
+            if not _allowed(raw, "image"):
+                return None
+            if raw.suffix.lower() not in image_extensions:
+                _log.warning("thumbnail regen: unsupported image extension: %s", raw)
+                return None
             if not raw.exists():
-                _log.warning("thumbnail regen: file not found: %s", image_path)
+                _log.warning("thumbnail regen: file not found: %s", raw)
                 return None
             try:
                 with Image.open(raw) as img:
                     img.load()
                     return img.copy()
             except Exception as exc:  # noqa: BLE001
-                _log.warning("thumbnail regen: could not open %r: %s", image_path, exc)
+                _log.warning("thumbnail regen: could not open %r: %s", raw, exc)
                 return None
 
-        img = await asyncio.to_thread(_load)
-        if img is None:
-            return
-        await asyncio.to_thread(_write, img, image_path)
+        # Try each candidate payload until one successfully produces an image.
+        for payload in payloads:
+            image_path: str | None = payload.get("image_path")
+            if not image_path:
+                continue
+            img = await asyncio.to_thread(_load, image_path)
+            if img is not None:
+                await asyncio.to_thread(_write, img, image_path)
+                return
+        _log.debug("thumbnail regen: no usable source found for hash %s", sha256[:12])
 
     except Exception as exc:  # noqa: BLE001
         _log.warning("thumbnail regen: unexpected error for %s: %s", sha256[:12], exc)
