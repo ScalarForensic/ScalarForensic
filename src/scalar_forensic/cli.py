@@ -461,7 +461,11 @@ def index(
 
     # ── Batch size: explicit config > calibration cache > auto-calibrate ─────
     if settings.batch_size is None:
-        from scalar_forensic.calibration import calibrate, load_cached_batch_size, save_cached_batch_size
+        from scalar_forensic.calibration import (
+            calibrate,
+            load_cached_batch_size,
+            save_cached_batch_size,
+        )
 
         _sample_dir = Path("data/sample_images")
         cached = load_cached_batch_size()
