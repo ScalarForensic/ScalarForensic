@@ -229,7 +229,14 @@ class Indexer:
                 "model_hash": shared_metadata["model_hash"],
                 "embedding_dim": shared_metadata["embedding_dim"],
                 "normalize_size": shared_metadata["normalize_size"],
+                "inference_dtype": shared_metadata["inference_dtype"],
                 "library_versions": shared_metadata["library_versions"],
+                # sscd_n_crops is only present for SSCD indexing runs
+                **(
+                    {"sscd_n_crops": shared_metadata["sscd_n_crops"]}
+                    if "sscd_n_crops" in shared_metadata
+                    else {}
+                ),
                 # EXIF flags (only present when extraction is enabled)
                 **(exif_payloads.get(image_path, {}) if exif_payloads else {}),
             }

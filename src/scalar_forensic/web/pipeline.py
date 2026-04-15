@@ -17,6 +17,7 @@ from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import (
+    _SSCD_SCALE,
     AnyEmbedder,
     hash_bytes,
     hash_bytes_md5,
@@ -63,6 +64,7 @@ def _get_embedder(key: str, settings: Settings) -> AnyEmbedder:
             remote_api_key=settings.embedding_api_key,
             embedding_dim=settings.embedding_dim,
             local_files_only=not settings.allow_online,
+            n_crops=settings.sscd_n_crops,
         )
     return _embedder_cache[key]
 
@@ -145,7 +147,10 @@ def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
     entry.file_hash_md5 = hash_bytes_md5(data)
     if not embedders:
         return
-    pre_results = preprocess_batch([data])
+    _effective_cap = max(
+        _SSCD_SCALE, max((e.normalize_size for e in embedders.values()), default=_SSCD_SCALE)
+    )
+    pre_results = preprocess_batch([data], cap=_effective_cap)
     result = pre_results[0]
     if isinstance(result, Exception):
         raise result.with_traceback(result.__traceback__)
@@ -203,7 +208,11 @@ def _analyze_video_file(
             if not frames:
                 continue
 
-            pil_images = preprocess_pil_batch([f.image for f in frames])
+            _effective_cap = max(
+                _SSCD_SCALE,
+                max((e.normalize_size for e in embedders.values()), default=_SSCD_SCALE),
+            )
+            pil_images = preprocess_pil_batch([f.image for f in frames], cap=_effective_cap)
 
             # Create / extend frame_entries for this batch
             batch_start = len(frame_entries)
@@ -1027,6 +1036,7 @@ _PROVENANCE_FIELDS = [
     "inference_dtype",
     "normalize_size",
     "embedding_dim",
+    "sscd_n_crops",
 ]
 
 

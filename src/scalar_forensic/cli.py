@@ -16,8 +16,10 @@ from PIL import Image
 
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import (
+    _SSCD_SCALE,
     AnyEmbedder,
     ExifInfo,
+    SSCDEmbedder,
     extract_exif,
     get_library_versions,
     hash_bytes,
@@ -428,6 +430,7 @@ def index(
                 remote_api_key=settings.embedding_api_key,
                 embedding_dim=settings.embedding_dim,
                 local_files_only=not settings.allow_online,
+                n_crops=settings.sscd_n_crops,
             )
         except (FileNotFoundError, ValueError) as exc:
             typer.echo(f"[ERROR] {exc}", err=True)
@@ -647,10 +650,15 @@ def index(
         needs_pre = needs_embed | needs_thumbnail
 
         # ── Shared pre-processing (only images that need it) ──────────────────
+        # Cap at max(SSCD scale, normalize_size) so DINOv2 receives images at
+        # its configured resolution while SSCD still gets ≥ 331 px short side.
         t0 = perf_counter()
         paths_to_pre = [p for p, _ in unique_pairs if p in needs_pre]
+        _effective_cap = max(_SSCD_SCALE, settings.normalize_size)
         pre_results = (
-            preprocess_batch([data_by_path[p] for p in paths_to_pre]) if paths_to_pre else []
+            preprocess_batch([data_by_path[p] for p in paths_to_pre], cap=_effective_cap)
+            if paths_to_pre
+            else []
         )
 
         pre_by_path: dict[Path, Image.Image] = {}
@@ -784,6 +792,9 @@ def index(
                 "normalize_size": embedder.normalize_size,
                 "inference_dtype": embedder.inference_dtype,
                 "library_versions": get_library_versions(),
+                **(
+                    {"sscd_n_crops": embedder.n_crops} if isinstance(embedder, SSCDEmbedder) else {}
+                ),
             }
             exif_for_batch: dict[Path, dict] | None = None
             if exif_data is not None:
@@ -850,6 +861,8 @@ def index(
                     )
 
     # ── Video processing pass ─────────────────────────────────────────────────
+    # Ensure _effective_cap is defined even when there were no images to process.
+    _effective_cap = max(_SSCD_SCALE, settings.normalize_size)
     n_video_frames_indexed = 0
     n_video_frames_skipped = 0
 
@@ -926,7 +939,7 @@ def index(
 
             # ── Preprocess: cap short side (same transform as preprocess_batch) ──
             t0 = perf_counter()
-            pre_images = preprocess_pil_batch(frame_images_raw)
+            pre_images = preprocess_pil_batch(frame_images_raw, cap=_effective_cap)
             pre_s = perf_counter() - t0
 
             # ── Thumbnails ────────────────────────────────────────────────────
@@ -1032,6 +1045,11 @@ def index(
                     "normalize_size": embedder.normalize_size,
                     "inference_dtype": embedder.inference_dtype,
                     "library_versions": get_library_versions(),
+                    **(
+                        {"sscd_n_crops": embedder.n_crops}
+                        if isinstance(embedder, SSCDEmbedder)
+                        else {}
+                    ),
                 }
 
                 def _make_frame_upsert(idx, eps, ehs, embs, meta, vmetas):

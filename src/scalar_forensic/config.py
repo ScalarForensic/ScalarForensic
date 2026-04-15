@@ -92,6 +92,22 @@ class Settings:
         if self.video_max_frames < 0:
             raise ValueError("SFN_VIDEO_MAX_FRAMES must be >= 0 (use 0 for no cap)")
 
+        # --- SSCD multi-crop ensemble ---
+        # SFN_SSCD_N_CROPS controls how many spatial crops are taken per image when
+        # embedding with SSCD.  Allowed values:
+        #   1 (default) — center crop only; matches historical behaviour.
+        #   5           — center crop + four corner crops; recommended for forensic
+        #                 use cases where subjects may be off-centre (surveillance
+        #                 stills, padded composites).  Requires ~5× the GPU compute
+        #                 of n_crops=1 per SSCD batch.  Changing this value
+        #                 invalidates embeddings from previous indexing runs.
+        self.sscd_n_crops: int = self._parse_int("SFN_SSCD_N_CROPS", 1)
+        if self.sscd_n_crops not in (1, 5):
+            raise ValueError(
+                f"SFN_SSCD_N_CROPS={self.sscd_n_crops!r} is invalid. "
+                "Allowed values: 1 (center crop only) or 5 (center + 4 corners)."
+            )
+
     def _parse_float(self, key: str, default: float) -> float:
         raw = os.environ.get(key)
         if raw is None:

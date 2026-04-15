@@ -14,13 +14,29 @@ from pathlib import Path
 from typing import TypedDict
 
 import torch
-from PIL import Image
+import torch.nn.functional as F
+from PIL import Image, ImageCms, ImageOps
 from torchvision import transforms
 from transformers import AutoImageProcessor, AutoModel
 
 _SSCD_INPUT_SIZE = 288
-# Short-side cap applied once before both models: SSCD needs 331 px, DINOv2 needs 256 px.
-_SHARED_CAP = 331
+# SSCD requires short-side ≥ 331 px before the 288×288 center-crop.
+_SSCD_SCALE = 331
+# Backward-compat alias — callers that don't pass an explicit cap still get 331 px.
+_SHARED_CAP = _SSCD_SCALE
+
+# Lazy-initialised sRGB profile for ICC colour-space conversion.
+# Deferred to first use so an absent lcms2 library only fails at image-open time,
+# not at import time.
+_SRGB_PROFILE: "ImageCms.ImageCmsProfile | None" = None
+
+
+def _get_srgb_profile() -> "ImageCms.ImageCmsProfile":
+    global _SRGB_PROFILE  # noqa: PLW0603
+    if _SRGB_PROFILE is None:
+        _SRGB_PROFILE = ImageCms.createProfile("sRGB")
+    return _SRGB_PROFILE
+
 
 _MAX_IMAGE_PIXELS_ENV = "SFN_MAX_IMAGE_PIXELS"
 _LEGACY_MAX_IMAGE_PIXELS_ENV = "SCALAR_FORENSIC_MAX_IMAGE_PIXELS"
@@ -197,31 +213,70 @@ def _resolve_device(device: str) -> str:
 
 
 def _open_rgb(data: bytes) -> Image.Image:
-    return Image.open(io.BytesIO(data)).convert("RGB")
+    """Decode image bytes to a normalised RGB PIL Image.
+
+    Three corrections are applied in order:
+
+    1. **ICC colour profile → sRGB** — images from wide-gamut cameras (AdobeRGB,
+       ProPhoto, etc.) are colour-converted to sRGB before stripping the profile.
+       Without this step, identical scenes captured with different colour spaces
+       produce systematically different pixel values and therefore different
+       embeddings.  Malformed or unsupported profiles fall through silently.
+
+    2. **EXIF orientation transpose** — rotates/flips the canvas to match the
+       orientation the user sees in any viewer.  Without this, a phone photo
+       stored with ``Orientation=6`` (90° CW) is embedded sideways, making it
+       unmatchable against a correctly-oriented copy.
+
+    3. **RGB conversion** — strips alpha, palette, and any remaining colour
+       metadata so downstream code always receives a plain ``RGB`` image.
+    """
+    img = Image.open(io.BytesIO(data))
+
+    # 1. ICC colour profile → sRGB
+    icc_bytes = img.info.get("icc_profile")
+    if icc_bytes:
+        try:
+            src_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_bytes))
+            img = ImageCms.profileToProfile(img, src_profile, _get_srgb_profile(), outputMode="RGB")
+        except Exception:  # noqa: BLE001 — malformed / unsupported profile
+            pass  # fall through to plain convert below
+
+    # 2. EXIF orientation (must happen before convert so geometry is correct)
+    img = ImageOps.exif_transpose(img)
+
+    # 3. Final RGB conversion
+    return img.convert("RGB")
 
 
-def _cap_short_side(img: Image.Image) -> Image.Image:
-    """Scale down if the short side exceeds _SHARED_CAP; leave smaller images untouched."""
+def _cap_short_side(img: Image.Image, cap: int = _SHARED_CAP) -> Image.Image:
+    """Scale down proportionally if the short side exceeds *cap*; leave smaller images untouched."""
     w, h = img.size
     short = min(w, h)
-    if short <= _SHARED_CAP:
+    if short <= cap:
         return img
-    scale = _SHARED_CAP / short
+    scale = cap / short
     return img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
 
 
-def preprocess_batch(image_data: list[bytes]) -> list[Image.Image | Exception]:
-    """Open RGB, cap short side to _SHARED_CAP px; parallelised over CPU cores.
+def preprocess_batch(
+    image_data: list[bytes], cap: int = _SHARED_CAP
+) -> list[Image.Image | Exception]:
+    """Open RGB (with ICC and EXIF corrections), cap short side to *cap* px.
 
-    Returns one entry per input image: an ``Image.Image`` on success or the
-    raised ``Exception`` on failure.  Individual futures are used instead of
-    ``pool.map()`` so that a single corrupt or oversized file does not abort
-    the rest of the batch — callers should check each result with
-    ``isinstance(result, Exception)``.
+    Parallelised over CPU cores.  Returns one entry per input image: an
+    ``Image.Image`` on success or the raised ``Exception`` on failure.
+    Individual futures are used instead of ``pool.map()`` so that a single
+    corrupt or oversized file does not abort the rest of the batch — callers
+    should check each result with ``isinstance(result, Exception)``.
+
+    *cap* defaults to ``_SHARED_CAP`` (331 px) for backward compatibility.
+    Pass ``max(_SSCD_SCALE, settings.normalize_size)`` from call sites so that
+    DINOv2 receives images at its configured resolution.
     """
 
     def _process(data: bytes) -> Image.Image:
-        return _cap_short_side(_open_rgb(data))
+        return _cap_short_side(_open_rgb(data), cap)
 
     with ThreadPoolExecutor() as pool:
         futures = [pool.submit(_process, data) for data in image_data]
@@ -234,17 +289,22 @@ def preprocess_batch(image_data: list[bytes]) -> list[Image.Image | Exception]:
         return results
 
 
-def preprocess_pil_batch(images: list[Image.Image]) -> list[Image.Image]:
+def preprocess_pil_batch(images: list[Image.Image], cap: int = _SHARED_CAP) -> list[Image.Image]:
     """Apply ``_cap_short_side`` to already-decoded PIL Images.
 
     Video frames arrive from PyAV as PIL Images, so there is no I/O or
     format-decoding step.  This function provides the same size-capping that
     ``preprocess_batch`` applies internally, without the bytes-open overhead.
+    ICC and EXIF corrections are not applied here — video frames come from
+    PyAV already in sRGB-equivalent colour space with correct geometry.
 
     Unlike ``preprocess_batch``, this function never returns exceptions —
     callers are responsible for ensuring all inputs are valid RGB Images.
+
+    *cap* defaults to ``_SHARED_CAP`` for backward compatibility; pass
+    ``max(_SSCD_SCALE, settings.normalize_size)`` from call sites.
     """
-    return [_cap_short_side(img) for img in images]
+    return [_cap_short_side(img, cap) for img in images]
 
 
 # ---------------------------------------------------------------------------
@@ -264,8 +324,23 @@ class DINOv2Embedder:
         self.normalize_size = normalize_size
         self.device = _resolve_device(device)
         self.processor = AutoImageProcessor.from_pretrained(
-            model_name, local_files_only=local_files_only
+            model_name,
+            local_files_only=local_files_only,
+            size={"shortest_edge": normalize_size},
+            crop_size={"height": normalize_size, "width": normalize_size},
         )
+        # Warn if the processor silently ignored the resolution kwargs — this can
+        # happen with non-standard DINOv2 variants that use a different processor class.
+        actual_size = getattr(self.processor, "size", {})
+        if isinstance(actual_size, dict) and actual_size.get("shortest_edge", 0) != normalize_size:
+            import warnings
+
+            warnings.warn(
+                f"DINOv2 processor did not accept normalize_size={normalize_size}; "
+                f"actual size config: {actual_size}. "
+                "Embeddings will be produced at the processor's built-in default resolution.",
+                stacklevel=2,
+            )
         dtype = torch.float16 if self.device == "cuda" else torch.float32
         self.model = AutoModel.from_pretrained(
             model_name, dtype=dtype, local_files_only=local_files_only
@@ -326,25 +401,45 @@ class DINOv2Embedder:
 # ---------------------------------------------------------------------------
 
 
-def _sscd_crop(img: Image.Image) -> Image.Image:
-    """Aspect-ratio resize to 331 px short side then center-crop to 288×288.
+def _sscd_resize(img: Image.Image) -> Image.Image:
+    """Proportionally resize *img* so the short side is exactly ``_SSCD_SCALE`` (331 px).
 
-    For images pre-capped at 331 px the resize is a near-no-op; for images
-    smaller than 331 px (never capped) it upscales as the model requires.
+    For images already capped at 331 px this is a near-no-op; for images smaller
+    than 331 px it upscales as SSCD requires.
     """
-    size = _SSCD_INPUT_SIZE
-    scale = int(size * 1.15)  # 331
+    scale = _SSCD_SCALE
     w, h = img.size
     new_w, new_h = (scale, int(h * scale / w)) if w <= h else (int(w * scale / h), scale)
-    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    left, top = (new_w - size) // 2, (new_h - size) // 2
-    return img.crop((left, top, left + size, top + size))
+    return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+
+def _sscd_crops(img: Image.Image, n_crops: int) -> list[Image.Image]:
+    """Return *n_crops* 288×288 crops from *img* (already at ``_SSCD_SCALE`` short side).
+
+    ``n_crops=1`` — center crop only (matches previous single-crop behaviour).
+    ``n_crops=5`` — center crop plus the four corner crops, giving full spatial
+    coverage for images where the semantically relevant content is off-centre
+    (e.g. surveillance stills, padded composites).
+    """
+    size = _SSCD_INPUT_SIZE
+    w, h = img.size
+    cx, cy = (w - size) // 2, (h - size) // 2
+    crops = [img.crop((cx, cy, cx + size, cy + size))]  # center
+    if n_crops == 5:
+        crops += [
+            img.crop((0, 0, size, size)),  # top-left
+            img.crop((w - size, 0, w, size)),  # top-right
+            img.crop((0, h - size, size, h)),  # bottom-left
+            img.crop((w - size, h - size, w, h)),  # bottom-right
+        ]
+    return crops
 
 
 class SSCDEmbedder:
-    def __init__(self, model_name: str, device: str = "auto") -> None:
+    def __init__(self, model_name: str, device: str = "auto", n_crops: int = 1) -> None:
         self.model_name = model_name
         self.normalize_size = _SSCD_INPUT_SIZE
+        self.n_crops = n_crops
         self.device = _resolve_device(device)
         if not Path(model_name).exists():
             raise FileNotFoundError(
@@ -388,13 +483,39 @@ class SSCDEmbedder:
         return self._model_hash
 
     def normalize_batch_bytes(self, images: list[Image.Image]) -> list[Image.Image]:
-        return [_sscd_crop(img) for img in images]
+        # SSCD-specific transforms (resize + crop) are performed inside embed_images
+        # so that multi-crop ensembling can expand the batch before inference.
+        return images
 
     def embed_images(self, images: list[Image.Image]) -> list[list[float]]:
-        batch = torch.stack([self._to_tensor(img) for img in images]).to(self.device)
+        """Embed *images* using the SSCD model.
+
+        Each image is first resized to ``_SSCD_SCALE`` (331 px) short side, then
+        ``self.n_crops`` crops of ``_SSCD_INPUT_SIZE``×``_SSCD_INPUT_SIZE`` (288×288)
+        are generated.  All crops are embedded in a single forward pass.
+
+        When ``n_crops == 1`` the center crop result is returned directly.
+        When ``n_crops == 5``, per-crop embeddings are L2-normalised, averaged
+        across crops per source image, then L2-normalised again — producing a
+        single unit-norm vector per image that covers the full spatial extent.
+        """
+        n_orig = len(images)
+        resized = [_sscd_resize(img) for img in images]
+        crop_lists = [_sscd_crops(img, self.n_crops) for img in resized]
+        flat_crops = [c for crops in crop_lists for c in crops]
+
+        batch = torch.stack([self._to_tensor(c) for c in flat_crops]).to(self.device)
         with torch.no_grad():
-            embeddings = self._model(batch)
-        return embeddings.float().cpu().tolist()
+            flat_embs = self._model(batch).float()  # (n_orig * n_crops, 512)
+
+        if self.n_crops == 1:
+            return flat_embs.cpu().tolist()
+
+        # L2-normalise per crop → average over crops per source image → L2-normalise
+        flat_embs = F.normalize(flat_embs, p=2, dim=1)
+        embs = flat_embs.view(n_orig, self.n_crops, -1).mean(dim=1)
+        embs = F.normalize(embs, p=2, dim=1)
+        return embs.cpu().tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -454,9 +575,13 @@ class RemoteEmbedder:
         inputs: list[str] = []
         for img in images:
             buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=95)
+            # PNG is lossless: avoids DCT block artefacts on screenshots and
+            # digital evidence, and eliminates double-compression if the source
+            # was already JPEG.  The payload size increase is acceptable given
+            # that this path is only used for remote embedding servers.
+            img.save(buf, format="PNG")
             b64 = base64.b64encode(buf.getvalue()).decode()
-            inputs.append(f"data:image/jpeg;base64,{b64}")
+            inputs.append(f"data:image/png;base64,{b64}")
 
         payload = json.dumps({"model": self.model_name, "input": inputs}).encode()
         headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -519,6 +644,7 @@ def load_embedder(
     remote_api_key: str | None = None,
     embedding_dim: int = 0,
     local_files_only: bool = False,
+    n_crops: int = 1,
 ) -> AnyEmbedder:
     """Load the embedder for the selected backend.
 
@@ -528,6 +654,10 @@ def load_embedder(
 
     *local_files_only* is forwarded to :class:`DINOv2Embedder` and prevents the
     HuggingFace SDK from fetching model files or metadata from the Hub.
+
+    *n_crops* is forwarded to :class:`SSCDEmbedder` and controls the number of
+    spatial crops used per image during embedding (1 = center only, 5 = center +
+    four corners).  Ignored for DINOv2 and remote backends.
     """
     if remote_endpoint is not None:
         if embedding_dim <= 0:
@@ -543,7 +673,7 @@ def load_embedder(
             normalize_size=normalize_size,
         )
     if use_sscd:
-        return SSCDEmbedder(model_name=model, device=device)
+        return SSCDEmbedder(model_name=model, device=device, n_crops=n_crops)
     return DINOv2Embedder(
         model_name=model,
         device=device,

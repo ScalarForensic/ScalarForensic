@@ -334,6 +334,9 @@
                         <span x-text="(auditHitProvenance[mode].normalize_size || '—') + ' px input'"></span>
                         ·
                         <span x-text="(auditHitProvenance[mode].embedding_dim || '—') + '-dim'"></span>
+                        <template x-if="auditHitProvenance[mode].sscd_n_crops">
+                          <span> · <span x-text="auditHitProvenance[mode].sscd_n_crops + '-crop'"></span></span>
+                        </template>
                       </span>
                     </div>
                   </div>
