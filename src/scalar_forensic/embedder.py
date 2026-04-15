@@ -199,6 +199,10 @@ def _resolve_device(device: str) -> str:
     return "cpu"
 
 
+_EXIF_ORIENTATION_TAG = 0x0112  # EXIF tag 274
+_EXIF_ORIENTATION_FORMATS = frozenset({"JPEG", "TIFF", "WEBP", "MPO"})
+
+
 def _open_rgb(data: bytes) -> Image.Image:
     """Decode image bytes to a normalised RGB PIL Image.
 
@@ -209,10 +213,14 @@ def _open_rgb(data: bytes) -> Image.Image:
 
     EXIF orientation is applied so that phone photos stored with a non-trivial
     Orientation tag are embedded in the orientation the user sees, not the raw
-    sensor orientation.
+    sensor orientation.  The check is skipped entirely for formats that never
+    carry EXIF (PNG, BMP, GIF …) and short-circuits for the common Orientation=1
+    case to avoid a full decode+rotate on every image.
     """
     img = Image.open(io.BytesIO(data))
-    img = ImageOps.exif_transpose(img)
+    if img.format in _EXIF_ORIENTATION_FORMATS:
+        if img.getexif().get(_EXIF_ORIENTATION_TAG, 1) != 1:
+            img = ImageOps.exif_transpose(img)
     return img.convert("RGB")
 
 
@@ -271,7 +279,10 @@ def preprocess_pil_batch(images: list[Image.Image], cap: int = _SHARED_CAP) -> l
     *cap* defaults to ``_SHARED_CAP`` for backward compatibility; pass
     ``max(_SSCD_SCALE, settings.normalize_size)`` from call sites.
     """
-    return [_cap_short_side(img, cap) for img in images]
+    if len(images) <= 1:
+        return [_cap_short_side(img, cap) for img in images]
+    with ThreadPoolExecutor() as pool:
+        return list(pool.map(lambda img: _cap_short_side(img, cap), images))
 
 
 # ---------------------------------------------------------------------------
@@ -371,13 +382,16 @@ class DINOv2Embedder:
 def _sscd_resize(img: Image.Image) -> Image.Image:
     """Proportionally resize *img* so the short side is exactly ``_SSCD_SCALE`` (331 px).
 
-    For images already capped at 331 px this is a near-no-op; for images smaller
+    Returns *img* unchanged when the short side is already ``_SSCD_SCALE`` —
+    the common case after ``_cap_short_side(_SSCD_SCALE)``.  For images smaller
     than 331 px it upscales as SSCD requires.
     """
-    scale = _SSCD_SCALE
     w, h = img.size
-    new_w, new_h = (scale, int(h * scale / w)) if w <= h else (int(w * scale / h), scale)
-    return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    short = min(w, h)
+    if short == _SSCD_SCALE:
+        return img
+    scale = _SSCD_SCALE / short
+    return img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
 
 
 def _sscd_crops(img: Image.Image, n_crops: int) -> list[Image.Image]:
@@ -467,7 +481,8 @@ class SSCDEmbedder:
         single unit-norm vector per image that covers the full spatial extent.
         """
         n_orig = len(images)
-        resized = [_sscd_resize(img) for img in images]
+        with ThreadPoolExecutor() as pool:
+            resized = list(pool.map(_sscd_resize, images))
         crop_lists = [_sscd_crops(img, self.n_crops) for img in resized]
         flat_crops = [c for crops in crop_lists for c in crops]
 
