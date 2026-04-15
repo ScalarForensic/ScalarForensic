@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <radialGradient id="sfn-bg" cx="46%" cy="54%" r="64%">
+      <stop offset="0%" stop-color="#131926"/>
+      <stop offset="100%" stop-color="#07080f"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="128" height="128" fill="url(#sfn-bg)" rx="3"/>
+
+  <!--
+    Isometric cube outline — three visible faces.
+    Cube: 24-unit side, screen-scale 1 unit = 1 px.
+    Isometric projection, origin at (64, 88):
+      right  edge dir = (+cos30°, +sin30°) ≈ (+0.866, +0.5)  → (+20.8, +12)
+      left   edge dir = (-cos30°, +sin30°) ≈ (-0.866, +0.5)  → (-20.8, +12)
+      up     edge dir = (0, -1)                               → (0, -24)
+
+    Bottom face: (64,88), (85,76), (64,64), (43,76)
+    Top face:    (64,64), (85,52), (64,40), (43,52)
+    Vertical edges connect matching vertices.
+  -->
+
+  <!-- Right face -->
+  <polygon points="85,52 64,40 64,64 85,76"
+           fill="#0d2236" fill-opacity="0.55" stroke="#1c4060" stroke-width="0.7" stroke-linejoin="round"/>
+  <!-- Left face -->
+  <polygon points="43,52 64,40 64,64 43,76"
+           fill="#091a28" fill-opacity="0.55" stroke="#163250" stroke-width="0.7" stroke-linejoin="round"/>
+  <!-- Top face -->
+  <polygon points="64,40 85,52 64,64 43,52"
+           fill="#162a40" fill-opacity="0.65" stroke="#1e4870" stroke-width="0.7" stroke-linejoin="round"/>
+  <!-- Front vertical edge (brightest, implied front corner) -->
+  <line x1="64" y1="64" x2="64" y2="88" stroke="#1e4060" stroke-width="0.7"/>
+
+  <!-- Axis tick marks at the front-bottom vertex -->
+  <line x1="64" y1="88" x2="64" y2="96"   stroke="#2dd4bf" stroke-width="0.9" opacity="0.55"/>
+  <line x1="64" y1="88" x2="72" y2="92.5" stroke="#818cf8" stroke-width="0.9" opacity="0.55"/>
+  <line x1="64" y1="88" x2="56" y2="92.5" stroke="#60a5fa" stroke-width="0.9" opacity="0.55"/>
+
+  <!-- ── Point cloud ────────────────────────────────────────────────────────
+       Three depth layers: far (purple/indigo), mid (blue), near (teal).
+       Depth is conveyed by colour, radius, and opacity.
+  ── -->
+
+  <!-- Far layer — small, dim, indigo/violet -->
+  <circle cx="64" cy="42" r="0.9" fill="#a78bfa" opacity="0.50"/>
+  <circle cx="70" cy="44" r="0.7" fill="#8b5cf6" opacity="0.44"/>
+  <circle cx="58" cy="45" r="0.8" fill="#a78bfa" opacity="0.46"/>
+  <circle cx="76" cy="48" r="0.9" fill="#7c3aed" opacity="0.42"/>
+  <circle cx="52" cy="50" r="0.7" fill="#a78bfa" opacity="0.44"/>
+  <circle cx="64" cy="48" r="1.0" fill="#8b5cf6" opacity="0.50"/>
+  <circle cx="81" cy="54" r="0.8" fill="#7c3aed" opacity="0.40"/>
+  <circle cx="47" cy="55" r="0.9" fill="#a78bfa" opacity="0.45"/>
+  <circle cx="73" cy="42" r="0.7" fill="#8b5cf6" opacity="0.42"/>
+  <circle cx="55" cy="57" r="0.8" fill="#a78bfa" opacity="0.43"/>
+  <circle cx="86" cy="60" r="0.7" fill="#6d28d9" opacity="0.38"/>
+  <circle cx="43" cy="62" r="0.8" fill="#7c3aed" opacity="0.40"/>
+
+  <!-- Mid layer — medium, blue -->
+  <circle cx="69" cy="55" r="1.4" fill="#3b82f6" opacity="0.60"/>
+  <circle cx="57" cy="58" r="1.3" fill="#60a5fa" opacity="0.58"/>
+  <circle cx="75" cy="60" r="1.5" fill="#2563eb" opacity="0.62"/>
+  <circle cx="53" cy="63" r="1.2" fill="#3b82f6" opacity="0.56"/>
+  <circle cx="73" cy="64" r="1.4" fill="#60a5fa" opacity="0.60"/>
+  <circle cx="81" cy="62" r="1.2" fill="#2563eb" opacity="0.55"/>
+  <circle cx="49" cy="67" r="1.3" fill="#3b82f6" opacity="0.57"/>
+  <circle cx="64" cy="57" r="1.6" fill="#60a5fa" opacity="0.64"/>
+  <circle cx="77" cy="69" r="1.4" fill="#2563eb" opacity="0.58"/>
+  <circle cx="56" cy="71" r="1.3" fill="#3b82f6" opacity="0.56"/>
+  <circle cx="85" cy="69" r="1.1" fill="#60a5fa" opacity="0.50"/>
+  <circle cx="45" cy="72" r="1.2" fill="#2563eb" opacity="0.52"/>
+  <circle cx="62" cy="52" r="1.3" fill="#3b82f6" opacity="0.55"/>
+  <circle cx="79" cy="56" r="1.2" fill="#60a5fa" opacity="0.54"/>
+
+  <!-- Near layer — larger, bright teal/emerald -->
+  <circle cx="64" cy="67" r="2.5" fill="#2dd4bf" opacity="0.90"/>
+  <circle cx="71" cy="71" r="2.1" fill="#14b8a6" opacity="0.85"/>
+  <circle cx="57" cy="72" r="2.2" fill="#2dd4bf" opacity="0.86"/>
+  <circle cx="67" cy="62" r="1.9" fill="#34d399" opacity="0.82"/>
+  <circle cx="73" cy="65" r="2.3" fill="#2dd4bf" opacity="0.87"/>
+  <circle cx="59" cy="66" r="2.1" fill="#14b8a6" opacity="0.84"/>
+  <circle cx="68" cy="76" r="2.0" fill="#2dd4bf" opacity="0.83"/>
+  <circle cx="77" cy="72" r="1.9" fill="#14b8a6" opacity="0.81"/>
+  <circle cx="55" cy="77" r="2.1" fill="#2dd4bf" opacity="0.84"/>
+  <circle cx="62" cy="81" r="1.8" fill="#34d399" opacity="0.79"/>
+  <circle cx="72" cy="79" r="1.9" fill="#14b8a6" opacity="0.81"/>
+  <circle cx="66" cy="72" r="2.6" fill="#2dd4bf" opacity="0.92"/>
+
+  <!-- Bright specular highlight on the densest near point -->
+  <circle cx="65" cy="67" r="1.1" fill="white"   opacity="0.22"/>
+</svg>

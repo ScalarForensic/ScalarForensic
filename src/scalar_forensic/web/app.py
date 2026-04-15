@@ -19,6 +19,7 @@ from pathlib import Path
 
 import torch
 import uvicorn
+from PIL import Image
 from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -392,7 +393,9 @@ async def thumbnail(sha256: str) -> FileResponse:
     """Serve a pre-generated thumbnail by SHA-256 hash.
 
     Thumbnails are written during `sfn index` when SFN_THUMBNAIL_DIR is configured.
-    Returns 404 when thumbnail dir is not configured or the file is not yet generated.
+    If the thumbnail file is missing but the raw file path is known in Qdrant,
+    attempts to regenerate and cache it before serving.
+    Returns 404 when the thumbnail dir is not configured or regeneration fails.
     """
     if not re.fullmatch(r"[0-9a-f]{64}", sha256):
         raise HTTPException(status_code=400, detail="Invalid hash")
@@ -401,8 +404,96 @@ async def thumbnail(sha256: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="Thumbnail directory not configured")
     thumb_path = settings.thumbnail_dir / f"{sha256}.jpg"
     if not thumb_path.exists():
+        await _try_regenerate_thumbnail(sha256, thumb_path, settings)
+    if not thumb_path.exists():
         raise HTTPException(status_code=404, detail="Thumbnail not found")
     return FileResponse(thumb_path, media_type="image/jpeg")
+
+
+async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings) -> None:
+    """Look up *sha256* in Qdrant and regenerate the missing thumbnail from the raw file.
+
+    Resolution order:
+      1. data/frames/{sha256}.jpg  — frame store written during indexing
+      2. Re-extract from the source video / reopen the source image (path from Qdrant)
+
+    Silently returns when regeneration is not possible (missing record, missing
+    file, extraction failure).  On success the JPEG is written to *dest* exactly
+    like thumbnails produced during ``sfn index``.
+    """
+
+    def _write(img: Image.Image, source_label: str) -> None:
+        thumb = img.copy()
+        thumb.thumbnail(
+            (settings.thumbnail_size, settings.thumbnail_size), Image.Resampling.LANCZOS
+        )
+        if thumb.mode not in ("RGB", "L"):
+            thumb = thumb.convert("RGB")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        thumb.save(dest, format="JPEG", quality=85, optimize=True)
+        _log.info("thumbnail regen: saved %s from %s", sha256[:12], source_label)
+
+    # ── Fast path: frame already on disk in frame store ─────────────────────
+    if settings.frame_store_dir is not None:
+        cached = settings.frame_store_dir / f"{sha256}.jpg"
+        if cached.exists():
+            _log.debug("thumbnail regen: using frame store for %s", sha256[:12])
+            await asyncio.to_thread(
+                lambda: _write(Image.open(cached), f"frame-store:{sha256[:12]}")
+            )
+            return
+
+    # ── Slow path: look up source path in Qdrant, then load/re-extract ──────
+    client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+    payload: dict | None = None
+    for collection in (settings.collection_sscd, settings.collection_dino):
+        try:
+            records, _ = client.scroll(
+                collection_name=collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="image_hash", match=MatchValue(value=sha256))]
+                ),
+                limit=1,
+                with_payload=True,
+                with_vectors=False,
+            )
+            if records:
+                payload = records[0].payload
+                break
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("thumbnail regen: could not scroll %r: %s", collection, exc)
+
+    if payload is None:
+        _log.debug("thumbnail regen: no Qdrant record found for hash %s", sha256[:12])
+        return
+
+    image_path: str | None = payload.get("image_path")
+    if not image_path:
+        _log.debug("thumbnail regen: no image_path in payload for hash %s", sha256[:12])
+        return
+
+    def _load() -> Image.Image | None:
+        parsed = parse_virtual_path(image_path)
+        if parsed is not None:
+            video_path, timecode_ms = parsed
+            if not video_path.exists():
+                _log.warning("thumbnail regen: video not found: %s", video_path)
+                return None
+            return extract_frame_at(video_path, timecode_ms)
+        raw = Path(image_path)
+        if not raw.exists():
+            _log.warning("thumbnail regen: file not found: %s", image_path)
+            return None
+        try:
+            return Image.open(raw)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("thumbnail regen: could not open %r: %s", image_path, exc)
+            return None
+
+    img = await asyncio.to_thread(_load)
+    if img is None:
+        return
+    await asyncio.to_thread(_write, img, image_path)
 
 
 @app.get("/api/hit-image")

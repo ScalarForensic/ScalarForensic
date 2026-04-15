@@ -939,6 +939,16 @@ def index(
                         except Exception as exc:  # noqa: BLE001
                             typer.echo(f"[WARN] Thumbnail failed for frame: {exc}", err=True)
 
+            # ── Frame store (full-res cache for cross-host thumbnail regen) ──
+            if settings.frame_store_dir is not None:
+                for fhash, raw_img in zip(frame_hashes, frame_images_raw):
+                    frame_path = settings.frame_store_dir / f"{fhash}.jpg"
+                    if not frame_path.exists():
+                        try:
+                            _write_thumbnail(raw_img, frame_path, settings.frame_store_size)
+                        except Exception as exc:  # noqa: BLE001
+                            typer.echo(f"[WARN] Frame store failed: {exc}", err=True)
+
             # ── Per-model loop: dedup → normalize → embed → collect upsert ───
             model_segments: list[str] = []
             upsert_jobs: list = []

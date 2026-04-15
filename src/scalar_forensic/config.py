@@ -48,6 +48,19 @@ class Settings:
         )
         self.thumbnail_size: int = self._parse_int("SFN_THUMBNAIL_SIZE", 128)
 
+        # --- Video frame store ---
+        # Full-resolution (short-side-capped) video frames are stored here during
+        # indexing, keyed by frame hash, so thumbnails can be regenerated later when
+        # the source video is no longer present.  Defaults to data/frames.
+        # Set SFN_FRAME_STORE_DIR= (empty) to disable.
+        self.frame_store_dir: Path | None = self._parse_optional_path(
+            "SFN_FRAME_STORE_DIR", "data/frames"
+        )
+        # Maximum pixel dimension (long side) at which frames are stored.
+        # Keeping this smaller than the source resolution reduces disk use while
+        # still producing high-quality thumbnails.  Default: 512.
+        self.frame_store_size: int = self._parse_int("SFN_FRAME_STORE_SIZE", 512)
+
         # --- Network policy ---
         # Default: offline — no outward connections to HuggingFace or any other service.
         # Set to true (or pass --allow-online) only for first-time model downloads.

@@ -553,13 +553,15 @@
                     <img class="video-thumb-small"
                          :src="sessionId && _bestFrameTimecodeForResult(r) !== null
                            ? `/api/query-frame/${sessionId}/${r.file_id}?timecode_ms=${_bestFrameTimecodeForResult(r)}`
-                           : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"
+                           : '/static/vector-fallback.svg'"
+                         @error="$el.onerror=null; $el.src='/static/vector-fallback.svg'"
                          loading="lazy" alt="">
                     <span class="vthumb-arrow">→</span>
                     <img class="video-thumb-small"
                          :src="_bestHitImageHash(r)
                            ? `/api/thumbnail/${_bestHitImageHash(r)}`
-                           : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"
+                           : '/static/vector-fallback.svg'"
+                         @error="$el.onerror=null; $el.src='/static/vector-fallback.svg'"
                          loading="lazy" alt="">
                   </div>
                   <span class="file-name" :title="r.filename" x-text="shortName(r.filename)"></span>
@@ -792,7 +794,7 @@
                  :src="matchSrc"
                  :style="`transform: scale(${matchZoom})`"
                  @click="openLightbox(matchSrc)"
-                 @error="$el.style.opacity='0.2'"
+                 @error="$el.onerror=null; $el.src='/static/vector-fallback.svg'"
                  alt="Best match">
             <div class="image-zoom-btns">
               <button class="zoom-btn" @click.stop="matchZoom = Math.min(4, matchZoom + 0.25)" title="Zoom in">+</button>
@@ -1005,8 +1007,8 @@
                }"
                @click="selectHit(hit)">
             <img class="hit-thumb"
-                 :src="hit.image_hash ? `/api/thumbnail/${hit.image_hash}` : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"
-                 @error="$el.onerror=null; $el.src='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"
+                 :src="hit.image_hash ? `/api/thumbnail/${hit.image_hash}` : '/static/vector-fallback.svg'"
+                 @error="$el.onerror=null; $el.src='/static/vector-fallback.svg'"
                  loading="lazy"
                  alt="">
             <div class="hit-body">
@@ -1068,7 +1070,8 @@
                       <img class="hit-frame-thumb"
                            :src="mf.frame_hash
                              ? `/api/thumbnail/${mf.frame_hash}`
-                             : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='"
+                             : '/static/vector-fallback.svg'"
+                           @error="$el.onerror=null; $el.src='/static/vector-fallback.svg'"
                            loading="lazy" alt="">
                       <span class="hit-frame-tc"
                             x-text="`t\u202f=\u202f${(mf.timecode_ms/1000).toFixed(2)}s`"></span>
