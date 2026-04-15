@@ -461,7 +461,7 @@ def index(
 
     # ── Batch size: explicit config > calibration cache > auto-calibrate ─────
     if settings.batch_size is None:
-        from scalar_forensic.calibration import calibrate, load_cached_batch_size
+        from scalar_forensic.calibration import calibrate, load_cached_batch_size, save_cached_batch_size
 
         _sample_dir = Path("data/sample_images")
         cached = load_cached_batch_size()
@@ -471,7 +471,15 @@ def index(
         elif _sample_dir.is_dir():
             # Calibrate each loaded embedder; use the minimum so the chosen
             # batch size is safe for every model that will run in production.
-            sizes = [calibrate(emb, _sample_dir) for emb, _, _ in specs]
+            # When multiple embedders are active, suppress per-embedder cache
+            # writes (cache_file=None) and write a single entry for the safe
+            # minimum after all probes complete — prevents the last embedder's
+            # (potentially larger) value from overwriting the minimum.
+            if len(specs) == 1:
+                sizes = [calibrate(specs[0][0], _sample_dir)]
+            else:
+                sizes = [calibrate(emb, _sample_dir, cache_file=None) for emb, _, _ in specs]
+                save_cached_batch_size(min(sizes))
             settings.batch_size = min(sizes)
             if len(sizes) > 1:
                 per = "  ".join(

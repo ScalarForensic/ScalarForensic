@@ -70,6 +70,8 @@ def save_cached_batch_size(
     cache_file: Path = _CACHE_FILE,
 ) -> None:
     """Persist the calibrated batch size and model parameters to *cache_file*."""
+    import os
+    import tempfile
     from datetime import datetime
 
     cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -81,7 +83,17 @@ def save_cached_batch_size(
         "model_t_max": round(t_max, 2),
         "model_k_half": round(k_half, 2),
     }
-    cache_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    fd, tmp_path = tempfile.mkstemp(dir=cache_file.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, indent=2))
+        Path(tmp_path).replace(cache_file)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +153,7 @@ def calibrate(
     embedder: AnyEmbedder,
     sample_dir: Path,
     *,
-    cache_file: Path = _CACHE_FILE,
+    cache_file: Path | None = _CACHE_FILE,
 ) -> int:
     """Probe batch sizes, fit the saturation model, display results, and return
     the optimal batch size.
@@ -158,7 +170,9 @@ def calibrate(
         Directory containing representative JPEG/PNG images for probing.
         Images are tiled in memory — no repeated disk I/O per probe.
     cache_file:
-        Destination for the JSON result cache.
+        Destination for the JSON result cache.  Pass ``None`` to skip
+        writing the cache (useful when the caller will save its own
+        aggregate result, e.g. the minimum across multiple embedders).
     """
     import typer
 
@@ -314,15 +328,16 @@ def calibrate(
         typer.echo(f"  Best measured: {best_tp:.1f} img/s at batch={optimal}")
     typer.echo(f"  ✓ Optimal batch size: {optimal}")
 
-    save_cached_batch_size(
-        optimal,
-        device=embedder.device,
-        throughput_img_per_s=best_tp,
-        t_max=t_max_fit,
-        k_half=k_half_fit,
-        cache_file=cache_file,
-    )
-    typer.echo(f"  Cached → {cache_file}")
+    if cache_file is not None:
+        save_cached_batch_size(
+            optimal,
+            device=embedder.device,
+            throughput_img_per_s=best_tp,
+            t_max=t_max_fit,
+            k_half=k_half_fit,
+            cache_file=cache_file,
+        )
+        typer.echo(f"  Cached → {cache_file}")
     typer.echo(sep)
     typer.echo("")
 
