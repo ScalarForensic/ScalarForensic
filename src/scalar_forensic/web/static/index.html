@@ -1737,11 +1737,14 @@ function sfn() {
         if (!r.ok) {
           const body = await r.json().catch(() => ({}));
           this.matchMetaError = body.detail ?? `HTTP ${r.status}`;
-          this.matchMeta = null; this.matchMetaError = null;
+          this.matchMeta = null;
         } else {
           this.matchMeta = await r.json();
         }
-      } catch { this.matchMeta = null; this.matchMetaError = null; }
+      } catch (e) {
+        this.matchMeta = null;
+        this.matchMetaError = e?.message || 'Metadata request failed';
+      }
     },
 
     async _loadVideoTimeline(videoHash) {
