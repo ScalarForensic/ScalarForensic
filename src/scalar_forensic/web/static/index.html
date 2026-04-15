@@ -818,6 +818,12 @@
               <span class="sub-label">Path</span>
               <span class="sub-val mono" x-text="selectedHit?.path.split('/').slice(0,-1).join('/') || '—'"></span>
             </div>
+            <template x-if="matchMetaError">
+              <div class="sub-row" style="grid-column:1/-1">
+                <span class="sub-val" style="color:#f87171;font-size:10px;word-break:break-all"
+                      x-text="`Metadata unavailable: ${matchMetaError}`"></span>
+              </div>
+            </template>
             <div class="sub-row"
                  :class="{'sub-match': queryMeta?.hash_sha256 && matchMeta?.hash_sha256 && queryMeta.hash_sha256 === matchMeta.hash_sha256}">
               <span class="sub-label">SHA-256</span>
@@ -1131,6 +1137,7 @@ function sfn() {
     // Metadata
     queryMeta: null,
     matchMeta: null,
+    matchMetaError: null,
     queryError: '',
     _queryTimer: null,
 
@@ -1541,7 +1548,7 @@ function sfn() {
       this.selectedFrameTimecode = null;
       this.selectedMatchedFrameKey = null;
       this.queryMeta = null;
-      this.matchMeta = null;
+      this.matchMeta = null; this.matchMetaError = null;
       this.queryZoom = 1.0;
       this.matchZoom = 1.0;
       this.queryFrames = null;
@@ -1641,7 +1648,7 @@ function sfn() {
         this.selectedFileId = fileId;
         this.selectedHitKey = null;
         this.queryMeta = null;
-        this.matchMeta = null;
+        this.matchMeta = null; this.matchMetaError = null;
         this.queryZoom = 1.0;
         this.matchZoom = 1.0;
         this.expandedHits = {};
@@ -1677,7 +1684,7 @@ function sfn() {
       this.selectedHitKey = this.hitKey(hit);
       this.selectedMatchedFrameKey = `${hit.path}:${mf.timecode_ms}`;
       this.matchZoom = 1.0;
-      this.matchMeta = null;
+      this.matchMeta = null; this.matchMetaError = null;
       // Construct virtual path for this specific dataset frame
       const virtualPath = `${hit.video_path}::frame_000000_t=${mf.timecode_ms}ms`;
       this.matchSrc = `/api/hit-image?path=${encodeURIComponent(virtualPath)}`;
@@ -1689,7 +1696,7 @@ function sfn() {
       this.selectedHitKey = this.hitKey(hit);
       this.selectedMatchedFrameKey = null;
       this.matchZoom = 1.0;
-      this.matchMeta = null;
+      this.matchMeta = null; this.matchMetaError = null;
       this.videoTimeline = null;
       this.matchSrc = `/api/hit-image?path=${encodeURIComponent(hit.path)}`;
       const metaPath = hit.is_video_frame && hit.video_path
@@ -1713,16 +1720,31 @@ function sfn() {
 
     async _loadMatchMeta() {
       const hit = this.selectedHit;
-      if (hit) await this._loadMatchMetaFor(hit.path);
-      else this.matchMeta = null;
+      if (hit) {
+        const metaPath = hit.is_video_frame && hit.video_path
+          ? `${hit.video_path}::frame_000000_t=${hit.frame_timecode_ms ?? 0}ms`
+          : hit.path;
+        await this._loadMatchMetaFor(metaPath);
+      } else {
+        this.matchMeta = null; this.matchMetaError = null;
+      }
     },
 
     async _loadMatchMetaFor(path) {
+      this.matchMetaError = null;
       try {
-        this.matchMeta = await fetch(
-          `/api/metadata?path=${encodeURIComponent(path)}`
-        ).then(r => r.json());
-      } catch { this.matchMeta = null; }
+        const r = await fetch(`/api/metadata?path=${encodeURIComponent(path)}`);
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          this.matchMetaError = body.detail ?? `HTTP ${r.status}`;
+          this.matchMeta = null;
+        } else {
+          this.matchMeta = await r.json();
+        }
+      } catch (e) {
+        this.matchMeta = null;
+        this.matchMetaError = e?.message || 'Metadata request failed';
+      }
     },
 
     async _loadVideoTimeline(videoHash) {
@@ -1940,7 +1962,7 @@ function sfn() {
       this.querySrc = null;
       this.matchSrc = null;
       this.queryMeta = null;
-      this.matchMeta = null;
+      this.matchMeta = null; this.matchMetaError = null;
       this.queryError = '';
       this.queryFrames = null;
       this.queryFrameIdx = 0;
