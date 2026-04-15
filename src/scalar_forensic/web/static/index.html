@@ -793,7 +793,7 @@
             <img x-show="matchSrc"
                  :src="matchSrc"
                  :style="`transform: scale(${matchZoom})`"
-                 @click="openLightbox(matchSrc)"
+                 @click="openLightbox($el.src)"
                  @error="$el.onerror=null; $el.src='/static/vector-fallback.svg'"
                  alt="Best match">
             <div class="image-zoom-btns">

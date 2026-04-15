@@ -49,7 +49,7 @@ class Settings:
         self.thumbnail_size: int = self._parse_int("SFN_THUMBNAIL_SIZE", 128)
 
         # --- Video frame store ---
-        # Full-resolution (short-side-capped) video frames are stored here during
+        # Long-side-capped video frames are stored here during
         # indexing, keyed by frame hash, so thumbnails can be regenerated later when
         # the source video is no longer present.  Defaults to data/frames.
         # Set SFN_FRAME_STORE_DIR= (empty) to disable.
