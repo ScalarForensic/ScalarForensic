@@ -491,7 +491,7 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
             _log.debug("thumbnail regen: SFN_INPUT_DIR not set, skipping path-based regen")
             return
         allowed = settings.input_dir.resolve()
-        image_extensions = {ext.lower() for ext in Image.registered_extensions()}
+        image_extensions = {ext.lower() for ext in _IMAGE_EXTENSIONS}
 
         def _allowed(p: Path, kind: str) -> bool:
             try:
@@ -514,7 +514,7 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
                 if video_path.suffix.lower() not in VIDEO_EXTENSIONS:
                     _log.warning("thumbnail regen: unsupported video extension: %s", video_path)
                     return None
-                if not video_path.exists():
+                if not video_path.is_file():
                     _log.warning("thumbnail regen: video not found: %s", video_path)
                     return None
                 return extract_frame_at(video_path, timecode_ms)
@@ -528,7 +528,7 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
             if raw.suffix.lower() not in image_extensions:
                 _log.warning("thumbnail regen: unsupported image extension: %s", raw)
                 return None
-            if not raw.exists():
+            if not raw.is_file():
                 _log.warning("thumbnail regen: file not found: %s", raw)
                 return None
             try:
@@ -541,8 +541,8 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
 
         # Try each candidate payload until one successfully produces an image.
         for payload in payloads:
-            image_path: str | None = payload.get("image_path")
-            if not image_path:
+            image_path = payload.get("image_path")
+            if not isinstance(image_path, str) or not image_path:
                 continue
             img = await asyncio.to_thread(_load, image_path)
             if img is not None:
