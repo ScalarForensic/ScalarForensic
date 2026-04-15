@@ -208,6 +208,7 @@ __marimo__/
 
 
 data/thumbnails/
+data/frames/
 data/sfn_batch_cache.json
 models/
 qdrant
