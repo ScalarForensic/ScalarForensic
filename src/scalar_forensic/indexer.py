@@ -65,9 +65,7 @@ class Indexer:
                 # incremental indexing: index --dino in one run, add --sscd later.
                 self.client.update_collection(
                     collection_name=self.collection,
-                    vectors_config={
-                        vector_name: VectorParams(size=dim, distance=Distance.COSINE)
-                    },
+                    vectors_config={vector_name: VectorParams(size=dim, distance=Distance.COSINE)},
                 )
                 info = self.client.get_collection(self.collection)
             else:
