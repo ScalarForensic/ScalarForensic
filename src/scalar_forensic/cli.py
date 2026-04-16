@@ -733,12 +733,17 @@ def index(
                 )
             )
 
-        # ── Parallel upserts ──────────────────────────────────────────────────
+        # ── Serialized upserts ────────────────────────────────────────────────
+        # Must be sequential: both models target the same unified collection and
+        # share point IDs.  Concurrent upserts race on the retrieve→upsert TOCTOU
+        # window — the second thread may see a point as "new" and overwrite the
+        # first thread's named vector.  Sequential execution guarantees the second
+        # call sees the first's point as "existing" and uses update_vectors.
         upsert_wall_s = 0.0
         if upsert_jobs:
             t0 = perf_counter()
-            with ThreadPoolExecutor(max_workers=len(upsert_jobs)) as pool:
-                list(pool.map(lambda j: j(), upsert_jobs))
+            for j in upsert_jobs:
+                j()
             upsert_wall_s = perf_counter() - t0
 
         if model_segments:
@@ -1260,12 +1265,15 @@ def index(
                     )
                 )
 
-            # ── Parallel upserts ──────────────────────────────────────────────
+            # ── Serialized upserts ────────────────────────────────────────────
+            # Sequential for the same reason as the image path: both models share
+            # the unified collection and point IDs, so concurrent upserts race on
+            # the retrieve→upsert TOCTOU window and can drop named vectors.
             upsert_wall_s = 0.0
             if upsert_jobs:
                 t0 = perf_counter()
-                with ThreadPoolExecutor(max_workers=len(upsert_jobs)) as pool:
-                    list(pool.map(lambda j: j(), upsert_jobs))
+                for j in upsert_jobs:
+                    j()
                 upsert_wall_s = perf_counter() - t0
 
             if model_segments:

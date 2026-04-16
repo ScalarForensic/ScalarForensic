@@ -775,10 +775,10 @@ def _query_exact_video(
 ) -> tuple[list[Hit], list[str]]:
     """Return exact video-hash matches for a video query.
 
-    Searches both collections for indexed frames whose ``video_hash`` equals
-    the query video's SHA-256, groups them by ``video_path`` into one Hit per
-    matching database video, and populates ``matched_frames`` with all matched
-    frames sorted by timecode.  Each matching database video gets score
+    Searches the unified collection for indexed frames whose ``video_hash``
+    equals the query video's SHA-256, groups them by ``video_path`` into one
+    Hit per matching database video, and populates ``matched_frames`` with all
+    matched frames sorted by timecode.  Each matching database video gets score
     ``{"exact": 1.0}``.
     """
     hits: list[Hit] = []
