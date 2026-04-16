@@ -7,9 +7,15 @@ Covers:
   - preprocess_batch / preprocess_pil_batch: cap forwarding
   - _sscd_crops: crop count and dimensions
   - Multi-crop averaging: L2-normalisation invariant
+  - DINOv2Embedder: processor reconfiguration kwargs and warning path
+  - RemoteEmbedder: PNG encoding and correct MIME type in payload
 """
 
+import base64
 import io
+import json
+import unittest.mock as mock
+import warnings
 
 import pytest
 import torch
@@ -25,6 +31,8 @@ from scalar_forensic.embedder import (
     _sscd_resize,
     preprocess_batch,
     preprocess_pil_batch,
+    DINOv2Embedder,
+    RemoteEmbedder,
 )
 
 # ---------------------------------------------------------------------------
@@ -311,3 +319,167 @@ class TestMultiCropAveraging:
         result = self._average_crops(embs)
         # The result may be arbitrary direction but must not be NaN.
         assert not torch.isnan(result).any(), "Result contains NaN for opposing unit vectors"
+
+
+# ---------------------------------------------------------------------------
+# Group J: DINOv2Embedder — processor reconfiguration
+# ---------------------------------------------------------------------------
+
+
+class TestDINOv2EmbedderProcessorKwargs:
+    """Verify that DINOv2Embedder passes size/crop_size to AutoImageProcessor
+    and emits a warning when the processor silently ignores them."""
+
+    def _make_mock_processor(self, returned_size: dict) -> mock.MagicMock:
+        proc = mock.MagicMock()
+        proc.size = returned_size
+        return proc
+
+    def _make_mock_model(self) -> mock.MagicMock:
+        model = mock.MagicMock()
+        model.to.return_value = model
+        return model
+
+    def test_processor_receives_size_and_crop_size_kwargs(self):
+        """AutoImageProcessor.from_pretrained is called with size and crop_size."""
+        normalize_size = 336
+        processor = self._make_mock_processor({"shortest_edge": normalize_size})
+
+        with (
+            mock.patch(
+                "scalar_forensic.embedder.AutoImageProcessor.from_pretrained",
+                return_value=processor,
+            ) as mock_proc,
+            mock.patch(
+                "scalar_forensic.embedder.AutoModel.from_pretrained",
+                return_value=self._make_mock_model(),
+            ),
+        ):
+            DINOv2Embedder("fake/model", normalize_size=normalize_size)
+
+        mock_proc.assert_called_once_with(
+            "fake/model",
+            local_files_only=False,
+            size={"shortest_edge": normalize_size},
+            crop_size={"height": normalize_size, "width": normalize_size},
+        )
+
+    def test_warning_when_processor_ignores_size(self):
+        """A UserWarning is emitted when the processor's resolved size does not
+        match the requested normalize_size."""
+        normalize_size = 336
+        # Processor reports a different size — simulates a variant that ignores kwargs.
+        processor = self._make_mock_processor({"shortest_edge": 224})
+
+        with (
+            mock.patch(
+                "scalar_forensic.embedder.AutoImageProcessor.from_pretrained",
+                return_value=processor,
+            ),
+            mock.patch(
+                "scalar_forensic.embedder.AutoModel.from_pretrained",
+                return_value=self._make_mock_model(),
+            ),
+        ):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                DINOv2Embedder("fake/model", normalize_size=normalize_size)
+
+        assert any(
+            "normalize_size" in str(w.message) for w in caught
+        ), "Expected a warning about processor ignoring normalize_size"
+
+    def test_no_warning_when_processor_accepts_size(self):
+        """No warning is emitted when the processor correctly reflects the requested size."""
+        normalize_size = 224
+        processor = self._make_mock_processor({"shortest_edge": normalize_size})
+
+        with (
+            mock.patch(
+                "scalar_forensic.embedder.AutoImageProcessor.from_pretrained",
+                return_value=processor,
+            ),
+            mock.patch(
+                "scalar_forensic.embedder.AutoModel.from_pretrained",
+                return_value=self._make_mock_model(),
+            ),
+        ):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                DINOv2Embedder("fake/model", normalize_size=normalize_size)
+
+        assert not any(
+            "normalize_size" in str(w.message) for w in caught
+        ), "Unexpected warning about normalize_size when processor accepted the value"
+
+
+# ---------------------------------------------------------------------------
+# Group K: RemoteEmbedder — PNG encoding and MIME type
+# ---------------------------------------------------------------------------
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+class TestRemoteEmbedderPngEncoding:
+    """Verify that embed_images sends PNG-encoded data-URIs in the JSON payload."""
+
+    def _make_embedder(self) -> RemoteEmbedder:
+        return RemoteEmbedder(
+            endpoint="http://fake-server",
+            model_name="test-model",
+            embedding_dim=3,
+        )
+
+    def _fake_response(self, n: int, dim: int) -> mock.MagicMock:
+        """Build a mock urllib response returning *n* embeddings of length *dim*."""
+        body = json.dumps(
+            {
+                "data": [
+                    {"index": i, "embedding": [0.1] * dim}
+                    for i in range(n)
+                ]
+            }
+        ).encode()
+        resp = mock.MagicMock()
+        resp.read.return_value = body
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = mock.MagicMock(return_value=False)
+        return resp
+
+    def test_payload_contains_png_mime_type(self):
+        """The JSON payload must use 'data:image/png;base64,' as the data-URI prefix."""
+        embedder = self._make_embedder()
+        img = _solid_image(64, 64)
+
+        with mock.patch(
+            "scalar_forensic.embedder.urllib.request.urlopen",
+            return_value=self._fake_response(1, 3),
+        ) as mock_open:
+            embedder.embed_images([img])
+
+        request_obj = mock_open.call_args[0][0]
+        payload = json.loads(request_obj.data)
+        data_uri = payload["input"][0]
+        assert data_uri.startswith("data:image/png;base64,"), (
+            f"Expected PNG data-URI, got prefix: {data_uri[:40]}"
+        )
+
+    def test_payload_bytes_are_valid_png(self):
+        """The base64-decoded payload bytes must start with the PNG file signature."""
+        embedder = self._make_embedder()
+        img = _solid_image(64, 64)
+
+        with mock.patch(
+            "scalar_forensic.embedder.urllib.request.urlopen",
+            return_value=self._fake_response(1, 3),
+        ) as mock_open:
+            embedder.embed_images([img])
+
+        request_obj = mock_open.call_args[0][0]
+        payload = json.loads(request_obj.data)
+        data_uri = payload["input"][0]
+        b64_part = data_uri.split(",", 1)[1]
+        raw_bytes = base64.b64decode(b64_part)
+        assert raw_bytes[:8] == _PNG_SIGNATURE, (
+            "Decoded payload bytes do not start with the PNG file signature"
+        )

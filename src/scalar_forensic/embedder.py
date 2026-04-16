@@ -511,7 +511,7 @@ class SSCDEmbedder:
         # .half() conversion causes for this checkpoint.  Enabled only on CUDA
         # (covers both NVIDIA and ROCm); CPU autocast uses BF16 which is a
         # separate concern and not enabled here.
-        with torch.no_grad(), torch.autocast(self.device, enabled=self.device == "cuda"):
+        with torch.no_grad(), torch.autocast("cuda", enabled=self.device == "cuda"):
             flat_embs = self._model(batch).float()  # (n_orig * n_crops, 512)
 
         if self.n_crops == 1:
