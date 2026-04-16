@@ -26,18 +26,29 @@ class Indexer:
         vector_name: str,
         embedding_dim: int,
         api_key: str | None = None,
+        initial_vectors_config: dict[str, VectorParams] | None = None,
     ) -> None:
         self.client = QdrantClient(url=url, api_key=api_key)
         self.collection = collection
         self.vector_name = vector_name
-        self._ensure_collection(vector_name, embedding_dim)
+        self._ensure_collection(vector_name, embedding_dim, initial_vectors_config)
 
-    def _ensure_collection(self, vector_name: str, dim: int) -> None:
+    def _ensure_collection(
+        self,
+        vector_name: str,
+        dim: int,
+        initial_vectors_config: dict[str, VectorParams] | None,
+    ) -> None:
         existing = {c.name for c in self.client.get_collections().collections}
         if self.collection not in existing:
+            # Use the full multi-vector config when provided so all vector types
+            # are registered in one shot; fall back to just this vector otherwise.
+            create_config = initial_vectors_config or {
+                vector_name: VectorParams(size=dim, distance=Distance.COSINE)
+            }
             self.client.create_collection(
                 collection_name=self.collection,
-                vectors_config={vector_name: VectorParams(size=dim, distance=Distance.COSINE)},
+                vectors_config=create_config,
             )
             info = self.client.get_collection(self.collection)
         else:
@@ -49,12 +60,18 @@ class Indexer:
                     "Drop it (e.g. via qdrant-client or the Qdrant dashboard) and re-index."
                 )
             if vector_name not in vectors_config:
-                # Collection exists but doesn't have this vector yet — add it.
-                self.client.update_collection(
-                    collection_name=self.collection,
-                    vectors_config={vector_name: VectorParams(size=dim, distance=Distance.COSINE)},
+                # The qdrant-client library does not expose an API to add new named
+                # vector types to an existing collection without dropping its data.
+                # The caller must create the collection with all desired vector types
+                # upfront by passing initial_vectors_config at construction time.
+                raise ValueError(
+                    f"Collection '{self.collection}' exists but does not have a "
+                    f"'{vector_name}' vector. The Qdrant Python client does not support "
+                    "adding new named vector types to an existing collection. "
+                    "Delete the collection and re-index, passing all desired models "
+                    "in a single run (e.g. sfn --dino --sscd) so the collection is "
+                    "created with all vector types at once."
                 )
-                info = self.client.get_collection(self.collection)
             else:
                 existing_dim = vectors_config[vector_name].size
                 if existing_dim != dim:

@@ -13,6 +13,7 @@ from time import perf_counter
 
 import typer
 from PIL import Image
+from qdrant_client.models import Distance, VectorParams
 
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import (
@@ -397,8 +398,11 @@ def index(
     if dino:
         models_to_run.append((False, settings.model_dino, "dino"))
 
-    # Load all models upfront — fail fast before scanning.
-    specs: list[tuple[AnyEmbedder, Indexer, str]] = []
+    # ── Pass 1: load all embedders upfront so we know every vector's dimension ──
+    # This lets us create the Qdrant collection with all named vectors in one shot.
+    # The qdrant-client library does not support adding named vector types to an
+    # existing collection, so all vector types must be declared at creation time.
+    _loaded: list[tuple[AnyEmbedder, str]] = []  # (embedder, vector_name)
     for use_sscd, model_name, vector_name in models_to_run:
         backend_name = "SSCD" if use_sscd else "DINOv2"
         if settings.embedding_endpoint:
@@ -442,7 +446,17 @@ def index(
         )
         if compiled:
             typer.echo("  (first batch will be slow — torch.compile warm-up)")
+        _loaded.append((embedder, vector_name))
 
+    # Build the full vectors config for this run so the collection is created
+    # with all named vector types in a single call.
+    _initial_vectors_config: dict[str, VectorParams] = {
+        vn: VectorParams(size=emb.embedding_dim, distance=Distance.COSINE) for emb, vn in _loaded
+    }
+
+    # ── Pass 2: create Indexer instances with the full vectors config ──────────
+    specs: list[tuple[AnyEmbedder, Indexer, str]] = []
+    for embedder, vector_name in _loaded:
         typer.echo(
             f"Connecting to Qdrant  collection={settings.collection!r}  vector={vector_name!r} ..."
         )
@@ -453,6 +467,7 @@ def index(
                 vector_name=vector_name,
                 embedding_dim=embedder.embedding_dim,
                 api_key=settings.qdrant_api_key,
+                initial_vectors_config=_initial_vectors_config,
             )
         except ValueError as exc:
             typer.echo(f"[ERROR] {exc}", err=True)
