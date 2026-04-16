@@ -203,7 +203,7 @@ _EXIF_ORIENTATION_TAG = 0x0112  # EXIF tag 274
 _EXIF_ORIENTATION_FORMATS = frozenset({"JPEG", "TIFF", "WEBP", "MPO"})
 
 
-def _open_rgb(data: bytes) -> Image.Image:
+def _open_rgb(data: bytes, cap: int = _SHARED_CAP) -> Image.Image:
     """Decode image bytes to a normalised RGB PIL Image.
 
     ICC colour profiles are ignored — images are treated as sRGB regardless of
@@ -216,8 +216,21 @@ def _open_rgb(data: bytes) -> Image.Image:
     sensor orientation.  The check is skipped entirely for formats that never
     carry EXIF (PNG, BMP, GIF …) and short-circuits for the common Orientation=1
     case to avoid a full decode+rotate on every image.
+
+    For JPEG inputs, ``draft()`` is called before any pixel decode to enable
+    libjpeg's built-in shrink-on-load: the decoder picks the largest 1/N scale
+    (N ∈ {2, 4, 8}) that still produces both dimensions ≥ *cap*, then
+    ``_cap_short_side`` does the final resize in software.  A 4000×3000 JPEG
+    shrunk to 1/8 (500×375) before Lanczos resizing to 331 px is decoded in a
+    fraction of the time, with negligible quality difference for semantic
+    embedding.  Images already close to *cap* decode at full size (no-op).
     """
     img = Image.open(io.BytesIO(data))
+    # draft() must be called before any operation that triggers full pixel
+    # decode (including exif_transpose and convert).  getexif() only reads
+    # the file header so it is safe to call before draft().
+    if img.format == "JPEG":
+        img.draft("RGB", (cap, cap))
     if img.format in _EXIF_ORIENTATION_FORMATS:
         if img.getexif().get(_EXIF_ORIENTATION_TAG, 1) != 1:
             img = ImageOps.exif_transpose(img)
@@ -251,7 +264,7 @@ def preprocess_batch(
     """
 
     def _process(data: bytes) -> Image.Image:
-        return _cap_short_side(_open_rgb(data), cap)
+        return _cap_short_side(_open_rgb(data, cap), cap)
 
     with ThreadPoolExecutor() as pool:
         futures = [pool.submit(_process, data) for data in image_data]
@@ -491,7 +504,12 @@ class SSCDEmbedder:
         flat_crops = [c for crops in crop_lists for c in crops]
 
         batch = torch.stack([self._to_tensor(c) for c in flat_crops]).to(self.device)
-        with torch.no_grad():
+        # autocast runs conv2d in FP16 (Tensor Cores / matrix units) while keeping
+        # BatchNorm in FP32 — avoiding the degenerate-embedding issue that a full
+        # .half() conversion causes for this checkpoint.  Enabled only on CUDA
+        # (covers both NVIDIA and ROCm); CPU autocast uses BF16 which is a
+        # separate concern and not enabled here.
+        with torch.no_grad(), torch.autocast(self.device, enabled=self.device == "cuda"):
             flat_embs = self._model(batch).float()  # (n_orig * n_crops, 512)
 
         if self.n_crops == 1:
