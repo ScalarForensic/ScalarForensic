@@ -234,7 +234,10 @@ class Indexer:
             collection_name=self.collection,
             payload={"video_frames_total": frame_count},
             points=Filter(
-                must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
+                must=[
+                    FieldCondition(key="video_hash", match=MatchValue(value=video_hash)),
+                    FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
+                ]
             ),
         )
 

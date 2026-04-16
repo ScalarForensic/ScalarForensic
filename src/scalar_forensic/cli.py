@@ -519,9 +519,9 @@ def index(
 
     # ── Mutable containers shared between slicing pass and _finish_batch ─────
     # Pre-declared so the closure captures them by reference; filled later.
-    vmeta_by_path: dict[Path, dict] = {}       # frame disk path → video metadata
-    _frame_source: dict[Path, Path] = {}        # frame disk path → source video path
-    vf_total: dict[Path, int] = {}              # source video path → total frames extracted
+    vmeta_by_path: dict[Path, dict] = {}  # frame disk path → video metadata
+    _frame_source: dict[Path, Path] = {}  # frame disk path → source video path
+    vf_total: dict[Path, int] = {}  # source video path → total frames extracted
     vf_indexed_by_spec: dict[int, dict[Path, int]] = {}  # spec_idx → {source vp → n_indexed}
 
     # Per-spec needs sets — images populated during image dedup, frames during slicing.
@@ -656,9 +656,7 @@ def index(
                 if p in vmeta_by_path:
                     sv = _frame_source[p]
                     vf_indexed_by_spec.setdefault(spec_idx, {})
-                    vf_indexed_by_spec[spec_idx][sv] = (
-                        vf_indexed_by_spec[spec_idx].get(sv, 0) + 1
-                    )
+                    vf_indexed_by_spec[spec_idx][sv] = vf_indexed_by_spec[spec_idx].get(sv, 0) + 1
 
             model_segments.append(
                 f"{backend} norm {norm_s:.2f}s"
@@ -810,7 +808,7 @@ def index(
     # subsequent runs.  Images are hashed in parallel; videos sequentially
     # (few files, often large — parallel read would thrash the drive).
     _file_hashes: dict[Path, str] = {}  # image / frame path → sha256
-    _pre_hashes: dict[Path, str] = {}   # video path → sha256
+    _pre_hashes: dict[Path, str] = {}  # video path → sha256
     _n_cache_hits = 0
 
     _hash_label_parts = []
@@ -977,8 +975,7 @@ def index(
         _pyav_version = get_pyav_version()
         _n_vids = len(_videos_to_process)
         typer.echo(
-            f"\nSlicing {_n_vids:,} video(s) into frames"
-            f"  (PyAV {_pyav_version})  →  {_frame_store}"
+            f"\nSlicing {_n_vids:,} video(s) into frames  (PyAV {_pyav_version})  →  {_frame_store}"
         )
 
         # Pre-probe durations for ETA estimation (container open only — no decoding).
@@ -1118,9 +1115,7 @@ def index(
                                 )
 
             except RuntimeError as _exc:
-                typer.echo(
-                    f"[WARN] Frame extraction failed for {_vp.name}: {_exc}", err=True
-                )
+                typer.echo(f"[WARN] Frame extraction failed for {_vp.name}: {_exc}", err=True)
                 records[_vp].status = _S_FAIL_PRE
                 records[_vp].reason = f"frame extraction error: {_exc}"
                 continue
@@ -1140,19 +1135,19 @@ def index(
             vf_total[_vp] = _n_frames_this_video
 
             if _n_frames_this_video > 0:
-                _video_records_to_upsert.append({
-                    "video_hash": _vh,
-                    "video_path": _vp_abs,
-                    "total_frames": _n_frames_this_video,
-                    "extraction_fps": settings.video_fps,
-                    "max_frames_cap": settings.video_max_frames,
-                    "pyav_version": _pyav_version,
-                })
+                _video_records_to_upsert.append(
+                    {
+                        "video_hash": _vh,
+                        "video_path": _vp_abs,
+                        "total_frames": _n_frames_this_video,
+                        "extraction_fps": settings.video_fps,
+                        "max_frames_cap": settings.video_max_frames,
+                        "pyav_version": _pyav_version,
+                    }
+                )
 
         _n_total_frames = len(_frame_paths)
-        typer.echo(
-            f"\n  {_n_total_frames:,} frames from {_n_vids:,} video(s)"
-        )
+        typer.echo(f"\n  {_n_total_frames:,} frames from {_n_vids:,} video(s)")
 
         # Upsert one payload-only Qdrant record per video (no vectors).
         if _video_records_to_upsert and specs:
@@ -1193,8 +1188,7 @@ def index(
 
     # ── Combined per-spec needs ───────────────────────────────────────────────
     _combined_needs_per_spec: list[set[Path]] = [
-        _needs_per_spec[si] | _frame_needs_per_spec[si]
-        for si in range(len(specs))
+        _needs_per_spec[si] | _frame_needs_per_spec[si] for si in range(len(specs))
     ]
 
     total_image_count = len(_paths_to_batch)
@@ -1376,7 +1370,8 @@ def index(
     # _finish_batch cannot reclassify them.  Do a single post-batch pass here.
     if image_paths and _file_hashes:
         _fail_pre_hashes = {
-            _file_hashes[p] for p in _file_hashes
+            _file_hashes[p]
+            for p in _file_hashes
             if not records[p].is_frame and records[p].status == _S_FAIL_PRE
         }
         if _fail_pre_hashes:
