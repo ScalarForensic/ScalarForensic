@@ -31,6 +31,7 @@ class Indexer:
                 collection_name=self.collection,
                 vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
             )
+            info = self.client.get_collection(self.collection)
         else:
             info = self.client.get_collection(self.collection)
             vectors_config = info.config.params.vectors
@@ -45,8 +46,7 @@ class Indexer:
                     f"but the current model produces dim={dim}. "
                     f"Use a different collection or the matching backend."
                 )
-        # Ensure payload indexes exist (idempotent).
-        info = self.client.get_collection(self.collection)
+        # Ensure payload indexes exist (idempotent). info is available from both branches above.
         schema = info.payload_schema or {}
         if "image_hash" not in schema:
             self.client.create_payload_index(
@@ -229,7 +229,14 @@ class Indexer:
                 "model_hash": shared_metadata["model_hash"],
                 "embedding_dim": shared_metadata["embedding_dim"],
                 "normalize_size": shared_metadata["normalize_size"],
+                "inference_dtype": shared_metadata["inference_dtype"],
                 "library_versions": shared_metadata["library_versions"],
+                # sscd_n_crops is only present for SSCD indexing runs
+                **(
+                    {"sscd_n_crops": shared_metadata["sscd_n_crops"]}
+                    if "sscd_n_crops" in shared_metadata
+                    else {}
+                ),
                 # EXIF flags (only present when extraction is enabled)
                 **(exif_payloads.get(image_path, {}) if exif_payloads else {}),
             }

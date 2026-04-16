@@ -17,6 +17,7 @@ from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import (
+    _SSCD_SCALE,
     AnyEmbedder,
     hash_bytes,
     hash_bytes_md5,
@@ -63,6 +64,7 @@ def _get_embedder(key: str, settings: Settings) -> AnyEmbedder:
             remote_api_key=settings.embedding_api_key,
             embedding_dim=settings.embedding_dim,
             local_files_only=not settings.allow_online,
+            n_crops=settings.sscd_n_crops,
         )
     return _embedder_cache[key]
 
@@ -145,7 +147,10 @@ def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
     entry.file_hash_md5 = hash_bytes_md5(data)
     if not embedders:
         return
-    pre_results = preprocess_batch([data])
+    _effective_cap = max(
+        _SSCD_SCALE, max((e.normalize_size for e in embedders.values()), default=_SSCD_SCALE)
+    )
+    pre_results = preprocess_batch([data], cap=_effective_cap)
     result = pre_results[0]
     if isinstance(result, Exception):
         raise result.with_traceback(result.__traceback__)
@@ -203,7 +208,11 @@ def _analyze_video_file(
             if not frames:
                 continue
 
-            pil_images = preprocess_pil_batch([f.image for f in frames])
+            _effective_cap = max(
+                _SSCD_SCALE,
+                max((e.normalize_size for e in embedders.values()), default=_SSCD_SCALE),
+            )
+            pil_images = preprocess_pil_batch([f.image for f in frames], cap=_effective_cap)
 
             # Create / extend frame_entries for this batch
             batch_start = len(frame_entries)
@@ -284,6 +293,10 @@ class Hit:
     # query frames that contributed to this hit.  Useful for the frontend to
     # auto-navigate to the most relevant query frame for a merged video hit.
     best_query_timecode_ms: int | None = None
+    # Dedup set for query_timecodes — kept in sync with the list for O(1)
+    # membership tests during the merge pass.  Excluded from repr and compare
+    # so it is invisible to callers that iterate over Hit fields.
+    _query_timecodes_seen: set[int] = field(default_factory=set, repr=False, compare=False)
 
     def best_score(self) -> float:
         return max(self.scores.values(), default=0.0)
@@ -356,16 +369,12 @@ def _merge_hit(h: Hit, dest: dict[str, Hit], key: str | None = None) -> None:
             tc = h.query_timecodes[0]
             if existing.query_timecodes is None:
                 existing.query_timecodes = [tc]
-                existing._query_timecodes_seen: set = {tc}  # type: ignore[attr-defined]
+                existing._query_timecodes_seen.add(tc)
                 existing.best_query_timecode_ms = tc
             else:
-                seen: set = getattr(
-                    existing, "_query_timecodes_seen", set(existing.query_timecodes)
-                )
-                if tc not in seen:
+                if tc not in existing._query_timecodes_seen:
                     existing.query_timecodes.append(tc)
-                    seen.add(tc)
-                    existing._query_timecodes_seen = seen  # type: ignore[attr-defined]
+                    existing._query_timecodes_seen.add(tc)
                 # Update best_query_timecode_ms when the incoming hit contributes
                 # a score higher than the current maximum across all modes.
                 if h.best_score() > pre_merge_best:
@@ -390,7 +399,9 @@ def _merge_hit(h: Hit, dest: dict[str, Hit], key: str | None = None) -> None:
                 existing.matched_frames = list(tc_to_mf.values())
     else:
         if h.query_timecodes:
-            h.best_query_timecode_ms = h.query_timecodes[0]
+            tc = h.query_timecodes[0]
+            h._query_timecodes_seen = {tc}
+            h.best_query_timecode_ms = tc
         dest[k] = h
 
 
@@ -1027,6 +1038,7 @@ _PROVENANCE_FIELDS = [
     "inference_dtype",
     "normalize_size",
     "embedding_dim",
+    "sscd_n_crops",
 ]
 
 

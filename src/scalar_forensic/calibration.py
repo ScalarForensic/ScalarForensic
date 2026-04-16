@@ -24,6 +24,8 @@ from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING
 
+from scalar_forensic.embedder import _SHARED_CAP
+
 if TYPE_CHECKING:
     from scalar_forensic.embedder import AnyEmbedder
 
@@ -33,13 +35,16 @@ if TYPE_CHECKING:
 
 _CACHE_FILE = Path("data/sfn_batch_cache.json")
 _EFFICIENCY_TARGET = 0.95  # fraction of T_max to accept as "optimal"
-_MAX_BATCH = 512  # hard ceiling for exponential probe
+_MAX_BATCH = 256  # hard ceiling — 512 triggers GPU hangs on some ROCm cards
 _MIN_WARMUP_IMAGES = 16  # warm-up images — fixed, never scales with probe_b
-_MAX_MEASURE_IMAGES = 40  # measurement window cap — keeps each probe fast;
-#   the shuffle ensures these 40 are representative
+_MAX_MEASURE_IMAGES = 32  # measurement window cap — keeps each probe fast;
+#   the shuffle ensures these 32 are representative
+_PROBE_REPEATS = 3  # timed runs per batch; median is reported — suppresses noise
 _MIN_GAIN = 0.03  # converged: positive gain < 3 % → saturation reached
 _PEAK_FRAC = 0.70  # post-peak guard: stop after this many consecutive
 _POST_PEAK_DROPS = 3  #   measurements below _PEAK_FRAC × best seen so far
+_PLATEAU_WINDOW = 4  # band-of-oscillation check: last N measurements…
+_PLATEAU_CV = 0.10  #   …with coefficient of variation below this → plateau
 _BAR_WIDTH = 30  # characters for the throughput bar
 
 
@@ -102,14 +107,25 @@ def save_cached_batch_size(
 
 
 def _run_batches(
-    embedder: AnyEmbedder,
+    embedders: list[AnyEmbedder],
     images: list[bytes],
     batch_size: int,
+    *,
+    cap: int = _SHARED_CAP,
 ) -> None:
-    """Pass *images* through the full pipeline in batches of *batch_size*.
+    """Pass *images* through the full combined pipeline in batches of *batch_size*.
 
-    Mirrors the real ingestion pipeline: hash → preprocess → normalize → embed.
-    Return value is intentionally omitted; callers time this externally.
+    Mirrors the real ingestion pipeline: hash → preprocess → (normalize →
+    embed) × len(embedders).  All embedders share a single preprocess_batch
+    call per chunk, matching what the indexer does.  Running them together
+    also captures the combined VRAM pressure that a single-embedder probe
+    would underestimate.
+
+    *cap* should match the effective cap used by the real indexing pipeline
+    (``max(_SSCD_SCALE, settings.normalize_size)``).  The default is
+    ``_SHARED_CAP`` (331 px) for backward compatibility, but callers should
+    pass the real cap so that calibration accurately represents production
+    throughput when ``normalize_size > 331``.
     """
     from scalar_forensic.embedder import hash_bytes, hash_bytes_md5, preprocess_batch
 
@@ -118,30 +134,44 @@ def _run_batches(
         for data in chunk:
             hash_bytes(data)
             hash_bytes_md5(data)
-        pils = [r for r in preprocess_batch(chunk) if not isinstance(r, Exception)]
+        pils = [r for r in preprocess_batch(chunk, cap=cap) if not isinstance(r, Exception)]
         if pils:
-            norm = embedder.normalize_batch_bytes(pils)
-            embedder.embed_images(norm)
+            for embedder in embedders:
+                norm = embedder.normalize_batch_bytes(pils)
+                embedder.embed_images(norm)
 
 
 def _probe(
-    embedder: AnyEmbedder,
+    embedders: list[AnyEmbedder],
     warmup_bytes: list[bytes],
     measure_bytes: list[bytes],
     batch_size: int,
+    *,
+    repeats: int = 1,
+    cap: int = _SHARED_CAP,
 ) -> float:
-    """Warm up then time *measure_bytes*; return images/second.
+    """Warm up once then time *measure_bytes* for *repeats* runs; return median img/s.
+
+    Taking the median of multiple runs suppresses timing noise from GPU
+    scheduler jitter and variable kernel compile times — especially important
+    at larger batch sizes where a single lucky/unlucky run can skew the probe
+    by 20%+.
 
     Keeping warmup and measure windows separate (and always the same
     *measure_bytes* across all probes) ensures every batch size is measured
     on an identical image distribution — critical when the sample set contains
     images of varying sizes.
     """
-    _run_batches(embedder, warmup_bytes, batch_size)  # warm-up (discarded)
-    t0 = perf_counter()
-    _run_batches(embedder, measure_bytes, batch_size)  # timed window
-    elapsed = perf_counter() - t0
-    return len(measure_bytes) / elapsed if elapsed > 0 else 0.0
+    import statistics
+
+    _run_batches(embedders, warmup_bytes, batch_size, cap=cap)  # warm-up (discarded)
+    tps: list[float] = []
+    for _ in range(repeats):
+        t0 = perf_counter()
+        _run_batches(embedders, measure_bytes, batch_size, cap=cap)
+        elapsed = perf_counter() - t0
+        tps.append(len(measure_bytes) / elapsed if elapsed > 0 else 0.0)
+    return statistics.median(tps)
 
 
 # ---------------------------------------------------------------------------
@@ -150,10 +180,11 @@ def _probe(
 
 
 def calibrate(
-    embedder: AnyEmbedder,
+    embedders: AnyEmbedder | list[AnyEmbedder],
     sample_dir: Path,
     *,
     cache_file: Path | None = _CACHE_FILE,
+    cap: int = _SHARED_CAP,
 ) -> int:
     """Probe batch sizes, fit the saturation model, display results, and return
     the optimal batch size.
@@ -163,18 +194,32 @@ def calibrate(
 
     Parameters
     ----------
-    embedder:
-        Any loaded embedder (DINOv2, SSCD, or remote).  Calibration uses its
-        ``normalize_batch_bytes`` and ``embed_images`` methods directly.
+    embedders:
+        One or more loaded embedders.  When multiple are given every probe
+        runs all of them on the same preprocessed batch — matching the real
+        indexing pipeline where preprocessing is shared and each model runs
+        sequentially on the same images.  This captures the true combined VRAM
+        pressure instead of calibrating each model in isolation.
     sample_dir:
         Directory containing representative JPEG/PNG images for probing.
         Images are tiled in memory — no repeated disk I/O per probe.
     cache_file:
         Destination for the JSON result cache.  Pass ``None`` to skip
-        writing the cache (useful when the caller will save its own
-        aggregate result, e.g. the minimum across multiple embedders).
+        writing the cache.
+    cap:
+        Short-side pixel cap passed to ``preprocess_batch`` for each probe.
+        Should match the effective cap used by the real indexing pipeline:
+        ``max(_SSCD_SCALE, settings.normalize_size)``.  Defaults to
+        ``_SHARED_CAP`` (331 px).  When ``normalize_size > 331``, passing the
+        correct cap ensures calibration measures throughput at production image
+        sizes rather than underestimating it on smaller inputs.
     """
     import typer
+
+    emb_list: list[AnyEmbedder] = (
+        [embedders] if not isinstance(embedders, list) else embedders  # type: ignore[list-item]
+    )
+    primary = emb_list[0]
 
     # ── Load sample images into memory (once) ─────────────────────────────
     image_paths: list[Path] = []
@@ -207,10 +252,12 @@ def calibrate(
 
     # ── Header ────────────────────────────────────────────────────────────
     sep = "─" * 62
+    model_names = "  +  ".join(type(e).__name__ for e in emb_list)
     typer.echo("")
     typer.echo("SFN_BATCH_SIZE unset — calibrating optimal batch size")
     typer.echo("  T(b) = T_max·b / (b+K)  [Michaelis-Menten saturation]")
-    typer.echo(f"  sample: {sample_dir}  ({n_samples} images)  ·  device: {embedder.device}")
+    typer.echo(f"  sample: {sample_dir}  ({n_samples} images)  ·  device: {primary.device}")
+    typer.echo(f"  pipeline: {model_names}")
     typer.echo(sep)
 
     # ── Exponential probe ─────────────────────────────────────────────────
@@ -230,7 +277,9 @@ def calibrate(
         warmup_bytes = (raw_bytes * 2)[:_MIN_WARMUP_IMAGES]
 
         try:
-            tp = _probe(embedder, warmup_bytes, measure_bytes, probe_b)
+            tp = _probe(
+                emb_list, warmup_bytes, measure_bytes, probe_b, repeats=_PROBE_REPEATS, cap=cap
+            )
         except Exception:  # noqa: BLE001 — catches CUDA/ROCm OOM and JIT errors
             typer.echo(f"  batch={probe_b:>4}  {'':>{_BAR_WIDTH + 2}}  out of memory — stopped")
             break
@@ -273,6 +322,21 @@ def calibrate(
                     f"  ← {_POST_PEAK_DROPS}× below peak, stopped"
                 )
                 break
+
+        # 3. Stable plateau: last _PLATEAU_WINDOW measurements oscillate within
+        #    a tight band — throughput has settled regardless of trend direction.
+        if len(measurements) >= _PLATEAU_WINDOW + 1:
+            recent = [t for _, t in measurements[-_PLATEAU_WINDOW:]]
+            mean_tp = sum(recent) / len(recent)
+            if mean_tp > 0:
+                variance = sum((t - mean_tp) ** 2 for t in recent) / len(recent)
+                cv = variance**0.5 / mean_tp
+                if cv < _PLATEAU_CV:
+                    typer.echo(
+                        f"  batch={probe_b:>4}  {bar}  {tp:7.1f} img/s{gain_str}"
+                        f"  ← plateau (CV={cv:.2f})"
+                    )
+                    break
 
         typer.echo(f"  batch={probe_b:>4}  {bar}  {tp:7.1f} img/s{gain_str}")
         prev_tp = tp
@@ -333,7 +397,7 @@ def calibrate(
     if cache_file is not None:
         save_cached_batch_size(
             optimal,
-            device=embedder.device,
+            device=primary.device,
             throughput_img_per_s=best_tp,
             t_max=t_max_fit,
             k_half=k_half_fit,

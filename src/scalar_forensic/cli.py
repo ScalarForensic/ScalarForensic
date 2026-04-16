@@ -2,9 +2,9 @@
 
 import csv
 import os
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import batched
@@ -16,8 +16,10 @@ from PIL import Image
 
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import (
+    _SSCD_SCALE,
     AnyEmbedder,
     ExifInfo,
+    SSCDEmbedder,
     extract_exif,
     get_library_versions,
     hash_bytes,
@@ -53,6 +55,29 @@ class _FileRecord:
     reason: str = ""
     md5: str = ""
     sha256: str = ""
+
+
+@dataclass
+class _BatchCtx:
+    """Carries Phase-A results (read/hash/dedup) across one loop iteration.
+
+    The preprocessing Future is submitted at the end of Phase A and resolved
+    at the start of the next iteration's finish step — so CPU preprocessing
+    of batch N+1 overlaps with GPU embedding of batch N.
+    """
+
+    batch_num: int
+    batch_bytes: int
+    read_s: float
+    hash_s: float
+    imgs_at_batch: int  # imgs_processed_so_far snapshot — used for ETA display
+    path_hash_pairs: list[tuple[Path, str]]
+    md5_by_sha256: dict[str, str]
+    unique_pairs: list[tuple[Path, str]]
+    to_embed_per_spec: list[list[tuple[Path, str]]]
+    exif_data: "dict[Path, ExifInfo] | None"
+    paths_to_pre: list[Path]
+    pre_future: "Future[tuple[list, float]] | None"  # tuple[list[Image.Image | Exception], float]
 
 
 def _fmt_rate(count: int, seconds: float, unit: str) -> str:
@@ -428,6 +453,7 @@ def index(
                 remote_api_key=settings.embedding_api_key,
                 embedding_dim=settings.embedding_dim,
                 local_files_only=not settings.allow_online,
+                n_crops=settings.sscd_n_crops,
             )
         except (FileNotFoundError, ValueError) as exc:
             typer.echo(f"[ERROR] {exc}", err=True)
@@ -459,12 +485,16 @@ def index(
 
         specs.append((embedder, indexer, model_hash))
 
+    # Effective short-side cap for preprocessing: must satisfy both SSCD (≥331 px)
+    # and DINOv2 (≥normalize_size px).  Computed here so it is available to
+    # calibrate() before the batch loops.
+    _effective_cap = max(_SSCD_SCALE, settings.normalize_size)
+
     # ── Batch size: explicit config > calibration cache > auto-calibrate ─────
     if settings.batch_size is None:
         from scalar_forensic.calibration import (
             calibrate,
             load_cached_batch_size,
-            save_cached_batch_size,
         )
 
         _sample_dir = Path("data/sample_images")
@@ -478,10 +508,8 @@ def index(
             # RemoteEmbedder calibration would send every sample image to the
             # remote endpoint on each probe iteration — expensive and surprising.
             # Skip it and require an explicit SFN_BATCH_SIZE in remote mode.
-            local_specs = [
-                (emb, idx, mh) for emb, idx, mh in specs if not isinstance(emb, RemoteEmbedder)
-            ]
-            if not local_specs:
+            local_embedders = [emb for emb, _, _ in specs if not isinstance(emb, RemoteEmbedder)]
+            if not local_embedders:
                 settings.batch_size = 32
                 typer.echo(
                     "[WARN] Auto-calibration skipped for remote embedder — "
@@ -489,30 +517,13 @@ def index(
                     err=True,
                 )
             else:
-                # Calibrate each local embedder; use the minimum so the chosen
-                # batch size is safe for every model that will run in production.
-                # When multiple embedders are active, suppress per-embedder cache
-                # writes (cache_file=None) and write a single entry for the safe
-                # minimum after all probes complete — prevents the last embedder's
-                # (potentially larger) value from overwriting the minimum.
-                if len(local_specs) == 1:
-                    sizes = [calibrate(local_specs[0][0], _sample_dir)]
-                else:
-                    sizes = [
-                        calibrate(emb, _sample_dir, cache_file=None) for emb, _, _ in local_specs
-                    ]
-                    save_cached_batch_size(min(sizes))
-                settings.batch_size = min(sizes)
-                if len(local_specs) > 1:
-                    per = "  ".join(
-                        f"{type(emb).__name__}={sz}" for (emb, _, _), sz in zip(local_specs, sizes)
-                    )
-                    typer.echo(f"  ({per}  →  using minimum)")
-            if len(sizes) > 1:
-                per = "  ".join(
-                    f"{type(emb).__name__}={sz}" for (emb, _, _), sz in zip(specs, sizes)
-                )
-                typer.echo(f"  ({per}  →  using minimum)")
+                # Calibrate the full combined pipeline in one pass: all local
+                # embedders share a single preprocess_batch call per probe batch,
+                # then each model runs normalize + embed in sequence — exactly
+                # mirroring what the indexer does.  This captures true combined
+                # VRAM pressure rather than underestimating it by probing models
+                # in isolation.
+                settings.batch_size = calibrate(local_embedders, _sample_dir, cap=_effective_cap)
         else:
             settings.batch_size = 32
             typer.echo(
@@ -548,6 +559,9 @@ def index(
         f"({len(image_paths):,} image, {len(video_paths):,} video, {n_unsupported:,} other)"
     )
 
+    # Library versions don't change during a run — compute once and reuse.
+    _library_versions = get_library_versions()
+
     # ── Per-model counters ────────────────────────────────────────────────────
     indexed_counts = [0] * len(specs)
     skipped_counts = [0] * len(specs)
@@ -568,93 +582,28 @@ def index(
             "  [Θ(1) Kalman]"
         )
 
-    for batch_paths in batched(iter(image_paths), settings.batch_size):
-        batch_num += 1
-        batch_wall_t0 = perf_counter()
+    # ── Pipelined batch loop ──────────────────────────────────────────────────
+    # Pipeline depth = 2: Phase A (read / hash / dedup) runs up to two batches
+    # ahead of the GPU.  Each Phase A immediately submits a preprocessing Future
+    # so CPU pre-processing starts as early as possible.  _finish_batch() (the
+    # GPU embed step) is called only when the pipeline is full, meaning Phase A
+    # for batches N+1 and N+2 overlaps with embed(N) regardless of whether CPU
+    # or GPU is the bottleneck.
+    _PIPELINE_DEPTH = 2
+    _pipeline: deque[_BatchCtx] = deque()
 
-        # ── Read (shared) ────────────────────────────────────────────────────
-        t0 = perf_counter()
-        raw: list[tuple[Path, bytes]] = []
-        batch_bytes = 0
-        for p in batch_paths:
-            try:
-                data = p.read_bytes()
-                raw.append((p, data))
-                batch_bytes += len(data)
-            except OSError as exc:
-                typer.echo(f"[WARN] Cannot read {p}: {exc}", err=True)
-                records[p].status = _S_FAIL_READ
-                records[p].reason = f"read error: {exc}"
-        read_s = perf_counter() - t0
-        total_read_s += read_s
-        total_bytes += batch_bytes
-        # Count after reading so the denominator reflects files we actually
-        # attempted to open — not files we merely iterated over in the plan.
-        imgs_processed_so_far += len(batch_paths)
+    def _finish_batch(ctx: _BatchCtx) -> None:
+        """Resolve the preprocessing Future and run embed + upsert for *ctx*."""
+        t_finish = perf_counter()
 
-        if not raw:
-            continue
-
-        # ── Hash (shared) ────────────────────────────────────────────────────
-        t0 = perf_counter()
-        path_hash_pairs_full = [(p, hash_bytes(data), hash_bytes_md5(data)) for p, data in raw]
-        path_hash_pairs = [(p, sha) for p, sha, _ in path_hash_pairs_full]
-        md5_by_sha256 = {sha: md5 for _, sha, md5 in path_hash_pairs_full}
-        hash_s = perf_counter() - t0
-        total_hash_s += hash_s
-
-        # Populate hash fields for every successfully-read file.
-        for p, sha, md5 in path_hash_pairs_full:
-            records[p].sha256 = sha
-            records[p].md5 = md5
-
-        # ── EXIF (shared, once per batch if enabled) ─────────────────────────
-        exif_data: dict[Path, ExifInfo] | None = None
-        if settings.extract_exif:
-            data_by_path_for_exif = {p: data for p, data in raw}
-            exif_data = {p: extract_exif(data_by_path_for_exif[p]) for p, _ in path_hash_pairs}
-
-        # ── Within-batch hash dedup ───────────────────────────────────────────
-        unique_path_by_hash: dict[str, Path] = {}
-        for p, h in path_hash_pairs:
-            unique_path_by_hash.setdefault(h, p)
-        unique_pairs = [(p, h) for h, p in unique_path_by_hash.items()]
-
-        winner_paths = {p for p, _ in unique_pairs}
-        for p, _ in path_hash_pairs:
-            if p not in winner_paths and records[p].status == "pending":
-                records[p].status = _S_SKIP_DUP
-                records[p].reason = "duplicate in batch (same SHA-256)"
-
-        data_by_path = {p: data for p, data in raw}
-
-        # ── Pre-dedup: determine which images actually need work ─────────────────
-        # Run dedup for every spec before preprocessing so we only decode/resize
-        # images that will be embedded or need a thumbnail generated.
-        to_embed_per_spec: list[list[tuple[Path, str]]] = []
-        needs_embed: set[Path] = set()
-        for _, indexer, _ in specs:
-            te = _apply_dedup(unique_pairs, indexer, settings)
-            to_embed_per_spec.append(te)
-            needs_embed.update(p for p, _ in te)
-
-        needs_thumbnail: set[Path] = set()
-        if settings.thumbnail_dir is not None:
-            for p, h in unique_pairs:
-                if not (settings.thumbnail_dir / f"{h}.jpg").exists():
-                    needs_thumbnail.add(p)
-
-        needs_pre = needs_embed | needs_thumbnail
-
-        # ── Shared pre-processing (only images that need it) ──────────────────
-        t0 = perf_counter()
-        paths_to_pre = [p for p, _ in unique_pairs if p in needs_pre]
-        pre_results = (
-            preprocess_batch([data_by_path[p] for p in paths_to_pre]) if paths_to_pre else []
-        )
+        # ── Wait for preprocessing (usually already done while GPU ran) ───────
+        # pre_s is the actual CPU preprocessing time recorded inside the worker;
+        # the future itself resolves instantly when GPU is the bottleneck.
+        pre_results: list[Image.Image | Exception]
+        pre_results, pre_s = ctx.pre_future.result() if ctx.pre_future is not None else ([], 0.0)
 
         pre_by_path: dict[Path, Image.Image] = {}
-        for p, result in zip(paths_to_pre, pre_results, strict=True):
+        for p, result in zip(ctx.paths_to_pre, pre_results, strict=True):
             if isinstance(result, Exception):
                 typer.echo(f"[WARN] Preprocessing failed for {p.name}: {result}", err=True)
                 if records[p].status == "pending":
@@ -663,9 +612,9 @@ def index(
             else:
                 pre_by_path[p] = result
 
-        # ── Thumbnail generation (shared, after preprocessing) ────────────────
+        # ── Thumbnail generation ───────────────────────────────────────────────
         if settings.thumbnail_dir is not None:
-            hash_by_path = {p: h for p, h in unique_pairs}
+            hash_by_path = {p: h for p, h in ctx.unique_pairs}
             for p, img in pre_by_path.items():
                 sha = hash_by_path.get(p)
                 if sha:
@@ -676,34 +625,23 @@ def index(
                         except Exception as exc:  # noqa: BLE001
                             typer.echo(f"[WARN] Thumbnail failed for {p.name}: {exc}", err=True)
 
-        # Propagate preprocessing failure to batch-duplicates of a failed winner.
-        # Those duplicates were marked _S_SKIP_DUP earlier; update them so the
-        # final report accurately reflects that their hash-winner couldn't be processed.
-        pre_failures: set[Path] = {p for p in paths_to_pre if p not in pre_by_path}
-        failed_pre_hashes = {h for p, h in unique_pairs if p in pre_failures}
+        # ── Propagate preprocessing failures ──────────────────────────────────
+        pre_failures: set[Path] = {p for p in ctx.paths_to_pre if p not in pre_by_path}
+        failed_pre_hashes = {h for p, h in ctx.unique_pairs if p in pre_failures}
         if failed_pre_hashes:
-            for p, h in path_hash_pairs:
+            for p, h in ctx.path_hash_pairs:
                 if h in failed_pre_hashes and records[p].status in ("pending", _S_SKIP_DUP):
                     records[p].status = _S_FAIL_PRE
                     if not records[p].reason:
                         records[p].reason = "duplicate of image that failed preprocessing"
 
-        pre_s = perf_counter() - t0
-
-        # Exclude preprocessing failures from the per-model loop; images that were
-        # skipped pre-dedup (already indexed + thumbnail present) stay in unique_pairs
-        # so the per-model loop can mark them _S_SKIP_IDX and log them correctly.
-        unique_pairs = [(p, h) for p, h in unique_pairs if p not in pre_failures]
-
+        unique_pairs = [(p, h) for p, h in ctx.unique_pairs if p not in pre_failures]
         if not unique_pairs:
-            continue
+            return
 
-        # Recompute the in-batch duplicate skip count after preprocessing-failure
-        # propagation: some records originally marked _S_SKIP_DUP may have been
-        # reclassified to _S_FAIL_PRE above, so using the old duplicate_hashes_in_batch
-        # count would inflate the per-model skipped_counts.
+        # Recompute duplicate-skip count after failure reclassification.
         duplicate_skips_in_batch = sum(
-            1 for p, _ in path_hash_pairs if records[p].status == _S_SKIP_DUP
+            1 for p, _ in ctx.path_hash_pairs if records[p].status == _S_SKIP_DUP
         )
 
         # ── Per-model loop: normalize + embed, collect upsert jobs ────────────
@@ -711,12 +649,10 @@ def index(
         upsert_jobs: list = []
 
         for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
-            # Use pre-computed dedup result, filtered to exclude any preprocessing failures.
-            to_embed = [(p, h) for p, h in to_embed_per_spec[spec_idx] if p not in pre_failures]
+            to_embed = [(p, h) for p, h in ctx.to_embed_per_spec[spec_idx] if p not in pre_failures]
             n_skipped = duplicate_skips_in_batch + (len(unique_pairs) - len(to_embed))
             skipped_counts[spec_idx] += n_skipped
 
-            # Mark already-indexed files for this model (don't overwrite "indexed").
             to_embed_set = {p for p, _ in to_embed}
             for p, _ in unique_pairs:
                 if p not in to_embed_set and records[p].status != _S_INDEXED:
@@ -783,13 +719,16 @@ def index(
                 "embedding_dim": embedder.embedding_dim,
                 "normalize_size": embedder.normalize_size,
                 "inference_dtype": embedder.inference_dtype,
-                "library_versions": get_library_versions(),
+                "library_versions": _library_versions,
+                **(
+                    {"sscd_n_crops": embedder.n_crops} if isinstance(embedder, SSCDEmbedder) else {}
+                ),
             }
             exif_for_batch: dict[Path, dict] | None = None
-            if exif_data is not None:
-                exif_for_batch = {p: dict(exif_data[p]) for p in paths}
+            if ctx.exif_data is not None:
+                exif_for_batch = {p: dict(ctx.exif_data[p]) for p in paths}
 
-            hashes_md5 = [md5_by_sha256[h] for h in hashes]
+            hashes_md5 = [ctx.md5_by_sha256[h] for h in hashes]
 
             def _make_upsert(idx, ps, hs, hs_md5, embs, meta, exif):
                 def _job():
@@ -818,28 +757,32 @@ def index(
             upsert_wall_s = perf_counter() - t0
 
         if model_segments:
-            wall_s = perf_counter() - batch_wall_t0
-            n_imgs = len(path_hash_pairs)
+            # wall_s = read + hash + everything in _finish_batch (pre-wait, normalize,
+            # embed, upsert).  Using perf_counter() - t_finish for the finish phase
+            # avoids double-counting pre_s, which is already included in that interval.
+            # Dedup time (~ms) is intentionally excluded.
+            wall_s = ctx.read_s + ctx.hash_s + (perf_counter() - t_finish)
+            n_imgs = len(ctx.path_hash_pairs)
             tracker.update(n_imgs, wall_s)
             upsert_str = f"  │  upsert {upsert_wall_s:.2f}s" if upsert_jobs else ""
             shared = (
-                f"  ▸ {batch_num:04d}  {n_imgs} imgs  {batch_bytes / 1e6:.1f} MB"
+                f"  ▸ {ctx.batch_num:04d}  {n_imgs} imgs  {ctx.batch_bytes / 1e6:.1f} MB"
                 f"  {_fmt_rate(n_imgs, wall_s, 'img')}"
-                f"  │  read {read_s:.2f}s ({_fmt_mbps(batch_bytes, read_s)})"
-                f"  hash {hash_s:.2f}s  pre {pre_s:.2f}s"
+                f"  │  read {ctx.read_s:.2f}s ({_fmt_mbps(ctx.batch_bytes, ctx.read_s)})"
+                f"  hash {ctx.hash_s:.2f}s  pre {pre_s:.2f}s"
             )
             typer.echo(shared + "  │  " + "  │  ".join(model_segments) + upsert_str)
 
-            if batch_num % 10 == 0 and total_image_count > 0:
-                result = tracker.eta(total_image_count - imgs_processed_so_far)
+            if ctx.batch_num % 10 == 0 and total_image_count > 0:
+                result = tracker.eta(total_image_count - ctx.imgs_at_batch)
                 if result is not None:
                     eta_s, sigma_s = result
-                    pct = imgs_processed_so_far / total_image_count * 100
+                    pct = ctx.imgs_at_batch / total_image_count * 100
                     bar = _progress_bar(pct)
                     sep = "─" * 68
                     typer.echo(
                         f"  {sep}\n"
-                        f"  [{bar}]  {imgs_processed_so_far:,} / {total_image_count:,}"
+                        f"  [{bar}]  {ctx.imgs_at_batch:,} / {total_image_count:,}"
                         f"  ({pct:.1f}%)\n"
                         f"  x̂ = {tracker.rate:.1f} img/s"
                         f"  √P = {tracker.rate_std:.1f}"
@@ -848,6 +791,121 @@ def index(
                         f"  σ_η ± {_fmt_duration(sigma_s)}\n"
                         f"  {sep}"
                     )
+
+    def _timed_preprocess(data: list[bytes], cap: int) -> tuple[list, float]:
+        """Run preprocess_batch and return (results, elapsed_s) for display."""
+        t0 = perf_counter()
+        result = preprocess_batch(data, cap=cap)
+        return result, perf_counter() - t0
+
+    with ThreadPoolExecutor(max_workers=1) as _pre_pool:
+        for batch_paths in batched(iter(image_paths), settings.batch_size):
+            batch_num += 1
+
+            # ── Read (shared) ─────────────────────────────────────────────────
+            t0 = perf_counter()
+            raw: list[tuple[Path, bytes]] = []
+            batch_bytes = 0
+            for p in batch_paths:
+                try:
+                    data = p.read_bytes()
+                    raw.append((p, data))
+                    batch_bytes += len(data)
+                except OSError as exc:
+                    typer.echo(f"[WARN] Cannot read {p}: {exc}", err=True)
+                    records[p].status = _S_FAIL_READ
+                    records[p].reason = f"read error: {exc}"
+            read_s = perf_counter() - t0
+            total_read_s += read_s
+            total_bytes += batch_bytes
+            imgs_processed_so_far += len(batch_paths)
+
+            if not raw:
+                continue
+
+            # ── Hash (shared) ─────────────────────────────────────────────────
+            t0 = perf_counter()
+            path_hash_pairs_full = [(p, hash_bytes(data), hash_bytes_md5(data)) for p, data in raw]
+            path_hash_pairs = [(p, sha) for p, sha, _ in path_hash_pairs_full]
+            md5_by_sha256 = {sha: md5 for _, sha, md5 in path_hash_pairs_full}
+            hash_s = perf_counter() - t0
+            total_hash_s += hash_s
+
+            for p, sha, md5 in path_hash_pairs_full:
+                records[p].sha256 = sha
+                records[p].md5 = md5
+
+            # ── EXIF (shared, once per batch if enabled) ──────────────────────
+            exif_data: dict[Path, ExifInfo] | None = None
+            if settings.extract_exif:
+                data_by_path_for_exif = {p: data for p, data in raw}
+                exif_data = {p: extract_exif(data_by_path_for_exif[p]) for p, _ in path_hash_pairs}
+
+            # ── Within-batch hash dedup ───────────────────────────────────────
+            unique_path_by_hash: dict[str, Path] = {}
+            for p, h in path_hash_pairs:
+                unique_path_by_hash.setdefault(h, p)
+            unique_pairs = [(p, h) for h, p in unique_path_by_hash.items()]
+
+            winner_paths = {p for p, _ in unique_pairs}
+            for p, _ in path_hash_pairs:
+                if p not in winner_paths and records[p].status == "pending":
+                    records[p].status = _S_SKIP_DUP
+                    records[p].reason = "duplicate in batch (same SHA-256)"
+
+            data_by_path = {p: data for p, data in raw}
+
+            # ── Pre-dedup: determine which images actually need work ───────────
+            to_embed_per_spec: list[list[tuple[Path, str]]] = []
+            needs_embed: set[Path] = set()
+            for _, indexer, _ in specs:
+                te = _apply_dedup(unique_pairs, indexer, settings)
+                to_embed_per_spec.append(te)
+                needs_embed.update(p for p, _ in te)
+
+            needs_thumbnail: set[Path] = set()
+            if settings.thumbnail_dir is not None:
+                for p, h in unique_pairs:
+                    if not (settings.thumbnail_dir / f"{h}.jpg").exists():
+                        needs_thumbnail.add(p)
+
+            needs_pre = needs_embed | needs_thumbnail
+
+            # ── Submit preprocessing in background ────────────────────────────
+            # Cap so DINOv2 gets its configured resolution and SSCD ≥ 331 px.
+            paths_to_pre = [p for p, _ in unique_pairs if p in needs_pre]
+            bytes_to_pre = [data_by_path[p] for p in paths_to_pre]
+            pre_future: Future[tuple[list, float]] | None = (
+                _pre_pool.submit(_timed_preprocess, bytes_to_pre, _effective_cap)
+                if paths_to_pre
+                else None
+            )
+
+            # ── Drain oldest batch when pipeline is full ─────────────────────
+            # Phase A for this batch (and the one before it) has already run,
+            # so embed(oldest) overlaps with both of those Phase A passes.
+            if len(_pipeline) >= _PIPELINE_DEPTH:
+                _finish_batch(_pipeline.popleft())
+            _pipeline.append(
+                _BatchCtx(
+                    batch_num=batch_num,
+                    batch_bytes=batch_bytes,
+                    read_s=read_s,
+                    hash_s=hash_s,
+                    imgs_at_batch=imgs_processed_so_far,
+                    path_hash_pairs=path_hash_pairs,
+                    md5_by_sha256=md5_by_sha256,
+                    unique_pairs=unique_pairs,
+                    to_embed_per_spec=to_embed_per_spec,
+                    exif_data=exif_data,
+                    paths_to_pre=paths_to_pre,
+                    pre_future=pre_future,
+                )
+            )
+
+        # ── Drain remaining batches ───────────────────────────────────────────
+        while _pipeline:
+            _finish_batch(_pipeline.popleft())
 
     # ── Video processing pass ─────────────────────────────────────────────────
     n_video_frames_indexed = 0
@@ -926,7 +984,7 @@ def index(
 
             # ── Preprocess: cap short side (same transform as preprocess_batch) ──
             t0 = perf_counter()
-            pre_images = preprocess_pil_batch(frame_images_raw)
+            pre_images = preprocess_pil_batch(frame_images_raw, cap=_effective_cap)
             pre_s = perf_counter() - t0
 
             # ── Thumbnails ────────────────────────────────────────────────────
@@ -967,10 +1025,10 @@ def index(
 
                 if spec_idx == 0:
                     n_video_frames_skipped += n_skipped
-                # Update per-video skip flag for all specs so that a video only
-                # indexed by spec 1 (not spec 0) is still reflected in vf_skipped.
-                for i in set(range(n_items)) - set(to_embed_idx):
-                    vf_skipped[source_vpaths[i]] += 1
+                    # Track per-video skips once (spec 0 is authoritative) so
+                    # vf_skipped reflects actual frames skipped, not frames×specs.
+                    for i in set(range(n_items)) - set(to_embed_idx):
+                        vf_skipped[source_vpaths[i]] += 1
 
                 backend = type(embedder).__name__
 
@@ -1031,7 +1089,12 @@ def index(
                     "embedding_dim": embedder.embedding_dim,
                     "normalize_size": embedder.normalize_size,
                     "inference_dtype": embedder.inference_dtype,
-                    "library_versions": get_library_versions(),
+                    "library_versions": _library_versions,
+                    **(
+                        {"sscd_n_crops": embedder.n_crops}
+                        if isinstance(embedder, SSCDEmbedder)
+                        else {}
+                    ),
                 }
 
                 def _make_frame_upsert(idx, eps, ehs, embs, meta, vmetas):
