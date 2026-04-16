@@ -37,6 +37,7 @@ from scalar_forensic.video import (
     extract_frames,
     frame_disk_path,
     get_pyav_version,
+    get_video_info,
 )
 
 # ── file-level status codes ──────────────────────────────────────────────────
@@ -974,17 +975,46 @@ def index(
 
         _frame_store = settings.frame_store_dir
         _pyav_version = get_pyav_version()
+        _n_vids = len(_videos_to_process)
         typer.echo(
-            f"\nSlicing {len(_videos_to_process):,} video(s) into frames"
+            f"\nSlicing {_n_vids:,} video(s) into frames"
             f"  (PyAV {_pyav_version})  →  {_frame_store}"
         )
 
+        # Pre-probe durations for ETA estimation (container open only — no decoding).
+        typer.echo("  Probing video durations ...")
+        _expected_per_video: dict[Path, int] = {}
+        for _vp_probe in _videos_to_process:
+            _probe = get_video_info(_vp_probe)
+            _dur = _probe.get("duration_s")
+            if _dur and _dur > 0:
+                _exp = int(_dur * settings.video_fps)
+                if settings.video_max_frames > 0:
+                    _exp = min(_exp, settings.video_max_frames)
+                _expected_per_video[_vp_probe] = max(_exp, 1)
+        _total_expected_frames = sum(_expected_per_video.values())
+        if _total_expected_frames > 0:
+            typer.echo(f"  ~{_total_expected_frames:,} frames estimated across {_n_vids} video(s)")
+
+        _slice_tracker = _ETATracker()
+        _slice_total_frames = 0  # running total across all videos
+        _SLICE_BLOCK = 50  # frames per Kalman update + progress line
+
         _video_records_to_upsert: list[dict] = []
 
-        for _vp in _videos_to_process:
+        for _vi, _vp in enumerate(_videos_to_process):
             _vh = _pre_hashes[_vp]
             _vp_abs = str(_vp.resolve())
             _n_frames_this_video = 0
+            _exp_this = _expected_per_video.get(_vp, 0)
+            _exp_suffix = f"  (est. {_exp_this:,} frames)" if _exp_this > 0 else ""
+
+            typer.echo(f"\n▶ [{_vi + 1}/{_n_vids}]  {_vp.name}{_exp_suffix}")
+
+            _t_video_start = perf_counter()
+            _t_block_start = perf_counter()
+            _block_frames = 0
+            _block_count = 0  # how many complete blocks emitted — for ETA box cadence
 
             try:
                 for _frame in extract_frames(
@@ -1042,6 +1072,50 @@ def index(
                     _frame_source[_fp] = _vp
                     _frame_paths.append(_fp)
                     _n_frames_this_video += 1
+                    _slice_total_frames += 1
+                    _block_frames += 1
+
+                    if _block_frames >= _SLICE_BLOCK:
+                        _block_s = perf_counter() - _t_block_start
+                        _slice_tracker.update(_block_frames, _block_s)
+                        _block_frames = 0
+                        _block_count += 1
+                        _t_block_start = perf_counter()
+
+                        # Per-block progress line
+                        _tc_s = _frame.timecode_ms / 1000
+                        _tc_str = (
+                            f"{int(_tc_s // 3600)}:"
+                            f"{int((_tc_s % 3600) // 60):02d}:"
+                            f"{int(_tc_s % 60):02d}"
+                        )
+                        typer.echo(
+                            f"  ▸ frame {_n_frames_this_video:,}"
+                            f"  timecode {_tc_str}"
+                            f"  │  {_fmt_rate(_SLICE_BLOCK, _block_s, 'fps')}"
+                        )
+
+                        # Kalman ETA box every 5 blocks (= 250 frames)
+                        if _block_count % 5 == 0 and _total_expected_frames > 0:
+                            _remaining = max(_total_expected_frames - _slice_total_frames, 0)
+                            _eta_result = _slice_tracker.eta(_remaining)
+                            if _eta_result is not None:
+                                _pct = _slice_total_frames / _total_expected_frames * 100
+                                _bar = _progress_bar(_pct)
+                                _eta_s, _sigma_s = _eta_result
+                                _sep = "─" * 68
+                                typer.echo(
+                                    f"  {_sep}\n"
+                                    f"  [{_bar}]  {_slice_total_frames:,}"
+                                    f" / ~{_total_expected_frames:,}"
+                                    f"  ({_pct:.1f}%)\n"
+                                    f"  x̂ = {_slice_tracker.rate:.1f} fps"
+                                    f"  √P = {_slice_tracker.rate_std:.1f}"
+                                    f"  K = {_slice_tracker.kalman_gain:.3f}"
+                                    f"  ·  η̂ ~ {_fmt_duration(_eta_s)}"
+                                    f"  σ_η ± {_fmt_duration(_sigma_s)}\n"
+                                    f"  {_sep}"
+                                )
 
             except RuntimeError as _exc:
                 typer.echo(
@@ -1050,6 +1124,18 @@ def index(
                 records[_vp].status = _S_FAIL_PRE
                 records[_vp].reason = f"frame extraction error: {_exc}"
                 continue
+
+            # Flush any remaining sub-block frames into the tracker.
+            if _block_frames > 0:
+                _block_s = perf_counter() - _t_block_start
+                _slice_tracker.update(_block_frames, _block_s)
+
+            _video_s = perf_counter() - _t_video_start
+            typer.echo(
+                f"  ✓ {_n_frames_this_video:,} frames"
+                f"  {_fmt_duration(_video_s)}"
+                f"  {_fmt_rate(_n_frames_this_video, _video_s, 'fps')}"
+            )
 
             vf_total[_vp] = _n_frames_this_video
 
@@ -1065,7 +1151,7 @@ def index(
 
         _n_total_frames = len(_frame_paths)
         typer.echo(
-            f"  {_n_total_frames:,} frames from {len(_videos_to_process):,} video(s)"
+            f"\n  {_n_total_frames:,} frames from {_n_vids:,} video(s)"
         )
 
         # Upsert one payload-only Qdrant record per video (no vectors).
@@ -1170,7 +1256,11 @@ def index(
                 data_by_path_for_exif = {p: data for p, data in raw if p not in vmeta_by_path}
                 exif_pairs = [(p, h) for p, h in path_hash_pairs if p not in vmeta_by_path]
                 if exif_pairs:
-                    exif_data = {p: extract_exif(data_by_path_for_exif[p]) for p, _ in exif_pairs if p in data_by_path_for_exif}
+                    exif_data = {
+                        p: extract_exif(data_by_path_for_exif[p])
+                        for p, _ in exif_pairs
+                        if p in data_by_path_for_exif
+                    }
 
             # All paths in _paths_to_batch are unique — no within-batch dedup needed.
             unique_pairs = path_hash_pairs

@@ -167,7 +167,12 @@ class Settings:
         raw = os.environ.get(key)
         if raw is not None:
             return Path(raw) if raw else None
-        return Path(default) if default else None
+        if not default:
+            return None
+        p = Path(default)
+        if not p.is_absolute() and self._env_file is not None:
+            p = self._env_file.parent / p
+        return p
 
     def _parse_dedup_mode(self) -> str:
         raw = os.environ.get("SFN_DUPLICATE_CHECK_MODE", "hash")
