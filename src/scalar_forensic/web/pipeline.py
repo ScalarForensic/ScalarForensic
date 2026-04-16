@@ -733,7 +733,9 @@ def _query_exact(
         if "not found" in msg or "doesn't exist" in msg:
             logger.debug("Exact query skipped non-existent collection %s", settings.collection)
         else:
-            logger.warning("Exact hash query failed on %s: %s", settings.collection, _query_exact_exc)
+            logger.warning(
+                "Exact hash query failed on %s: %s", settings.collection, _query_exact_exc
+            )
             errors.append(f"exact query failed: {type(_query_exact_exc).__name__}")
         _query_exact_ok = False
 
