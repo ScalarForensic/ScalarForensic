@@ -195,22 +195,10 @@ class _ETATracker:
 
 def _apply_dedup(
     pairs: list[tuple[Path, str]],
-    indexer: Indexer,
-    settings: Settings,
+    indexed_hashes: set[str],
+    indexed_paths: set[str],
 ) -> list[tuple[Path, str]]:
-    """Filter already-indexed images according to the configured dedup mode."""
-    mode = settings.duplicate_check_mode
-    hashes = [h for _, h in pairs]
-    str_paths = [str(p.resolve()) for p, _ in pairs]
-
-    indexed_hashes: set[str] = set()
-    indexed_paths: set[str] = set()
-
-    if mode in ("hash", "both"):
-        indexed_hashes = indexer.get_indexed_hashes(hashes)
-    if mode in ("filepath", "both"):
-        indexed_paths = indexer.get_indexed_paths(str_paths)
-
+    """Filter already-indexed images using pre-loaded hash/path sets."""
     return [
         (p, h)
         for p, h in pairs
@@ -798,6 +786,29 @@ def index(
         result = preprocess_batch(data, cap=cap)
         return result, perf_counter() - t0
 
+    # ── Pre-load all indexed hashes/paths from Qdrant (once per model) ───────
+    # Replaces per-batch scroll queries with a single paginated collection scan,
+    # giving O(1) local set lookups for all subsequent dedup checks.
+    _dedup_hashes: list[set[str]] = []
+    _dedup_paths: list[set[str]] = []
+    if image_paths:
+        mode = settings.duplicate_check_mode
+        typer.echo("Pre-loading dedup index from Qdrant ...")
+        for _, indexer, _ in specs:
+            _dedup_hashes.append(
+                indexer.get_all_indexed_hashes() if mode in ("hash", "both") else set()
+            )
+            _dedup_paths.append(
+                indexer.get_all_indexed_paths() if mode in ("filepath", "both") else set()
+            )
+        typer.echo(
+            "  "
+            + " | ".join(
+                f"{type(emb).__name__}: {len(h):,} hashes"
+                for (emb, _, _), h in zip(specs, _dedup_hashes)
+            )
+        )
+
     with ThreadPoolExecutor(max_workers=1) as _pre_pool:
         for batch_paths in batched(iter(image_paths), settings.batch_size):
             batch_num += 1
@@ -858,8 +869,8 @@ def index(
             # ── Pre-dedup: determine which images actually need work ───────────
             to_embed_per_spec: list[list[tuple[Path, str]]] = []
             needs_embed: set[Path] = set()
-            for _, indexer, _ in specs:
-                te = _apply_dedup(unique_pairs, indexer, settings)
+            for spec_i, _ in enumerate(specs):
+                te = _apply_dedup(unique_pairs, _dedup_hashes[spec_i], _dedup_paths[spec_i])
                 to_embed_per_spec.append(te)
                 needs_embed.update(p for p, _ in te)
 
@@ -919,6 +930,21 @@ def index(
         # Hash each video once and query each model's collection at the video level.
         # If all models already have the video, skip frame extraction entirely.
         # If only some models have it, only those models skip during the batch loop.
+
+        # Pre-load all video info per spec in one scroll pass so per-video checks
+        # are local dict lookups rather than individual Qdrant queries.
+        typer.echo("Pre-loading video index from Qdrant ...")
+        _video_info: list[dict[str, dict]] = [
+            indexer.get_all_video_info() for _, indexer, _ in specs
+        ]
+        typer.echo(
+            "  "
+            + " | ".join(
+                f"{type(emb).__name__}: {len(vi):,} videos"
+                for (emb, _, _), vi in zip(specs, _video_info)
+            )
+        )
+
         pre_hashes: dict[Path, str] = {}  # vpath → sha256
         skip_by_spec: dict[Path, set[int]] = {}  # vpath → spec indices that already have it
 
@@ -938,8 +964,11 @@ def index(
 
             already_in = {
                 spec_idx
-                for spec_idx, (_, indexer, _) in enumerate(specs)
-                if indexer.is_video_complete(vh, settings.video_fps, settings.video_max_frames)
+                for spec_idx, vi in enumerate(_video_info)
+                if (info := vi.get(vh)) is not None
+                and info["extraction_fps"] == settings.video_fps
+                and info["max_frames_cap"] == settings.video_max_frames
+                and info["complete"]
             }
             if already_in:
                 skip_by_spec[vp] = already_in

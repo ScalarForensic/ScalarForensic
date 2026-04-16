@@ -91,53 +91,98 @@ class Indexer:
                 field_schema=PayloadSchemaType.BOOL,
             )
 
-    def get_indexed_hashes(self, hashes: list[str]) -> set[str]:
-        """Return the subset of hashes that are already in the collection."""
-        if not hashes:
-            return set()
-        results, _ = self.client.scroll(
-            collection_name=self.collection,
-            scroll_filter=Filter(
-                should=[FieldCondition(key="image_hash", match=MatchValue(value=h)) for h in hashes]
-            ),
-            limit=len(hashes),
-            with_payload=["image_hash"],
-            with_vectors=False,
-        )
-        return {r.payload["image_hash"] for r in results}
+    def get_all_indexed_hashes(self) -> set[str]:
+        """Return the set of all image_hash values stored in the collection.
 
-    def is_video_complete(
-        self, video_hash: str, extraction_fps: float, max_frames_cap: int
-    ) -> bool:
-        """Return True if this video was previously indexed with matching extraction settings.
-
-        Fetches one stored frame for the given video_hash and compares extraction_fps
-        and max_frames_cap against the current settings.  A mismatch means the video
-        must be re-indexed (e.g. fps increased → more frames expected).
+        Performs a single paginated scroll rather than one query per batch,
+        building an in-memory set for O(1) per-item lookup during ingestion.
         """
-        results, _ = self.client.scroll(
-            collection_name=self.collection,
-            scroll_filter=Filter(
-                must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
-            ),
-            limit=1,
-            with_payload=["extraction_fps", "max_frames_cap", "video_frames_total"],
-            with_vectors=False,
-        )
-        if not results:
-            return False
-        payload = results[0].payload or {}
-        return (
-            payload.get("extraction_fps") == extraction_fps
-            and payload.get("max_frames_cap") == max_frames_cap
-            and "video_frames_total" in payload  # written by mark_video_complete after full index
-        )
+        result: set[str] = set()
+        offset = None
+        while True:
+            records, offset = self.client.scroll(
+                collection_name=self.collection,
+                limit=10_000,
+                with_payload=["image_hash"],
+                with_vectors=False,
+                offset=offset,
+            )
+            for r in records:
+                if r.payload and "image_hash" in r.payload:
+                    result.add(r.payload["image_hash"])
+            if not records or offset is None:
+                break
+        return result
+
+    def get_all_indexed_paths(self) -> set[str]:
+        """Return the set of all image_path values stored in the collection.
+
+        Performs a single paginated scroll rather than one query per batch,
+        building an in-memory set for O(1) per-item lookup during ingestion.
+        """
+        result: set[str] = set()
+        offset = None
+        while True:
+            records, offset = self.client.scroll(
+                collection_name=self.collection,
+                limit=10_000,
+                with_payload=["image_path"],
+                with_vectors=False,
+                offset=offset,
+            )
+            for r in records:
+                if r.payload and "image_path" in r.payload:
+                    result.add(r.payload["image_path"])
+            if not records or offset is None:
+                break
+        return result
+
+    def get_all_video_info(self) -> dict[str, dict]:
+        """Return one payload record per distinct video_hash stored in the collection.
+
+        The returned dict maps ``video_hash → {extraction_fps, max_frames_cap, complete}``
+        where *complete* is True iff ``video_frames_total`` is present in the payload
+        (written by :meth:`mark_video_complete` after a successful full index).
+
+        Performs a single paginated scroll so the caller can do all
+        is_video_complete checks locally without per-video Qdrant queries.
+        """
+        seen: dict[str, dict] = {}
+        offset = None
+        while True:
+            records, offset = self.client.scroll(
+                collection_name=self.collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="is_video_frame", match=MatchValue(value=True))]
+                ),
+                limit=10_000,
+                with_payload=[
+                    "video_hash",
+                    "extraction_fps",
+                    "max_frames_cap",
+                    "video_frames_total",
+                ],
+                with_vectors=False,
+                offset=offset,
+            )
+            for r in records:
+                p = r.payload or {}
+                vh = p.get("video_hash")
+                if vh and vh not in seen:
+                    seen[vh] = {
+                        "extraction_fps": p.get("extraction_fps"),
+                        "max_frames_cap": p.get("max_frames_cap"),
+                        "complete": "video_frames_total" in p,
+                    }
+            if not records or offset is None:
+                break
+        return seen
 
     def mark_video_complete(self, video_hash: str, frame_count: int) -> None:
         """Set video_frames_total on every frame of this video as a completion marker.
 
         Called after all frames have been successfully upserted.  Its absence
-        tells is_video_complete() that a previous run was interrupted and the
+        tells :meth:`get_all_video_info` that a previous run was interrupted and the
         video must be re-indexed.
         """
         self.client.set_payload(
@@ -147,21 +192,6 @@ class Indexer:
                 must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
             ),
         )
-
-    def get_indexed_paths(self, paths: list[str]) -> set[str]:
-        """Return the subset of absolute path strings already stored in the collection."""
-        if not paths:
-            return set()
-        results, _ = self.client.scroll(
-            collection_name=self.collection,
-            scroll_filter=Filter(
-                should=[FieldCondition(key="image_path", match=MatchValue(value=p)) for p in paths]
-            ),
-            limit=len(paths),
-            with_payload=["image_path"],
-            with_vectors=False,
-        )
-        return {r.payload["image_path"] for r in results}
 
     def upsert_batch(
         self,
