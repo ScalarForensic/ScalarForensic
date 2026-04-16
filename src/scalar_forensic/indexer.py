@@ -289,7 +289,7 @@ class Indexer:
             f"{vn}_embedding_dim": shared_metadata["embedding_dim"],
             f"{vn}_normalize_size": shared_metadata["normalize_size"],
             f"{vn}_inference_dtype": shared_metadata["inference_dtype"],
-            f"{vn}_library_versions": shared_metadata["library_versions"],
+            "library_versions": shared_metadata["library_versions"],
             f"{vn}_indexed_at": indexed_at,
             **(
                 {"sscd_n_crops": shared_metadata["sscd_n_crops"]}

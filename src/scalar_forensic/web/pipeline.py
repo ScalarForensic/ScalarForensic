@@ -1045,7 +1045,6 @@ _PROVENANCE_FIELD_NAMES = [
     "model_name",
     "model_hash",
     "indexed_at",
-    "library_versions",
     "inference_dtype",
     "normalize_size",
     "embedding_dim",
@@ -1072,7 +1071,7 @@ def get_hit_qdrant_provenance(image_hash: str, settings: Settings) -> dict[str, 
         # Collect all prefixed field names we want from the payload.
         payload_fields = [
             f"{vn}_{field}" for vn, _ in _VECTOR_MODE_MAP for field in _PROVENANCE_FIELD_NAMES
-        ] + ["sscd_n_crops"]
+        ] + ["sscd_n_crops", "library_versions"]
         records, _ = client.scroll(
             collection_name=settings.collection,
             scroll_filter=Filter(
@@ -1088,6 +1087,7 @@ def get_hit_qdrant_provenance(image_hash: str, settings: Settings) -> dict[str, 
                 mode_data = {field: p.get(f"{vn}_{field}") for field in _PROVENANCE_FIELD_NAMES}
                 # Only include the mode entry if at least one provenance field is populated.
                 if any(v is not None for v in mode_data.values()):
+                    mode_data["library_versions"] = p.get("library_versions")
                     if vn == "sscd":
                         mode_data["sscd_n_crops"] = p.get("sscd_n_crops")
                     result[mode] = mode_data
