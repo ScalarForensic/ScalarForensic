@@ -399,9 +399,8 @@ def index(
         models_to_run.append((False, settings.model_dino, "dino"))
 
     # ── Pass 1: load all embedders upfront so we know every vector's dimension ──
-    # This lets us create the Qdrant collection with all named vectors in one shot.
-    # The qdrant-client library does not support adding named vector types to an
-    # existing collection, so all vector types must be declared at creation time.
+    # When the collection does not yet exist, passing all selected vector types in
+    # a single create_collection call is more efficient than adding them one by one.
     _loaded: list[tuple[AnyEmbedder, str]] = []  # (embedder, vector_name)
     for use_sscd, model_name, vector_name in models_to_run:
         backend_name = "SSCD" if use_sscd else "DINOv2"

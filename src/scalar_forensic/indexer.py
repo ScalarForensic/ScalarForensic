@@ -60,18 +60,16 @@ class Indexer:
                     "Drop it (e.g. via qdrant-client or the Qdrant dashboard) and re-index."
                 )
             if vector_name not in vectors_config:
-                # The qdrant-client library does not expose an API to add new named
-                # vector types to an existing collection without dropping its data.
-                # The caller must create the collection with all desired vector types
-                # upfront by passing initial_vectors_config at construction time.
-                raise ValueError(
-                    f"Collection '{self.collection}' exists but does not have a "
-                    f"'{vector_name}' vector. The Qdrant Python client does not support "
-                    "adding new named vector types to an existing collection. "
-                    "Delete the collection and re-index, passing all desired models "
-                    "in a single run (e.g. sfn --dino --sscd) so the collection is "
-                    "created with all vector types at once."
+                # Qdrant supports adding new named vector types to an existing
+                # collection without touching existing data.  This enables
+                # incremental indexing: index --dino in one run, add --sscd later.
+                self.client.update_collection(
+                    collection_name=self.collection,
+                    vectors_config={
+                        vector_name: VectorParams(size=dim, distance=Distance.COSINE)
+                    },
                 )
+                info = self.client.get_collection(self.collection)
             else:
                 existing_dim = vectors_config[vector_name].size
                 if existing_dim != dim:
