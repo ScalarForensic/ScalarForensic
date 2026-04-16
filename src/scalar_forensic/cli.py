@@ -77,7 +77,7 @@ class _BatchCtx:
     to_embed_per_spec: list[list[tuple[Path, str]]]
     exif_data: "dict[Path, ExifInfo] | None"
     paths_to_pre: list[Path]
-    pre_future: "Future[list] | None"  # Future[list[Image.Image | Exception]]
+    pre_future: "Future[tuple[list, float]] | None"  # tuple[list[Image.Image | Exception], float]
 
 
 def _fmt_rate(count: int, seconds: float, unit: str) -> str:
@@ -597,10 +597,10 @@ def index(
         t_finish = perf_counter()
 
         # ── Wait for preprocessing (usually already done while GPU ran) ───────
-        pre_results: list[Image.Image | Exception] = (
-            ctx.pre_future.result() if ctx.pre_future is not None else []
-        )
-        pre_s = perf_counter() - t_finish  # ≈ 0 when GPU was the bottleneck
+        # pre_s is the actual CPU preprocessing time recorded inside the worker;
+        # the future itself resolves instantly when GPU is the bottleneck.
+        pre_results: list[Image.Image | Exception]
+        pre_results, pre_s = ctx.pre_future.result() if ctx.pre_future is not None else ([], 0.0)
 
         pre_by_path: dict[Path, Image.Image] = {}
         for p, result in zip(ctx.paths_to_pre, pre_results, strict=True):
@@ -792,6 +792,12 @@ def index(
                         f"  {sep}"
                     )
 
+    def _timed_preprocess(data: list[bytes], cap: int) -> tuple[list, float]:
+        """Run preprocess_batch and return (results, elapsed_s) for display."""
+        t0 = perf_counter()
+        result = preprocess_batch(data, cap=cap)
+        return result, perf_counter() - t0
+
     with ThreadPoolExecutor(max_workers=1) as _pre_pool:
         for batch_paths in batched(iter(image_paths), settings.batch_size):
             batch_num += 1
@@ -869,8 +875,8 @@ def index(
             # Cap so DINOv2 gets its configured resolution and SSCD ≥ 331 px.
             paths_to_pre = [p for p, _ in unique_pairs if p in needs_pre]
             bytes_to_pre = [data_by_path[p] for p in paths_to_pre]
-            pre_future: Future[list] | None = (
-                _pre_pool.submit(preprocess_batch, bytes_to_pre, cap=_effective_cap)
+            pre_future: Future[tuple[list, float]] | None = (
+                _pre_pool.submit(_timed_preprocess, bytes_to_pre, _effective_cap)
                 if paths_to_pre
                 else None
             )
