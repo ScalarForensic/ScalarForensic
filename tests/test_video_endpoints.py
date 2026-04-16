@@ -374,8 +374,9 @@ class TestHitMetadataFramePath:
         assert body["frame_timecode_ms"] == 1000
 
     def test_non_frame_path_under_input_dir_returns_image_metadata(self, client, tmp_path):
-        from PIL import Image
         import io
+
+        from PIL import Image
 
         img_buf = io.BytesIO()
         Image.new("RGB", (8, 8)).save(img_buf, format="JPEG")
