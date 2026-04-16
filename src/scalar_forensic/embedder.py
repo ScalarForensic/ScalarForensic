@@ -237,7 +237,7 @@ def _cap_short_side(img: Image.Image, cap: int = _SHARED_CAP) -> Image.Image:
 def preprocess_batch(
     image_data: list[bytes], cap: int = _SHARED_CAP
 ) -> list[Image.Image | Exception]:
-    """Open RGB (with ICC and EXIF corrections), cap short side to *cap* px.
+    """Open RGB (with EXIF orientation correction), cap short side to *cap* px.
 
     Parallelised over CPU cores.  Returns one entry per input image: an
     ``Image.Image`` on success or the raised ``Exception`` on failure.
@@ -387,8 +387,11 @@ def _sscd_resize(img: Image.Image) -> Image.Image:
     short = min(w, h)
     if short == _SSCD_SCALE:
         return img
-    scale = _SSCD_SCALE / short
-    return img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
+    if w <= h:
+        new_w, new_h = _SSCD_SCALE, round(h * _SSCD_SCALE / w)
+    else:
+        new_w, new_h = round(w * _SSCD_SCALE / h), _SSCD_SCALE
+    return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
 
 def _sscd_crops(img: Image.Image, n_crops: int) -> list[Image.Image]:

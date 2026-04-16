@@ -2,8 +2,7 @@
 
 Covers:
   - _open_rgb: EXIF orientation correction
-  - _open_rgb: ICC colour-profile → sRGB conversion
-  - _open_rgb: graceful fallback on malformed ICC data
+  - _open_rgb: ICC colour-profile metadata is ignored (no conversion)
   - _cap_short_side: cap parameter behaviour
   - preprocess_batch / preprocess_pil_batch: cap forwarding
   - _sscd_crops: crop count and dimensions

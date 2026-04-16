@@ -150,12 +150,11 @@ Images are PNG-encoded (lossless) before base64 transmission. This prevents DCT 
 
 ## Breaking Changes
 
-All five improvements introduced in this pipeline revision alter embedding values:
+All four improvements introduced in this pipeline revision alter embedding values:
 
 | Change | Affected images | Effect |
 |---|---|---|
 | EXIF orientation correction | Any image with non-trivial EXIF Orientation tag | Embeddings now match the display orientation |
-| ICC profile conversion | Images with non-sRGB ICC profiles | Colour values now correspond to sRGB appearance |
 | DINOv2 resolution wired in | All images (processor now respects SFN_NORMALIZE_SIZE; default 224 px) | Embeddings now match configured resolution |
 | SSCD crop restructuring | No change for n_crops=1; new capability for n_crops=5 | Multi-crop embeddings are averaged |
 | Remote PNG encoding | Images sent to remote endpoints | No re-compression artefacts |
