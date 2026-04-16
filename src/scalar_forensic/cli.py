@@ -770,12 +770,10 @@ def index(
         HashCache(settings.hash_cache_path) if settings.hash_cache_path is not None else None
     )
 
-    # ── Pre-load all indexed hashes/paths from Qdrant (once per model) ───────
-    # Single paginated scroll per model builds in-memory sets for O(1) lookups.
+    # ── Pre-load Qdrant dedup indices ─────────────────────────────────────────
     _dedup_hashes: list[set[str]] = []
     _dedup_paths: list[set[str]] = []
-    _needs_per_spec: list[set[Path]] = []
-    _paths_to_batch: list[Path] = []
+    _video_info: list[dict[str, dict]] = []
 
     if image_paths:
         _mode = settings.duplicate_check_mode
@@ -795,16 +793,36 @@ def index(
             )
         )
 
-        # ── Parallel upfront hash pass ────────────────────────────────────────
-        # Hash every image file in parallel, then compute the diff against the
-        # pre-loaded Qdrant sets.  Only files needing embedding enter the batch
-        # loop — already-indexed files never get read again.
-        # A persistent HashCache skips the disk read entirely for files whose
-        # (path, mtime_ns, size) tuple is unchanged since the last run.
-        _file_hashes: dict[Path, str] = {}  # path → sha256
-        typer.echo(f"Hashing {len(image_paths):,} image files ...")
-        _t_hash0 = perf_counter()
+    if video_paths:
+        typer.echo("Pre-loading video index from Qdrant ...")
+        _video_info = [indexer.get_all_video_info() for _, indexer, _ in specs]
+        typer.echo(
+            "  "
+            + " | ".join(
+                f"{type(emb).__name__}: {len(vi):,} videos"
+                for (emb, _, _), vi in zip(specs, _video_info)
+            )
+        )
 
+    # ── Upfront hash pass (images + videos) ──────────────────────────────────
+    # Hash every file before any embedding so the full dedup picture is known
+    # upfront.  The HashCache skips the disk read for unchanged files on
+    # subsequent runs.  Images are hashed in parallel; videos sequentially
+    # (few files, often large — parallel read would thrash the drive).
+    _file_hashes: dict[Path, str] = {}  # image path → sha256
+    _pre_hashes: dict[Path, str] = {}   # video path → sha256
+    _n_cache_hits = 0
+
+    _hash_label_parts = []
+    if image_paths:
+        _hash_label_parts.append(f"{len(image_paths):,} image files")
+    if video_paths:
+        _hash_label_parts.append(f"{len(video_paths):,} video files")
+    if _hash_label_parts:
+        typer.echo(f"Hashing {' and '.join(_hash_label_parts)} ...")
+    _t_hash0 = perf_counter()
+
+    if image_paths:
         def _hash_one(p: Path) -> tuple[Path, str | None, str | None, bool]:
             try:
                 if _hash_cache is not None:
@@ -814,7 +832,6 @@ def index(
             except OSError as exc:
                 return p, None, str(exc), False
 
-        _n_cache_hits = 0
         _n_hash_workers = min(32, (os.cpu_count() or 4) * 2)
         with ThreadPoolExecutor(max_workers=_n_hash_workers) as _hpool:
             for _p, _sha, _err, _cached in _hpool.map(_hash_one, image_paths):
@@ -827,6 +844,35 @@ def index(
                     if _cached:
                         _n_cache_hits += 1
 
+    for _vp in video_paths:
+        _vrec = records[_vp]
+        try:
+            if _hash_cache is not None:
+                _vh, _vm, _vcached = _hash_cache.get_or_hash_both(_vp)
+            else:
+                _vh, _vm = hash_file_both(_vp)
+                _vcached = False
+            if _vcached:
+                _n_cache_hits += 1
+        except OSError as _exc:
+            typer.echo(f"[WARN] Cannot read video {_vp.name}: {_exc}", err=True)
+            _vrec.status = _S_FAIL_READ
+            _vrec.reason = f"read error: {_exc}"
+            continue
+        _vrec.sha256 = _vh
+        _vrec.md5 = _vm
+        _pre_hashes[_vp] = _vh
+
+    _hash_elapsed = perf_counter() - _t_hash0
+
+    # ── Image dedup ───────────────────────────────────────────────────────────
+    _needs_per_spec: list[set[Path]] = []
+    _paths_to_batch: list[Path] = []
+    _any_needs: set[Path] = set()
+    _n_run_dups = 0
+    _n_all_indexed = 0
+
+    if image_paths:
         # Global within-run hash dedup (first occurrence of each hash wins).
         _unique_by_hash: dict[str, Path] = {}
         for _p, _sha in _file_hashes.items():
@@ -847,7 +893,7 @@ def index(
             }
             for si in range(len(specs))
         ]
-        _any_needs: set[Path] = set().union(*_needs_per_spec) if specs else set()
+        _any_needs = set().union(*_needs_per_spec) if specs else set()
 
         # Files unique in this run but already indexed in every model → skip.
         for _p in _winners:
@@ -864,20 +910,55 @@ def index(
         # Build the ordered list of paths that actually need processing.
         _paths_to_batch = [p for p in image_paths if p in _any_needs]
 
-        _hash_elapsed = perf_counter() - _t_hash0
+    # ── Video dedup ───────────────────────────────────────────────────────────
+    _skip_by_spec: dict[Path, set[int]] = {}
+    _videos_to_process: list[Path] = []
+
+    for _vp, _vh in _pre_hashes.items():
+        _already_in = {
+            _si
+            for _si, _vi in enumerate(_video_info)
+            if (_vinfo := _vi.get(_vh)) is not None
+            and _vinfo["extraction_fps"] == settings.video_fps
+            and _vinfo["max_frames_cap"] == settings.video_max_frames
+            and _vinfo["complete"]
+        }
+        if _already_in:
+            _skip_by_spec[_vp] = _already_in
+        if len(_already_in) == len(specs):
+            records[_vp].status = _S_SKIP_IDX
+            records[_vp].reason = "video already indexed"
+
+    _videos_to_process = [
+        vp
+        for vp in video_paths
+        if vp in _pre_hashes and records[vp].status not in (_S_FAIL_READ, _S_SKIP_IDX)
+    ]
+
+    # ── Hash pass summary ─────────────────────────────────────────────────────
+    if _hash_label_parts:
         _cache_hits_str = (
-            f"  │  {_n_cache_hits:,} cache hits  {len(_file_hashes) - _n_cache_hits:,} hashed"
+            f"  │  {_n_cache_hits:,} cache hits"
+            f"  {(len(_file_hashes) + len(_pre_hashes)) - _n_cache_hits:,} hashed"
             if _hash_cache is not None
             else ""
         )
-        typer.echo(
-            f"  {len(_file_hashes):,} files in {_hash_elapsed:.1f}s"
-            f"{_cache_hits_str}"
-            f"  │  {len(_any_needs):,} to embed"
-            f"  │  {_n_run_dups:,} run-dups"
-            f"  │  {_n_all_indexed:,} already indexed"
-            f"  │  {len(image_paths) - len(_file_hashes):,} read errors"
-        )
+        if image_paths:
+            typer.echo(
+                f"  {len(_file_hashes):,} images in {_hash_elapsed:.1f}s"
+                f"{_cache_hits_str}"
+                f"  │  {len(_any_needs):,} to embed"
+                f"  │  {_n_run_dups:,} run-dups"
+                f"  │  {_n_all_indexed:,} already indexed"
+                f"  │  {len(image_paths) - len(_file_hashes):,} read errors"
+            )
+        if video_paths:
+            typer.echo(
+                f"  {len(_pre_hashes):,} videos"
+                + ("" if image_paths else f" in {_hash_elapsed:.1f}s{_cache_hits_str}")
+                + f"  │  {len(_videos_to_process):,} to process"
+                f"  │  {len(video_paths) - len(_pre_hashes):,} read errors"
+            )
 
     total_image_count = len(_paths_to_batch)
     if total_image_count > 0:
@@ -994,78 +1075,23 @@ def index(
 
     if video_paths:
         pyav_version = get_pyav_version()
-        typer.echo(f"\nProcessing {len(video_paths):,} video file(s) (PyAV {pyav_version}) ...")
-
-        # ── Pre-check: skip videos already fully indexed ───────────────────────
-        # Hash each video once and query each model's collection at the video level.
-        # If all models already have the video, skip frame extraction entirely.
-        # If only some models have it, only those models skip during the batch loop.
-
-        # Pre-load all video info per spec in one scroll pass so per-video checks
-        # are local dict lookups rather than individual Qdrant queries.
-        typer.echo("Pre-loading video index from Qdrant ...")
-        _video_info: list[dict[str, dict]] = [
-            indexer.get_all_video_info() for _, indexer, _ in specs
-        ]
         typer.echo(
-            "  "
-            + " | ".join(
-                f"{type(emb).__name__}: {len(vi):,} videos"
-                for (emb, _, _), vi in zip(specs, _video_info)
-            )
+            f"\nProcessing {len(_videos_to_process):,} / {len(video_paths):,}"
+            f" video file(s) (PyAV {pyav_version}) ..."
         )
 
-        pre_hashes: dict[Path, str] = {}  # vpath → sha256
-        skip_by_spec: dict[Path, set[int]] = {}  # vpath → spec indices that already have it
-
-        for vp in video_paths:
-            rec = records[vp]
-            try:
-                if _hash_cache is not None:
-                    vh, vm, _ = _hash_cache.get_or_hash_both(vp)
-                else:
-                    vh, vm = hash_file_both(vp)
-            except OSError as exc:
-                typer.echo(f"[WARN] Cannot read video {vp.name}: {exc}", err=True)
-                rec.status = _S_FAIL_READ
-                rec.reason = f"read error: {exc}"
-                continue
-            rec.sha256 = vh
-            rec.md5 = vm
-            pre_hashes[vp] = vh
-
-            already_in = {
-                spec_idx
-                for spec_idx, vi in enumerate(_video_info)
-                if (info := vi.get(vh)) is not None
-                and info["extraction_fps"] == settings.video_fps
-                and info["max_frames_cap"] == settings.video_max_frames
-                and info["complete"]
-            }
-            if already_in:
-                skip_by_spec[vp] = already_in
-            if len(already_in) == len(specs):
-                rec.status = _S_SKIP_IDX
-                rec.reason = "video already indexed"
-
-        videos_to_process = [
-            vp
-            for vp in video_paths
-            if vp in pre_hashes and records[vp].status not in (_S_FAIL_READ, _S_SKIP_IDX)
-        ]
-
         # Per-video frame counters — only for videos being processed this run.
-        vf_total: dict[Path, int] = {vp: 0 for vp in videos_to_process}
-        vf_indexed: dict[Path, int] = {vp: 0 for vp in videos_to_process}
-        vf_skipped: dict[Path, int] = {vp: 0 for vp in videos_to_process}
+        vf_total: dict[Path, int] = {vp: 0 for vp in _videos_to_process}
+        vf_indexed: dict[Path, int] = {vp: 0 for vp in _videos_to_process}
+        vf_skipped: dict[Path, int] = {vp: 0 for vp in _videos_to_process}
         # Per-spec, per-video indexed counts — used after the batch loop to
         # call mark_video_complete() only for specs that fully indexed a video.
         vf_indexed_by_spec: dict[int, dict[Path, int]] = {
-            si: {vp: 0 for vp in videos_to_process} for si in range(len(specs))
+            si: {vp: 0 for vp in _videos_to_process} for si in range(len(specs))
         }
 
         for raw_frame_batch in batched(
-            _frame_stream(videos_to_process, records, settings, pyav_version, pre_hashes),
+            _frame_stream(_videos_to_process, records, settings, pyav_version, _pre_hashes),
             settings.batch_size,
         ):
             batch_num += 1
@@ -1119,7 +1145,7 @@ def index(
                 to_embed_idx = [
                     i
                     for i in range(n_items)
-                    if spec_idx not in skip_by_spec.get(source_vpaths[i], set())
+                    if spec_idx not in _skip_by_spec.get(source_vpaths[i], set())
                 ]
                 n_skipped = n_items - len(to_embed_idx)
                 skipped_counts[spec_idx] += n_skipped
@@ -1238,12 +1264,12 @@ def index(
         # upserted by a given spec.  Writes video_frames_total onto every frame
         # payload so is_video_complete() can distinguish a finished index from
         # an interrupted partial one.
-        for vp in videos_to_process:
+        for vp in _videos_to_process:
             total = vf_total.get(vp, 0)
             if total == 0:
                 continue
-            vh = pre_hashes[vp]
-            already_done = skip_by_spec.get(vp, set())
+            vh = _pre_hashes[vp]
+            already_done = _skip_by_spec.get(vp, set())
             for spec_idx, (_, indexer, _) in enumerate(specs):
                 if spec_idx in already_done:
                     continue  # was complete before this run
