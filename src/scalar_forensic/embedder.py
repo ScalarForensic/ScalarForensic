@@ -6,7 +6,9 @@ import importlib.metadata
 import io
 import json
 import os
+import sqlite3
 import sys
+import threading
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -124,6 +126,111 @@ def hash_file_md5(path: Path, chunk_size: int = 1 << 20) -> str:
                 break
             h.update(buf)
     return h.hexdigest()
+
+
+def hash_file_both(path: Path, chunk_size: int = 1 << 20) -> tuple[str, str]:
+    """Return ``(sha256, md5)`` hex digests of a file in a single read pass."""
+    h_sha = hashlib.sha256()
+    h_md5 = hashlib.md5()  # noqa: S324
+    with path.open("rb") as fh:
+        while True:
+            buf = fh.read(chunk_size)
+            if not buf:
+                break
+            h_sha.update(buf)
+            h_md5.update(buf)
+    return h_sha.hexdigest(), h_md5.hexdigest()
+
+
+class HashCache:
+    """Persistent SHA-256 cache keyed by (absolute-path, mtime_ns, size).
+
+    On construction the entire table is loaded into an in-memory dict so every
+    lookup is a plain dict.get — no SQLite round-trip per file.  New entries
+    are collected in a pending list and flushed to disk in one bulk INSERT
+    transaction by flush() / close(), so there is no per-file I/O overhead
+    during the parallel hash pass.
+
+    Thread-safety: reads use an unsynchronised dict.get (GIL-safe in CPython).
+    Writes hold a lock.  Two threads racing on the same cold key will both
+    compute the hash and the second write silently overwrites with the same
+    value — harmless.
+
+    Disable the cache at runtime by setting SFN_HASH_CACHE_PATH= (empty).
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS file_hashes (
+                path     TEXT    NOT NULL PRIMARY KEY,
+                mtime_ns INTEGER NOT NULL,
+                size     INTEGER NOT NULL,
+                sha256   TEXT    NOT NULL,
+                md5      TEXT    NOT NULL DEFAULT ''
+            )"""
+        )
+        self._conn.commit()
+        rows = self._conn.execute("SELECT path, mtime_ns, size, sha256, md5 FROM file_hashes")
+        self._mem: dict[str, tuple[int, int, str, str]] = {
+            r[0]: (r[1], r[2], r[3], r[4]) for r in rows
+        }
+        self._pending: list[tuple[str, int, int, str, str]] = []
+        self._lock = threading.Lock()
+
+    def get_or_hash(self, path: Path) -> tuple[str, bool]:
+        """Return ``(sha256, was_cached)``.  Thread-safe.
+
+        MD5 is computed alongside SHA-256 at no extra I/O cost and stored in
+        the cache so that ``get_or_hash_both`` can serve it without a disk read.
+        """
+        key = str(path)
+        st = path.stat()
+        mtime_ns: int = st.st_mtime_ns
+        size: int = st.st_size
+        entry = self._mem.get(key)
+        if entry is not None and entry[0] == mtime_ns and entry[1] == size:
+            return entry[2], True
+        sha, md5 = hash_file_both(path)
+        with self._lock:
+            self._mem[key] = (mtime_ns, size, sha, md5)
+            self._pending.append((key, mtime_ns, size, sha, md5))
+        return sha, False
+
+    def get_or_hash_both(self, path: Path) -> tuple[str, str, bool]:
+        """Return ``(sha256, md5, was_cached)``.  Thread-safe."""
+        key = str(path)
+        st = path.stat()
+        mtime_ns: int = st.st_mtime_ns
+        size: int = st.st_size
+        entry = self._mem.get(key)
+        if entry is not None and entry[0] == mtime_ns and entry[1] == size and entry[3]:
+            return entry[2], entry[3], True
+        sha, md5 = hash_file_both(path)
+        with self._lock:
+            self._mem[key] = (mtime_ns, size, sha, md5)
+            self._pending.append((key, mtime_ns, size, sha, md5))
+        return sha, md5, False
+
+    def flush(self) -> int:
+        """Persist pending entries to SQLite.  Returns the number of rows written."""
+        with self._lock:
+            pending, self._pending = self._pending, []
+        if not pending:
+            return 0
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO file_hashes (path, mtime_ns, size, sha256, md5)"
+            " VALUES (?,?,?,?,?)",
+            pending,
+        )
+        self._conn.commit()
+        return len(pending)
+
+    def close(self) -> None:
+        self.flush()
+        self._conn.close()
 
 
 class ExifInfo(TypedDict):

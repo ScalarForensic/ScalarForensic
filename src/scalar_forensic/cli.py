@@ -19,11 +19,13 @@ from scalar_forensic.embedder import (
     _SSCD_SCALE,
     AnyEmbedder,
     ExifInfo,
+    HashCache,
     SSCDEmbedder,
     extract_exif,
     get_library_versions,
     hash_bytes_md5,
     hash_file,
+    hash_file_both,
     hash_file_md5,
     load_embedder,
     preprocess_batch,
@@ -763,6 +765,11 @@ def index(
         result = preprocess_batch(data, cap=cap)
         return result, perf_counter() - t0
 
+    # ── Persistent hash cache (shared across image and video passes) ─────────
+    _hash_cache: HashCache | None = (
+        HashCache(settings.hash_cache_path) if settings.hash_cache_path is not None else None
+    )
+
     # ── Pre-load all indexed hashes/paths from Qdrant (once per model) ───────
     # Single paginated scroll per model builds in-memory sets for O(1) lookups.
     _dedup_hashes: list[set[str]] = []
@@ -792,25 +799,33 @@ def index(
         # Hash every image file in parallel, then compute the diff against the
         # pre-loaded Qdrant sets.  Only files needing embedding enter the batch
         # loop — already-indexed files never get read again.
+        # A persistent HashCache skips the disk read entirely for files whose
+        # (path, mtime_ns, size) tuple is unchanged since the last run.
         _file_hashes: dict[Path, str] = {}  # path → sha256
         typer.echo(f"Hashing {len(image_paths):,} image files ...")
         _t_hash0 = perf_counter()
 
-        def _hash_one(p: Path) -> tuple[Path, str | None, str | None]:
+        def _hash_one(p: Path) -> tuple[Path, str | None, str | None, bool]:
             try:
-                return p, hash_file(p), None
+                if _hash_cache is not None:
+                    sha, cached = _hash_cache.get_or_hash(p)
+                    return p, sha, None, cached
+                return p, hash_file(p), None, False
             except OSError as exc:
-                return p, None, str(exc)
+                return p, None, str(exc), False
 
+        _n_cache_hits = 0
         _n_hash_workers = min(32, (os.cpu_count() or 4) * 2)
         with ThreadPoolExecutor(max_workers=_n_hash_workers) as _hpool:
-            for _p, _sha, _err in _hpool.map(_hash_one, image_paths):
+            for _p, _sha, _err, _cached in _hpool.map(_hash_one, image_paths):
                 if _err:
                     records[_p].status = _S_FAIL_READ
                     records[_p].reason = f"read error: {_err}"
                 else:
                     _file_hashes[_p] = _sha
                     records[_p].sha256 = _sha
+                    if _cached:
+                        _n_cache_hits += 1
 
         # Global within-run hash dedup (first occurrence of each hash wins).
         _unique_by_hash: dict[str, Path] = {}
@@ -850,8 +865,14 @@ def index(
         _paths_to_batch = [p for p in image_paths if p in _any_needs]
 
         _hash_elapsed = perf_counter() - _t_hash0
+        _cache_hits_str = (
+            f"  │  {_n_cache_hits:,} cache hits  {len(_file_hashes) - _n_cache_hits:,} hashed"
+            if _hash_cache is not None
+            else ""
+        )
         typer.echo(
-            f"  {len(_file_hashes):,} hashed in {_hash_elapsed:.1f}s"
+            f"  {len(_file_hashes):,} files in {_hash_elapsed:.1f}s"
+            f"{_cache_hits_str}"
             f"  │  {len(_any_needs):,} to embed"
             f"  │  {_n_run_dups:,} run-dups"
             f"  │  {_n_all_indexed:,} already indexed"
@@ -1000,8 +1021,10 @@ def index(
         for vp in video_paths:
             rec = records[vp]
             try:
-                vh = hash_file(vp)
-                vm = hash_file_md5(vp)
+                if _hash_cache is not None:
+                    vh, vm, _ = _hash_cache.get_or_hash_both(vp)
+                else:
+                    vh, vm = hash_file_both(vp)
             except OSError as exc:
                 typer.echo(f"[WARN] Cannot read video {vp.name}: {exc}", err=True)
                 rec.status = _S_FAIL_READ
@@ -1246,6 +1269,11 @@ def index(
             else:
                 rec.status = _S_FAIL_EMB
                 rec.reason = f"{total} frames extracted but no new vectors were indexed"
+
+    # ── Flush and close hash cache ────────────────────────────────────────────
+    if _hash_cache is not None:
+        _hash_cache.flush()
+        _hash_cache.close()
 
     # ── Write CSV report ──────────────────────────────────────────────────────
     _write_csv(records, csv_path)

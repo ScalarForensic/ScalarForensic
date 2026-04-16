@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 
 _VALID_DEDUP_MODES = frozenset({"hash", "filepath", "both"})
 
+_DEFAULT_HASH_CACHE_PATH = str(Path.home() / ".cache" / "sfn" / "hash_cache.db")
+
 
 class Settings:
     """All SFN_* runtime settings.
@@ -91,6 +93,15 @@ class Settings:
         self.video_max_frames: int = self._parse_int("SFN_VIDEO_MAX_FRAMES", 500)
         if self.video_max_frames < 0:
             raise ValueError("SFN_VIDEO_MAX_FRAMES must be >= 0 (use 0 for no cap)")
+
+        # --- Hash cache ---
+        # Persistent on-disk SHA-256 cache keyed by (path, mtime_ns, size).
+        # Eliminates redundant disk reads for files whose content has not changed
+        # since the last indexing run.  Defaults to ~/.cache/sfn/hash_cache.db.
+        # Set SFN_HASH_CACHE_PATH= (empty) to disable.
+        self.hash_cache_path: Path | None = self._parse_optional_path(
+            "SFN_HASH_CACHE_PATH", _DEFAULT_HASH_CACHE_PATH
+        )
 
         # --- SSCD multi-crop ensemble ---
         # SFN_SSCD_N_CROPS controls how many spatial crops are taken per image when
