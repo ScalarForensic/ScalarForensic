@@ -170,8 +170,11 @@ class Settings:
         if not default:
             return None
         p = Path(default)
-        if not p.is_absolute() and self._env_file is not None:
-            p = self._env_file.parent / p
+        if not p.is_absolute():
+            if self._env_file is not None:
+                p = self._env_file.parent / p
+            else:
+                p = Path.cwd() / p
         return p
 
     def _parse_dedup_mode(self) -> str:
