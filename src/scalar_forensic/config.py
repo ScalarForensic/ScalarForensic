@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 _VALID_DEDUP_MODES = frozenset({"hash", "filepath", "both"})
 
-_DEFAULT_HASH_CACHE_PATH = str(Path.home() / ".cache" / "sfn" / "hash_cache.db")
+_DEFAULT_HASH_CACHE_PATH = "data/hash_cache.db"
 
 
 class Settings:
