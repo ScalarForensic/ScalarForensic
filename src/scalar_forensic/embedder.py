@@ -200,7 +200,7 @@ def _resolve_device(device: str) -> str:
 
 
 _EXIF_ORIENTATION_TAG = 0x0112  # EXIF tag 274
-_EXIF_ORIENTATION_FORMATS = frozenset({"JPEG", "TIFF", "WEBP", "MPO"})
+_EXIF_ORIENTATION_FORMATS = frozenset({"JPEG", "TIFF", "WEBP", "MPO", "HEIF"})
 
 
 def _open_rgb(data: bytes, cap: int = _SHARED_CAP) -> Image.Image:
@@ -381,7 +381,9 @@ class DINOv2Embedder:
             inputs = {k: v.half() if v.is_floating_point() else v for k, v in inputs.items()}
         with torch.no_grad():
             outputs = self.model(**inputs)
-        return outputs.last_hidden_state[:, 0, :].float().cpu().tolist()
+        cls = outputs.last_hidden_state[:, 0, :].float()
+        cls = F.normalize(cls, p=2, dim=1)
+        return cls.cpu().tolist()
 
 
 # ---------------------------------------------------------------------------
