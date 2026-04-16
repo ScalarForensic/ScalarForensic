@@ -296,9 +296,7 @@ class Hit:
     # Dedup set for query_timecodes — kept in sync with the list for O(1)
     # membership tests during the merge pass.  Excluded from repr and compare
     # so it is invisible to callers that iterate over Hit fields.
-    _query_timecodes_seen: set[int] = field(
-        default_factory=set, repr=False, compare=False
-    )
+    _query_timecodes_seen: set[int] = field(default_factory=set, repr=False, compare=False)
 
     def best_score(self) -> float:
         return max(self.scores.values(), default=0.0)

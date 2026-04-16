@@ -649,9 +649,7 @@ def index(
         upsert_jobs: list = []
 
         for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
-            to_embed = [
-                (p, h) for p, h in ctx.to_embed_per_spec[spec_idx] if p not in pre_failures
-            ]
+            to_embed = [(p, h) for p, h in ctx.to_embed_per_spec[spec_idx] if p not in pre_failures]
             n_skipped = duplicate_skips_in_batch + (len(unique_pairs) - len(to_embed))
             skipped_counts[spec_idx] += n_skipped
 
@@ -821,9 +819,7 @@ def index(
 
             # ── Hash (shared) ─────────────────────────────────────────────────
             t0 = perf_counter()
-            path_hash_pairs_full = [
-                (p, hash_bytes(data), hash_bytes_md5(data)) for p, data in raw
-            ]
+            path_hash_pairs_full = [(p, hash_bytes(data), hash_bytes_md5(data)) for p, data in raw]
             path_hash_pairs = [(p, sha) for p, sha, _ in path_hash_pairs_full]
             md5_by_sha256 = {sha: md5 for _, sha, md5 in path_hash_pairs_full}
             hash_s = perf_counter() - t0
@@ -837,9 +833,7 @@ def index(
             exif_data: dict[Path, ExifInfo] | None = None
             if settings.extract_exif:
                 data_by_path_for_exif = {p: data for p, data in raw}
-                exif_data = {
-                    p: extract_exif(data_by_path_for_exif[p]) for p, _ in path_hash_pairs
-                }
+                exif_data = {p: extract_exif(data_by_path_for_exif[p]) for p, _ in path_hash_pairs}
 
             # ── Within-batch hash dedup ───────────────────────────────────────
             unique_path_by_hash: dict[str, Path] = {}
