@@ -143,7 +143,7 @@ def hash_file_both(path: Path, chunk_size: int = 1 << 20) -> tuple[str, str]:
 
 
 class HashCache:
-    """Persistent SHA-256 cache keyed by (absolute-path, mtime_ns, size).
+    """Persistent SHA-256 cache keyed by (normalized absolute real-path, mtime_ns, size).
 
     On construction the entire table is loaded into an in-memory dict so every
     lookup is a plain dict.get — no SQLite round-trip per file.  New entries
@@ -158,6 +158,11 @@ class HashCache:
 
     Disable the cache at runtime by setting SFN_HASH_CACHE_PATH= (empty).
     """
+
+    @staticmethod
+    def _cache_key(path: Path) -> str:
+        """Return a stable, normalized absolute path string for use as a cache key."""
+        return str(path.resolve())
 
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -186,7 +191,7 @@ class HashCache:
         MD5 is computed alongside SHA-256 at no extra I/O cost and stored in
         the cache so that ``get_or_hash_both`` can serve it without a disk read.
         """
-        key = str(path)
+        key = self._cache_key(path)
         st = path.stat()
         mtime_ns: int = st.st_mtime_ns
         size: int = st.st_size
@@ -201,7 +206,7 @@ class HashCache:
 
     def get_or_hash_both(self, path: Path) -> tuple[str, str, bool]:
         """Return ``(sha256, md5, was_cached)``.  Thread-safe."""
-        key = str(path)
+        key = self._cache_key(path)
         st = path.stat()
         mtime_ns: int = st.st_mtime_ns
         size: int = st.st_size

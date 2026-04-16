@@ -1296,9 +1296,23 @@ def index(
                 rec.status = _S_FAIL_EMB
                 rec.reason = f"{total} frames extracted but no new vectors were indexed"
 
-    # ── Flush and close hash cache ────────────────────────────────────────────
+    # ── Reclassify run-duplicates whose winner failed preprocessing ───────────
+    # Non-winners are marked _S_SKIP_DUP upfront and never enter any batch, so
+    # _finish_batch cannot reclassify them.  Do a single post-batch pass here.
+    if image_paths and _file_hashes:
+        _fail_pre_hashes = {
+            _file_hashes[p]
+            for p in _file_hashes
+            if records[p].status == _S_FAIL_PRE
+        }
+        if _fail_pre_hashes:
+            for _p, _sha in _file_hashes.items():
+                if _sha in _fail_pre_hashes and records[_p].status == _S_SKIP_DUP:
+                    records[_p].status = _S_FAIL_PRE
+                    records[_p].reason = "duplicate of image that failed preprocessing"
+
+    # ── Close hash cache (close() performs the final flush) ──────────────────
     if _hash_cache is not None:
-        _hash_cache.flush()
         _hash_cache.close()
 
     # ── Write CSV report ──────────────────────────────────────────────────────
