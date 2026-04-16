@@ -13,6 +13,7 @@ from time import perf_counter
 
 import typer
 from PIL import Image
+from qdrant_client.models import Distance, VectorParams
 
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import (
@@ -390,16 +391,18 @@ def index(
     # Resolve the CSV report path early so the user knows where it will land.
     csv_path = report or Path(f"sfn_ingestion_{datetime.now():%Y%m%d_%H%M%S}.csv")
 
-    # Build list of (use_sscd, model_name, collection_name) for each requested backend.
+    # Build list of (use_sscd, model_name, vector_name) for each requested backend.
     models_to_run: list[tuple[bool, str, str]] = []
     if sscd:
-        models_to_run.append((True, settings.model_sscd, settings.collection_sscd))
+        models_to_run.append((True, settings.model_sscd, "sscd"))
     if dino:
-        models_to_run.append((False, settings.model_dino, settings.collection_dino))
+        models_to_run.append((False, settings.model_dino, "dino"))
 
-    # Load all models upfront — fail fast before scanning.
-    specs: list[tuple[AnyEmbedder, Indexer, str]] = []
-    for use_sscd, model_name, collection in models_to_run:
+    # ── Pass 1: load all embedders upfront so we know every vector's dimension ──
+    # When the collection does not yet exist, passing all selected vector types in
+    # a single create_collection call is more efficient than adding them one by one.
+    _loaded: list[tuple[AnyEmbedder, str]] = []  # (embedder, vector_name)
+    for use_sscd, model_name, vector_name in models_to_run:
         backend_name = "SSCD" if use_sscd else "DINOv2"
         if settings.embedding_endpoint:
             if not settings.embedding_model:
@@ -442,14 +445,28 @@ def index(
         )
         if compiled:
             typer.echo("  (first batch will be slow — torch.compile warm-up)")
+        _loaded.append((embedder, vector_name))
 
-        typer.echo(f"Connecting to Qdrant  collection={collection!r} ...")
+    # Build the full vectors config for this run so the collection is created
+    # with all named vector types in a single call.
+    _initial_vectors_config: dict[str, VectorParams] = {
+        vn: VectorParams(size=emb.embedding_dim, distance=Distance.COSINE) for emb, vn in _loaded
+    }
+
+    # ── Pass 2: create Indexer instances with the full vectors config ──────────
+    specs: list[tuple[AnyEmbedder, Indexer, str]] = []
+    for embedder, vector_name in _loaded:
+        typer.echo(
+            f"Connecting to Qdrant  collection={settings.collection!r}  vector={vector_name!r} ..."
+        )
         try:
             indexer = Indexer(
                 url=settings.qdrant_url,
-                collection=collection,
+                collection=settings.collection,
+                vector_name=vector_name,
                 embedding_dim=embedder.embedding_dim,
                 api_key=settings.qdrant_api_key,
+                initial_vectors_config=_initial_vectors_config,
             )
         except ValueError as exc:
             typer.echo(f"[ERROR] {exc}", err=True)
@@ -715,12 +732,17 @@ def index(
                 )
             )
 
-        # ── Parallel upserts ──────────────────────────────────────────────────
+        # ── Serialized upserts ────────────────────────────────────────────────
+        # Must be sequential: both models target the same unified collection and
+        # share point IDs.  Concurrent upserts race on the retrieve→upsert TOCTOU
+        # window — the second thread may see a point as "new" and overwrite the
+        # first thread's named vector.  Sequential execution guarantees the second
+        # call sees the first's point as "existing" and uses update_vectors.
         upsert_wall_s = 0.0
         if upsert_jobs:
             t0 = perf_counter()
-            with ThreadPoolExecutor(max_workers=len(upsert_jobs)) as pool:
-                list(pool.map(lambda j: j(), upsert_jobs))
+            for j in upsert_jobs:
+                j()
             upsert_wall_s = perf_counter() - t0
 
         if model_segments:
@@ -1242,12 +1264,15 @@ def index(
                     )
                 )
 
-            # ── Parallel upserts ──────────────────────────────────────────────
+            # ── Serialized upserts ────────────────────────────────────────────
+            # Sequential for the same reason as the image path: both models share
+            # the unified collection and point IDs, so concurrent upserts race on
+            # the retrieve→upsert TOCTOU window and can drop named vectors.
             upsert_wall_s = 0.0
             if upsert_jobs:
                 t0 = perf_counter()
-                with ThreadPoolExecutor(max_workers=len(upsert_jobs)) as pool:
-                    list(pool.map(lambda j: j(), upsert_jobs))
+                for j in upsert_jobs:
+                    j()
                 upsert_wall_s = perf_counter() - t0
 
             if model_segments:
