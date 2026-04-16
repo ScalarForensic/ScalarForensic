@@ -385,9 +385,9 @@ class TestDINOv2EmbedderProcessorKwargs:
                 warnings.simplefilter("always")
                 DINOv2Embedder("fake/model", normalize_size=normalize_size)
 
-        assert any(
-            "normalize_size" in str(w.message) for w in caught
-        ), "Expected a warning about processor ignoring normalize_size"
+        assert any("normalize_size" in str(w.message) for w in caught), (
+            "Expected a warning about processor ignoring normalize_size"
+        )
 
     def test_no_warning_when_processor_accepts_size(self):
         """No warning is emitted when the processor correctly reflects the requested size."""
@@ -408,9 +408,9 @@ class TestDINOv2EmbedderProcessorKwargs:
                 warnings.simplefilter("always")
                 DINOv2Embedder("fake/model", normalize_size=normalize_size)
 
-        assert not any(
-            "normalize_size" in str(w.message) for w in caught
-        ), "Unexpected warning about normalize_size when processor accepted the value"
+        assert not any("normalize_size" in str(w.message) for w in caught), (
+            "Unexpected warning about normalize_size when processor accepted the value"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -433,12 +433,7 @@ class TestRemoteEmbedderPngEncoding:
     def _fake_response(self, n: int, dim: int) -> mock.MagicMock:
         """Build a mock urllib response returning *n* embeddings of length *dim*."""
         body = json.dumps(
-            {
-                "data": [
-                    {"index": i, "embedding": [0.1] * dim}
-                    for i in range(n)
-                ]
-            }
+            {"data": [{"index": i, "embedding": [0.1] * dim} for i in range(n)]}
         ).encode()
         resp = mock.MagicMock()
         resp.read.return_value = body
