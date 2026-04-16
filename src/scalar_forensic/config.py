@@ -20,7 +20,7 @@ class Settings:
     """
 
     def __init__(self, env_file: Path | None = None) -> None:
-        resolved = env_file or Path(".env")
+        resolved = (env_file or Path(".env")).resolve()
         self._env_file: Path | None = resolved if resolved.exists() else None
         load_dotenv(self._env_file, override=False)
 
@@ -167,7 +167,15 @@ class Settings:
         raw = os.environ.get(key)
         if raw is not None:
             return Path(raw) if raw else None
-        return Path(default) if default else None
+        if not default:
+            return None
+        p = Path(default)
+        if not p.is_absolute():
+            if self._env_file is not None:
+                p = self._env_file.parent / p
+            else:
+                p = Path.cwd() / p
+        return p
 
     def _parse_dedup_mode(self) -> str:
         raw = os.environ.get("SFN_DUPLICATE_CHECK_MODE", "hash")

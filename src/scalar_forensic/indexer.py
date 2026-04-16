@@ -120,6 +120,12 @@ class Indexer:
                 field_name="is_video_frame",
                 field_schema=PayloadSchemaType.BOOL,
             )
+        if "is_video" not in schema:
+            self.client.create_payload_index(
+                collection_name=self.collection,
+                field_name="is_video",
+                field_schema=PayloadSchemaType.BOOL,
+            )
 
     def get_all_indexed_hashes(self) -> set[str]:
         """Return the set of all image_hash values for points that have this vector.
@@ -228,9 +234,44 @@ class Indexer:
             collection_name=self.collection,
             payload={"video_frames_total": frame_count},
             points=Filter(
-                must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
+                must=[
+                    FieldCondition(key="video_hash", match=MatchValue(value=video_hash)),
+                    FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
+                ]
             ),
         )
+
+    def upsert_video_records(self, videos: list[dict]) -> None:
+        """Upsert one payload-only Qdrant point per video (no vectors).
+
+        Each point stores file-level forensic metadata and serves as a stable
+        anchor for the web UI's metadata display.  Point IDs are deterministic:
+        ``uuid5(NAMESPACE_URL, "video:" + video_hash)``.
+
+        Required keys in each *videos* dict: ``video_hash``, ``video_path``,
+        ``total_frames``, ``extraction_fps``, ``max_frames_cap``, ``pyav_version``.
+        """
+        if not videos:
+            return
+        indexed_at = datetime.now(UTC).isoformat()
+        points = [
+            PointStruct(
+                id=str(uuid.uuid5(uuid.NAMESPACE_URL, "video:" + v["video_hash"])),
+                vector={},
+                payload={
+                    "is_video": True,
+                    "video_hash": v["video_hash"],
+                    "video_path": v["video_path"],
+                    "total_frames": v["total_frames"],
+                    "extraction_fps": v["extraction_fps"],
+                    "max_frames_cap": v["max_frames_cap"],
+                    "pyav_version": v["pyav_version"],
+                    "indexed_at": indexed_at,
+                },
+            )
+            for v in videos
+        ]
+        self.client.upsert(collection_name=self.collection, points=points)
 
     def upsert_batch(
         self,
@@ -318,12 +359,7 @@ class Indexer:
                 # Forensic identifiers
                 "image_hash": image_hash,
                 **({"image_hash_md5": image_hashes_md5[i]} if image_hashes_md5 else {}),
-                # Video frames carry a virtual path string (already absolute).
-                # Regular images are resolved to an absolute path so that
-                # get_indexed_paths() and /api/hit-image lookups always match.
-                "image_path": (
-                    str(image_path) if vmeta is not None else str(Path(image_path).resolve())
-                ),
+                "image_path": str(Path(image_path).resolve()),
                 # EXIF flags (only present when extraction is enabled)
                 **(exif_payloads.get(image_path, {}) if exif_payloads else {}),
             }

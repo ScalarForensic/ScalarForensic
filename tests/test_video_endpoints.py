@@ -288,3 +288,110 @@ class TestThumbnail:
         with patch("scalar_forensic.web.app.Settings", return_value=settings_mock):
             r = client.get(f"/api/thumbnail/{self._VALID_HASH}")
         assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# /api/hit-image — serve frame JPEGs from frame_store_dir
+# ---------------------------------------------------------------------------
+
+
+class TestHitImage:
+    def test_relative_path_returns_400(self, client):
+        r = client.get("/api/hit-image?path=relative/path.jpg")
+        assert r.status_code == 400
+
+    def test_frame_jpeg_under_frame_store_dir_is_served(self, client, tmp_path, monkeypatch):
+        frame_store = tmp_path / "frames"
+        frame_store.mkdir()
+        vh = "a" * 64
+        frame_dir = frame_store / vh
+        frame_dir.mkdir()
+        frame_file = frame_dir / "0000000000ms.jpg"
+        frame_file.write_bytes(
+            b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+        )
+        settings_mock = MagicMock()
+        settings_mock.input_dir = None
+        settings_mock.frame_store_dir = frame_store
+        with patch("scalar_forensic.web.app.Settings", return_value=settings_mock):
+            r = client.get(f"/api/hit-image?path={frame_file}")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "image/jpeg"
+
+    def test_path_outside_allowed_roots_returns_403(self, client, tmp_path, monkeypatch):
+        frame_store = tmp_path / "frames"
+        frame_store.mkdir()
+        other = tmp_path / "other" / "file.jpg"
+        other.parent.mkdir()
+        other.write_bytes(b"\xff\xd8\xff\xd9")
+        settings_mock = MagicMock()
+        settings_mock.input_dir = None
+        settings_mock.frame_store_dir = frame_store
+        with patch("scalar_forensic.web.app.Settings", return_value=settings_mock):
+            r = client.get(f"/api/hit-image?path={other}")
+        assert r.status_code == 403
+
+    def test_missing_file_returns_404(self, client, tmp_path):
+        settings_mock = MagicMock()
+        settings_mock.input_dir = tmp_path
+        settings_mock.frame_store_dir = None
+        missing = tmp_path / "gone.jpg"
+        with patch("scalar_forensic.web.app.Settings", return_value=settings_mock):
+            r = client.get(f"/api/hit-image?path={missing}")
+        assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# /api/metadata — frame path classification via parse_frame_path
+# ---------------------------------------------------------------------------
+
+
+class TestHitMetadataFramePath:
+    def test_frame_path_returns_frame_metadata(self, client, tmp_path):
+        frame_store = tmp_path / "frames"
+        vh = "b" * 64
+        frame_dir = frame_store / vh
+        frame_dir.mkdir(parents=True)
+        frame_file = frame_dir / "0000001000ms.jpg"
+        frame_file.write_bytes(b"\xff\xd8\xff\xd9")
+
+        settings_mock = MagicMock()
+        settings_mock.input_dir = None
+        settings_mock.frame_store_dir = frame_store
+        mock_qdrant = MagicMock()
+        mock_qdrant.scroll.return_value = ([], None)
+
+        with (
+            patch("scalar_forensic.web.app.Settings", return_value=settings_mock),
+            patch("scalar_forensic.web.app.QdrantClient", return_value=mock_qdrant),
+        ):
+            r = client.get(f"/api/metadata?path={frame_file}")
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["is_video_frame"] is True
+        assert body["video_hash"] == vh
+        assert body["frame_timecode_ms"] == 1000
+
+    def test_non_frame_path_under_input_dir_returns_image_metadata(self, client, tmp_path):
+        import io
+
+        from PIL import Image
+
+        img_buf = io.BytesIO()
+        Image.new("RGB", (8, 8)).save(img_buf, format="JPEG")
+        img_bytes = img_buf.getvalue()
+
+        img_file = tmp_path / "photo.jpg"
+        img_file.write_bytes(img_bytes)
+
+        settings_mock = MagicMock()
+        settings_mock.input_dir = tmp_path
+        settings_mock.frame_store_dir = None
+
+        with patch("scalar_forensic.web.app.Settings", return_value=settings_mock):
+            r = client.get(f"/api/metadata?path={img_file}")
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body.get("is_video_frame") is not True
