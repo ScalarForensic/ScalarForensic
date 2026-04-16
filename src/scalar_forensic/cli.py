@@ -22,8 +22,6 @@ from scalar_forensic.embedder import (
     SSCDEmbedder,
     extract_exif,
     get_library_versions,
-    hash_bytes,
-    hash_bytes_md5,
     hash_file,
     hash_file_md5,
     load_embedder,
@@ -191,19 +189,6 @@ class _ETATracker:
         eta_s = remaining / self._x  # η̂
         sigma_s = remaining * self.rate_std / self._x**2  # σ_η
         return eta_s, sigma_s
-
-
-def _apply_dedup(
-    pairs: list[tuple[Path, str]],
-    indexed_hashes: set[str],
-    indexed_paths: set[str],
-) -> list[tuple[Path, str]]:
-    """Filter already-indexed images using pre-loaded hash/path sets."""
-    return [
-        (p, h)
-        for p, h in pairs
-        if h not in indexed_hashes and str(p.resolve()) not in indexed_paths
-    ]
 
 
 def _write_thumbnail(img: "Image.Image", dest: Path, size: int) -> None:
@@ -559,16 +544,7 @@ def index(
     total_bytes = 0
     batch_num = 0
     imgs_processed_so_far = 0
-    total_image_count = len(image_paths)
     tracker = _ETATracker()
-
-    if total_image_count > 0:
-        typer.echo(
-            "  ETA  x̂ₜ = x̂ₜ⁻ + Kₜ(zₜ − x̂ₜ⁻)"
-            "  ·  Kₜ = Pₜ⁻(Pₜ⁻ + R)⁻¹"
-            "  ·  σ_η = N_rem · √Pₜ / x̂²"
-            "  [Θ(1) Kalman]"
-        )
 
     # ── Pipelined batch loop ──────────────────────────────────────────────────
     # Pipeline depth = 2: Phase A (read / hash / dedup) runs up to two batches
@@ -787,19 +763,21 @@ def index(
         return result, perf_counter() - t0
 
     # ── Pre-load all indexed hashes/paths from Qdrant (once per model) ───────
-    # Replaces per-batch scroll queries with a single paginated collection scan,
-    # giving O(1) local set lookups for all subsequent dedup checks.
+    # Single paginated scroll per model builds in-memory sets for O(1) lookups.
     _dedup_hashes: list[set[str]] = []
     _dedup_paths: list[set[str]] = []
+    _needs_per_spec: list[set[Path]] = []
+    _paths_to_batch: list[Path] = []
+
     if image_paths:
-        mode = settings.duplicate_check_mode
+        _mode = settings.duplicate_check_mode
         typer.echo("Pre-loading dedup index from Qdrant ...")
-        for _, indexer, _ in specs:
+        for _, _idx, _ in specs:
             _dedup_hashes.append(
-                indexer.get_all_indexed_hashes() if mode in ("hash", "both") else set()
+                _idx.get_all_indexed_hashes() if _mode in ("hash", "both") else set()
             )
             _dedup_paths.append(
-                indexer.get_all_indexed_paths() if mode in ("filepath", "both") else set()
+                _idx.get_all_indexed_paths() if _mode in ("filepath", "both") else set()
             )
         typer.echo(
             "  "
@@ -809,8 +787,91 @@ def index(
             )
         )
 
+        # ── Parallel upfront hash pass ────────────────────────────────────────
+        # Hash every image file in parallel, then compute the diff against the
+        # pre-loaded Qdrant sets.  Only files needing embedding enter the batch
+        # loop — already-indexed files never get read again.
+        _file_hashes: dict[Path, str] = {}  # path → sha256
+        _file_hashes_md5: dict[Path, str] = {}  # path → md5
+
+        typer.echo(f"Hashing {len(image_paths):,} image files ...")
+        _t_hash0 = perf_counter()
+
+        def _hash_one(p: Path) -> tuple[Path, str | None, str | None, str | None]:
+            try:
+                return p, hash_file(p), hash_file_md5(p), None
+            except OSError as exc:
+                return p, None, None, str(exc)
+
+        _n_hash_workers = min(32, (os.cpu_count() or 4) * 2)
+        with ThreadPoolExecutor(max_workers=_n_hash_workers) as _hpool:
+            for _p, _sha, _md5, _err in _hpool.map(_hash_one, image_paths):
+                if _err:
+                    records[_p].status = _S_FAIL_READ
+                    records[_p].reason = f"read error: {_err}"
+                else:
+                    _file_hashes[_p] = _sha
+                    _file_hashes_md5[_p] = _md5
+                    records[_p].sha256 = _sha
+                    records[_p].md5 = _md5
+
+        # Global within-run hash dedup (first occurrence of each hash wins).
+        _unique_by_hash: dict[str, Path] = {}
+        for _p, _sha in _file_hashes.items():
+            _unique_by_hash.setdefault(_sha, _p)
+        _winners: set[Path] = set(_unique_by_hash.values())
+        for _p in _file_hashes:
+            if _p not in _winners:
+                records[_p].status = _S_SKIP_DUP
+                records[_p].reason = "duplicate in run (same SHA-256)"
+
+        # Per-spec: which unique files does each model still need to embed?
+        _needs_per_spec = [
+            {
+                p
+                for p in _winners
+                if _file_hashes[p] not in _dedup_hashes[si]
+                and str(p.resolve()) not in _dedup_paths[si]
+            }
+            for si in range(len(specs))
+        ]
+        _any_needs: set[Path] = set().union(*_needs_per_spec) if specs else set()
+
+        # Files unique in this run but already indexed in every model → skip.
+        for _p in _winners:
+            if _p not in _any_needs:
+                records[_p].status = _S_SKIP_IDX
+                records[_p].reason = "already indexed in Qdrant"
+
+        # Pre-populate per-spec skip counters for files that never enter the loop.
+        _n_run_dups = len(_file_hashes) - len(_winners)
+        _n_all_indexed = len(_winners) - len(_any_needs)
+        for _si in range(len(specs)):
+            skipped_counts[_si] += _n_run_dups + _n_all_indexed
+
+        # Build the ordered list of paths that actually need processing.
+        _paths_to_batch = [p for p in image_paths if p in _any_needs]
+
+        _hash_elapsed = perf_counter() - _t_hash0
+        typer.echo(
+            f"  {len(_file_hashes):,} hashed in {_hash_elapsed:.1f}s"
+            f"  │  {len(_any_needs):,} to embed"
+            f"  │  {_n_run_dups:,} run-dups"
+            f"  │  {_n_all_indexed:,} already indexed"
+            f"  │  {len(image_paths) - len(_file_hashes):,} read errors"
+        )
+
+    total_image_count = len(_paths_to_batch)
+    if total_image_count > 0:
+        typer.echo(
+            "  ETA  x̂ₜ = x̂ₜ⁻ + Kₜ(zₜ − x̂ₜ⁻)"
+            "  ·  Kₜ = Pₜ⁻(Pₜ⁻ + R)⁻¹"
+            "  ·  σ_η = N_rem · √Pₜ / x̂²"
+            "  [Θ(1) Kalman]"
+        )
+
     with ThreadPoolExecutor(max_workers=1) as _pre_pool:
-        for batch_paths in batched(iter(image_paths), settings.batch_size):
+        for batch_paths in batched(iter(_paths_to_batch), settings.batch_size):
             batch_num += 1
 
             # ── Read (shared) ─────────────────────────────────────────────────
@@ -834,17 +895,13 @@ def index(
             if not raw:
                 continue
 
-            # ── Hash (shared) ─────────────────────────────────────────────────
+            # ── Hash lookup (pre-computed in upfront pass) ────────────────────
             t0 = perf_counter()
-            path_hash_pairs_full = [(p, hash_bytes(data), hash_bytes_md5(data)) for p, data in raw]
+            path_hash_pairs_full = [(p, _file_hashes[p], _file_hashes_md5[p]) for p, _ in raw]
             path_hash_pairs = [(p, sha) for p, sha, _ in path_hash_pairs_full]
             md5_by_sha256 = {sha: md5 for _, sha, md5 in path_hash_pairs_full}
             hash_s = perf_counter() - t0
             total_hash_s += hash_s
-
-            for p, sha, md5 in path_hash_pairs_full:
-                records[p].sha256 = sha
-                records[p].md5 = md5
 
             # ── EXIF (shared, once per batch if enabled) ──────────────────────
             exif_data: dict[Path, ExifInfo] | None = None
@@ -852,25 +909,17 @@ def index(
                 data_by_path_for_exif = {p: data for p, data in raw}
                 exif_data = {p: extract_exif(data_by_path_for_exif[p]) for p, _ in path_hash_pairs}
 
-            # ── Within-batch hash dedup ───────────────────────────────────────
-            unique_path_by_hash: dict[str, Path] = {}
-            for p, h in path_hash_pairs:
-                unique_path_by_hash.setdefault(h, p)
-            unique_pairs = [(p, h) for h, p in unique_path_by_hash.items()]
-
-            winner_paths = {p for p, _ in unique_pairs}
-            for p, _ in path_hash_pairs:
-                if p not in winner_paths and records[p].status == "pending":
-                    records[p].status = _S_SKIP_DUP
-                    records[p].reason = "duplicate in batch (same SHA-256)"
+            # All paths in _paths_to_batch are unique winners — no within-batch
+            # dedup needed.  unique_pairs == path_hash_pairs by construction.
+            unique_pairs = path_hash_pairs
 
             data_by_path = {p: data for p, data in raw}
 
-            # ── Pre-dedup: determine which images actually need work ───────────
+            # ── Per-spec: use pre-computed needs sets ─────────────────────────
             to_embed_per_spec: list[list[tuple[Path, str]]] = []
             needs_embed: set[Path] = set()
             for spec_i, _ in enumerate(specs):
-                te = _apply_dedup(unique_pairs, _dedup_hashes[spec_i], _dedup_paths[spec_i])
+                te = [(p, h) for p, h in unique_pairs if p in _needs_per_spec[spec_i]]
                 to_embed_per_spec.append(te)
                 needs_embed.update(p for p, _ in te)
 
