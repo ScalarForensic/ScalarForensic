@@ -97,7 +97,8 @@ class Settings:
         # --- Hash cache ---
         # Persistent on-disk SHA-256 cache keyed by (path, mtime_ns, size).
         # Eliminates redundant disk reads for files whose content has not changed
-        # since the last indexing run.  Defaults to ~/.cache/sfn/hash_cache.db.
+        # since the last indexing run.  Defaults to data/hash_cache.db
+        # (relative to CWD).
         # Set SFN_HASH_CACHE_PATH= (empty) to disable.
         self.hash_cache_path: Path | None = self._parse_optional_path(
             "SFN_HASH_CACHE_PATH", _DEFAULT_HASH_CACHE_PATH

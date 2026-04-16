@@ -144,8 +144,9 @@ class Indexer:
         where *complete* is True iff ``video_frames_total`` is present in the payload
         (written by :meth:`mark_video_complete` after a successful full index).
 
-        Performs a single paginated scroll so the caller can do all
-        is_video_complete checks locally without per-video Qdrant queries.
+        Performs a single paginated scroll so the caller can evaluate video
+        completeness locally from the returned metadata without per-video
+        Qdrant queries.
         """
         seen: dict[str, dict] = {}
         offset = None

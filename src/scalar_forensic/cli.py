@@ -810,7 +810,7 @@ def index(
     # subsequent runs.  Images are hashed in parallel; videos sequentially
     # (few files, often large — parallel read would thrash the drive).
     _file_hashes: dict[Path, str] = {}  # image path → sha256
-    _pre_hashes: dict[Path, str] = {}   # video path → sha256
+    _pre_hashes: dict[Path, str] = {}  # video path → sha256
     _n_cache_hits = 0
 
     _hash_label_parts = []
@@ -823,6 +823,7 @@ def index(
     _t_hash0 = perf_counter()
 
     if image_paths:
+
         def _hash_one(p: Path) -> tuple[Path, str | None, str | None, bool]:
             try:
                 if _hash_cache is not None:
@@ -1261,9 +1262,10 @@ def index(
 
         # ── Mark videos as fully indexed (per spec) ──────────────────────────
         # Called only when all frames of a video were successfully embedded and
-        # upserted by a given spec.  Writes video_frames_total onto every frame
-        # payload so is_video_complete() can distinguish a finished index from
-        # an interrupted partial one.
+        # upserted by a given spec.  Writes the video_frames_total marker onto
+        # the stored frame payloads so future runs can use the preloaded
+        # get_all_video_info() metadata plus that marker to distinguish a
+        # finished index from an interrupted partial one.
         for vp in _videos_to_process:
             total = vf_total.get(vp, 0)
             if total == 0:
@@ -1301,9 +1303,7 @@ def index(
     # _finish_batch cannot reclassify them.  Do a single post-batch pass here.
     if image_paths and _file_hashes:
         _fail_pre_hashes = {
-            _file_hashes[p]
-            for p in _file_hashes
-            if records[p].status == _S_FAIL_PRE
+            _file_hashes[p] for p in _file_hashes if records[p].status == _S_FAIL_PRE
         }
         if _fail_pre_hashes:
             for _p, _sha in _file_hashes.items():
