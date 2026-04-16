@@ -293,6 +293,12 @@ class Hit:
     # query frames that contributed to this hit.  Useful for the frontend to
     # auto-navigate to the most relevant query frame for a merged video hit.
     best_query_timecode_ms: int | None = None
+    # Dedup set for query_timecodes — kept in sync with the list for O(1)
+    # membership tests during the merge pass.  Excluded from repr and compare
+    # so it is invisible to callers that iterate over Hit fields.
+    _query_timecodes_seen: set[int] = field(
+        default_factory=set, repr=False, compare=False
+    )
 
     def best_score(self) -> float:
         return max(self.scores.values(), default=0.0)
@@ -365,16 +371,12 @@ def _merge_hit(h: Hit, dest: dict[str, Hit], key: str | None = None) -> None:
             tc = h.query_timecodes[0]
             if existing.query_timecodes is None:
                 existing.query_timecodes = [tc]
-                existing._query_timecodes_seen: set = {tc}  # type: ignore[attr-defined]
+                existing._query_timecodes_seen.add(tc)
                 existing.best_query_timecode_ms = tc
             else:
-                seen: set = getattr(
-                    existing, "_query_timecodes_seen", set(existing.query_timecodes)
-                )
-                if tc not in seen:
+                if tc not in existing._query_timecodes_seen:
                     existing.query_timecodes.append(tc)
-                    seen.add(tc)
-                    existing._query_timecodes_seen = seen  # type: ignore[attr-defined]
+                    existing._query_timecodes_seen.add(tc)
                 # Update best_query_timecode_ms when the incoming hit contributes
                 # a score higher than the current maximum across all modes.
                 if h.best_score() > pre_merge_best:
@@ -399,7 +401,9 @@ def _merge_hit(h: Hit, dest: dict[str, Hit], key: str | None = None) -> None:
                 existing.matched_frames = list(tc_to_mf.values())
     else:
         if h.query_timecodes:
-            h.best_query_timecode_ms = h.query_timecodes[0]
+            tc = h.query_timecodes[0]
+            h._query_timecodes_seen = {tc}
+            h.best_query_timecode_ms = tc
         dest[k] = h
 
 

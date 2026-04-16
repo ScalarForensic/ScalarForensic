@@ -31,6 +31,7 @@ class Indexer:
                 collection_name=self.collection,
                 vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
             )
+            info = self.client.get_collection(self.collection)
         else:
             info = self.client.get_collection(self.collection)
             vectors_config = info.config.params.vectors
@@ -45,8 +46,7 @@ class Indexer:
                     f"but the current model produces dim={dim}. "
                     f"Use a different collection or the matching backend."
                 )
-        # Ensure payload indexes exist (idempotent).
-        info = self.client.get_collection(self.collection)
+        # Ensure payload indexes exist (idempotent). info is available from both branches above.
         schema = info.payload_schema or {}
         if "image_hash" not in schema:
             self.client.create_payload_index(

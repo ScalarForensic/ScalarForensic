@@ -72,7 +72,6 @@ class _BatchCtx:
     hash_s: float
     imgs_at_batch: int  # imgs_processed_so_far snapshot — used for ETA display
     path_hash_pairs: list[tuple[Path, str]]
-    path_hash_pairs_full: list[tuple[Path, str, str]]
     md5_by_sha256: dict[str, str]
     unique_pairs: list[tuple[Path, str]]
     to_embed_per_spec: list[list[tuple[Path, str]]]
@@ -486,6 +485,11 @@ def index(
 
         specs.append((embedder, indexer, model_hash))
 
+    # Effective short-side cap for preprocessing: must satisfy both SSCD (≥331 px)
+    # and DINOv2 (≥normalize_size px).  Computed here so it is available to
+    # calibrate() before the batch loops.
+    _effective_cap = max(_SSCD_SCALE, settings.normalize_size)
+
     # ── Batch size: explicit config > calibration cache > auto-calibrate ─────
     if settings.batch_size is None:
         from scalar_forensic.calibration import (
@@ -519,7 +523,7 @@ def index(
                 # mirroring what the indexer does.  This captures true combined
                 # VRAM pressure rather than underestimating it by probing models
                 # in isolation.
-                settings.batch_size = calibrate(local_embedders, _sample_dir)
+                settings.batch_size = calibrate(local_embedders, _sample_dir, cap=_effective_cap)
         else:
             settings.batch_size = 32
             typer.echo(
@@ -555,6 +559,9 @@ def index(
         f"({len(image_paths):,} image, {len(video_paths):,} video, {n_unsupported:,} other)"
     )
 
+    # Library versions don't change during a run — compute once and reuse.
+    _library_versions = get_library_versions()
+
     # ── Per-model counters ────────────────────────────────────────────────────
     indexed_counts = [0] * len(specs)
     skipped_counts = [0] * len(specs)
@@ -582,7 +589,6 @@ def index(
     # GPU embed step) is called only when the pipeline is full, meaning Phase A
     # for batches N+1 and N+2 overlaps with embed(N) regardless of whether CPU
     # or GPU is the bottleneck.
-    _effective_cap = max(_SSCD_SCALE, settings.normalize_size)
     _PIPELINE_DEPTH = 2
     _pipeline: deque[_BatchCtx] = deque()
 
@@ -715,7 +721,7 @@ def index(
                 "embedding_dim": embedder.embedding_dim,
                 "normalize_size": embedder.normalize_size,
                 "inference_dtype": embedder.inference_dtype,
-                "library_versions": get_library_versions(),
+                "library_versions": _library_versions,
                 **(
                     {"sscd_n_crops": embedder.n_crops} if isinstance(embedder, SSCDEmbedder) else {}
                 ),
@@ -887,7 +893,6 @@ def index(
                     hash_s=hash_s,
                     imgs_at_batch=imgs_processed_so_far,
                     path_hash_pairs=path_hash_pairs,
-                    path_hash_pairs_full=path_hash_pairs_full,
                     md5_by_sha256=md5_by_sha256,
                     unique_pairs=unique_pairs,
                     to_embed_per_spec=to_embed_per_spec,
@@ -1019,10 +1024,10 @@ def index(
 
                 if spec_idx == 0:
                     n_video_frames_skipped += n_skipped
-                # Update per-video skip flag for all specs so that a video only
-                # indexed by spec 1 (not spec 0) is still reflected in vf_skipped.
-                for i in set(range(n_items)) - set(to_embed_idx):
-                    vf_skipped[source_vpaths[i]] += 1
+                    # Track per-video skips once (spec 0 is authoritative) so
+                    # vf_skipped reflects actual frames skipped, not frames×specs.
+                    for i in set(range(n_items)) - set(to_embed_idx):
+                        vf_skipped[source_vpaths[i]] += 1
 
                 backend = type(embedder).__name__
 
@@ -1083,7 +1088,7 @@ def index(
                     "embedding_dim": embedder.embedding_dim,
                     "normalize_size": embedder.normalize_size,
                     "inference_dtype": embedder.inference_dtype,
-                    "library_versions": get_library_versions(),
+                    "library_versions": _library_versions,
                     **(
                         {"sscd_n_crops": embedder.n_crops}
                         if isinstance(embedder, SSCDEmbedder)

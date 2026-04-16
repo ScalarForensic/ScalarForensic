@@ -279,10 +279,7 @@ def preprocess_pil_batch(images: list[Image.Image], cap: int = _SHARED_CAP) -> l
     *cap* defaults to ``_SHARED_CAP`` for backward compatibility; pass
     ``max(_SSCD_SCALE, settings.normalize_size)`` from call sites.
     """
-    if len(images) <= 1:
-        return [_cap_short_side(img, cap) for img in images]
-    with ThreadPoolExecutor() as pool:
-        return list(pool.map(lambda img: _cap_short_side(img, cap), images))
+    return [_cap_short_side(img, cap) for img in images]
 
 
 # ---------------------------------------------------------------------------
@@ -481,8 +478,7 @@ class SSCDEmbedder:
         single unit-norm vector per image that covers the full spatial extent.
         """
         n_orig = len(images)
-        with ThreadPoolExecutor() as pool:
-            resized = list(pool.map(_sscd_resize, images))
+        resized = [_sscd_resize(img) for img in images]
         crop_lists = [_sscd_crops(img, self.n_crops) for img in resized]
         flat_crops = [c for crops in crop_lists for c in crops]
 

@@ -24,6 +24,8 @@ from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING
 
+from scalar_forensic.embedder import _SHARED_CAP
+
 if TYPE_CHECKING:
     from scalar_forensic.embedder import AnyEmbedder
 
@@ -108,6 +110,8 @@ def _run_batches(
     embedders: list[AnyEmbedder],
     images: list[bytes],
     batch_size: int,
+    *,
+    cap: int = _SHARED_CAP,
 ) -> None:
     """Pass *images* through the full combined pipeline in batches of *batch_size*.
 
@@ -116,6 +120,12 @@ def _run_batches(
     call per chunk, matching what the indexer does.  Running them together
     also captures the combined VRAM pressure that a single-embedder probe
     would underestimate.
+
+    *cap* should match the effective cap used by the real indexing pipeline
+    (``max(_SSCD_SCALE, settings.normalize_size)``).  The default is
+    ``_SHARED_CAP`` (331 px) for backward compatibility, but callers should
+    pass the real cap so that calibration accurately represents production
+    throughput when ``normalize_size > 331``.
     """
     from scalar_forensic.embedder import hash_bytes, hash_bytes_md5, preprocess_batch
 
@@ -124,7 +134,7 @@ def _run_batches(
         for data in chunk:
             hash_bytes(data)
             hash_bytes_md5(data)
-        pils = [r for r in preprocess_batch(chunk) if not isinstance(r, Exception)]
+        pils = [r for r in preprocess_batch(chunk, cap=cap) if not isinstance(r, Exception)]
         if pils:
             for embedder in embedders:
                 norm = embedder.normalize_batch_bytes(pils)
@@ -138,6 +148,7 @@ def _probe(
     batch_size: int,
     *,
     repeats: int = 1,
+    cap: int = _SHARED_CAP,
 ) -> float:
     """Warm up once then time *measure_bytes* for *repeats* runs; return median img/s.
 
@@ -153,11 +164,11 @@ def _probe(
     """
     import statistics
 
-    _run_batches(embedders, warmup_bytes, batch_size)  # warm-up (discarded)
+    _run_batches(embedders, warmup_bytes, batch_size, cap=cap)  # warm-up (discarded)
     tps: list[float] = []
     for _ in range(repeats):
         t0 = perf_counter()
-        _run_batches(embedders, measure_bytes, batch_size)
+        _run_batches(embedders, measure_bytes, batch_size, cap=cap)
         elapsed = perf_counter() - t0
         tps.append(len(measure_bytes) / elapsed if elapsed > 0 else 0.0)
     return statistics.median(tps)
@@ -173,6 +184,7 @@ def calibrate(
     sample_dir: Path,
     *,
     cache_file: Path | None = _CACHE_FILE,
+    cap: int = _SHARED_CAP,
 ) -> int:
     """Probe batch sizes, fit the saturation model, display results, and return
     the optimal batch size.
@@ -194,6 +206,13 @@ def calibrate(
     cache_file:
         Destination for the JSON result cache.  Pass ``None`` to skip
         writing the cache.
+    cap:
+        Short-side pixel cap passed to ``preprocess_batch`` for each probe.
+        Should match the effective cap used by the real indexing pipeline:
+        ``max(_SSCD_SCALE, settings.normalize_size)``.  Defaults to
+        ``_SHARED_CAP`` (331 px).  When ``normalize_size > 331``, passing the
+        correct cap ensures calibration measures throughput at production image
+        sizes rather than underestimating it on smaller inputs.
     """
     import typer
 
@@ -258,7 +277,9 @@ def calibrate(
         warmup_bytes = (raw_bytes * 2)[:_MIN_WARMUP_IMAGES]
 
         try:
-            tp = _probe(emb_list, warmup_bytes, measure_bytes, probe_b, repeats=_PROBE_REPEATS)
+            tp = _probe(
+                emb_list, warmup_bytes, measure_bytes, probe_b, repeats=_PROBE_REPEATS, cap=cap
+            )
         except Exception:  # noqa: BLE001 — catches CUDA/ROCm OOM and JIT errors
             typer.echo(f"  batch={probe_b:>4}  {'':>{_BAR_WIDTH + 2}}  out of memory — stopped")
             break
