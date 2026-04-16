@@ -13,7 +13,7 @@ Input
   │
   ▼
 [Stage 1: Shared Preprocessing]
-  _open_rgb (images only)     ICC → sRGB, EXIF orientation, RGB conversion
+  _open_rgb (images only)     EXIF orientation, RGB conversion (ICC profiles ignored)
   _cap_short_side             proportional downscale to effective cap
   │
   ▼
@@ -33,7 +33,7 @@ Embedding vector (unit-norm)
 | **Still images** | Bytes read from disk → `preprocess_batch` | Bytes from HTTP upload → `preprocess_batch` |
 | **Video frames** | PyAV PIL frames → `preprocess_pil_batch` | PyAV PIL frames → `preprocess_pil_batch` |
 
-The only structural difference: still images go through `_open_rgb` (bytes → PIL, with ICC and EXIF correction), while video frames arrive from PyAV already decoded as RGB PIL images with correct geometry, so `_open_rgb` is skipped for them.
+The only structural difference: still images go through `_open_rgb` (bytes → PIL, with EXIF orientation correction), while video frames arrive from PyAV already decoded as RGB PIL images with correct geometry, so `_open_rgb` is skipped for them.
 
 ---
 
@@ -41,17 +41,9 @@ The only structural difference: still images go through `_open_rgb` (bytes → P
 
 ### `_open_rgb` — Still images only
 
-Three corrections are applied in sequence to every still image:
+Two corrections are applied in sequence to every still image:
 
-#### 1. ICC Colour Profile → sRGB
-
-Many cameras (and professional imaging software) embed non-sRGB colour profiles such as AdobeRGB (1998) or ProPhoto RGB. Without conversion, identical scenes photographed with different colour-space settings produce systematically different pixel values and therefore different embeddings — even if the images look perceptually identical on a calibrated display.
-
-The correction: if the image contains an embedded ICC profile, it is converted to sRGB using a perceptual rendering intent before the profile is stripped. If the profile is malformed or the conversion fails for any reason, the image falls back to Pillow's default `.convert("RGB")` (which assumes sRGB). This fallback is silent; it is the correct behaviour for images that genuinely lack a profile.
-
-**Forensic implication**: evidence photographs from digital SLR cameras set to AdobeRGB, screenshots exported with wide-gamut profiles, and scanned documents with custom scanner profiles all benefit from this correction. Without it, the hue and saturation values seen by the model diverge from what the image actually depicts.
-
-#### 2. EXIF Orientation Transpose
+#### 1. EXIF Orientation Transpose
 
 Phone cameras and some digital cameras store images with a rotation EXIF tag (`Orientation`) rather than physically rotating the pixel data. A portrait photo stored as landscape pixels with `Orientation=6` will be displayed correctly in any viewer, but without the transpose the raw pixel grid is 90° rotated from what the image depicts.
 
@@ -59,9 +51,11 @@ Phone cameras and some digital cameras store images with a rotation EXIF tag (`O
 
 **Forensic implication**: phone evidence, body-camera stills, and any image whose orientation was set by the capture device rather than baked into the pixel data requires this correction for reliable matching.
 
-#### 3. RGB Conversion
+#### 2. RGB Conversion
 
 Strips alpha channels, palette modes, and any remaining colour metadata so all downstream code sees a plain `RGB` image.
+
+> **Note on ICC colour profiles:** embedded ICC profiles (AdobeRGB, ProPhoto, etc.) are currently ignored — images are treated as sRGB regardless of any embedded profile. Wide-gamut sources produce slightly shifted pixel values relative to a colour-managed pipeline, but the semantic embedding models are robust to small colour shifts, and the per-image transform rebuild required for correct LCMS conversion was found to dominate Phase 1 preprocessing time in practice.
 
 ---
 

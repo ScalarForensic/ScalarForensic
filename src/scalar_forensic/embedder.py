@@ -415,6 +415,11 @@ def _sscd_crops(img: Image.Image, n_crops: int) -> list[Image.Image]:
 
 class SSCDEmbedder:
     def __init__(self, model_name: str, device: str = "auto", n_crops: int = 1) -> None:
+        if n_crops not in (1, 5):
+            raise ValueError(
+                f"SSCDEmbedder n_crops={n_crops!r} is not supported. "
+                "Allowed values: 1 (center crop only) or 5 (center + 4 corners)."
+            )
         self.model_name = model_name
         self.normalize_size = _SSCD_INPUT_SIZE
         self.n_crops = n_crops
@@ -504,12 +509,14 @@ class SSCDEmbedder:
 class RemoteEmbedder:
     """Calls an OpenAI-compatible POST /v1/embeddings endpoint.
 
-    Images are JPEG-encoded and sent as base64 data-URIs in the ``input`` array,
-    which is the convention used by servers such as Infinity and similar multimodal
-    embedding APIs.  Required configuration: endpoint URL (``SFN_EMBEDDING_ENDPOINT``),
-    model name (``SFN_EMBEDDING_MODEL``), and embedding dimension (``SFN_EMBEDDING_DIM``,
-    must match the dimension the remote model actually produces).  An optional Bearer
-    API key may be provided via ``SFN_EMBEDDING_API_KEY``.
+    Images are PNG-encoded and sent as base64 data-URIs (``data:image/png;base64,…``)
+    in the ``input`` array.  PNG is lossless: it avoids DCT block artefacts on
+    screenshots and digital evidence, and eliminates double-compression when the
+    source is already JPEG.  Required configuration: endpoint URL
+    (``SFN_EMBEDDING_ENDPOINT``), model name (``SFN_EMBEDDING_MODEL``), and embedding
+    dimension (``SFN_EMBEDDING_DIM``, must match the dimension the remote model
+    actually produces).  An optional Bearer API key may be provided via
+    ``SFN_EMBEDDING_API_KEY``.
     """
 
     def __init__(

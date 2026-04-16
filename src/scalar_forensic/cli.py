@@ -759,10 +759,11 @@ def index(
             upsert_wall_s = perf_counter() - t0
 
         if model_segments:
-            # wall_s = sum of measured component times so that pipelining
-            # overlap with the next batch's Phase A does not inflate this batch's
-            # reported time.  Dedup time (~ms) is intentionally excluded.
-            wall_s = ctx.read_s + ctx.hash_s + pre_s + (perf_counter() - t_finish)
+            # wall_s = read + hash + everything in _finish_batch (pre-wait, normalize,
+            # embed, upsert).  Using perf_counter() - t_finish for the finish phase
+            # avoids double-counting pre_s, which is already included in that interval.
+            # Dedup time (~ms) is intentionally excluded.
+            wall_s = ctx.read_s + ctx.hash_s + (perf_counter() - t_finish)
             n_imgs = len(ctx.path_hash_pairs)
             tracker.update(n_imgs, wall_s)
             upsert_str = f"  │  upsert {upsert_wall_s:.2f}s" if upsert_jobs else ""
