@@ -25,14 +25,14 @@ from scalar_forensic.embedder import (
     _SHARED_CAP,
     _SSCD_INPUT_SIZE,
     _SSCD_SCALE,
+    DINOv2Embedder,
+    RemoteEmbedder,
     _cap_short_side,
     _open_rgb,
     _sscd_crops,
     _sscd_resize,
     preprocess_batch,
     preprocess_pil_batch,
-    DINOv2Embedder,
-    RemoteEmbedder,
 )
 
 # ---------------------------------------------------------------------------
