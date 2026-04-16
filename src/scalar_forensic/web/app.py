@@ -32,7 +32,7 @@ from scalar_forensic.video import (
     VIDEO_EXTENSIONS,
     extract_frame_at,
     get_video_info,
-    parse_virtual_path,
+    parse_frame_path,
 )
 from scalar_forensic.web.pipeline import (
     ProgressEvent,
@@ -80,22 +80,29 @@ _IMAGE_EXTENSIONS = frozenset(
 
 
 def _check_allowed_path(p: Path) -> None:
-    """Raise 403 unless *p* is under the configured SFN_INPUT_DIR root.
+    """Raise 403 unless *p* is under an allowed root (input_dir or frame_store_dir).
 
-    File-serving endpoints require an explicit allowed root.  When SFN_INPUT_DIR
-    is not configured we fail closed rather than serving arbitrary host paths.
+    File-serving endpoints require at least one configured root.  When neither
+    is set we fail closed rather than serving arbitrary host paths.
     """
     settings = Settings()
-    if settings.input_dir is None:
+    allowed_roots: list[Path] = []
+    if settings.input_dir is not None:
+        allowed_roots.append(settings.input_dir.resolve())
+    if settings.frame_store_dir is not None:
+        allowed_roots.append(settings.frame_store_dir.resolve())
+    if not allowed_roots:
         raise HTTPException(
             status_code=403,
             detail="File serving is disabled: SFN_INPUT_DIR is not configured",
         )
-    allowed = settings.input_dir.resolve()
-    try:
-        p.relative_to(allowed)
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Path is outside the allowed directory")
+    for root in allowed_roots:
+        try:
+            p.relative_to(root)
+            return
+        except ValueError:
+            continue
+    raise HTTPException(status_code=403, detail="Path is outside the allowed directories")
 
 
 # Cached PCA-projected point cloud, computed once at startup.
@@ -455,20 +462,7 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
         _log.info("thumbnail regen: saved %s from %s", sha256[:12], source_label)
 
     try:
-        # ── Fast path: frame already on disk in frame store ──────────────────
-        if settings.frame_store_dir is not None:
-            cached = settings.frame_store_dir / f"{sha256}.jpg"
-            if cached.exists():
-                _log.debug("thumbnail regen: using frame store for %s", sha256[:12])
-
-                def _write_cached() -> None:
-                    with Image.open(cached) as img:
-                        _write(img, f"frame-store:{sha256[:12]}")
-
-                await asyncio.to_thread(_write_cached)
-                return
-
-        # ── Slow path: look up source path in Qdrant, then load/re-extract ───
+        # ── Look up source path in Qdrant, then load the file directly ────────
         def _scroll_qdrant() -> list[dict]:
             client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
             payloads: list[dict] = []
@@ -493,47 +487,33 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
             _log.debug("thumbnail regen: no Qdrant record found for hash %s", sha256[:12])
             return
 
-        # Validate paths against the configured input dir before reading anything.
-        if settings.input_dir is None:
-            _log.debug("thumbnail regen: SFN_INPUT_DIR not set, skipping path-based regen")
+        # Build allowed roots: images live under input_dir, frame JPEGs under frame_store_dir.
+        allowed_roots: list[Path] = []
+        if settings.input_dir is not None:
+            allowed_roots.append(settings.input_dir.resolve())
+        if settings.frame_store_dir is not None:
+            allowed_roots.append(settings.frame_store_dir.resolve())
+        if not allowed_roots:
+            _log.debug("thumbnail regen: no allowed roots configured, skipping")
             return
-        allowed = settings.input_dir.resolve()
-        image_extensions = {ext.lower() for ext in _IMAGE_EXTENSIONS}
 
-        def _allowed(p: Path, kind: str) -> bool:
-            try:
-                p.relative_to(allowed)
-                return True
-            except ValueError:
-                _log.warning("thumbnail regen: %s path outside allowed dir: %s", kind, p)
-                return False
+        def _allowed(p: Path) -> bool:
+            for root in allowed_roots:
+                try:
+                    p.relative_to(root)
+                    return True
+                except ValueError:
+                    continue
+            _log.warning("thumbnail regen: path outside allowed dirs: %s", p)
+            return False
 
         def _load(image_path: str) -> Image.Image | None:
-            parsed = parse_virtual_path(image_path)
-            if parsed is not None:
-                video_path, timecode_ms = parsed
-                if not video_path.is_absolute():
-                    _log.warning("thumbnail regen: video path not absolute: %s", video_path)
-                    return None
-                video_path = video_path.resolve()
-                if not _allowed(video_path, "video"):
-                    return None
-                if video_path.suffix.lower() not in VIDEO_EXTENSIONS:
-                    _log.warning("thumbnail regen: unsupported video extension: %s", video_path)
-                    return None
-                if not video_path.is_file():
-                    _log.warning("thumbnail regen: video not found: %s", video_path)
-                    return None
-                return extract_frame_at(video_path, timecode_ms)
             raw = Path(image_path)
             if not raw.is_absolute():
                 _log.warning("thumbnail regen: image path not absolute: %s", raw)
                 return None
             raw = raw.resolve()
-            if not _allowed(raw, "image"):
-                return None
-            if raw.suffix.lower() not in image_extensions:
-                _log.warning("thumbnail regen: unsupported image extension: %s", raw)
+            if not _allowed(raw):
                 return None
             if not raw.is_file():
                 _log.warning("thumbnail regen: file not found: %s", raw)
@@ -563,32 +543,7 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
 
 @app.get("/api/hit-image")
 async def hit_image(path: str) -> Response:
-    """Serve a hit image (or video frame) from the server filesystem.
-
-    Accepts both regular image paths and virtual video frame paths
-    (``/abs/path/video.mp4::frame_000001_t=1000ms``).
-    """
-    # Virtual video frame path
-    parsed = parse_virtual_path(path)
-    if parsed is not None:
-        video_path, timecode_ms = parsed
-        if not video_path.is_absolute():
-            raise HTTPException(status_code=400, detail="Virtual path must be absolute")
-        video_path = video_path.resolve()
-        _check_allowed_path(video_path)
-        if not video_path.exists() or not video_path.is_file():
-            raise HTTPException(status_code=404, detail="Video file not found")
-        if video_path.suffix.lower() not in VIDEO_EXTENSIONS:
-            raise HTTPException(status_code=400, detail="Not a video file")
-        img = await asyncio.to_thread(extract_frame_at, video_path, timecode_ms)
-        if img is None:
-            raise HTTPException(status_code=404, detail="Frame not found at given timecode")
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=90)
-        buf.seek(0)
-        return StreamingResponse(buf, media_type="image/jpeg")
-
-    # Regular image path
+    """Serve a hit image or stored video frame JPEG from the server filesystem."""
     raw = Path(path)
     if not raw.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
@@ -679,74 +634,72 @@ async def query_metadata(session_id: str, file_id: str) -> JSONResponse:
 
 @app.get("/api/metadata")
 async def hit_metadata(path: str) -> JSONResponse:
-    """Detailed metadata for a hit image or video frame (filesystem path)."""
-    # Virtual video frame path
-    parsed = parse_virtual_path(path)
-    if parsed is not None:
-        video_path, timecode_ms = parsed
-        if not video_path.is_absolute():
-            raise HTTPException(status_code=400, detail="Virtual path must be absolute")
-        video_path = video_path.resolve()
-        _check_allowed_path(video_path)
-        if not video_path.exists() or not video_path.is_file():
-            raise HTTPException(status_code=404, detail="Video file not found")
-        if video_path.suffix.lower() not in VIDEO_EXTENSIONS:
-            raise HTTPException(status_code=400, detail="Not a video file")
-        info = get_video_info(video_path)
-
-        # Retrieve the already-computed hashes from Qdrant rather than
-        # re-reading the (potentially large) video file just to hash it.
-        sha256: str | None = None
-        try:
-            settings_inner = Settings()
-            _client = QdrantClient(
-                url=settings_inner.qdrant_url, api_key=settings_inner.qdrant_api_key
-            )
-            records, _ = _client.scroll(
-                collection_name=settings_inner.collection,
-                scroll_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="video_path",
-                            match=MatchValue(value=str(video_path)),
-                        ),
-                        FieldCondition(
-                            key="frame_timecode_ms",
-                            match=MatchValue(value=timecode_ms),
-                        ),
-                    ]
-                ),
-                limit=1,
-                with_payload=["video_hash"],
-                with_vectors=False,
-            )
-            if records:
-                sha256 = records[0].payload.get("video_hash")
-        except Exception:  # noqa: BLE001
-            pass  # fall through — hashes will be omitted rather than blocking
-
-        meta: dict = {
-            "filename": video_path.name,
-            "path": str(video_path),
-            "is_video_frame": True,
-            "frame_timecode_ms": timecode_ms,
-            **{f"video_{k}": v for k, v in info.items()},
-        }
-        if sha256:
-            meta["hash_sha256"] = sha256
-        return JSONResponse(meta)
-
-    # Regular image path
+    """Detailed metadata for a hit image or stored video frame (filesystem path)."""
     raw = Path(path)
     if not raw.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
     p = raw.resolve()
-    if p.suffix.lower() not in _IMAGE_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="Invalid path")
     _check_allowed_path(p)
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 
+    settings = Settings()
+
+    # Detect frame files by their canonical path structure under frame_store_dir.
+    frame_parsed = (
+        parse_frame_path(p, settings.frame_store_dir)
+        if settings.frame_store_dir is not None
+        else None
+    )
+    if frame_parsed is not None:
+        video_hash, timecode_ms = frame_parsed
+
+        # Look up the source video path and frame image_hash from Qdrant.
+        frame_sha256: str | None = None
+        video_path_str: str | None = None
+        try:
+            _client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+            _records, _ = _client.scroll(
+                collection_name=settings.collection,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(key="video_hash", match=MatchValue(value=video_hash)),
+                        FieldCondition(
+                            key="frame_timecode_ms", match=MatchValue(value=timecode_ms)
+                        ),
+                        FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
+                    ]
+                ),
+                limit=1,
+                with_payload=["image_hash", "video_path"],
+                with_vectors=False,
+            )
+            if _records:
+                frame_sha256 = _records[0].payload.get("image_hash")
+                video_path_str = _records[0].payload.get("video_path")
+        except Exception:  # noqa: BLE001
+            pass
+
+        meta: dict = {
+            "filename": p.name,
+            "path": str(p),
+            "is_video_frame": True,
+            "frame_timecode_ms": timecode_ms,
+            "video_hash": video_hash,
+        }
+        if frame_sha256:
+            meta["hash_sha256"] = frame_sha256
+        if video_path_str:
+            meta["video_path"] = video_path_str
+            _vp = Path(video_path_str)
+            if _vp.is_file():
+                _info = get_video_info(_vp)
+                meta.update({f"video_{k}": v for k, v in _info.items()})
+        return JSONResponse(meta)
+
+    # Regular image path
+    if p.suffix.lower() not in _IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Invalid path")
     data = p.read_bytes()
     meta = extract_exif_detailed(data)
     meta["filename"] = p.name
@@ -811,7 +764,10 @@ async def video_timeline(video_hash: str) -> JSONResponse:
             records, offset = client.scroll(
                 collection_name=settings.collection,
                 scroll_filter=Filter(
-                    must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
+                    must=[
+                        FieldCondition(key="video_hash", match=MatchValue(value=video_hash)),
+                        FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
+                    ]
                 ),
                 limit=256,
                 offset=offset,

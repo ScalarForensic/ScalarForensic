@@ -793,7 +793,10 @@ def _query_exact_video(
 
     try:
         scroll_filter = Filter(
-            must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
+            must=[
+                FieldCondition(key="video_hash", match=MatchValue(value=video_hash)),
+                FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
+            ]
         )
         payload_fields = [
             "image_path",

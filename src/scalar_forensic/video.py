@@ -367,36 +367,37 @@ def get_pyav_version() -> str:
         return "unknown"
 
 
-def make_virtual_path(video_path: Path, frame: ExtractedFrame) -> str:
-    """Return the virtual path string for a video frame.
+def frame_disk_path(frame_store_dir: Path, video_hash: str, timecode_ms: int) -> Path:
+    """Return the canonical on-disk path for a stored video frame.
 
-    Format: ``/absolute/path/to/video.mp4::frame_000001_t=1000ms``
+    Format: ``{frame_store_dir}/{video_hash}/{timecode_ms:010d}ms.jpg``
 
-    The ``::`` separator is unambiguous in filesystem paths (colons are valid
-    on Linux but ``::`` does not appear in normal paths).  The timecode suffix
-    ``t={ms}ms`` is the authoritative re-extraction key — ``frame_index`` is
-    informational only.
+    The parent directory groups all frames from one video under its hash, and
+    the filename encodes the timecode so it is human-readable and sortable.
     """
-    abs_path = str(video_path.resolve())
-    return f"{abs_path}::frame_{frame.frame_index:06d}_t={frame.timecode_ms}ms"
+    return frame_store_dir / video_hash / f"{timecode_ms:010d}ms.jpg"
 
 
-def parse_virtual_path(virtual_path: str) -> tuple[Path, int] | None:
-    """Parse a virtual video frame path into ``(video_path, timecode_ms)``.
+def parse_frame_path(path: Path, frame_store_dir: Path) -> tuple[str, int] | None:
+    """Parse a stored frame path into ``(video_hash, timecode_ms)``, or None.
 
-    Returns ``None`` if the string is not a valid virtual frame path.
+    Recognises the canonical format produced by :func:`frame_disk_path`.
+    Both *path* and *frame_store_dir* are resolved before comparison so
+    relative paths on either side are handled correctly.
     """
-    if "::" not in virtual_path:
+    try:
+        rel = path.resolve().relative_to(frame_store_dir.resolve())
+    except ValueError:
         return None
-    video_part, frame_spec = virtual_path.split("::", 1)
-    # Parse "frame_000001_t=1000ms"
-    if not frame_spec.startswith("frame_") or "_t=" not in frame_spec:
+    parts = rel.parts
+    if len(parts) != 2:
+        return None
+    video_hash, filename = parts
+    stem = Path(filename).stem  # e.g. "0001234567ms"
+    if not stem.endswith("ms"):
         return None
     try:
-        t_part = frame_spec.rsplit("_t=", 1)[1]
-        if not t_part.endswith("ms"):
-            return None
-        timecode_ms = int(t_part[:-2])
-    except (ValueError, IndexError):
+        timecode_ms = int(stem[:-2])
+    except ValueError:
         return None
-    return Path(video_part), timecode_ms
+    return video_hash, timecode_ms
