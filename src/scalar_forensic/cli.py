@@ -22,6 +22,7 @@ from scalar_forensic.embedder import (
     SSCDEmbedder,
     extract_exif,
     get_library_versions,
+    hash_bytes_md5,
     hash_file,
     hash_file_md5,
     load_embedder,
@@ -792,28 +793,24 @@ def index(
         # pre-loaded Qdrant sets.  Only files needing embedding enter the batch
         # loop — already-indexed files never get read again.
         _file_hashes: dict[Path, str] = {}  # path → sha256
-        _file_hashes_md5: dict[Path, str] = {}  # path → md5
-
         typer.echo(f"Hashing {len(image_paths):,} image files ...")
         _t_hash0 = perf_counter()
 
-        def _hash_one(p: Path) -> tuple[Path, str | None, str | None, str | None]:
+        def _hash_one(p: Path) -> tuple[Path, str | None, str | None]:
             try:
-                return p, hash_file(p), hash_file_md5(p), None
+                return p, hash_file(p), None
             except OSError as exc:
-                return p, None, None, str(exc)
+                return p, None, str(exc)
 
         _n_hash_workers = min(32, (os.cpu_count() or 4) * 2)
         with ThreadPoolExecutor(max_workers=_n_hash_workers) as _hpool:
-            for _p, _sha, _md5, _err in _hpool.map(_hash_one, image_paths):
+            for _p, _sha, _err in _hpool.map(_hash_one, image_paths):
                 if _err:
                     records[_p].status = _S_FAIL_READ
                     records[_p].reason = f"read error: {_err}"
                 else:
                     _file_hashes[_p] = _sha
-                    _file_hashes_md5[_p] = _md5
                     records[_p].sha256 = _sha
-                    records[_p].md5 = _md5
 
         # Global within-run hash dedup (first occurrence of each hash wins).
         _unique_by_hash: dict[str, Path] = {}
@@ -895,13 +892,16 @@ def index(
             if not raw:
                 continue
 
-            # ── Hash lookup (pre-computed in upfront pass) ────────────────────
+            # ── Hash: SHA-256 from pre-computed lookup, MD5 from in-memory bytes ─
             t0 = perf_counter()
-            path_hash_pairs_full = [(p, _file_hashes[p], _file_hashes_md5[p]) for p, _ in raw]
+            path_hash_pairs_full = [(p, _file_hashes[p], hash_bytes_md5(data)) for p, data in raw]
             path_hash_pairs = [(p, sha) for p, sha, _ in path_hash_pairs_full]
             md5_by_sha256 = {sha: md5 for _, sha, md5 in path_hash_pairs_full}
             hash_s = perf_counter() - t0
             total_hash_s += hash_s
+
+            for p, _, md5 in path_hash_pairs_full:
+                records[p].md5 = md5
 
             # ── EXIF (shared, once per batch if enabled) ──────────────────────
             exif_data: dict[Path, ExifInfo] | None = None
