@@ -94,7 +94,10 @@ def _check_allowed_path(p: Path) -> None:
     if not allowed_roots:
         raise HTTPException(
             status_code=403,
-            detail="File serving is disabled: SFN_INPUT_DIR is not configured",
+            detail=(
+                "File serving is disabled: neither SFN_INPUT_DIR nor "
+                "SFN_FRAME_STORE_DIR is configured"
+            ),
         )
     for root in allowed_roots:
         try:
