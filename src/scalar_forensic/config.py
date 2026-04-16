@@ -20,7 +20,7 @@ class Settings:
     """
 
     def __init__(self, env_file: Path | None = None) -> None:
-        resolved = env_file or Path(".env")
+        resolved = (env_file or Path(".env")).resolve()
         self._env_file: Path | None = resolved if resolved.exists() else None
         load_dotenv(self._env_file, override=False)
 
