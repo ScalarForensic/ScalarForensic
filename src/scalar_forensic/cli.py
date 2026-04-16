@@ -444,8 +444,7 @@ def index(
             typer.echo("  (first batch will be slow — torch.compile warm-up)")
 
         typer.echo(
-            f"Connecting to Qdrant  collection={settings.collection!r}"
-            f"  vector={vector_name!r} ..."
+            f"Connecting to Qdrant  collection={settings.collection!r}  vector={vector_name!r} ..."
         )
         try:
             indexer = Indexer(

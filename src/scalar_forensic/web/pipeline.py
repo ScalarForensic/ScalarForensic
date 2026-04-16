@@ -746,9 +746,7 @@ def _query_exact(
                 collection_name=settings.collection,
                 scroll_filter=Filter(
                     must=[
-                        FieldCondition(
-                            key="image_hash_md5", match=MatchValue(value=image_hash_md5)
-                        )
+                        FieldCondition(key="image_hash_md5", match=MatchValue(value=image_hash_md5))
                     ]
                 ),
                 limit=50,
@@ -968,10 +966,10 @@ def query_semantic_stats(
     settings: Settings,
     sample_size: int = _STATS_SAMPLE,
 ) -> tuple[SemanticStats | None, str | None]:
-    """Return score-distribution stats for one uploaded file against the DINOv2 collection.
+    """Return score-distribution stats for one uploaded file using the DINOv2 named vector.
 
-    Queries the top-*sample_size* most-similar points with no score threshold so the
-    result covers the full relevant tail.  Returns (stats, None) on success or
+    Queries the top-*sample_size* most-similar points (using="dino") with no score threshold
+    so the result covers the full relevant tail.  Returns (stats, None) on success or
     (None, error_message) on failure.
     """
     entry = next((e for e in session.files if e.file_id == file_id), None)
@@ -1073,9 +1071,7 @@ def get_hit_qdrant_provenance(image_hash: str, settings: Settings) -> dict[str, 
     try:
         # Collect all prefixed field names we want from the payload.
         payload_fields = [
-            f"{vn}_{field}"
-            for vn, _ in _VECTOR_MODE_MAP
-            for field in _PROVENANCE_FIELD_NAMES
+            f"{vn}_{field}" for vn, _ in _VECTOR_MODE_MAP for field in _PROVENANCE_FIELD_NAMES
         ] + ["sscd_n_crops"]
         records, _ = client.scroll(
             collection_name=settings.collection,
@@ -1146,5 +1142,7 @@ async def get_available_modes(settings: Settings) -> tuple[list[str], str | None
             if "dino" in vectors_config:
                 modes.append("semantic")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Could not inspect vector config for %s: %s", settings.collection, exc)
+        err = f"Could not inspect vector config for {settings.collection}: {exc}"
+        logger.warning(err)
+        return modes, err
     return modes, None

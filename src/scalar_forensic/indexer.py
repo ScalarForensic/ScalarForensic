@@ -52,9 +52,7 @@ class Indexer:
                 # Collection exists but doesn't have this vector yet — add it.
                 self.client.update_collection(
                     collection_name=self.collection,
-                    vectors_config={
-                        vector_name: VectorParams(size=dim, distance=Distance.COSINE)
-                    },
+                    vectors_config={vector_name: VectorParams(size=dim, distance=Distance.COSINE)},
                 )
                 info = self.client.get_collection(self.collection)
             else:
@@ -122,9 +120,7 @@ class Indexer:
         while True:
             records, offset = self.client.scroll(
                 collection_name=self.collection,
-                scroll_filter=Filter(
-                    must=[HasVectorCondition(has_vector=self.vector_name)]
-                ),
+                scroll_filter=Filter(must=[HasVectorCondition(has_vector=self.vector_name)]),
                 limit=10_000,
                 with_payload=["image_hash"],
                 with_vectors=False,
@@ -149,9 +145,7 @@ class Indexer:
         while True:
             records, offset = self.client.scroll(
                 collection_name=self.collection,
-                scroll_filter=Filter(
-                    must=[HasVectorCondition(has_vector=self.vector_name)]
-                ),
+                scroll_filter=Filter(must=[HasVectorCondition(has_vector=self.vector_name)]),
                 limit=10_000,
                 with_payload=["image_path"],
                 with_vectors=False,
@@ -347,7 +341,7 @@ class Indexer:
 
         new_points: list[PointStruct] = []
         existing_vector_updates: list[PointVectors] = []
-        existing_provenance_updates: list[tuple[str, dict]] = []  # (id, payload)
+        existing_point_ids: list[str] = []
 
         for pid, core, emb in zip(point_ids, core_payloads, vector_list):
             if pid not in existing_ids:
@@ -360,7 +354,7 @@ class Indexer:
                 )
             else:
                 existing_vector_updates.append(PointVectors(id=pid, vector={vn: emb}))
-                existing_provenance_updates.append((pid, model_provenance))
+                existing_point_ids.append(pid)
 
         if new_points:
             self.client.upsert(collection_name=self.collection, points=new_points)
@@ -369,9 +363,9 @@ class Indexer:
             self.client.update_vectors(
                 collection_name=self.collection, points=existing_vector_updates
             )
-            for pid, prov in existing_provenance_updates:
-                self.client.set_payload(
-                    collection_name=self.collection,
-                    payload=prov,
-                    points=[pid],
-                )
+            # model_provenance is identical for every point in the batch — one call suffices.
+            self.client.set_payload(
+                collection_name=self.collection,
+                payload=model_provenance,
+                points=existing_point_ids,
+            )

@@ -794,9 +794,9 @@ async def video_frame(path: str, timecode_ms: int) -> StreamingResponse:
 async def video_timeline(video_hash: str) -> JSONResponse:
     """Return all indexed frame timecodes for a given video hash.
 
-    Scrolls Qdrant (SSCD collection first, then DINOv2) for points with a
-    matching ``video_hash`` payload field.  Returns timecodes, frame hashes,
-    and virtual paths so the frontend can render the timeline bar.
+    Scrolls the unified Qdrant collection for points with a matching
+    ``video_hash`` payload field.  Returns timecodes, frame hashes, and virtual
+    paths so the frontend can render the timeline bar.
     """
     if not re.fullmatch(r"[0-9a-f]{64}", video_hash):
         raise HTTPException(status_code=400, detail="Invalid video hash")
