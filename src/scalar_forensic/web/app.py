@@ -124,10 +124,18 @@ async def lifespan(_app: FastAPI):
     if settings.viz_max_points > 0:
         sscd_pts, dino_pts = await asyncio.gather(
             asyncio.to_thread(
-                _fetch_and_project, settings.collection_sscd, settings.viz_max_points, settings
+                _fetch_and_project,
+                settings.collection,
+                "sscd",
+                settings.viz_max_points,
+                settings,
             ),
             asyncio.to_thread(
-                _fetch_and_project, settings.collection_dino, settings.viz_max_points, settings
+                _fetch_and_project,
+                settings.collection,
+                "dino",
+                settings.viz_max_points,
+                settings,
             ),
         )
         _points3d_cache = {"sscd": sscd_pts, "dino": dino_pts}
@@ -464,20 +472,19 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
         def _scroll_qdrant() -> list[dict]:
             client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
             payloads: list[dict] = []
-            for collection in (settings.collection_sscd, settings.collection_dino):
-                try:
-                    records, _ = client.scroll(
-                        collection_name=collection,
-                        scroll_filter=Filter(
-                            must=[FieldCondition(key="image_hash", match=MatchValue(value=sha256))]
-                        ),
-                        limit=4,
-                        with_payload=True,
-                        with_vectors=False,
-                    )
-                    payloads.extend(r.payload for r in records if r.payload)
-                except Exception as exc:  # noqa: BLE001
-                    _log.debug("thumbnail regen: could not scroll %r: %s", collection, exc)
+            try:
+                records, _ = client.scroll(
+                    collection_name=settings.collection,
+                    scroll_filter=Filter(
+                        must=[FieldCondition(key="image_hash", match=MatchValue(value=sha256))]
+                    ),
+                    limit=4,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                payloads.extend(r.payload for r in records if r.payload)
+            except Exception as exc:  # noqa: BLE001
+                _log.debug("thumbnail regen: could not scroll %r: %s", settings.collection, exc)
             return payloads
 
         payloads = await asyncio.to_thread(_scroll_qdrant)
@@ -695,28 +702,26 @@ async def hit_metadata(path: str) -> JSONResponse:
             _client = QdrantClient(
                 url=settings_inner.qdrant_url, api_key=settings_inner.qdrant_api_key
             )
-            for coll in (settings_inner.collection_sscd, settings_inner.collection_dino):
-                records, _ = _client.scroll(
-                    collection_name=coll,
-                    scroll_filter=Filter(
-                        must=[
-                            FieldCondition(
-                                key="video_path",
-                                match=MatchValue(value=str(video_path)),
-                            ),
-                            FieldCondition(
-                                key="frame_timecode_ms",
-                                match=MatchValue(value=timecode_ms),
-                            ),
-                        ]
-                    ),
-                    limit=1,
-                    with_payload=["video_hash"],
-                    with_vectors=False,
-                )
-                if records:
-                    sha256 = records[0].payload.get("video_hash")
-                    break
+            records, _ = _client.scroll(
+                collection_name=settings_inner.collection,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="video_path",
+                            match=MatchValue(value=str(video_path)),
+                        ),
+                        FieldCondition(
+                            key="frame_timecode_ms",
+                            match=MatchValue(value=timecode_ms),
+                        ),
+                    ]
+                ),
+                limit=1,
+                with_payload=["video_hash"],
+                with_vectors=False,
+            )
+            if records:
+                sha256 = records[0].payload.get("video_hash")
         except Exception:  # noqa: BLE001
             pass  # fall through — hashes will be omitted rather than blocking
 
@@ -800,40 +805,39 @@ async def video_timeline(video_hash: str) -> JSONResponse:
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
 
     frames: dict[int, dict] = {}  # timecode_ms → frame info
-    for collection in (settings.collection_sscd, settings.collection_dino):
-        try:
-            offset = None
-            while True:
-                records, offset = client.scroll(
-                    collection_name=collection,
-                    scroll_filter=Filter(
-                        must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
-                    ),
-                    limit=256,
-                    offset=offset,
-                    with_payload=[
-                        "image_path",
-                        "image_hash",
-                        "frame_timecode_ms",
-                        "frame_index",
-                        "video_path",
-                    ],
-                    with_vectors=False,
-                )
-                for r in records:
-                    tc = r.payload.get("frame_timecode_ms")
-                    if tc is not None and tc not in frames:
-                        frames[tc] = {
-                            "timecode_ms": tc,
-                            "frame_hash": r.payload.get("image_hash"),
-                            "frame_index": r.payload.get("frame_index"),
-                            "virtual_path": r.payload.get("image_path"),
-                            "video_path": r.payload.get("video_path"),
-                        }
-                if offset is None:
-                    break
-        except Exception as exc:  # noqa: BLE001
-            _log.debug("video-timeline: could not scroll %r: %s", collection, exc)
+    try:
+        offset = None
+        while True:
+            records, offset = client.scroll(
+                collection_name=settings.collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
+                ),
+                limit=256,
+                offset=offset,
+                with_payload=[
+                    "image_path",
+                    "image_hash",
+                    "frame_timecode_ms",
+                    "frame_index",
+                    "video_path",
+                ],
+                with_vectors=False,
+            )
+            for r in records:
+                tc = r.payload.get("frame_timecode_ms")
+                if tc is not None and tc not in frames:
+                    frames[tc] = {
+                        "timecode_ms": tc,
+                        "frame_hash": r.payload.get("image_hash"),
+                        "frame_index": r.payload.get("frame_index"),
+                        "virtual_path": r.payload.get("image_path"),
+                        "video_path": r.payload.get("video_path"),
+                    }
+            if offset is None:
+                break
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("video-timeline: could not scroll %r: %s", settings.collection, exc)
 
     return JSONResponse(
         {
@@ -868,8 +872,19 @@ def _pca3(vectors: list[list[float]]) -> list[list[float]]:
     return proj.tolist()
 
 
-def _fetch_and_project(collection: str, max_points: int, settings: Settings) -> list[list[float]]:
-    """Scroll *collection* for up to *max_points* vectors, then PCA-project to 3-D."""
+def _fetch_and_project(
+    collection: str,
+    vector_name: str,
+    max_points: int,
+    settings: Settings,
+) -> list[list[float]]:
+    """Scroll *collection* for up to *max_points* named vectors, then PCA-project to 3-D.
+
+    Only points that carry *vector_name* are considered; the scroll filter uses
+    ``HasVectorCondition`` so points indexed by only the other model are skipped.
+    """
+    from qdrant_client.models import HasVectorCondition
+
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
     vectors: list[list[float]] = []
     offset = None
@@ -878,20 +893,21 @@ def _fetch_and_project(collection: str, max_points: int, settings: Settings) -> 
             batch_size = min(256, max_points - len(vectors))
             records, offset = client.scroll(
                 collection_name=collection,
+                scroll_filter=Filter(must=[HasVectorCondition(has_vector=vector_name)]),
                 limit=batch_size,
-                with_vectors=True,
+                with_vectors=[vector_name],
                 offset=offset,
             )
             for r in records:
                 v = r.vector
                 if isinstance(v, dict):
-                    v = next(iter(v.values()), None)
+                    v = v.get(vector_name)
                 if v is not None:
                     vectors.append(v)
             if offset is None:
                 break
     except Exception as exc:  # collection missing or Qdrant unreachable
-        _log.warning("points3d: could not scroll %r: %s", collection, exc)
+        _log.warning("points3d: could not scroll %r/%r: %s", collection, vector_name, exc)
         return []
     return _pca3(vectors)
 

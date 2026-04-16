@@ -92,8 +92,7 @@ there. Environment variables already set in the shell take precedence over the f
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SFN_QDRANT_URL` | `http://localhost:6333` | Qdrant server URL |
-| `SFN_COLLECTION_DINO` | `sfn-dinov2` | Collection name for DINOv2 vectors |
-| `SFN_COLLECTION_SSCD` | `sfn-sscd` | Collection name for SSCD vectors |
+| `SFN_COLLECTION` | `sfn` | Qdrant collection name (holds all vector types) |
 | `SFN_MODEL_DINO` | `facebook/dinov2-large` | DINOv2 model identifier |
 | `SFN_MODEL_SSCD` | `models/sscd_disc_mixup.torchscript.pt` | Path to SSCD checkpoint |
 | `SFN_NORMALIZE_SIZE` | `512` | DINOv2 resize dimension (N×N px) |

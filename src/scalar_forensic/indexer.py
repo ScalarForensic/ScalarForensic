@@ -9,43 +9,62 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    HasVectorCondition,
     MatchValue,
     PayloadSchemaType,
     PointStruct,
+    PointVectors,
     VectorParams,
 )
 
 
 class Indexer:
     def __init__(
-        self, url: str, collection: str, embedding_dim: int, api_key: str | None = None
+        self,
+        url: str,
+        collection: str,
+        vector_name: str,
+        embedding_dim: int,
+        api_key: str | None = None,
     ) -> None:
         self.client = QdrantClient(url=url, api_key=api_key)
         self.collection = collection
-        self._ensure_collection(embedding_dim)
+        self.vector_name = vector_name
+        self._ensure_collection(vector_name, embedding_dim)
 
-    def _ensure_collection(self, dim: int) -> None:
+    def _ensure_collection(self, vector_name: str, dim: int) -> None:
         existing = {c.name for c in self.client.get_collections().collections}
         if self.collection not in existing:
             self.client.create_collection(
                 collection_name=self.collection,
-                vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+                vectors_config={vector_name: VectorParams(size=dim, distance=Distance.COSINE)},
             )
             info = self.client.get_collection(self.collection)
         else:
             info = self.client.get_collection(self.collection)
             vectors_config = info.config.params.vectors
-            if isinstance(vectors_config, dict):
+            if not isinstance(vectors_config, dict):
                 raise ValueError(
-                    f"Collection '{self.collection}' uses named vectors — not supported."
+                    f"Collection '{self.collection}' uses a legacy single-vector format. "
+                    "Drop it (e.g. via qdrant-client or the Qdrant dashboard) and re-index."
                 )
-            existing_dim = vectors_config.size  # type: ignore[union-attr]
-            if existing_dim != dim:
-                raise ValueError(
-                    f"Collection '{self.collection}' already exists with dim={existing_dim}, "
-                    f"but the current model produces dim={dim}. "
-                    f"Use a different collection or the matching backend."
+            if vector_name not in vectors_config:
+                # Collection exists but doesn't have this vector yet — add it.
+                self.client.update_collection(
+                    collection_name=self.collection,
+                    vectors_config={
+                        vector_name: VectorParams(size=dim, distance=Distance.COSINE)
+                    },
                 )
+                info = self.client.get_collection(self.collection)
+            else:
+                existing_dim = vectors_config[vector_name].size
+                if existing_dim != dim:
+                    raise ValueError(
+                        f"Vector '{vector_name}' in collection '{self.collection}' already "
+                        f"exists with dim={existing_dim}, but the current model produces "
+                        f"dim={dim}. Use a different collection or the matching model."
+                    )
         # Ensure payload indexes exist (idempotent). info is available from both branches above.
         schema = info.payload_schema or {}
         if "image_hash" not in schema:
@@ -92,16 +111,20 @@ class Indexer:
             )
 
     def get_all_indexed_hashes(self) -> set[str]:
-        """Return the set of all image_hash values stored in the collection.
+        """Return the set of all image_hash values for points that have this vector.
 
         Performs a single paginated scroll rather than one query per batch,
         building an in-memory set for O(1) per-item lookup during ingestion.
+        Only considers points that carry the vector type this Indexer manages.
         """
         result: set[str] = set()
         offset = None
         while True:
             records, offset = self.client.scroll(
                 collection_name=self.collection,
+                scroll_filter=Filter(
+                    must=[HasVectorCondition(has_vector=self.vector_name)]
+                ),
                 limit=10_000,
                 with_payload=["image_hash"],
                 with_vectors=False,
@@ -115,16 +138,20 @@ class Indexer:
         return result
 
     def get_all_indexed_paths(self) -> set[str]:
-        """Return the set of all image_path values stored in the collection.
+        """Return the set of all image_path values for points that have this vector.
 
         Performs a single paginated scroll rather than one query per batch,
         building an in-memory set for O(1) per-item lookup during ingestion.
+        Only considers points that carry the vector type this Indexer manages.
         """
         result: set[str] = set()
         offset = None
         while True:
             records, offset = self.client.scroll(
                 collection_name=self.collection,
+                scroll_filter=Filter(
+                    must=[HasVectorCondition(has_vector=self.vector_name)]
+                ),
                 limit=10_000,
                 with_payload=["image_path"],
                 with_vectors=False,
@@ -146,7 +173,8 @@ class Indexer:
 
         Performs a single paginated scroll so the caller can evaluate video
         completeness locally from the returned metadata without per-video
-        Qdrant queries.
+        Qdrant queries.  Only considers points that carry the vector type this
+        Indexer manages.
         """
         seen: dict[str, dict] = {}
         offset = None
@@ -154,7 +182,10 @@ class Indexer:
             records, offset = self.client.scroll(
                 collection_name=self.collection,
                 scroll_filter=Filter(
-                    must=[FieldCondition(key="is_video_frame", match=MatchValue(value=True))]
+                    must=[
+                        FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
+                        HasVectorCondition(has_vector=self.vector_name),
+                    ]
                 ),
                 limit=10_000,
                 with_payload=[
@@ -206,6 +237,15 @@ class Indexer:
     ) -> None:
         """Upsert vectors with full forensic metadata payload.
 
+        Each point stores its embedding under the named vector ``self.vector_name``
+        (``"dino"`` or ``"sscd"``).  Model-specific provenance fields are prefixed
+        with the vector name (e.g. ``dino_model_name``) so a single point can carry
+        provenance for both models when indexed by both pipelines.
+
+        Points that already exist in the collection (e.g. because the other model was
+        indexed first) are updated in-place: only the new named vector and its provenance
+        are written; the core payload and any other named vectors are left untouched.
+
         For video frames, pass ``video_metadata`` as a list of per-point dicts
         (or ``None`` entries for non-video points in a mixed batch).  When a
         dict is present for point ``i`` it must contain: ``video_hash``,
@@ -229,8 +269,31 @@ class Indexer:
                 f"video_metadata length mismatch: "
                 f"expected={len(image_hashes)}, got={len(video_metadata)}"
             )
+        vn = self.vector_name
         indexed_at = datetime.now(UTC).isoformat()
-        points = []
+
+        # Model-specific provenance — prefixed with the vector name so a single
+        # point can hold provenance for multiple models side by side.
+        model_provenance: dict = {
+            f"{vn}_model_name": shared_metadata["model_name"],
+            f"{vn}_model_hash": shared_metadata["model_hash"],
+            f"{vn}_embedding_dim": shared_metadata["embedding_dim"],
+            f"{vn}_normalize_size": shared_metadata["normalize_size"],
+            f"{vn}_inference_dtype": shared_metadata["inference_dtype"],
+            f"{vn}_library_versions": shared_metadata["library_versions"],
+            f"{vn}_indexed_at": indexed_at,
+            **(
+                {"sscd_n_crops": shared_metadata["sscd_n_crops"]}
+                if "sscd_n_crops" in shared_metadata
+                else {}
+            ),
+        }
+
+        # Build all point IDs and per-point data in one pass.
+        point_ids: list[str] = []
+        core_payloads: list[dict] = []
+        vector_list: list[list[float]] = []
+
         for i, (image_path, image_hash, embedding) in enumerate(
             zip(image_paths, image_hashes, embeddings)
         ):
@@ -242,9 +305,9 @@ class Indexer:
                 point_id_key = vmeta["video_hash"] + ":" + str(vmeta["frame_timecode_ms"])
             else:
                 point_id_key = image_hash
-            point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, point_id_key))
+            point_ids.append(str(uuid.uuid5(uuid.NAMESPACE_URL, point_id_key)))
 
-            payload: dict = {
+            core: dict = {
                 # Forensic identifiers
                 "image_hash": image_hash,
                 **({"image_hash_md5": image_hashes_md5[i]} if image_hashes_md5 else {}),
@@ -254,35 +317,61 @@ class Indexer:
                 "image_path": (
                     str(image_path) if vmeta is not None else str(Path(image_path).resolve())
                 ),
-                "indexed_at": indexed_at,
-                # Model & library provenance
-                "model_name": shared_metadata["model_name"],
-                "model_hash": shared_metadata["model_hash"],
-                "embedding_dim": shared_metadata["embedding_dim"],
-                "normalize_size": shared_metadata["normalize_size"],
-                "inference_dtype": shared_metadata["inference_dtype"],
-                "library_versions": shared_metadata["library_versions"],
-                # sscd_n_crops is only present for SSCD indexing runs
-                **(
-                    {"sscd_n_crops": shared_metadata["sscd_n_crops"]}
-                    if "sscd_n_crops" in shared_metadata
-                    else {}
-                ),
                 # EXIF flags (only present when extraction is enabled)
                 **(exif_payloads.get(image_path, {}) if exif_payloads else {}),
             }
 
             # Video-frame provenance fields
             if vmeta is not None:
-                payload["is_video_frame"] = True
-                payload["video_hash"] = vmeta["video_hash"]
-                payload["video_path"] = vmeta["video_path"]
-                payload["frame_timecode_ms"] = vmeta["frame_timecode_ms"]
-                payload["frame_index"] = vmeta["frame_index"]
-                payload["extraction_fps"] = vmeta["extraction_fps"]
-                payload["max_frames_cap"] = vmeta["max_frames_cap"]
-                payload["pyav_version"] = vmeta["pyav_version"]
+                core["is_video_frame"] = True
+                core["video_hash"] = vmeta["video_hash"]
+                core["video_path"] = vmeta["video_path"]
+                core["frame_timecode_ms"] = vmeta["frame_timecode_ms"]
+                core["frame_index"] = vmeta["frame_index"]
+                core["extraction_fps"] = vmeta["extraction_fps"]
+                core["max_frames_cap"] = vmeta["max_frames_cap"]
+                core["pyav_version"] = vmeta["pyav_version"]
 
-            points.append(PointStruct(id=point_id, vector=embedding, payload=payload))
+            core_payloads.append(core)
+            vector_list.append(embedding)
 
-        self.client.upsert(collection_name=self.collection, points=points)
+        # Determine which points already exist so we can do targeted updates
+        # rather than full replacements (which would wipe the other model's vector).
+        retrieved = self.client.retrieve(
+            collection_name=self.collection,
+            ids=point_ids,
+            with_vectors=False,
+            with_payload=False,
+        )
+        existing_ids = {r.id for r in retrieved}
+
+        new_points: list[PointStruct] = []
+        existing_vector_updates: list[PointVectors] = []
+        existing_provenance_updates: list[tuple[str, dict]] = []  # (id, payload)
+
+        for pid, core, emb in zip(point_ids, core_payloads, vector_list):
+            if pid not in existing_ids:
+                new_points.append(
+                    PointStruct(
+                        id=pid,
+                        vector={vn: emb},
+                        payload={**core, **model_provenance},
+                    )
+                )
+            else:
+                existing_vector_updates.append(PointVectors(id=pid, vector={vn: emb}))
+                existing_provenance_updates.append((pid, model_provenance))
+
+        if new_points:
+            self.client.upsert(collection_name=self.collection, points=new_points)
+
+        if existing_vector_updates:
+            self.client.update_vectors(
+                collection_name=self.collection, points=existing_vector_updates
+            )
+            for pid, prov in existing_provenance_updates:
+                self.client.set_payload(
+                    collection_name=self.collection,
+                    payload=prov,
+                    points=[pid],
+                )

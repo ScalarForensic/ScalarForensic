@@ -12,8 +12,7 @@ def _settings(**kwargs) -> Settings:
     defaults = dict(
         qdrant_url="http://localhost:6333",
         qdrant_api_key=None,
-        collection_sscd="sfn-sscd",
-        collection_dino="sfn-dinov2",
+        collection="sfn",
     )
     defaults.update(kwargs)
     s = MagicMock(spec=Settings)
@@ -28,21 +27,28 @@ def _make_collection(name: str) -> MagicMock:
     return c
 
 
+def _make_collection_info(vector_names: list[str]) -> MagicMock:
+    """Return a mock get_collection() response with the given named vectors."""
+    info = MagicMock()
+    info.config.params.vectors = {name: MagicMock() for name in vector_names}
+    return info
+
+
 # ---------------------------------------------------------------------------
 # Success paths
 # ---------------------------------------------------------------------------
 
 
-def test_get_available_modes_both_collections():
+def test_get_available_modes_both_vectors():
     settings = _settings()
     collections_response = MagicMock()
-    collections_response.collections = [
-        _make_collection("sfn-sscd"),
-        _make_collection("sfn-dinov2"),
-    ]
+    collections_response.collections = [_make_collection("sfn")]
 
     with patch("scalar_forensic.web.pipeline.QdrantClient") as MockClient:
         MockClient.return_value.get_collections.return_value = collections_response
+        MockClient.return_value.get_collection.return_value = _make_collection_info(
+            ["dino", "sscd"]
+        )
         modes, error = asyncio.run(get_available_modes(settings))
 
     assert error is None
@@ -52,10 +58,11 @@ def test_get_available_modes_both_collections():
 def test_get_available_modes_only_sscd():
     settings = _settings()
     collections_response = MagicMock()
-    collections_response.collections = [_make_collection("sfn-sscd")]
+    collections_response.collections = [_make_collection("sfn")]
 
     with patch("scalar_forensic.web.pipeline.QdrantClient") as MockClient:
         MockClient.return_value.get_collections.return_value = collections_response
+        MockClient.return_value.get_collection.return_value = _make_collection_info(["sscd"])
         modes, error = asyncio.run(get_available_modes(settings))
 
     assert error is None
@@ -64,7 +71,23 @@ def test_get_available_modes_only_sscd():
     assert "semantic" not in modes
 
 
-def test_get_available_modes_empty_collections():
+def test_get_available_modes_only_dino():
+    settings = _settings()
+    collections_response = MagicMock()
+    collections_response.collections = [_make_collection("sfn")]
+
+    with patch("scalar_forensic.web.pipeline.QdrantClient") as MockClient:
+        MockClient.return_value.get_collections.return_value = collections_response
+        MockClient.return_value.get_collection.return_value = _make_collection_info(["dino"])
+        modes, error = asyncio.run(get_available_modes(settings))
+
+    assert error is None
+    assert "exact" in modes
+    assert "semantic" in modes
+    assert "altered" not in modes
+
+
+def test_get_available_modes_collection_absent():
     settings = _settings()
     collections_response = MagicMock()
     collections_response.collections = []
@@ -113,10 +136,7 @@ def test_get_available_modes_succeeds_on_second_attempt():
     """When first attempt fails but second succeeds, returns correct modes."""
     settings = _settings()
     collections_response = MagicMock()
-    collections_response.collections = [
-        _make_collection("sfn-sscd"),
-        _make_collection("sfn-dinov2"),
-    ]
+    collections_response.collections = [_make_collection("sfn")]
 
     attempt = 0
 
@@ -127,6 +147,7 @@ def test_get_available_modes_succeeds_on_second_attempt():
             raise ConnectionError("first attempt failed")
         client = MagicMock()
         client.get_collections.return_value = collections_response
+        client.get_collection.return_value = _make_collection_info(["dino", "sscd"])
         return client
 
     async def _noop_sleep(_):

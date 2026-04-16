@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Interactively remap file paths stored in the Qdrant collections.
+"""Interactively remap file paths stored in the Qdrant collection.
 
 When evidence drives are moved or mounted at different paths, the stored
 ``image_path`` and ``video_path`` payload fields go stale.  This tool
-enumerates every distinct path in the collection(s), shows you how many
+enumerates every distinct path in the collection, shows you how many
 points each one affects, and lets you replace prefixes in bulk.
 
 Usage:
     uv run python scripts/remap_paths.py [--url URL] [--collection NAME]
 
-With no arguments it reads SFN_QDRANT_URL / SFN_COLLECTION_* from the
+With no arguments it reads SFN_QDRANT_URL / SFN_COLLECTION from the
 environment (or a .env file in the working directory) and operates on
-both configured collections.
+the configured collection.
 
 Point updates are performed via ``set_payload`` filtered by the exact
 old path value — payload indexes on ``image_path`` and ``video_path``
@@ -427,7 +427,7 @@ def main() -> None:
         action="append",
         help=(
             "Collection to operate on (repeat for multiple). "
-            "Defaults to both SFN_COLLECTION_SSCD and SFN_COLLECTION_DINO."
+            "Defaults to SFN_COLLECTION (or 'sfn' if unset)."
         ),
     )
     parser.add_argument(
@@ -439,7 +439,7 @@ def main() -> None:
     settings = Settings()
     url = args.url or settings.qdrant_url
     api_key = args.api_key or settings.qdrant_api_key
-    collections = args.collection or [settings.collection_sscd, settings.collection_dino]
+    collections = args.collection or [settings.collection]
 
     print(f"Connecting to Qdrant at {url!r} …")
     client = QdrantClient(url=url, api_key=api_key)

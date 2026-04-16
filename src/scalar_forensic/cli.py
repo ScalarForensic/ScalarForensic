@@ -390,16 +390,16 @@ def index(
     # Resolve the CSV report path early so the user knows where it will land.
     csv_path = report or Path(f"sfn_ingestion_{datetime.now():%Y%m%d_%H%M%S}.csv")
 
-    # Build list of (use_sscd, model_name, collection_name) for each requested backend.
+    # Build list of (use_sscd, model_name, vector_name) for each requested backend.
     models_to_run: list[tuple[bool, str, str]] = []
     if sscd:
-        models_to_run.append((True, settings.model_sscd, settings.collection_sscd))
+        models_to_run.append((True, settings.model_sscd, "sscd"))
     if dino:
-        models_to_run.append((False, settings.model_dino, settings.collection_dino))
+        models_to_run.append((False, settings.model_dino, "dino"))
 
     # Load all models upfront — fail fast before scanning.
     specs: list[tuple[AnyEmbedder, Indexer, str]] = []
-    for use_sscd, model_name, collection in models_to_run:
+    for use_sscd, model_name, vector_name in models_to_run:
         backend_name = "SSCD" if use_sscd else "DINOv2"
         if settings.embedding_endpoint:
             if not settings.embedding_model:
@@ -443,11 +443,15 @@ def index(
         if compiled:
             typer.echo("  (first batch will be slow — torch.compile warm-up)")
 
-        typer.echo(f"Connecting to Qdrant  collection={collection!r} ...")
+        typer.echo(
+            f"Connecting to Qdrant  collection={settings.collection!r}"
+            f"  vector={vector_name!r} ..."
+        )
         try:
             indexer = Indexer(
                 url=settings.qdrant_url,
-                collection=collection,
+                collection=settings.collection,
+                vector_name=vector_name,
                 embedding_dim=embedder.embedding_dim,
                 api_key=settings.qdrant_api_key,
             )

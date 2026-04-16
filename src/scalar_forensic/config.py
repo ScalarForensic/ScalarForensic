@@ -25,8 +25,7 @@ class Settings:
         load_dotenv(self._env_file, override=False)
 
         self.qdrant_url: str = os.environ.get("SFN_QDRANT_URL", "http://localhost:6333")
-        self.collection_dino: str = os.environ.get("SFN_COLLECTION_DINO", "sfn-dinov2")
-        self.collection_sscd: str = os.environ.get("SFN_COLLECTION_SSCD", "sfn-sscd")
+        self.collection: str = os.environ.get("SFN_COLLECTION", "sfn")
         self.model_dino: str = os.environ.get("SFN_MODEL_DINO", "facebook/dinov2-large")
         self.model_sscd: str = os.environ.get(
             "SFN_MODEL_SSCD", "models/sscd_disc_mixup.torchscript.pt"

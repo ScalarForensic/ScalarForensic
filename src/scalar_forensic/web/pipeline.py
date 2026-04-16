@@ -577,11 +577,12 @@ def query_session(
                 for vec in sscd_by_qtc.get(qtc, []):
                     hits, errs = _query_vector(
                         client,
-                        collection=settings.collection_sscd,
+                        collection=settings.collection,
                         vector=vec,
                         mode="altered",
                         threshold=threshold_altered,
                         limit=limit,
+                        vector_name="sscd",
                     )
                     for h in hits:
                         if qtc is not None:
@@ -596,11 +597,12 @@ def query_session(
                 for vec in dino_by_qtc.get(qtc, []):
                     hits, errs = _query_vector(
                         client,
-                        collection=settings.collection_dino,
+                        collection=settings.collection,
                         vector=vec,
                         mode="semantic",
                         threshold=threshold_semantic,
                         limit=limit,
+                        vector_name="dino",
                     )
                     for h in hits:
                         if qtc is not None:
@@ -681,84 +683,88 @@ def _query_exact(
     hits: list[Hit] = []
     errors: list[str] = []
     collision_paths: set[str] = set()
-    # Map each collection to the mode label used in model_provenance
-    collection_mode = {
-        settings.collection_sscd: "altered",
-        settings.collection_dino: "semantic",
-    }
-    for collection in (settings.collection_sscd, settings.collection_dino):
-        mode_key = collection_mode[collection]
+    try:
+        records, _ = client.scroll(
+            collection_name=settings.collection,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="image_hash", match=MatchValue(value=image_hash))]
+            ),
+            limit=50,
+            with_payload=[
+                "image_path",
+                "image_hash",
+                "exif",
+                "exif_geo_data",
+                "dino_model_name",
+                "dino_model_hash",
+                "sscd_model_name",
+                "sscd_model_hash",
+            ],
+            with_vectors=False,
+        )
+        for r in records:
+            path = r.payload.get("image_path", "")
+            mp: dict = {}
+            dino_mn = r.payload.get("dino_model_name", "")
+            dino_mh = r.payload.get("dino_model_hash", "")
+            sscd_mn = r.payload.get("sscd_model_name", "")
+            sscd_mh = r.payload.get("sscd_model_hash", "")
+            if dino_mn or dino_mh:
+                mp["semantic"] = {"name": dino_mn, "hash": dino_mh}
+            if sscd_mn or sscd_mh:
+                mp["altered"] = {"name": sscd_mn, "hash": sscd_mh}
+            existing = next((h for h in hits if h.path == path), None)
+            if existing is None:
+                hits.append(
+                    Hit(
+                        path=path,
+                        scores={"exact": 1.0},
+                        exif=r.payload.get("exif"),
+                        exif_geo_data=r.payload.get("exif_geo_data"),
+                        image_hash=r.payload.get("image_hash"),
+                        model_provenance=mp,
+                    )
+                )
+            else:
+                existing.model_provenance.update(mp)
+        _query_exact_ok = True
+    except Exception as _query_exact_exc:  # noqa: BLE001
+        msg = str(_query_exact_exc).lower()
+        if "not found" in msg or "doesn't exist" in msg:
+            logger.debug("Exact query skipped non-existent collection %s", settings.collection)
+        else:
+            logger.warning("Exact hash query failed on %s: %s", settings.collection, _query_exact_exc)
+            errors.append(f"exact query failed: {type(_query_exact_exc).__name__}")
+        _query_exact_ok = False
+
+    # Collision detection: find images with same MD5 but different SHA-256
+    if _query_exact_ok and image_hash_md5:
         try:
-            records, _ = client.scroll(
-                collection_name=collection,
+            md5_records, _ = client.scroll(
+                collection_name=settings.collection,
                 scroll_filter=Filter(
-                    must=[FieldCondition(key="image_hash", match=MatchValue(value=image_hash))]
+                    must=[
+                        FieldCondition(
+                            key="image_hash_md5", match=MatchValue(value=image_hash_md5)
+                        )
+                    ]
                 ),
                 limit=50,
-                with_payload=[
-                    "image_path",
-                    "image_hash",
-                    "exif",
-                    "exif_geo_data",
-                    "model_name",
-                    "model_hash",
-                ],
+                with_payload=["image_path", "image_hash"],
                 with_vectors=False,
             )
-            for r in records:
-                path = r.payload.get("image_path", "")
-                mn = r.payload.get("model_name", "")
-                mh = r.payload.get("model_hash", "")
-                mp: dict = {mode_key: {"name": mn, "hash": mh}} if (mn or mh) else {}
-                existing = next((h for h in hits if h.path == path), None)
-                if existing is None:
-                    hits.append(
-                        Hit(
-                            path=path,
-                            scores={"exact": 1.0},
-                            exif=r.payload.get("exif"),
-                            exif_geo_data=r.payload.get("exif_geo_data"),
-                            image_hash=r.payload.get("image_hash"),
-                            model_provenance=mp,
+            for r in md5_records:
+                stored_sha256 = r.payload.get("image_hash", "")
+                if stored_sha256 and stored_sha256 != image_hash:
+                    path = r.payload.get("image_path", "")
+                    if path not in collision_paths:
+                        collision_paths.add(path)
+                        errors.append(
+                            f"MD5 collision: '{path}' has the same MD5 ({image_hash_md5}) "
+                            f"but a different SHA-256 ({stored_sha256})"
                         )
-                    )
-                else:
-                    # Image found in a second collection — merge its model provenance
-                    existing.model_provenance.update(mp)
-
-            # Collision detection: find images with same MD5 but different SHA-256
-            if image_hash_md5:
-                md5_records, _ = client.scroll(
-                    collection_name=collection,
-                    scroll_filter=Filter(
-                        must=[
-                            FieldCondition(
-                                key="image_hash_md5", match=MatchValue(value=image_hash_md5)
-                            )
-                        ]
-                    ),
-                    limit=50,
-                    with_payload=["image_path", "image_hash"],
-                    with_vectors=False,
-                )
-                for r in md5_records:
-                    stored_sha256 = r.payload.get("image_hash", "")
-                    if stored_sha256 and stored_sha256 != image_hash:
-                        path = r.payload.get("image_path", "")
-                        if path not in collision_paths:
-                            collision_paths.add(path)
-                            errors.append(
-                                f"MD5 collision: '{path}' has the same MD5 ({image_hash_md5}) "
-                                f"but a different SHA-256 ({stored_sha256})"
-                            )
         except Exception as exc:  # noqa: BLE001
-            msg = str(exc).lower()
-            if "not found" in msg or "doesn't exist" in msg:
-                # Collection not yet indexed — not an error, just skip it
-                logger.debug("Exact query skipped non-existent collection %s", collection)
-            else:
-                logger.warning("Exact query failed on %s: %s", collection, exc)
-                errors.append(f"exact query failed: {type(exc).__name__}")
+            logger.warning("MD5 collision query failed on %s: %s", settings.collection, exc)
     return hits, errors
 
 
@@ -777,10 +783,6 @@ def _query_exact_video(
     """
     hits: list[Hit] = []
     errors: list[str] = []
-    collection_mode = {
-        settings.collection_sscd: "altered",
-        settings.collection_dino: "semantic",
-    }
     # video_path → {timecode_ms → payload dict}, provenance dict
     video_frames: dict[str, dict[int, dict]] = {}
     video_provenance: dict[str, dict] = {}
@@ -789,59 +791,65 @@ def _query_exact_video(
     # Page size: use video_max_frames when set (0 = no cap → fall back to 2000).
     _page_size = settings.video_max_frames if settings.video_max_frames > 0 else 2000
 
-    for collection in (settings.collection_sscd, settings.collection_dino):
-        mode_key = collection_mode[collection]
-        try:
-            scroll_filter = Filter(
-                must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
+    try:
+        scroll_filter = Filter(
+            must=[FieldCondition(key="video_hash", match=MatchValue(value=video_hash))]
+        )
+        payload_fields = [
+            "image_path",
+            "image_hash",
+            "video_path",
+            "video_hash",
+            "frame_timecode_ms",
+            "dino_model_name",
+            "dino_model_hash",
+            "sscd_model_name",
+            "sscd_model_hash",
+        ]
+        offset = None
+        while True:
+            records, offset = client.scroll(
+                collection_name=settings.collection,
+                scroll_filter=scroll_filter,
+                limit=_page_size,
+                offset=offset,
+                with_payload=payload_fields,
+                with_vectors=False,
             )
-            payload_fields = [
-                "image_path",
-                "image_hash",
-                "video_path",
-                "video_hash",
-                "frame_timecode_ms",
-                "model_name",
-                "model_hash",
-            ]
-            offset = None
-            while True:
-                records, offset = client.scroll(
-                    collection_name=collection,
-                    scroll_filter=scroll_filter,
-                    limit=_page_size,
-                    offset=offset,
-                    with_payload=payload_fields,
-                    with_vectors=False,
-                )
-                for r in records:
-                    vpath = r.payload.get("video_path", "")
-                    if not vpath:
-                        continue
-                    if vpath not in video_frames:
-                        video_frames[vpath] = {}
-                        video_provenance[vpath] = {}
-                        video_video_hash[vpath] = r.payload.get("video_hash", video_hash)
-                    mn = r.payload.get("model_name", "")
-                    mh = r.payload.get("model_hash", "")
-                    if (mn or mh) and mode_key not in video_provenance[vpath]:
-                        video_provenance[vpath][mode_key] = {"name": mn, "hash": mh}
-                    tc: int = r.payload.get("frame_timecode_ms") or 0
-                    if tc not in video_frames[vpath]:
-                        video_frames[vpath][tc] = {
-                            "timecode_ms": tc,
-                            "frame_hash": r.payload.get("image_hash", ""),
-                            "image_path": r.payload.get("image_path", ""),
-                        }
-                if not records or offset is None:
-                    break
-        except Exception as exc:  # noqa: BLE001
-            msg = str(exc).lower()
-            if "not found" in msg or "doesn't exist" in msg:
-                logger.debug("Exact video query skipped non-existent collection %s", collection)
-            else:
-                logger.warning("Exact video query failed on %s: %s", collection, exc)
-                errors.append(f"exact video query failed: {type(exc).__name__}")
+            for r in records:
+                vpath = r.payload.get("video_path", "")
+                if not vpath:
+                    continue
+                if vpath not in video_frames:
+                    video_frames[vpath] = {}
+                    video_provenance[vpath] = {}
+                    video_video_hash[vpath] = r.payload.get("video_hash", video_hash)
+                dino_mn = r.payload.get("dino_model_name", "")
+                dino_mh = r.payload.get("dino_model_hash", "")
+                sscd_mn = r.payload.get("sscd_model_name", "")
+                sscd_mh = r.payload.get("sscd_model_hash", "")
+                if (dino_mn or dino_mh) and "semantic" not in video_provenance[vpath]:
+                    video_provenance[vpath]["semantic"] = {"name": dino_mn, "hash": dino_mh}
+                if (sscd_mn or sscd_mh) and "altered" not in video_provenance[vpath]:
+                    video_provenance[vpath]["altered"] = {"name": sscd_mn, "hash": sscd_mh}
+                tc: int = r.payload.get("frame_timecode_ms") or 0
+                if tc not in video_frames[vpath]:
+                    video_frames[vpath][tc] = {
+                        "timecode_ms": tc,
+                        "frame_hash": r.payload.get("image_hash", ""),
+                        "image_path": r.payload.get("image_path", ""),
+                    }
+            if not records or offset is None:
+                break
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc).lower()
+        if "not found" in msg or "doesn't exist" in msg:
+            logger.debug(
+                "Exact video query skipped non-existent collection %s", settings.collection
+            )
+        else:
+            logger.warning("Exact video query failed on %s: %s", settings.collection, exc)
+            errors.append(f"exact video query failed: {type(exc).__name__}")
 
     for vpath, frames_by_tc in video_frames.items():
         sorted_frames = sorted(frames_by_tc.values(), key=lambda f: f["timecode_ms"])
@@ -878,11 +886,13 @@ def _query_vector(
     mode: str,
     threshold: float,
     limit: int,
+    vector_name: str = "dino",
 ) -> tuple[list[Hit], list[str]]:
     try:
         result = client.query_points(
             collection_name=collection,
             query=vector,
+            using=vector_name,
             score_threshold=threshold,
             limit=limit,
             with_payload=[
@@ -890,8 +900,8 @@ def _query_vector(
                 "image_hash",
                 "exif",
                 "exif_geo_data",
-                "model_name",
-                "model_hash",
+                f"{vector_name}_model_name",
+                f"{vector_name}_model_hash",
                 "is_video_frame",
                 "video_path",
                 "video_hash",
@@ -901,8 +911,8 @@ def _query_vector(
         hits = []
         for r in result.points:
             mp: dict = {}
-            mn = r.payload.get("model_name", "")
-            mh = r.payload.get("model_hash", "")
+            mn = r.payload.get(f"{vector_name}_model_name", "")
+            mh = r.payload.get(f"{vector_name}_model_hash", "")
             if mn or mh:
                 mp[mode] = {"name": mn, "hash": mh}
             hits.append(
@@ -973,8 +983,9 @@ def query_semantic_stats(
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
     try:
         result = client.query_points(
-            collection_name=settings.collection_dino,
+            collection_name=settings.collection,
             query=entry.dino_embedding,
+            using="dino",
             limit=sample_size,
             with_payload=False,
         )
@@ -1030,7 +1041,7 @@ def query_semantic_stats(
 # Full indexing provenance for a single image (on-demand, for Audit modal)
 # ---------------------------------------------------------------------------
 
-_PROVENANCE_FIELDS = [
+_PROVENANCE_FIELD_NAMES = [
     "model_name",
     "model_hash",
     "indexed_at",
@@ -1038,7 +1049,13 @@ _PROVENANCE_FIELDS = [
     "inference_dtype",
     "normalize_size",
     "embedding_dim",
-    "sscd_n_crops",
+]
+
+# Per-model provenance is stored with a vector-name prefix in the unified collection.
+# Map: (vector_name, mode_label) pairs to resolve at query time.
+_VECTOR_MODE_MAP = [
+    ("dino", "semantic"),
+    ("sscd", "altered"),
 ]
 
 
@@ -1047,29 +1064,37 @@ def get_hit_qdrant_provenance(image_hash: str, settings: Settings) -> dict[str, 
 
     Returns a dict keyed by mode ("altered", "semantic") containing all
     provenance fields stored in the point payload when the image was indexed.
-    Missing collections are silently skipped.
+    Fields are retrieved from the prefixed payload keys (e.g. ``dino_model_name``).
     """
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-    collection_mode = {
-        settings.collection_sscd: "altered",
-        settings.collection_dino: "semantic",
-    }
     result: dict[str, dict] = {}
-    for collection, mode in collection_mode.items():
-        try:
-            records, _ = client.scroll(
-                collection_name=collection,
-                scroll_filter=Filter(
-                    must=[FieldCondition(key="image_hash", match=MatchValue(value=image_hash))]
-                ),
-                limit=1,
-                with_payload=_PROVENANCE_FIELDS,
-                with_vectors=False,
-            )
-            if records:
-                result[mode] = {k: records[0].payload.get(k) for k in _PROVENANCE_FIELDS}
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Provenance query failed on %s: %s", collection, exc)
+    try:
+        # Collect all prefixed field names we want from the payload.
+        payload_fields = [
+            f"{vn}_{field}"
+            for vn, _ in _VECTOR_MODE_MAP
+            for field in _PROVENANCE_FIELD_NAMES
+        ] + ["sscd_n_crops"]
+        records, _ = client.scroll(
+            collection_name=settings.collection,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="image_hash", match=MatchValue(value=image_hash))]
+            ),
+            limit=1,
+            with_payload=payload_fields,
+            with_vectors=False,
+        )
+        if records:
+            p = records[0].payload
+            for vn, mode in _VECTOR_MODE_MAP:
+                mode_data = {field: p.get(f"{vn}_{field}") for field in _PROVENANCE_FIELD_NAMES}
+                # Only include the mode entry if at least one provenance field is populated.
+                if any(v is not None for v in mode_data.values()):
+                    if vn == "sscd":
+                        mode_data["sscd_n_crops"] = p.get("sscd_n_crops")
+                    result[mode] = mode_data
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Provenance query failed on %s: %s", settings.collection, exc)
     return result
 
 
@@ -1106,12 +1131,18 @@ async def get_available_modes(settings: Settings) -> tuple[list[str], str | None
     else:
         return [], str(last_exc)
 
-    if not existing:
+    if settings.collection not in existing:
         return [], None
 
-    modes: list[str] = ["exact"]  # exact works as long as any collection exists
-    if settings.collection_sscd in existing:
-        modes.append("altered")
-    if settings.collection_dino in existing:
-        modes.append("semantic")
+    modes: list[str] = ["exact"]  # exact works as long as the collection exists
+    try:
+        info = client.get_collection(settings.collection)
+        vectors_config = info.config.params.vectors
+        if isinstance(vectors_config, dict):
+            if "sscd" in vectors_config:
+                modes.append("altered")
+            if "dino" in vectors_config:
+                modes.append("semantic")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not inspect vector config for %s: %s", settings.collection, exc)
     return modes, None

@@ -60,8 +60,7 @@ def _mock_settings() -> MagicMock:
     s = MagicMock()
     s.qdrant_url = "http://localhost:6333"
     s.qdrant_api_key = None
-    s.collection_sscd = "sfn_sscd"
-    s.collection_dino = "sfn_dino"
+    s.collection = "sfn"
     return s
 
 
@@ -182,7 +181,7 @@ def test_per_mode_limit_respected():
     many_semantic = [_semantic_hit(f"/img/s{i}.jpg", score=0.9 - i * 0.01) for i in range(10)]
     many_altered = [_altered_hit(f"/img/a{i}.jpg", score=0.85 - i * 0.01) for i in range(10)]
 
-    def _fake_query_vector(client, collection, vector, mode, threshold, limit):
+    def _fake_query_vector(client, collection, vector, mode, threshold, limit, vector_name="dino"):
         if mode == "semantic":
             return (many_semantic[:limit], [])
         return (many_altered[:limit], [])
@@ -222,7 +221,7 @@ def test_altered_and_semantic_same_path_yields_one_merged_row():
     session = _make_session([_make_entry(dino=True, sscd=True)])
     settings = _mock_settings()
 
-    def _fake_query_vector(client, collection, vector, mode, threshold, limit):
+    def _fake_query_vector(client, collection, vector, mode, threshold, limit, vector_name="dino"):
         return ([Hit(path=PATH_A, scores={mode: 0.92})], [])
 
     with (
@@ -305,7 +304,7 @@ def test_unify_false_same_path_yields_separate_rows():
     session = _make_session([_make_entry(dino=True, sscd=True)])
     settings = _mock_settings()
 
-    def _fake_qv(client, collection, vector, mode, threshold, limit):
+    def _fake_qv(client, collection, vector, mode, threshold, limit, vector_name="dino"):
         return ([Hit(path=PATH_A, scores={mode: 0.92})], [])
 
     with (
@@ -327,7 +326,7 @@ def test_unify_false_sort_order_exact_altered_semantic():
     session = _make_session([_make_entry(dino=True, sscd=True)])
     settings = _mock_settings()
 
-    def _fake_qv(client, collection, vector, mode, threshold, limit):
+    def _fake_qv(client, collection, vector, mode, threshold, limit, vector_name="dino"):
         return ([Hit(path=PATH_A, scores={mode: 0.92})], [])
 
     with (
