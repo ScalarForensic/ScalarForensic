@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import hashlib
 import io
@@ -22,12 +23,18 @@ import uvicorn
 from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from PIL import Image
+from PIL import Image, ImageDraw
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from scalar_forensic.config import Settings
-from scalar_forensic.embedder import extract_exif_detailed, get_library_versions
+from scalar_forensic.embedder import (
+    _SSCD_INPUT_SIZE,
+    _open_rgb,
+    _sscd_resize,
+    extract_exif_detailed,
+    get_library_versions,
+)
 from scalar_forensic.video import (
     VIDEO_EXTENSIONS,
     extract_frame_at,
@@ -599,6 +606,126 @@ async def hit_provenance(image_hash: str) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Invalid hash")
     settings = Settings()
     return JSONResponse(get_hit_qdrant_provenance(image_hash, settings))
+
+
+# ---------------------------------------------------------------------------
+# Preprocessing preview helpers (audit modal)
+# ---------------------------------------------------------------------------
+
+
+def _sscd_annotated(img: Image.Image, n_crops: int) -> Image.Image:
+    resized = _sscd_resize(img)
+    out = resized.copy().convert("RGB")
+    draw = ImageDraw.Draw(out)
+    s = _SSCD_INPUT_SIZE
+    w, h = resized.size
+    cx, cy = (w - s) // 2, (h - s) // 2
+    boxes: list[tuple[tuple[int, int, int, int], tuple[int, int, int]]] = [
+        ((cx, cy, cx + s, cy + s), (220, 40, 40)),   # center: red
+    ]
+    if n_crops == 5:
+        boxes += [
+            ((0, 0, s, s), (230, 190, 0)),                      # TL: yellow
+            ((w - s, 0, w, s), (0, 200, 230)),                  # TR: cyan
+            ((0, h - s, s, h), (40, 200, 40)),                  # BL: green
+            ((w - s, h - s, w, h), (230, 110, 0)),              # BR: orange
+        ]
+    for (x1, y1, x2, y2), color in boxes:
+        draw.rectangle([x1, y1, x2 - 1, y2 - 1], outline=color, width=3)
+    return out
+
+
+def _dino_annotated(img: Image.Image, normalize_size: int) -> Image.Image:
+    """Resize shortest edge to normalize_size, draw rectangle showing the center-crop area."""
+    w, h = img.size
+    scale = normalize_size / min(w, h)
+    nw = max(normalize_size, round(w * scale))
+    nh = max(normalize_size, round(h * scale))
+    out = img.resize((nw, nh), Image.Resampling.BICUBIC).convert("RGB")
+    draw = ImageDraw.Draw(out)
+    cx, cy = (nw - normalize_size) // 2, (nh - normalize_size) // 2
+    draw.rectangle([cx, cy, cx + normalize_size - 1, cy + normalize_size - 1],
+                   outline=(220, 40, 40), width=3)
+    return out
+
+
+def _to_data_url(img: Image.Image) -> str:
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=88)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def _build_preproc_payload(
+    img: Image.Image,
+    sscd_n_crops: int,
+    dino_normalize_size: int,
+) -> dict:
+    result: dict = {}
+    if sscd_n_crops in (1, 5):
+        result["sscd"] = {
+            "annotated_url": _to_data_url(_sscd_annotated(img, sscd_n_crops)),
+            "resize_size": 331,
+            "crop_size": _SSCD_INPUT_SIZE,
+            "n_crops": sscd_n_crops,
+        }
+    if dino_normalize_size > 0:
+        result["dino"] = {
+            "annotated_url": _to_data_url(_dino_annotated(img, dino_normalize_size)),
+            "normalize_size": dino_normalize_size,
+        }
+    return result
+
+
+@app.get("/api/query-preprocessed/{session_id}/{file_id}")
+async def query_preprocessed(
+    session_id: str, file_id: str, timecode_ms: int | None = None
+) -> JSONResponse:
+    """Return SSCD-annotated and DINOv2-cropped preview images for an uploaded query file."""
+    session = get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    entry = next((e for e in session.files if e.file_id == file_id), None)
+    if entry is None or not entry.temp_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    settings = Settings()
+
+    def _compute() -> dict:
+        if entry.is_video and timecode_ms is not None:
+            pil = extract_frame_at(entry.temp_path, timecode_ms)
+            if pil is None:
+                raise ValueError("Frame not found at given timecode")
+        else:
+            pil = _open_rgb(entry.temp_path.read_bytes())
+        return _build_preproc_payload(pil, settings.sscd_n_crops, settings.normalize_size)
+
+    try:
+        return JSONResponse(await asyncio.to_thread(_compute))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/hit-preprocessed")
+async def hit_preprocessed(
+    path: str,
+    sscd_n_crops: int = 1,
+    dino_normalize_size: int = 224,
+) -> JSONResponse:
+    """Return SSCD-annotated and DINOv2-cropped preview images for a dataset hit file."""
+    raw = Path(path)
+    if not raw.is_absolute():
+        raise HTTPException(status_code=400, detail="Invalid path")
+    p = raw.resolve()
+    _check_allowed_path(p)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    if sscd_n_crops not in (0, 1, 5):
+        raise HTTPException(status_code=400, detail="sscd_n_crops must be 0, 1, or 5")
+
+    def _compute() -> dict:
+        return _build_preproc_payload(_open_rgb(p.read_bytes()), sscd_n_crops, dino_normalize_size)
+
+    return JSONResponse(await asyncio.to_thread(_compute))
 
 
 # ---------------------------------------------------------------------------
