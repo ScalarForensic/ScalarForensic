@@ -712,6 +712,8 @@ async def hit_preprocessed(
     dino_normalize_size: int = 224,
 ) -> JSONResponse:
     """Return SSCD-annotated and DINOv2-cropped preview images for a dataset hit file."""
+    if sscd_n_crops not in (0, 1, 5):
+        raise HTTPException(status_code=400, detail="sscd_n_crops must be 0, 1, or 5")
     raw = Path(path)
     if not raw.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
@@ -719,8 +721,6 @@ async def hit_preprocessed(
     _check_allowed_path(p)
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-    if sscd_n_crops not in (0, 1, 5):
-        raise HTTPException(status_code=400, detail="sscd_n_crops must be 0, 1, or 5")
 
     def _compute() -> dict:
         return _build_preproc_payload(_open_rgb(p.read_bytes()), sscd_n_crops, dino_normalize_size)
