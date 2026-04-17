@@ -71,7 +71,7 @@ class Settings:
         # --- Network policy ---
         # Default: offline — no outward connections to HuggingFace or any other service.
         # Set to true (or pass --allow-online) only for first-time model downloads.
-        self.allow_online: bool = self._parse_bool("SFN_ALLOW_ONLINE", default=False)
+        self.allow_online: bool = self._parse_bool(ENV_ALLOW_ONLINE, default=False)
 
         # --- Qdrant auth (optional) ---
         self.qdrant_api_key: str | None = os.environ.get("SFN_QDRANT_API_KEY") or None

@@ -197,7 +197,6 @@ class _ETATracker:
         return eta_s, sigma_s
 
 
-
 def _write_csv(records: dict[Path, "_FileRecord"], csv_path: Path) -> None:
     try:
         csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -242,8 +241,7 @@ def _dedup_by_hash(
         needs_per_spec[si] = {
             p
             for p in winners
-            if hash_lookup[p] not in dedup_hashes[si]
-            and str(p.resolve()) not in dedup_paths[si]
+            if hash_lookup[p] not in dedup_hashes[si] and str(p.resolve()) not in dedup_paths[si]
         }
     any_needs = set().union(*needs_per_spec) if n_specs > 0 else set()
 
@@ -1317,11 +1315,20 @@ def index(
         # Count dup-skipped frames per source video; these are already present
         # in Qdrant (via a hash-identical frame that was embedded) so they count
         # toward the "fully indexed" threshold even though they weren't embedded
-        # in this run.
+        # in this run.  Only count within-video dups: if the dedup winner came
+        # from a different video its Qdrant point carries that video's metadata,
+        # not this one's, so this video's timecode slot was never written.
+        _winner_by_hash: dict[str, Path] = {}
+        for _fp in _frame_source:
+            if records[_fp].status != _S_SKIP_DUP:
+                _winner_by_hash.setdefault(_file_hashes[_fp], _fp)
+
         _vf_dup_count: dict[Path, int] = {}
         for _fp, _sv in _frame_source.items():
             if records[_fp].status == _S_SKIP_DUP:
-                _vf_dup_count[_sv] = _vf_dup_count.get(_sv, 0) + 1
+                _winner = _winner_by_hash.get(_file_hashes[_fp])
+                if _winner is not None and _frame_source.get(_winner) == _sv:
+                    _vf_dup_count[_sv] = _vf_dup_count.get(_sv, 0) + 1
 
         for _vp in _videos_to_process:
             _total = vf_total.get(_vp, 0)
