@@ -23,7 +23,7 @@ import uvicorn
 from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, UnidentifiedImageError
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
@@ -621,14 +621,14 @@ def _sscd_annotated(img: Image.Image, n_crops: int) -> Image.Image:
     w, h = resized.size
     cx, cy = (w - s) // 2, (h - s) // 2
     boxes: list[tuple[tuple[int, int, int, int], tuple[int, int, int]]] = [
-        ((cx, cy, cx + s, cy + s), (220, 40, 40)),   # center: red
+        ((cx, cy, cx + s, cy + s), (220, 40, 40)),  # center: red
     ]
     if n_crops == 5:
         boxes += [
-            ((0, 0, s, s), (230, 190, 0)),                      # TL: yellow
-            ((w - s, 0, w, s), (0, 200, 230)),                  # TR: cyan
-            ((0, h - s, s, h), (40, 200, 40)),                  # BL: green
-            ((w - s, h - s, w, h), (230, 110, 0)),              # BR: orange
+            ((0, 0, s, s), (230, 190, 0)),  # TL: yellow
+            ((w - s, 0, w, s), (0, 200, 230)),  # TR: cyan
+            ((0, h - s, s, h), (40, 200, 40)),  # BL: green
+            ((w - s, h - s, w, h), (230, 110, 0)),  # BR: orange
         ]
     for (x1, y1, x2, y2), color in boxes:
         draw.rectangle([x1, y1, x2 - 1, y2 - 1], outline=color, width=3)
@@ -644,8 +644,9 @@ def _dino_annotated(img: Image.Image, normalize_size: int) -> Image.Image:
     out = img.resize((nw, nh), Image.Resampling.BICUBIC).convert("RGB")
     draw = ImageDraw.Draw(out)
     cx, cy = (nw - normalize_size) // 2, (nh - normalize_size) // 2
-    draw.rectangle([cx, cy, cx + normalize_size - 1, cy + normalize_size - 1],
-                   outline=(220, 40, 40), width=3)
+    draw.rectangle(
+        [cx, cy, cx + normalize_size - 1, cy + normalize_size - 1], outline=(220, 40, 40), width=3
+    )
     return out
 
 
@@ -688,10 +689,13 @@ async def query_preprocessed(
     if entry is None or not entry.temp_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
+    if entry.is_video and timecode_ms is None:
+        raise HTTPException(status_code=400, detail="timecode_ms is required for video queries")
+
     settings = Settings()
 
     def _compute() -> dict:
-        if entry.is_video and timecode_ms is not None:
+        if entry.is_video:
             pil = extract_frame_at(entry.temp_path, timecode_ms)
             if pil is None:
                 raise ValueError("Frame not found at given timecode")
@@ -714,6 +718,10 @@ async def hit_preprocessed(
     """Return SSCD-annotated and DINOv2-cropped preview images for a dataset hit file."""
     if sscd_n_crops not in (0, 1, 5):
         raise HTTPException(status_code=400, detail="sscd_n_crops must be 0, 1, or 5")
+    if dino_normalize_size != 0 and not (32 <= dino_normalize_size <= 4096):
+        raise HTTPException(
+            status_code=400, detail="dino_normalize_size must be 0 or between 32 and 4096"
+        )
     raw = Path(path)
     if not raw.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
@@ -723,9 +731,17 @@ async def hit_preprocessed(
         raise HTTPException(status_code=404, detail="File not found")
 
     def _compute() -> dict:
-        return _build_preproc_payload(_open_rgb(p.read_bytes()), sscd_n_crops, dino_normalize_size)
+        try:
+            return _build_preproc_payload(
+                _open_rgb(p.read_bytes()), sscd_n_crops, dino_normalize_size
+            )
+        except (UnidentifiedImageError, OSError) as exc:
+            raise ValueError(f"Cannot decode image: {exc}") from exc
 
-    return JSONResponse(await asyncio.to_thread(_compute))
+    try:
+        return JSONResponse(await asyncio.to_thread(_compute))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
