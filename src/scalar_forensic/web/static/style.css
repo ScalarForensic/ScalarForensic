@@ -1663,3 +1663,49 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .audit-prov-detail { flex: 1; min-width: 0; }
 .audit-prov-detail .audit-row { padding: 2px 0; }
 .audit-prov-detail .audit-k   { width: 60px; }
+
+/* model input preview section */
+.audit-preproc-section { border-bottom: 1px solid var(--border); padding-bottom: 1rem; }
+.audit-preproc-note {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin: 0.2rem 0 0.75rem;
+}
+.audit-preproc-grid {
+  display: grid;
+  grid-template-columns: auto 1fr 1fr;
+  gap: 0.5rem 0.75rem;
+  align-items: center;
+}
+.audit-preproc-hdr {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--muted);
+  padding-bottom: 0.25rem;
+}
+.audit-preproc-model-lbl {
+  text-align: center;
+  padding-right: 0.5rem;
+  white-space: nowrap;
+}
+.audit-preproc-model-sub {
+  font-size: 0.65rem;
+  color: var(--muted);
+  margin-top: 3px;
+}
+.audit-preproc-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.audit-preproc-img {
+  max-width: 100%;
+  width: 180px;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  image-rendering: pixelated;
+  cursor: zoom-in;
+}
