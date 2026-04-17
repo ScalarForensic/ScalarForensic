@@ -18,7 +18,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from scalar_forensic.config import Settings
-from scalar_forensic.web.pipeline import Hit, _group_video_hits, _query_exact_video, _video_frame_batch
+from scalar_forensic.web.pipeline import (
+    Hit,
+    _group_video_hits,
+    _query_exact_video,
+    _video_frame_batch,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -337,8 +342,10 @@ def test_query_exact_video_skips_unparseable_timecode():
 def test_query_exact_video_all_malformed_produces_no_hit():
     """If every point for a video has a malformed timecode, no Hit must be emitted."""
     records = [
-        _make_record({"video_path": "/evidence/clip.mp4", "video_hash": "vh", "frame_timecode_ms": None}),
-        _make_record({"video_path": "/evidence/clip.mp4", "video_hash": "vh", "frame_timecode_ms": "bad"}),
+        _make_record({"video_path": "/evidence/clip.mp4", "video_hash": "vh",
+                      "frame_timecode_ms": None}),
+        _make_record({"video_path": "/evidence/clip.mp4", "video_hash": "vh",
+                      "frame_timecode_ms": "bad"}),
     ]
 
     with patch("scalar_forensic.web.pipeline.qdrant_scroll_all", return_value=iter(records)):
