@@ -110,6 +110,18 @@ class TestQueryPreprocessed:
         assert r.status_code == 200
         assert r.json() == _PREPROC_PAYLOAD
 
+    def test_non_image_upload_returns_400(self, client, tmp_path):
+        p = tmp_path / "img1.jpg"
+        p.write_bytes(b"not-an-image")
+        entry = FileEntry(file_id="img1", filename="photo.jpg", temp_path=p, is_video=False)
+        sess = _mock_session([entry])
+        with (
+            patch("scalar_forensic.web.app.get_session", return_value=sess),
+            patch("scalar_forensic.web.app.Settings"),
+        ):
+            r = client.get("/api/query-preprocessed/s1/img1")
+        assert r.status_code == 400
+
 
 # ---------------------------------------------------------------------------
 # /api/hit-preprocessed
@@ -127,7 +139,7 @@ class TestHitPreprocessed:
         r = client.get(f"/api/hit-preprocessed?path={p}&sscd_n_crops=3")
         assert r.status_code == 400
 
-    def test_dino_normalize_size_zero_returns_400_below_min(self, client, tmp_path, monkeypatch):
+    def test_dino_normalize_size_negative_returns_400(self, client, tmp_path, monkeypatch):
         monkeypatch.setenv("SFN_INPUT_DIR", str(tmp_path))
         p = tmp_path / "img.jpg"
         p.write_bytes(_tiny_jpeg())

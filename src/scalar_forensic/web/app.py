@@ -707,6 +707,8 @@ async def query_preprocessed(
         return JSONResponse(await asyncio.to_thread(_compute))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (UnidentifiedImageError, OSError) as exc:
+        raise HTTPException(status_code=400, detail="Unable to read uploaded image") from exc
 
 
 @app.get("/api/hit-preprocessed")
