@@ -207,6 +207,7 @@ async def analyze(
 
     session = await create_session()
     tmp_dir = Path(tempfile.mkdtemp(prefix="sfn_"))
+    session.temp_dir = tmp_dir
 
     for upload in files:
         file_id = str(uuid.uuid4())

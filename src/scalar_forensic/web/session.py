@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import shutil
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,7 @@ class FileEntry:
 class Session:
     session_id: str
     files: list[FileEntry] = field(default_factory=list)
+    temp_dir: Path | None = None
 
 
 _store: dict[str, Session] = {}
@@ -54,6 +56,7 @@ async def create_session() -> Session:
     global _current_session_id
 
     stale_paths: list[Path] = []
+    stale_temp_dir: Path | None = None
 
     async with _session_lock:
         # Collect paths while holding the lock, then delete after releasing it
@@ -61,6 +64,7 @@ async def create_session() -> Session:
         if _current_session_id and _current_session_id in _store:
             old = _store.pop(_current_session_id)
             stale_paths = [e.temp_path for e in old.files]
+            stale_temp_dir = old.temp_dir
 
         session = Session(session_id=str(uuid.uuid4()))
         _store[session.session_id] = session
@@ -71,6 +75,12 @@ async def create_session() -> Session:
             path.unlink(missing_ok=True)
         except OSError:
             logger.warning("Failed to delete temp file %s", path)
+
+    if stale_temp_dir is not None:
+        try:
+            shutil.rmtree(stale_temp_dir, ignore_errors=True)
+        except OSError:
+            logger.warning("Failed to remove temp dir %s", stale_temp_dir)
 
     return session
 

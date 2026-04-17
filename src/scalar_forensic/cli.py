@@ -1319,6 +1319,15 @@ def index(
     # payloads so future runs can distinguish a finished index from an
     # interrupted partial one via get_all_video_info().
     if _videos_to_process:
+        # Count dup-skipped frames per source video; these are already present
+        # in Qdrant (via a hash-identical frame that was embedded) so they count
+        # toward the "fully indexed" threshold even though they weren't embedded
+        # in this run.
+        _vf_dup_count: dict[Path, int] = {}
+        for _fp, _sv in _frame_source.items():
+            if records[_fp].status == _S_SKIP_DUP:
+                _vf_dup_count[_sv] = _vf_dup_count.get(_sv, 0) + 1
+
         for _vp in _videos_to_process:
             _total = vf_total.get(_vp, 0)
             if _total == 0:
@@ -1328,7 +1337,9 @@ def index(
             for _spec_idx, (_, _indexer, _) in enumerate(specs):
                 if _spec_idx in _already_done:
                     continue  # was complete before this run
-                if vf_indexed_by_spec.get(_spec_idx, {}).get(_vp, 0) >= _total:
+                _indexed = vf_indexed_by_spec.get(_spec_idx, {}).get(_vp, 0)
+                _dups = _vf_dup_count.get(_vp, 0)
+                if _indexed + _dups >= _total:
                     _indexer.mark_video_complete(_vh, _total)
 
     # ── Finalise per-video source file records ────────────────────────────────

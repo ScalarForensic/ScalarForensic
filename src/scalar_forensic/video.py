@@ -314,14 +314,23 @@ def extract_frame_at(video_path: Path, timecode_ms: int) -> Image.Image | None:
         target_pts = int(target_s / time_base)
         container.seek(target_pts, backward=True, any_frame=False, stream=video_stream)
 
-        # Decode forward until we reach the target timestamp
+        # Decode forward until we reach the target timestamp.
+        # Track the previous frame so that if the backward seek overshot the
+        # target we can return the last frame seen before passing it.
+        frame_dur = 1.0 / max(float(video_stream.average_rate or 30), 1)
+        prev_av_frame = None
         for av_frame in container.decode(video=0):
             if av_frame.pts is None:
                 continue
             pts_s = av_frame.pts * time_base
-            # Accept the first frame at or just before the target (±1 frame tolerance)
-            if pts_s >= target_s - (1.0 / max(float(video_stream.average_rate or 30), 1)):
+            if pts_s >= target_s - frame_dur:
+                # Within ±1 frame of target: return this frame.
+                # If we've overshot by more than 1 frame and have a closer
+                # prior frame, prefer that one.
+                if pts_s > target_s + frame_dur and prev_av_frame is not None:
+                    return prev_av_frame.to_image()
                 return av_frame.to_image()
+            prev_av_frame = av_frame
     except Exception:
         return None
     finally:

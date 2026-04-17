@@ -835,7 +835,10 @@ def _query_exact_video(
                     video_provenance[vpath]["semantic"] = {"name": dino_mn, "hash": dino_mh}
                 if (sscd_mn or sscd_mh) and "altered" not in video_provenance[vpath]:
                     video_provenance[vpath]["altered"] = {"name": sscd_mn, "hash": sscd_mh}
-                tc: int = r.payload.get("frame_timecode_ms") or 0
+                tc_raw = r.payload.get("frame_timecode_ms")
+                if tc_raw is None:
+                    continue  # skip malformed point with no timecode
+                tc: int = int(tc_raw)
                 if tc not in video_frames[vpath]:
                     video_frames[vpath][tc] = {
                         "timecode_ms": tc,
