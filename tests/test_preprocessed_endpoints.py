@@ -171,12 +171,8 @@ class TestHitPreprocessed:
         monkeypatch.setenv("SFN_INPUT_DIR", str(tmp_path))
         p = tmp_path / "img.jpg"
         p.write_bytes(_tiny_jpeg())
-        with patch(
-            "scalar_forensic.web.app._build_preproc_payload", return_value=_PREPROC_PAYLOAD
-        ):
-            r = client.get(
-                f"/api/hit-preprocessed?path={p}&sscd_n_crops=1&dino_normalize_size=224"
-            )
+        with patch("scalar_forensic.web.app._build_preproc_payload", return_value=_PREPROC_PAYLOAD):
+            r = client.get(f"/api/hit-preprocessed?path={p}&sscd_n_crops=1&dino_normalize_size=224")
         assert r.status_code == 200
         assert r.json() == _PREPROC_PAYLOAD
 
@@ -187,9 +183,7 @@ class TestHitPreprocessed:
         with patch(
             "scalar_forensic.web.app._build_preproc_payload", return_value={"sscd": {}}
         ) as mock_build:
-            r = client.get(
-                f"/api/hit-preprocessed?path={p}&sscd_n_crops=1&dino_normalize_size=0"
-            )
+            r = client.get(f"/api/hit-preprocessed?path={p}&sscd_n_crops=1&dino_normalize_size=0")
         assert r.status_code == 200
         mock_build.assert_called_once()
         _, _, dino_size = mock_build.call_args[0]
