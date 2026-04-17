@@ -900,7 +900,13 @@ async def video_timeline(video_hash: str) -> JSONResponse:
                 ]
             ),
             limit=256,
-            with_payload=["image_path", "image_hash", "frame_timecode_ms", "frame_index", "video_path"],
+            with_payload=[
+                "image_path",
+                "image_hash",
+                "frame_timecode_ms",
+                "frame_index",
+                "video_path",
+            ],
         ):
             tc = r.payload.get("frame_timecode_ms")
             if tc is not None and tc not in frames:

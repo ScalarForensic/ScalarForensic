@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from scalar_forensic.video import extract_frames
+from scalar_forensic.video import extract_frame_at, extract_frames
 
 _NONEXISTENT = Path("/nonexistent/video.mp4")
 
@@ -55,3 +56,62 @@ def test_extract_frames_positive_fps_reaches_file_open():
         list(extract_frames(_NONEXISTENT, fps=1.0))
 
     assert not isinstance(exc_info.value, ValueError)
+
+
+# ---------------------------------------------------------------------------
+# extract_frame_at: overshoot-seeking behaviour
+# ---------------------------------------------------------------------------
+
+
+def _make_av_frame(pts: int) -> MagicMock:
+    frame = MagicMock()
+    frame.pts = pts
+    frame.to_image.return_value = MagicMock(name=f"image_pts{pts}")
+    return frame
+
+
+def _make_av_container(frames: list, time_base: float = 0.001, avg_rate: float = 30.0) -> MagicMock:
+    stream = MagicMock()
+    stream.time_base = time_base
+    stream.average_rate = avg_rate
+
+    container = MagicMock()
+    container.streams.video = [stream]
+    container.decode.return_value = iter(frames)
+    return container
+
+
+def test_extract_frame_at_returns_previous_frame_on_overshoot():
+    """If decoding overshoots the target by more than one frame interval,
+    extract_frame_at must return the last frame decoded before the overshoot."""
+    # target = 1000 ms (1.0 s), time_base = 1 ms/unit, fps = 30
+    # frame_dur ≈ 0.0333 s  →  threshold = 1.0 + 0.0333 ≈ 1.0333 s
+    # prev_frame at 966 ms (0.966 s) is just before the detection window
+    # overshot_frame at 1100 ms (1.1 s) exceeds the threshold → return prev
+    prev_frame = _make_av_frame(pts=966)
+    overshot_frame = _make_av_frame(pts=1100)
+    container = _make_av_container([prev_frame, overshot_frame])
+
+    with patch("av.open", return_value=container):
+        result = extract_frame_at(Path("/fake/video.mp4"), timecode_ms=1000)
+
+    assert result is prev_frame.to_image.return_value
+
+
+def test_extract_frame_at_returns_exact_frame_when_within_range():
+    """A frame within ±1 frame interval of the target must be returned directly."""
+    # prev_frame at 966 ms is before the window; target_frame at 1000 ms is within it
+    prev_frame = _make_av_frame(pts=966)
+    target_frame = _make_av_frame(pts=1000)
+    container = _make_av_container([prev_frame, target_frame])
+
+    with patch("av.open", return_value=container):
+        result = extract_frame_at(Path("/fake/video.mp4"), timecode_ms=1000)
+
+    assert result is target_frame.to_image.return_value
+
+
+def test_extract_frame_at_returns_none_for_unopenable_video():
+    with patch("av.open", side_effect=RuntimeError("cannot open")):
+        result = extract_frame_at(Path("/nonexistent/video.mp4"), timecode_ms=500)
+    assert result is None

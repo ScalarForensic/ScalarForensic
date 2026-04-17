@@ -12,12 +12,13 @@ Forensic correctness requirements verified here:
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from scalar_forensic.config import Settings
-from scalar_forensic.web.pipeline import Hit, _group_video_hits, _video_frame_batch
+from scalar_forensic.web.pipeline import Hit, _group_video_hits, _query_exact_video, _video_frame_batch
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -275,3 +276,84 @@ def test_video_frame_batch_cache_miss_returns_default():
         result = _video_frame_batch(settings)
 
     assert result == 32
+
+
+# ---------------------------------------------------------------------------
+# _query_exact_video: malformed frame_timecode_ms handling
+# ---------------------------------------------------------------------------
+
+
+def _make_query_settings(collection: str = "sfn_test") -> Settings:
+    s = Settings.__new__(Settings)
+    s.collection = collection
+    s.video_max_frames = 500
+    return s
+
+
+def _make_record(payload: dict):
+    return SimpleNamespace(payload=payload)
+
+
+def _good_record(timecode_ms=1000) -> SimpleNamespace:
+    return _make_record({
+        "video_path": "/evidence/clip.mp4",
+        "video_hash": "videohash1",
+        "frame_timecode_ms": timecode_ms,
+        "image_hash": f"framehash_{timecode_ms}",
+        "image_path": f"/frames/clip_{timecode_ms}.jpg",
+    })
+
+
+def test_query_exact_video_skips_missing_timecode():
+    """A point missing frame_timecode_ms must not produce a hit; well-formed points still do."""
+    bad = _make_record({"video_path": "/evidence/clip.mp4", "video_hash": "videohash1"})
+    good = _good_record(timecode_ms=2000)
+
+    with patch("scalar_forensic.web.pipeline.qdrant_scroll_all", return_value=iter([bad, good])):
+        hits, errors = _query_exact_video(MagicMock(), "videohash1", _make_query_settings())
+
+    assert errors == []
+    assert len(hits) == 1
+    assert hits[0].video_path == "/evidence/clip.mp4"
+    assert hits[0].frame_timecode_ms == 2000
+
+
+def test_query_exact_video_skips_unparseable_timecode():
+    """A point with a non-numeric frame_timecode_ms must be skipped."""
+    bad = _make_record({
+        "video_path": "/evidence/clip.mp4",
+        "video_hash": "videohash1",
+        "frame_timecode_ms": "not-a-number",
+    })
+    good = _good_record(timecode_ms=500)
+
+    with patch("scalar_forensic.web.pipeline.qdrant_scroll_all", return_value=iter([bad, good])):
+        hits, errors = _query_exact_video(MagicMock(), "videohash1", _make_query_settings())
+
+    assert len(hits) == 1
+    assert hits[0].frame_timecode_ms == 500
+
+
+def test_query_exact_video_all_malformed_produces_no_hit():
+    """If every point for a video has a malformed timecode, no Hit must be emitted."""
+    records = [
+        _make_record({"video_path": "/evidence/clip.mp4", "video_hash": "vh", "frame_timecode_ms": None}),
+        _make_record({"video_path": "/evidence/clip.mp4", "video_hash": "vh", "frame_timecode_ms": "bad"}),
+    ]
+
+    with patch("scalar_forensic.web.pipeline.qdrant_scroll_all", return_value=iter(records)):
+        hits, errors = _query_exact_video(MagicMock(), "vh", _make_query_settings())
+
+    assert hits == []
+
+
+def test_query_exact_video_multiple_frames_sorted_by_timecode():
+    """matched_frames must be sorted by timecode regardless of scroll order."""
+    records = [_good_record(tc) for tc in [3000, 1000, 2000]]
+
+    with patch("scalar_forensic.web.pipeline.qdrant_scroll_all", return_value=iter(records)):
+        hits, errors = _query_exact_video(MagicMock(), "videohash1", _make_query_settings())
+
+    assert len(hits) == 1
+    timecodes = [mf.timecode_ms for mf in hits[0].matched_frames]
+    assert timecodes == [1000, 2000, 3000]

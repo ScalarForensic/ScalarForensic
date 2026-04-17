@@ -77,10 +77,7 @@ async def create_session() -> Session:
             logger.warning("Failed to delete temp file %s", path)
 
     if stale_temp_dir is not None:
-        try:
-            shutil.rmtree(stale_temp_dir, ignore_errors=True)
-        except OSError:
-            logger.warning("Failed to remove temp dir %s", stale_temp_dir)
+        shutil.rmtree(stale_temp_dir, ignore_errors=True)
 
     return session
 

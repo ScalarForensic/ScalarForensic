@@ -799,6 +799,13 @@ def _query_exact_video(
             vpath = r.payload.get("video_path", "")
             if not vpath:
                 continue
+            tc_raw = r.payload.get("frame_timecode_ms")
+            if tc_raw is None:
+                continue
+            try:
+                tc: int = int(tc_raw)
+            except (TypeError, ValueError):
+                continue
             if vpath not in video_frames:
                 video_frames[vpath] = {}
                 video_provenance[vpath] = {}
@@ -806,10 +813,6 @@ def _query_exact_video(
             for mode, entry in _payload_model_provenance(r.payload).items():
                 if mode not in video_provenance[vpath]:
                     video_provenance[vpath][mode] = entry
-            tc_raw = r.payload.get("frame_timecode_ms")
-            if tc_raw is None:
-                continue
-            tc: int = int(tc_raw)
             if tc not in video_frames[vpath]:
                 video_frames[vpath][tc] = {
                     "timecode_ms": tc,
