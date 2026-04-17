@@ -1707,4 +1707,5 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   border: 1px solid var(--border);
   border-radius: 4px;
   image-rendering: pixelated;
+  cursor: zoom-in;
 }
