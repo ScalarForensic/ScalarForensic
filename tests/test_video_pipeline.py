@@ -300,13 +300,15 @@ def _make_record(payload: dict):
 
 
 def _good_record(timecode_ms=1000) -> SimpleNamespace:
-    return _make_record({
-        "video_path": "/evidence/clip.mp4",
-        "video_hash": "videohash1",
-        "frame_timecode_ms": timecode_ms,
-        "image_hash": f"framehash_{timecode_ms}",
-        "image_path": f"/frames/clip_{timecode_ms}.jpg",
-    })
+    return _make_record(
+        {
+            "video_path": "/evidence/clip.mp4",
+            "video_hash": "videohash1",
+            "frame_timecode_ms": timecode_ms,
+            "image_hash": f"framehash_{timecode_ms}",
+            "image_path": f"/frames/clip_{timecode_ms}.jpg",
+        }
+    )
 
 
 def test_query_exact_video_skips_missing_timecode():
@@ -325,11 +327,13 @@ def test_query_exact_video_skips_missing_timecode():
 
 def test_query_exact_video_skips_unparseable_timecode():
     """A point with a non-numeric frame_timecode_ms must be skipped."""
-    bad = _make_record({
-        "video_path": "/evidence/clip.mp4",
-        "video_hash": "videohash1",
-        "frame_timecode_ms": "not-a-number",
-    })
+    bad = _make_record(
+        {
+            "video_path": "/evidence/clip.mp4",
+            "video_hash": "videohash1",
+            "frame_timecode_ms": "not-a-number",
+        }
+    )
     good = _good_record(timecode_ms=500)
 
     with patch("scalar_forensic.web.pipeline.qdrant_scroll_all", return_value=iter([bad, good])):
@@ -342,10 +346,12 @@ def test_query_exact_video_skips_unparseable_timecode():
 def test_query_exact_video_all_malformed_produces_no_hit():
     """If every point for a video has a malformed timecode, no Hit must be emitted."""
     records = [
-        _make_record({"video_path": "/evidence/clip.mp4", "video_hash": "vh",
-                      "frame_timecode_ms": None}),
-        _make_record({"video_path": "/evidence/clip.mp4", "video_hash": "vh",
-                      "frame_timecode_ms": "bad"}),
+        _make_record(
+            {"video_path": "/evidence/clip.mp4", "video_hash": "vh", "frame_timecode_ms": None}
+        ),
+        _make_record(
+            {"video_path": "/evidence/clip.mp4", "video_hash": "vh", "frame_timecode_ms": "bad"}
+        ),
     ]
 
     with patch("scalar_forensic.web.pipeline.qdrant_scroll_all", return_value=iter(records)):
