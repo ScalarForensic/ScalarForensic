@@ -121,6 +121,73 @@
       <template x-if="!auditLoading && !auditError">
         <div class="audit-body">
 
+          <!-- ── Section: Model Input Preview ── -->
+          <template x-if="embeddingModels.altered || embeddingModels.semantic">
+            <div class="audit-section audit-preproc-section">
+              <div class="audit-section-hdr">Model Input Preview</div>
+              <p class="audit-preproc-note">
+                Images as passed to the embedding models — spatial transforms applied,
+                ImageNet channel normalisation not shown.
+              </p>
+              <div class="audit-preproc-grid">
+                <!-- header row -->
+                <div class="audit-preproc-cell audit-preproc-hdr"></div>
+                <div class="audit-preproc-cell audit-preproc-hdr">Analysis Image</div>
+                <div class="audit-preproc-cell audit-preproc-hdr">Result Image</div>
+
+                <!-- ALTER / SSCD row (x-show on each cell — x-if requires single root) -->
+                <div class="audit-preproc-cell audit-preproc-model-lbl" x-show="embeddingModels.altered">
+                  <span class="badge badge-altered">ALTER</span>
+                  <div class="audit-preproc-model-sub"
+                       x-text="auditQueryPreproc?.sscd ? `331px · ${auditQueryPreproc.sscd.n_crops}-crop` : 'SSCD'"></div>
+                </div>
+                <div class="audit-preproc-cell" x-show="embeddingModels.altered">
+                  <template x-if="auditQueryPreproc?.sscd">
+                    <img :src="auditQueryPreproc.sscd.annotated_url"
+                         class="audit-preproc-img" alt="Query SSCD input">
+                  </template>
+                  <template x-if="!auditQueryPreproc?.sscd">
+                    <span class="audit-muted">—</span>
+                  </template>
+                </div>
+                <div class="audit-preproc-cell" x-show="embeddingModels.altered">
+                  <template x-if="auditHitPreproc?.sscd">
+                    <img :src="auditHitPreproc.sscd.annotated_url"
+                         class="audit-preproc-img" alt="Result SSCD input">
+                  </template>
+                  <template x-if="!auditHitPreproc?.sscd">
+                    <span class="audit-muted">—</span>
+                  </template>
+                </div>
+
+                <!-- SEMAN / DINOv2 row -->
+                <div class="audit-preproc-cell audit-preproc-model-lbl" x-show="embeddingModels.semantic">
+                  <span class="badge badge-semantic">SEMAN</span>
+                  <div class="audit-preproc-model-sub"
+                       x-text="auditQueryPreproc?.dino ? `→${auditQueryPreproc.dino.normalize_size}px · center crop` : 'DINOv2'"></div>
+                </div>
+                <div class="audit-preproc-cell" x-show="embeddingModels.semantic">
+                  <template x-if="auditQueryPreproc?.dino">
+                    <img :src="auditQueryPreproc.dino.annotated_url"
+                         class="audit-preproc-img" alt="Query DINOv2 input">
+                  </template>
+                  <template x-if="!auditQueryPreproc?.dino">
+                    <span class="audit-muted">—</span>
+                  </template>
+                </div>
+                <div class="audit-preproc-cell" x-show="embeddingModels.semantic">
+                  <template x-if="auditHitPreproc?.dino">
+                    <img :src="auditHitPreproc.dino.annotated_url"
+                         class="audit-preproc-img" alt="Result DINOv2 input">
+                  </template>
+                  <template x-if="!auditHitPreproc?.dino">
+                    <span class="audit-muted">—</span>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </template>
+
           <!-- Integrity banner -->
           <div class="audit-integrity-banner"
                :class="auditIntegrity === null ? 'audit-banner-neutral'
@@ -1182,6 +1249,8 @@ function sfn() {
     auditError: null,
     auditQueryLibVersions: null,
     auditHitProvenance: null,
+    auditQueryPreproc: null,
+    auditHitPreproc: null,
 
     // Provenance
     provenance: null,
@@ -1824,7 +1893,10 @@ function sfn() {
       this.auditError = null;
       this.auditQueryLibVersions = null;
       this.auditHitProvenance = null;
+      this.auditQueryPreproc = null;
+      this.auditHitPreproc = null;
       try {
+        // Phase 1: library versions + hit provenance
         const hash = this.selectedHit.image_hash;
         const [lvResp, hpResp] = await Promise.all([
           fetch('/api/library-versions'),
@@ -1834,6 +1906,39 @@ function sfn() {
         this.auditQueryLibVersions = await lvResp.json();
         if (hpResp?.ok) this.auditHitProvenance = await hpResp.json();
         else if (hpResp) this.auditHitProvenance = {};
+
+        // Phase 2: preprocessing previews (non-fatal if unavailable)
+        const hasAlter = !!this.embeddingModels?.altered;
+        const hasSeman = !!this.embeddingModels?.semantic;
+        if (hasAlter || hasSeman) {
+          const hitNcrops   = this.auditHitProvenance?.altered?.sscd_n_crops ?? 1;
+          const hitDinoSize = this.auditHitProvenance?.semantic?.normalize_size ?? 224;
+          const hitPath     = this.selectedHit?.path;
+
+          const hitParams = new URLSearchParams({ path: hitPath ?? '' });
+          hitParams.set('sscd_n_crops',      hasAlter ? String(hitNcrops)   : '0');
+          hitParams.set('dino_normalize_size', hasSeman ? String(hitDinoSize) : '0');
+
+          const tc = this.currentQueryFrame?.timecode_ms;
+          const queryUrl = `/api/query-preprocessed/${this.sessionId}/${this.selectedFileId}`
+                         + (tc != null ? `?timecode_ms=${tc}` : '');
+          const hitUrl = hitPath ? `/api/hit-preprocessed?${hitParams}` : null;
+
+          const [qpResp, hpPrep] = await Promise.all([
+            fetch(queryUrl),
+            hitUrl ? fetch(hitUrl) : Promise.resolve(null),
+          ]);
+          if (qpResp.ok) {
+            this.auditQueryPreproc = await qpResp.json();
+          } else {
+            console.error(`query-preprocessed failed: HTTP ${qpResp.status}`, queryUrl);
+          }
+          if (hpPrep?.ok) {
+            this.auditHitPreproc = await hpPrep.json();
+          } else if (hpPrep) {
+            console.error(`hit-preprocessed failed: HTTP ${hpPrep.status}`, hitUrl);
+          }
+        }
       } catch (e) {
         this.auditError = e?.message || 'Audit data fetch failed';
       } finally {
@@ -1997,6 +2102,8 @@ function sfn() {
       this.auditError = null;
       this.auditQueryLibVersions = null;
       this.auditHitProvenance = null;
+      this.auditQueryPreproc = null;
+      this.auditHitPreproc = null;
       // Restart background viz with client-cached point cloud
       this.$nextTick(() => {
         if (this._points3dData) initVectorViz(this._points3dData);
