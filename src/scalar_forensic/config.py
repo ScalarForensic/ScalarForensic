@@ -9,6 +9,12 @@ _VALID_DEDUP_MODES = frozenset({"hash", "filepath", "both"})
 
 _DEFAULT_HASH_CACHE_PATH = "data/hash_cache.db"
 
+# Environment variable name for the allow-online flag.  Both the CLI and the
+# web entry-point write this variable before constructing Settings() so that
+# every per-request Settings() instance created by FastAPI handlers also sees
+# the flag without an explicit argument.
+ENV_ALLOW_ONLINE = "SFN_ALLOW_ONLINE"
+
 
 class Settings:
     """All SFN_* runtime settings.
@@ -186,6 +192,22 @@ class Settings:
                 f"Choose one of: {', '.join(sorted(_VALID_DEDUP_MODES))}"
             )
         return mode
+
+    def resolve_embedding_model(self, local_model: str) -> str:
+        """Return the effective model path/ID to pass to load_embedder.
+
+        When a remote embedding endpoint is configured the model must be
+        explicitly named via SFN_EMBEDDING_MODEL; raises ValueError otherwise.
+        When using local inference, *local_model* (the per-backend default or
+        explicit SFN_MODEL_SSCD/SFN_MODEL_DINO value) is returned as-is.
+        """
+        if self.embedding_endpoint:
+            if not self.embedding_model:
+                raise ValueError(
+                    "SFN_EMBEDDING_MODEL must be set when SFN_EMBEDDING_ENDPOINT is configured."
+                )
+            return self.embedding_model
+        return local_model
 
     def apply_network_policy(self) -> None:
         """Enforce the network policy for HuggingFace libraries.

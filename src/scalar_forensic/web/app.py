@@ -27,14 +27,16 @@ from PIL import Image, ImageDraw, UnidentifiedImageError
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
-from scalar_forensic.config import Settings
+from scalar_forensic.config import ENV_ALLOW_ONLINE, Settings
 from scalar_forensic.embedder import (
     _SSCD_INPUT_SIZE,
     _open_rgb,
     _sscd_resize,
     extract_exif_detailed,
     get_library_versions,
+    write_thumbnail,
 )
+from scalar_forensic.indexer import qdrant_scroll_all
 from scalar_forensic.video import (
     VIDEO_EXTENSIONS,
     extract_frame_at,
@@ -448,27 +450,7 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
     """
 
     def _write(img: Image.Image, source_label: str) -> None:
-        thumb = img.copy()
-        thumb.thumbnail(
-            (settings.thumbnail_size, settings.thumbnail_size), Image.Resampling.LANCZOS
-        )
-        if thumb.mode not in ("RGB", "L"):
-            thumb = thumb.convert("RGB")
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        # Write atomically so concurrent requests never read a half-written file.
-        tmp_path: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                delete=False, dir=dest.parent, suffix=dest.suffix or ".jpg"
-            ) as tmp_file:
-                tmp_path = Path(tmp_file.name)
-            thumb.save(tmp_path, format="JPEG", quality=85, optimize=True)
-            os.replace(tmp_path, dest)
-        except Exception:
-            if tmp_path is not None:
-                with contextlib.suppress(FileNotFoundError):
-                    tmp_path.unlink()
-            raise
+        write_thumbnail(img, dest, settings.thumbnail_size)
         _log.info("thumbnail regen: saved %s from %s", sha256[:12], source_label)
 
     try:
@@ -907,39 +889,27 @@ async def video_timeline(video_hash: str) -> JSONResponse:
 
     frames: dict[int, dict] = {}  # timecode_ms → frame info
     try:
-        offset = None
-        while True:
-            records, offset = client.scroll(
-                collection_name=settings.collection,
-                scroll_filter=Filter(
-                    must=[
-                        FieldCondition(key="video_hash", match=MatchValue(value=video_hash)),
-                        FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
-                    ]
-                ),
-                limit=256,
-                offset=offset,
-                with_payload=[
-                    "image_path",
-                    "image_hash",
-                    "frame_timecode_ms",
-                    "frame_index",
-                    "video_path",
-                ],
-                with_vectors=False,
-            )
-            for r in records:
-                tc = r.payload.get("frame_timecode_ms")
-                if tc is not None and tc not in frames:
-                    frames[tc] = {
-                        "timecode_ms": tc,
-                        "frame_hash": r.payload.get("image_hash"),
-                        "frame_index": r.payload.get("frame_index"),
-                        "virtual_path": r.payload.get("image_path"),
-                        "video_path": r.payload.get("video_path"),
-                    }
-            if offset is None:
-                break
+        for r in qdrant_scroll_all(
+            client,
+            settings.collection,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key="video_hash", match=MatchValue(value=video_hash)),
+                    FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
+                ]
+            ),
+            limit=256,
+            with_payload=["image_path", "image_hash", "frame_timecode_ms", "frame_index", "video_path"],
+        ):
+            tc = r.payload.get("frame_timecode_ms")
+            if tc is not None and tc not in frames:
+                frames[tc] = {
+                    "timecode_ms": tc,
+                    "frame_hash": r.payload.get("image_hash"),
+                    "frame_index": r.payload.get("frame_index"),
+                    "virtual_path": r.payload.get("image_path"),
+                    "video_path": r.payload.get("video_path"),
+                }
     except Exception as exc:  # noqa: BLE001
         _log.debug("video-timeline: could not scroll %r: %s", settings.collection, exc)
 
@@ -1073,7 +1043,7 @@ def start() -> None:
     # per-request Settings() instance created by FastAPI handlers also sees
     # allow_online=True — mutating the object here would have no effect on them.
     if args.allow_online:
-        os.environ["SFN_ALLOW_ONLINE"] = "true"
+        os.environ[ENV_ALLOW_ONLINE] = "true"
 
     settings = Settings()
 

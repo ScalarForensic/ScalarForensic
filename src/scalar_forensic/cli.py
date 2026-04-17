@@ -16,13 +16,13 @@ import typer
 from PIL import Image
 from qdrant_client.models import Distance, VectorParams
 
-from scalar_forensic.config import Settings
+from scalar_forensic.config import ENV_ALLOW_ONLINE, Settings
 from scalar_forensic.embedder import (
-    _SSCD_SCALE,
     AnyEmbedder,
     ExifInfo,
     HashCache,
     SSCDEmbedder,
+    effective_preprocessing_cap,
     extract_exif,
     get_library_versions,
     hash_bytes_md5,
@@ -30,6 +30,7 @@ from scalar_forensic.embedder import (
     hash_file_both,
     load_embedder,
     preprocess_batch,
+    write_thumbnail,
 )
 from scalar_forensic.indexer import Indexer
 from scalar_forensic.scanner import _HEIF_AVAILABLE, scan_all_files
@@ -196,15 +197,6 @@ class _ETATracker:
         return eta_s, sigma_s
 
 
-def _write_thumbnail(img: "Image.Image", dest: Path, size: int) -> None:
-    """Save a thumbnail JPEG of *img* at *dest* (size×size, aspect-ratio preserved)."""
-    thumb = img.copy()
-    thumb.thumbnail((size, size), Image.Resampling.LANCZOS)
-    if thumb.mode not in ("RGB", "L"):
-        thumb = thumb.convert("RGB")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    thumb.save(dest, format="JPEG", quality=85, optimize=True)
-
 
 def _write_csv(records: dict[Path, "_FileRecord"], csv_path: Path) -> None:
     try:
@@ -219,6 +211,53 @@ def _write_csv(records: dict[Path, "_FileRecord"], csv_path: Path) -> None:
                 )
     except OSError as exc:
         typer.echo(f"[ERROR] Could not write CSV report to {csv_path}: {exc}", err=True)
+
+
+def _dedup_by_hash(
+    paths: "list[Path]",
+    hash_lookup: "dict[Path, str]",
+    records: "dict[Path, _FileRecord]",
+    dedup_hashes: "list[set[str]]",
+    dedup_paths: "list[set[str]]",
+    n_specs: int,
+    skipped_counts: "list[int]",
+) -> "tuple[list[set[Path]], set[Path], int, int]":
+    """Elect one winner per unique SHA-256, mark duplicates and already-indexed files.
+
+    Returns ``(needs_per_spec, any_needs, n_run_dups, n_all_indexed)``.
+    Mutates *records* (sets status/reason) and *skipped_counts* in place.
+    """
+    unique_by_hash: dict[str, Path] = {}
+    for p in paths:
+        unique_by_hash.setdefault(hash_lookup[p], p)
+    winners: set[Path] = set(unique_by_hash.values())
+
+    for p in paths:
+        if p not in winners:
+            records[p].status = _S_SKIP_DUP
+            records[p].reason = "duplicate in run (same SHA-256)"
+
+    needs_per_spec: list[set[Path]] = [set() for _ in range(n_specs)]
+    for si in range(n_specs):
+        needs_per_spec[si] = {
+            p
+            for p in winners
+            if hash_lookup[p] not in dedup_hashes[si]
+            and str(p.resolve()) not in dedup_paths[si]
+        }
+    any_needs = set().union(*needs_per_spec) if n_specs > 0 else set()
+
+    n_run_dups = len(paths) - len(winners)
+    n_all_indexed = len(winners) - len(any_needs)
+    for si in range(n_specs):
+        skipped_counts[si] += n_run_dups + n_all_indexed
+
+    for p in winners:
+        if p not in any_needs:
+            records[p].status = _S_SKIP_IDX
+            records[p].reason = "already indexed in Qdrant"
+
+    return needs_per_spec, any_needs, n_run_dups, n_all_indexed
 
 
 def _print_summary(
@@ -302,7 +341,7 @@ def index(
     # Write back to os.environ so Settings() reads the correct value,
     # and any subprocess inherits the flag without an explicit argument.
     if allow_online:
-        os.environ["SFN_ALLOW_ONLINE"] = "true"
+        os.environ[ENV_ALLOW_ONLINE] = "true"
 
     settings = Settings()
 
@@ -355,21 +394,17 @@ def index(
     _loaded: list[tuple[AnyEmbedder, str]] = []  # (embedder, vector_name)
     for use_sscd, model_name, vector_name in models_to_run:
         backend_name = "SSCD" if use_sscd else "DINOv2"
+        try:
+            effective_model = settings.resolve_embedding_model(model_name)
+        except ValueError as exc:
+            typer.echo(f"[ERROR] {exc}", err=True)
+            raise typer.Exit(1)
         if settings.embedding_endpoint:
-            if not settings.embedding_model:
-                typer.echo(
-                    "[ERROR] SFN_EMBEDDING_MODEL must be set when"
-                    " SFN_EMBEDDING_ENDPOINT is configured.",
-                    err=True,
-                )
-                raise typer.Exit(1)
-            effective_model = settings.embedding_model
             typer.echo(
                 f"Using remote {backend_name} embedder at {settings.embedding_endpoint!r}"
                 f" (model={effective_model!r}) ..."
             )
         else:
-            effective_model = model_name
             typer.echo(
                 f"Loading {backend_name} model {model_name!r} on device={settings.device!r} ..."
             )
@@ -432,7 +467,7 @@ def index(
     # Effective short-side cap for preprocessing: must satisfy both SSCD (≥331 px)
     # and DINOv2 (≥normalize_size px).  Computed here so it is available to
     # calibrate() before the batch loops.
-    _effective_cap = max(_SSCD_SCALE, settings.normalize_size)
+    _effective_cap = effective_preprocessing_cap(settings.normalize_size)
 
     # ── Batch size: explicit config > calibration cache > auto-calibrate ─────
     if settings.batch_size is None:
@@ -567,7 +602,7 @@ def index(
                     thumb_path = settings.thumbnail_dir / f"{sha}.jpg"
                     if not thumb_path.exists():
                         try:
-                            _write_thumbnail(img, thumb_path, settings.thumbnail_size)
+                            write_thumbnail(img, thumb_path, settings.thumbnail_size)
                         except Exception as exc:  # noqa: BLE001
                             typer.echo(f"[WARN] Thumbnail failed for {p.name}: {exc}", err=True)
 
@@ -871,38 +906,15 @@ def index(
     _n_all_indexed = 0
 
     if image_paths:
-        # Global within-run hash dedup (first occurrence of each hash wins).
-        _unique_by_hash: dict[str, Path] = {}
-        for _p, _sha in _file_hashes.items():
-            _unique_by_hash.setdefault(_sha, _p)
-        _winners: set[Path] = set(_unique_by_hash.values())
-        for _p in _file_hashes:
-            if _p not in _winners:
-                records[_p].status = _S_SKIP_DUP
-                records[_p].reason = "duplicate in run (same SHA-256)"
-
-        # Per-spec: which unique files does each model still need to embed?
-        for _si in range(len(specs)):
-            _needs_per_spec[_si] = {
-                p
-                for p in _winners
-                if _file_hashes[p] not in _dedup_hashes[_si]
-                and str(p.resolve()) not in _dedup_paths[_si]
-            }
-        _any_needs = set().union(*_needs_per_spec) if specs else set()
-
-        # Files unique in this run but already indexed in every model → skip.
-        for _p in _winners:
-            if _p not in _any_needs:
-                records[_p].status = _S_SKIP_IDX
-                records[_p].reason = "already indexed in Qdrant"
-
-        # Pre-populate per-spec skip counters for files that never enter the loop.
-        _n_run_dups = len(_file_hashes) - len(_winners)
-        _n_all_indexed = len(_winners) - len(_any_needs)
-        for _si in range(len(specs)):
-            skipped_counts[_si] += _n_run_dups + _n_all_indexed
-
+        _needs_per_spec, _any_needs, _n_run_dups, _n_all_indexed = _dedup_by_hash(
+            paths=list(_file_hashes.keys()),
+            hash_lookup=_file_hashes,
+            records=records,
+            dedup_hashes=_dedup_hashes,
+            dedup_paths=_dedup_paths,
+            n_specs=len(specs),
+            skipped_counts=skipped_counts,
+        )
         # Build the ordered list of image paths that actually need processing.
         _paths_to_batch = [p for p in image_paths if p in _any_needs]
 
@@ -1156,34 +1168,17 @@ def index(
     # ── Frame dedup (hash-based, same pipeline as images) ────────────────────
     _frame_any_needs: set[Path] = set()
     if _frame_paths:
-        _frame_unique_by_hash: dict[str, Path] = {}
-        for fp in _frame_paths:
-            _frame_unique_by_hash.setdefault(_file_hashes[fp], fp)
-        _frame_winners: set[Path] = set(_frame_unique_by_hash.values())
-        for fp in _frame_paths:
-            if fp not in _frame_winners:
-                records[fp].status = _S_SKIP_DUP
-                records[fp].reason = "duplicate in run (same SHA-256)"
-
-        for _si in range(len(specs)):
-            _frame_needs_per_spec[_si] = {
-                fp
-                for fp in _frame_winners
-                if _file_hashes[fp] not in _dedup_hashes[_si]
-                and str(fp.resolve()) not in _dedup_paths[_si]
-            }
-        _frame_any_needs = set().union(*_frame_needs_per_spec) if specs else set()
-
-        _n_frame_run_dups = len(_frame_paths) - len(_frame_winners)
-        _n_frame_all_indexed = len(_frame_winners) - len(_frame_any_needs)
-        for _si in range(len(specs)):
-            skipped_counts[_si] += _n_frame_run_dups + _n_frame_all_indexed
-
-        for fp in _frame_winners:
-            if fp not in _frame_any_needs:
-                records[fp].status = _S_SKIP_IDX
-                records[fp].reason = "already indexed in Qdrant"
-
+        _frame_needs_per_spec, _frame_any_needs, _n_frame_run_dups, _n_frame_all_indexed = (
+            _dedup_by_hash(
+                paths=_frame_paths,
+                hash_lookup=_file_hashes,
+                records=records,
+                dedup_hashes=_dedup_hashes,
+                dedup_paths=_dedup_paths,
+                n_specs=len(specs),
+                skipped_counts=skipped_counts,
+            )
+        )
         _paths_to_batch.extend(fp for fp in _frame_paths if fp in _frame_any_needs)
 
     # ── Combined per-spec needs ───────────────────────────────────────────────

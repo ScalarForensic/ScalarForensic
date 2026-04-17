@@ -19,14 +19,15 @@ from scalar_forensic.config import Settings
 from scalar_forensic.embedder import (
     _SSCD_SCALE,
     AnyEmbedder,
+    effective_preprocessing_cap,
     hash_bytes,
     hash_bytes_md5,
-    hash_file,
-    hash_file_md5,
+    hash_file_both,
     load_embedder,
     preprocess_batch,
     preprocess_pil_batch,
 )
+from scalar_forensic.indexer import qdrant_scroll_all
 from scalar_forensic.video import VIDEO_EXTENSIONS, extract_frames
 from scalar_forensic.web.session import FileEntry, Session, VideoFrameEntry
 
@@ -41,20 +42,9 @@ _embedder_cache: dict[str, AnyEmbedder] = {}
 
 def _get_embedder(key: str, settings: Settings) -> AnyEmbedder:
     if key not in _embedder_cache:
-        if key == "sscd":
-            local_model = settings.model_sscd
-            use_sscd = True
-        else:
-            local_model = settings.model_dino
-            use_sscd = False
-        if settings.embedding_endpoint:
-            if not settings.embedding_model:
-                raise ValueError(
-                    "SFN_EMBEDDING_MODEL must be set when SFN_EMBEDDING_ENDPOINT is configured."
-                )
-            effective_model = settings.embedding_model
-        else:
-            effective_model = local_model
+        use_sscd = key == "sscd"
+        local_model = settings.model_sscd if use_sscd else settings.model_dino
+        effective_model = settings.resolve_embedding_model(local_model)
         _embedder_cache[key] = load_embedder(
             model=effective_model,
             use_sscd=use_sscd,
@@ -147,8 +137,8 @@ def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
     entry.file_hash_md5 = hash_bytes_md5(data)
     if not embedders:
         return
-    _effective_cap = max(
-        _SSCD_SCALE, max((e.normalize_size for e in embedders.values()), default=_SSCD_SCALE)
+    _effective_cap = effective_preprocessing_cap(
+        max((e.normalize_size for e in embedders.values()), default=_SSCD_SCALE)
     )
     pre_results = preprocess_batch([data], cap=_effective_cap)
     result = pre_results[0]
@@ -192,9 +182,8 @@ def _analyze_video_file(
     """
     from itertools import batched as _batched
 
-    # Chunked hash — avoids reading the whole upload into memory just to hash it
-    entry.file_hash = hash_file(entry.temp_path)
-    entry.file_hash_md5 = hash_file_md5(entry.temp_path)
+    # Single-pass chunked hash — avoids two separate reads of the upload file.
+    entry.file_hash, entry.file_hash_md5 = hash_file_both(entry.temp_path)
     entry.is_video = True
     frame_entries: list[VideoFrameEntry] = []
     _batch_sz = _video_frame_batch(settings)
@@ -208,9 +197,8 @@ def _analyze_video_file(
             if not frames:
                 continue
 
-            _effective_cap = max(
-                _SSCD_SCALE,
-                max((e.normalize_size for e in embedders.values()), default=_SSCD_SCALE),
+            _effective_cap = effective_preprocessing_cap(
+                max((e.normalize_size for e in embedders.values()), default=_SSCD_SCALE)
             )
             pil_images = preprocess_pil_batch([f.image for f in frames], cap=_effective_cap)
 
@@ -704,15 +692,7 @@ def _query_exact(
         )
         for r in records:
             path = r.payload.get("image_path", "")
-            mp: dict = {}
-            dino_mn = r.payload.get("dino_model_name", "")
-            dino_mh = r.payload.get("dino_model_hash", "")
-            sscd_mn = r.payload.get("sscd_model_name", "")
-            sscd_mh = r.payload.get("sscd_model_hash", "")
-            if dino_mn or dino_mh:
-                mp["semantic"] = {"name": dino_mn, "hash": dino_mh}
-            if sscd_mn or sscd_mh:
-                mp["altered"] = {"name": sscd_mn, "hash": sscd_mh}
+            mp = _payload_model_provenance(r.payload)
             existing = next((h for h in hits if h.path == path), None)
             if existing is None:
                 hits.append(
@@ -809,41 +789,33 @@ def _query_exact_video(
             "sscd_model_name",
             "sscd_model_hash",
         ]
-        offset = None
-        while True:
-            records, offset = client.scroll(
-                collection_name=settings.collection,
-                scroll_filter=scroll_filter,
-                limit=_page_size,
-                offset=offset,
-                with_payload=payload_fields,
-                with_vectors=False,
-            )
-            for r in records:
-                vpath = r.payload.get("video_path", "")
-                if not vpath:
-                    continue
-                if vpath not in video_frames:
-                    video_frames[vpath] = {}
-                    video_provenance[vpath] = {}
-                    video_video_hash[vpath] = r.payload.get("video_hash", video_hash)
-                dino_mn = r.payload.get("dino_model_name", "")
-                dino_mh = r.payload.get("dino_model_hash", "")
-                sscd_mn = r.payload.get("sscd_model_name", "")
-                sscd_mh = r.payload.get("sscd_model_hash", "")
-                if (dino_mn or dino_mh) and "semantic" not in video_provenance[vpath]:
-                    video_provenance[vpath]["semantic"] = {"name": dino_mn, "hash": dino_mh}
-                if (sscd_mn or sscd_mh) and "altered" not in video_provenance[vpath]:
-                    video_provenance[vpath]["altered"] = {"name": sscd_mn, "hash": sscd_mh}
-                tc: int = r.payload.get("frame_timecode_ms") or 0
-                if tc not in video_frames[vpath]:
-                    video_frames[vpath][tc] = {
-                        "timecode_ms": tc,
-                        "frame_hash": r.payload.get("image_hash", ""),
-                        "image_path": r.payload.get("image_path", ""),
-                    }
-            if not records or offset is None:
-                break
+        for r in qdrant_scroll_all(
+            client,
+            settings.collection,
+            scroll_filter=scroll_filter,
+            limit=_page_size,
+            with_payload=payload_fields,
+        ):
+            vpath = r.payload.get("video_path", "")
+            if not vpath:
+                continue
+            if vpath not in video_frames:
+                video_frames[vpath] = {}
+                video_provenance[vpath] = {}
+                video_video_hash[vpath] = r.payload.get("video_hash", video_hash)
+            for mode, entry in _payload_model_provenance(r.payload).items():
+                if mode not in video_provenance[vpath]:
+                    video_provenance[vpath][mode] = entry
+            tc_raw = r.payload.get("frame_timecode_ms")
+            if tc_raw is None:
+                continue
+            tc: int = int(tc_raw)
+            if tc not in video_frames[vpath]:
+                video_frames[vpath][tc] = {
+                    "timecode_ms": tc,
+                    "frame_hash": r.payload.get("image_hash", ""),
+                    "image_path": r.payload.get("image_path", ""),
+                }
     except Exception as exc:  # noqa: BLE001
         msg = str(exc).lower()
         if "not found" in msg or "doesn't exist" in msg:
@@ -913,11 +885,7 @@ def _query_vector(
         )
         hits = []
         for r in result.points:
-            mp: dict = {}
-            mn = r.payload.get(f"{vector_name}_model_name", "")
-            mh = r.payload.get(f"{vector_name}_model_hash", "")
-            if mn or mh:
-                mp[mode] = {"name": mn, "hash": mh}
+            mp = _payload_model_provenance(r.payload)
             hits.append(
                 Hit(
                     path=r.payload.get("image_path", ""),
@@ -1059,6 +1027,21 @@ _VECTOR_MODE_MAP = [
     ("dino", "semantic"),
     ("sscd", "altered"),
 ]
+
+
+def _payload_model_provenance(payload: dict) -> dict[str, dict]:
+    """Extract model provenance from a Qdrant payload using _VECTOR_MODE_MAP.
+
+    Returns a dict keyed by mode label (e.g. "semantic", "altered") for every
+    model whose name or hash is present in *payload*.
+    """
+    mp: dict[str, dict] = {}
+    for vn, mode in _VECTOR_MODE_MAP:
+        name = payload.get(f"{vn}_model_name", "")
+        h = payload.get(f"{vn}_model_hash", "")
+        if name or h:
+            mp[mode] = {"name": name, "hash": h}
+    return mp
 
 
 def get_hit_qdrant_provenance(image_hash: str, settings: Settings) -> dict[str, dict]:
