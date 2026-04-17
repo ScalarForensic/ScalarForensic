@@ -144,7 +144,9 @@
                 <div class="audit-preproc-cell" x-show="embeddingModels.altered">
                   <template x-if="auditQueryPreproc?.sscd">
                     <img :src="auditQueryPreproc.sscd.annotated_url"
-                         class="audit-preproc-img" alt="Query SSCD input">
+                         class="audit-preproc-img" style="cursor:pointer"
+                         @click="openLightbox(auditQueryPreproc.sscd.annotated_url)"
+                         alt="Query SSCD input">
                   </template>
                   <template x-if="!auditQueryPreproc?.sscd">
                     <span class="audit-muted">—</span>
@@ -153,7 +155,9 @@
                 <div class="audit-preproc-cell" x-show="embeddingModels.altered">
                   <template x-if="auditHitPreproc?.sscd">
                     <img :src="auditHitPreproc.sscd.annotated_url"
-                         class="audit-preproc-img" alt="Result SSCD input">
+                         class="audit-preproc-img" style="cursor:pointer"
+                         @click="openLightbox(auditHitPreproc.sscd.annotated_url)"
+                         alt="Result SSCD input">
                   </template>
                   <template x-if="!auditHitPreproc?.sscd">
                     <span class="audit-muted">—</span>
@@ -169,7 +173,9 @@
                 <div class="audit-preproc-cell" x-show="embeddingModels.semantic">
                   <template x-if="auditQueryPreproc?.dino">
                     <img :src="auditQueryPreproc.dino.annotated_url"
-                         class="audit-preproc-img" alt="Query DINOv2 input">
+                         class="audit-preproc-img" style="cursor:pointer"
+                         @click="openLightbox(auditQueryPreproc.dino.annotated_url)"
+                         alt="Query DINOv2 input">
                   </template>
                   <template x-if="!auditQueryPreproc?.dino">
                     <span class="audit-muted">—</span>
@@ -178,7 +184,9 @@
                 <div class="audit-preproc-cell" x-show="embeddingModels.semantic">
                   <template x-if="auditHitPreproc?.dino">
                     <img :src="auditHitPreproc.dino.annotated_url"
-                         class="audit-preproc-img" alt="Result DINOv2 input">
+                         class="audit-preproc-img" style="cursor:pointer"
+                         @click="openLightbox(auditHitPreproc.dino.annotated_url)"
+                         alt="Result DINOv2 input">
                   </template>
                   <template x-if="!auditHitPreproc?.dino">
                     <span class="audit-muted">—</span>
