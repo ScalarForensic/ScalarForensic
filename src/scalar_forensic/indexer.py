@@ -1,6 +1,7 @@
 """Qdrant collection management and vector upsert."""
 
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +17,37 @@ from qdrant_client.models import (
     PointVectors,
     VectorParams,
 )
+
+
+def qdrant_scroll_all(
+    client: QdrantClient,
+    collection_name: str,
+    *,
+    scroll_filter,
+    limit: int,
+    with_payload,
+    with_vectors: bool = False,
+) -> Iterator:
+    """Yield every record from a Qdrant collection matching *scroll_filter*.
+
+    Handles pagination internally so callers don't repeat the
+    ``offset = None; while True: ...; if not records or offset is None: break``
+    boilerplate.  Terminates when the server returns an empty page or no next
+    offset — both are reliable end-of-collection signals.
+    """
+    offset = None
+    while True:
+        records, offset = client.scroll(
+            collection_name=collection_name,
+            scroll_filter=scroll_filter,
+            limit=limit,
+            with_payload=with_payload,
+            with_vectors=with_vectors,
+            offset=offset,
+        )
+        yield from records
+        if not records or offset is None:
+            break
 
 
 class Indexer:
@@ -135,21 +167,15 @@ class Indexer:
         Only considers points that carry the vector type this Indexer manages.
         """
         result: set[str] = set()
-        offset = None
-        while True:
-            records, offset = self.client.scroll(
-                collection_name=self.collection,
-                scroll_filter=Filter(must=[HasVectorCondition(has_vector=self.vector_name)]),
-                limit=10_000,
-                with_payload=["image_hash"],
-                with_vectors=False,
-                offset=offset,
-            )
-            for r in records:
-                if r.payload and "image_hash" in r.payload:
-                    result.add(r.payload["image_hash"])
-            if not records or offset is None:
-                break
+        for r in qdrant_scroll_all(
+            self.client,
+            self.collection,
+            scroll_filter=Filter(must=[HasVectorCondition(has_vector=self.vector_name)]),
+            limit=10_000,
+            with_payload=["image_hash"],
+        ):
+            if r.payload and "image_hash" in r.payload:
+                result.add(r.payload["image_hash"])
         return result
 
     def get_all_indexed_paths(self) -> set[str]:
@@ -160,21 +186,15 @@ class Indexer:
         Only considers points that carry the vector type this Indexer manages.
         """
         result: set[str] = set()
-        offset = None
-        while True:
-            records, offset = self.client.scroll(
-                collection_name=self.collection,
-                scroll_filter=Filter(must=[HasVectorCondition(has_vector=self.vector_name)]),
-                limit=10_000,
-                with_payload=["image_path"],
-                with_vectors=False,
-                offset=offset,
-            )
-            for r in records:
-                if r.payload and "image_path" in r.payload:
-                    result.add(r.payload["image_path"])
-            if not records or offset is None:
-                break
+        for r in qdrant_scroll_all(
+            self.client,
+            self.collection,
+            scroll_filter=Filter(must=[HasVectorCondition(has_vector=self.vector_name)]),
+            limit=10_000,
+            with_payload=["image_path"],
+        ):
+            if r.payload and "image_path" in r.payload:
+                result.add(r.payload["image_path"])
         return result
 
     def get_all_video_info(self) -> dict[str, dict]:
@@ -190,37 +210,26 @@ class Indexer:
         Indexer manages.
         """
         seen: dict[str, dict] = {}
-        offset = None
-        while True:
-            records, offset = self.client.scroll(
-                collection_name=self.collection,
-                scroll_filter=Filter(
-                    must=[
-                        FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
-                        HasVectorCondition(has_vector=self.vector_name),
-                    ]
-                ),
-                limit=10_000,
-                with_payload=[
-                    "video_hash",
-                    "extraction_fps",
-                    "max_frames_cap",
-                    "video_frames_total",
-                ],
-                with_vectors=False,
-                offset=offset,
-            )
-            for r in records:
-                p = r.payload or {}
-                vh = p.get("video_hash")
-                if vh and vh not in seen:
-                    seen[vh] = {
-                        "extraction_fps": p.get("extraction_fps"),
-                        "max_frames_cap": p.get("max_frames_cap"),
-                        "complete": "video_frames_total" in p,
-                    }
-            if not records or offset is None:
-                break
+        for r in qdrant_scroll_all(
+            self.client,
+            self.collection,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
+                    HasVectorCondition(has_vector=self.vector_name),
+                ]
+            ),
+            limit=10_000,
+            with_payload=["video_hash", "extraction_fps", "max_frames_cap", "video_frames_total"],
+        ):
+            p = r.payload or {}
+            vh = p.get("video_hash")
+            if vh and vh not in seen:
+                seen[vh] = {
+                    "extraction_fps": p.get("extraction_fps"),
+                    "max_frames_cap": p.get("max_frames_cap"),
+                    "complete": "video_frames_total" in p,
+                }
         return seen
 
     def mark_video_complete(self, video_hash: str, frame_count: int) -> None:

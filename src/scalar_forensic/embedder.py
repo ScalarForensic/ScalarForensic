@@ -142,6 +142,40 @@ def hash_file_both(path: Path, chunk_size: int = 1 << 20) -> tuple[str, str]:
     return h_sha.hexdigest(), h_md5.hexdigest()
 
 
+def effective_preprocessing_cap(normalize_size: int) -> int:
+    """Short-side pixel cap satisfying both SSCD (≥_SSCD_SCALE) and DINOv2 (≥normalize_size)."""
+    return max(_SSCD_SCALE, normalize_size)
+
+
+def write_thumbnail(img: Image.Image, dest: Path, size: int) -> None:
+    """Save a thumbnail JPEG at *dest* (size×size, aspect-ratio preserved), atomically.
+
+    Uses a temp-file + os.replace strategy so concurrent readers never see a
+    partially-written file.
+    """
+    import contextlib
+    import tempfile
+
+    thumb = img.copy()
+    thumb.thumbnail((size, size), Image.Resampling.LANCZOS)
+    if thumb.mode not in ("RGB", "L"):
+        thumb = thumb.convert("RGB")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            delete=False, dir=dest.parent, suffix=dest.suffix or ".jpg"
+        ) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+        thumb.save(tmp_path, format="JPEG", quality=85, optimize=True)
+        os.replace(tmp_path, dest)
+    except Exception:
+        if tmp_path is not None:
+            with contextlib.suppress(FileNotFoundError):
+                tmp_path.unlink()
+        raise
+
+
 class HashCache:
     """Persistent SHA-256 cache keyed by (normalized absolute real-path, mtime_ns, size).
 
