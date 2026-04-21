@@ -1354,19 +1354,51 @@
       <template x-if="selectedConcept">
         <div class="image-panel-inner" style="overflow-y:auto">
           <div class="concept-editor-hdr">
-            <div class="concept-editor-name" x-text="selectedConcept.name"></div>
-            <div class="concept-editor-meta">
-              <span x-text="selectedConcept.polarity === 'incriminating' ? 'Incriminating' : 'Exculpatory (benign)'"></span>
-              &nbsp;·&nbsp;
-              <span x-text="`${selectedConcept.positive_ids.length} positive`"></span>
-              &nbsp;/&nbsp;
-              <span x-text="`${selectedConcept.negative_ids.length} negative`"></span>
-              <template x-if="selectedConcept.target_id">
-                <span>&nbsp;·&nbsp;target set</span>
-              </template>
+            <div style="display:flex;align-items:center;gap:8px">
+              <div class="concept-editor-name" x-text="selectedConcept.name"></div>
+              <button class="btn-tiny" x-show="!conceptEditing"
+                      @click="startEditConcept()" title="Edit notes and polarity">Edit</button>
             </div>
-            <template x-if="selectedConcept.notes">
-              <div class="concept-notes-txt" style="margin-top:4px" x-text="selectedConcept.notes"></div>
+            <!-- view mode -->
+            <template x-if="!conceptEditing">
+              <div>
+                <div class="concept-editor-meta">
+                  <span x-text="selectedConcept.polarity === 'incriminating' ? 'Incriminating' : 'Exculpatory (benign)'"></span>
+                  &nbsp;·&nbsp;
+                  <span x-text="`${selectedConcept.positive_ids.length} positive`"></span>
+                  &nbsp;/&nbsp;
+                  <span x-text="`${selectedConcept.negative_ids.length} negative`"></span>
+                  <template x-if="selectedConcept.target_id">
+                    <span>&nbsp;·&nbsp;target set</span>
+                  </template>
+                </div>
+                <template x-if="selectedConcept.notes">
+                  <div class="concept-notes-txt" style="margin-top:4px" x-text="selectedConcept.notes"></div>
+                </template>
+              </div>
+            </template>
+            <!-- edit mode -->
+            <template x-if="conceptEditing">
+              <div style="margin-top:6px">
+                <div class="concept-form-row">
+                  <label class="concept-form-label">Polarity</label>
+                  <select class="concept-form-select" x-model="editPolarity">
+                    <option value="incriminating">Incriminating</option>
+                    <option value="exculpatory">Exculpatory (benign)</option>
+                  </select>
+                </div>
+                <div class="concept-form-row">
+                  <label class="concept-form-label">Notes</label>
+                  <input class="concept-form-input" x-model="editNotes" placeholder="Free-form description">
+                </div>
+                <div class="concept-form-error" x-show="conceptEditError" x-text="conceptEditError"></div>
+                <div class="concept-form-actions">
+                  <button class="btn-tiny" :disabled="conceptEditLoading"
+                          @click="saveEditConcept()"
+                          x-text="conceptEditLoading ? 'Saving…' : 'Save'"></button>
+                  <button class="btn-tiny" @click="conceptEditing = false">Cancel</button>
+                </div>
+              </div>
             </template>
           </div>
 
@@ -1432,6 +1464,8 @@
               <template x-if="selectedConcept.target_id">
                 <span class="concept-target-id" :title="String(selectedConcept.target_id)"
                       x-text="String(selectedConcept.target_id).slice(0,20) + '…'"></span>
+                <button class="btn-tiny" @click="clearConceptTarget()"
+                        title="Remove target anchor" style="color:var(--danger)">Clear</button>
               </template>
               <template x-if="selectedTriageHit">
                 <button class="btn-tiny" @click="setConceptTarget()"
@@ -1582,6 +1616,10 @@
         Triage Results
         <template x-if="triageResults.length > 0">
           <span class="count-chip" x-text="triageResults.length"></span>
+        </template>
+        <template x-if="triageResults.length > 0">
+          <button class="btn-tiny" @click="exportTriageResults()"
+                  style="margin-left:auto" title="Download results as JSONL">↓ JSONL</button>
         </template>
       </div>
 
@@ -1787,6 +1825,13 @@ function sfn() {
     newConceptNegative: '',
     conceptCreateError: null,
     conceptCreateLoading: false,
+
+    // Concept inline edit
+    conceptEditing: false,
+    editPolarity: 'incriminating',
+    editNotes: '',
+    conceptEditError: null,
+    conceptEditLoading: false,
 
     // Search-mode mark: image_hash currently being looked up
     markingSearchHit: null,
@@ -2678,6 +2723,7 @@ function sfn() {
 
     async selectConcept(conceptId) {
       this.selectedConceptId = conceptId;
+      this.conceptEditing = false;
       this.triageResults = [];
       this.selectedTriageHitId = null;
       this.triageMatchSrc = null;
@@ -2876,6 +2922,95 @@ function sfn() {
           if (idx >= 0) this.concepts[idx] = updated;
         }
       } catch { /* ignore */ }
+    },
+
+    async clearConceptTarget() {
+      if (!this.selectedConceptId) return;
+      const c = this.selectedConcept;
+      const fd = new FormData();
+      fd.append('name', c.name);
+      fd.append('polarity', c.polarity);
+      fd.append('notes', c.notes ?? '');
+      fd.append('positive_ids', c.positive_ids.join(','));
+      fd.append('negative_ids', c.negative_ids.join(','));
+      fd.append('target_id', '');
+      try {
+        const resp = await fetch('/api/concept', { method: 'POST', body: fd });
+        if (resp.ok) {
+          const updated = await resp.json();
+          const idx = this.concepts.findIndex(c => c.concept_id === updated.concept_id);
+          if (idx >= 0) this.concepts[idx] = updated;
+        }
+      } catch { /* ignore */ }
+    },
+
+    startEditConcept() {
+      const c = this.selectedConcept;
+      if (!c) return;
+      this.editPolarity = c.polarity;
+      this.editNotes = c.notes ?? '';
+      this.conceptEditError = null;
+      this.conceptEditing = true;
+    },
+
+    async saveEditConcept() {
+      if (!this.selectedConceptId) return;
+      this.conceptEditLoading = true;
+      this.conceptEditError = null;
+      const c = this.selectedConcept;
+      const fd = new FormData();
+      fd.append('name', c.name);
+      fd.append('polarity', this.editPolarity);
+      fd.append('notes', this.editNotes.trim());
+      fd.append('positive_ids', c.positive_ids.join(','));
+      fd.append('negative_ids', c.negative_ids.join(','));
+      fd.append('target_id', c.target_id != null ? String(c.target_id) : '');
+      try {
+        const resp = await fetch('/api/concept', { method: 'POST', body: fd });
+        if (!resp.ok) {
+          const d = await resp.json().catch(() => ({}));
+          this.conceptEditError = d.detail ?? `HTTP ${resp.status}`;
+          return;
+        }
+        const updated = await resp.json();
+        const idx = this.concepts.findIndex(c => c.concept_id === updated.concept_id);
+        if (idx >= 0) this.concepts[idx] = updated; else this.concepts.unshift(updated);
+        this.conceptEditing = false;
+      } catch (e) {
+        this.conceptEditError = e?.message || 'Save failed';
+      } finally {
+        this.conceptEditLoading = false;
+      }
+    },
+
+    exportTriageResults() {
+      if (!this.triageResults.length) return;
+      const concept = this.selectedConcept;
+      const lines = this.triageResults.map(h => JSON.stringify({
+        concept_id: concept?.concept_id ?? null,
+        concept_name: concept?.name ?? null,
+        point_id: h.point_id,
+        matched_modes: h.matched_modes,
+        triplet_score_dino: h.triplet_score_dino ?? null,
+        triplet_score_sscd: h.triplet_score_sscd ?? null,
+        cosine_margin_dino: h.cosine_margin_dino ?? null,
+        cosine_margin_sscd: h.cosine_margin_sscd ?? null,
+        fused_triplet_score: h.fused_triplet_score,
+        fused_cosine_margin: h.fused_cosine_margin,
+        path: h.path ?? null,
+        image_hash: h.image_hash ?? null,
+        is_video_frame: h.is_video_frame ?? false,
+        video_path: h.video_path ?? null,
+        frame_timecode_ms: h.frame_timecode_ms ?? null,
+      }));
+      const blob = new Blob([lines.join('\n') + '\n'], { type: 'application/x-ndjson' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      a.download = `triage-${(concept?.name ?? 'export').replace(/[^a-z0-9_-]/gi, '_')}-${ts}.jsonl`;
+      a.click();
+      URL.revokeObjectURL(url);
     },
 
     triageHitMark(hit) {
