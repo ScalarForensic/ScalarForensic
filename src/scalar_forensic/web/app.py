@@ -28,7 +28,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from scalar_forensic.config import ENV_ALLOW_ONLINE, Settings
-from scalar_forensic.discovery import DiscoveryHit, _MAX_CONTEXT_PAIRS, run_triage
+from scalar_forensic.discovery import DiscoveryHit, _MAX_CONTEXT_PAIRS, run_discovery, run_explore
 
 # Cosine similarity floor used when a tag has no negatives and Qdrant falls
 # back to Recommendation (triplet_score is None).  DINOv2 cosine ≥ 0.5
@@ -1236,10 +1236,11 @@ async def triage(
         if tag is None:
             raise HTTPException(status_code=404, detail="Tag not found")
         hits = await asyncio.to_thread(
-            run_triage,
+            run_discovery,
             client,
             settings.collection,
             tag,
+            vector_name="dino",
             limit=limit,
             reverse=reverse,
             reference_collection=settings.reference_collection,
@@ -1254,6 +1255,51 @@ async def triage(
         {
             "tag": _tag_to_json(tag),
             "reverse": reverse,
+            "limit": limit,
+            "hits": [_hit_to_json(h) for h in hits],
+        }
+    )
+
+
+@app.post("/api/explore")
+async def explore(
+    tag_id: str = Form(...),
+    limit: int = Form(default=50, ge=1, le=200),
+) -> JSONResponse:
+    """Surface exploration candidates for tag bootstrapping.
+
+    Automatically selects strategy based on tag state:
+    - Both positives and negatives present → ContextQuery (boundary-seeking)
+    - Otherwise → random sample (cold-start / diversity injection)
+
+    Already-labelled points are excluded so successive runs surface fresh
+    candidates.  Returns the same hit envelope as /api/triage so the UI
+    can reuse the existing mark/unmark flow.
+    """
+    settings = Settings()
+    try:
+        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+        store = TagStore(client, settings.tags_collection)
+        tag = await asyncio.to_thread(store.get, tag_id)
+        if tag is None:
+            raise HTTPException(status_code=404, detail="Tag not found")
+        hits, strategy = await asyncio.to_thread(
+            run_explore,
+            client,
+            settings.collection,
+            list(tag.positive_ids),
+            list(tag.negative_ids),
+            vector_name="dino",
+            limit=limit,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+    return JSONResponse(
+        {
+            "tag": _tag_to_json(tag),
+            "strategy": strategy,
             "limit": limit,
             "hits": [_hit_to_json(h) for h in hits],
         }

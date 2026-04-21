@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -49,9 +49,17 @@ from qdrant_client.models import (
     RecommendInput,
     RecommendQuery,
     RecommendStrategy,
+    Sample,
+    SampleQuery,
 )
 
-from scalar_forensic.concepts import Concept
+
+@runtime_checkable
+class ConceptLike(Protocol):
+    """Structural interface shared by Concept and Tag."""
+    positive_ids: list[str | int]
+    negative_ids: list[str | int]
+    target_id: str | int | None
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +188,7 @@ def _merge_filter(user_filter: Filter | None, exclude: Filter | None) -> Filter 
 
 
 def _resolve_polarity(
-    concept: Concept, reverse: bool
+    concept: ConceptLike, reverse: bool
 ) -> tuple[list[str | int], list[str | int]]:
     """Apply reverse-polarity by swapping positive and negative lists.
 
@@ -198,7 +206,7 @@ def _resolve_polarity(
 def run_discovery(
     client: QdrantClient,
     collection: str,
-    concept: Concept,
+    concept: ConceptLike,
     *,
     vector_name: str,
     limit: int = 50,
@@ -225,8 +233,8 @@ def run_discovery(
 
     if not positives and not negatives and target is None:
         raise ValueError(
-            f"Concept {concept.concept_id!r} has no positive, negative, or target "
-            "references; cannot build a Discovery or Recommend query."
+            "Concept has no positive, negative, or target references; "
+            "cannot build a Discovery or Recommend query."
         )
 
     ref_ids: list[str | int] = []
@@ -264,10 +272,9 @@ def run_discovery(
     else:
         if not positives and target is None:
             raise ValueError(
-                f"Concept {concept.concept_id!r} has only negative references; "
-                "cannot build a Recommend query (Qdrant requires ≥1 positive "
-                "or a target).  Add a positive example or a target_id, or use "
-                "reverse=True if this concept is exculpatory."
+                "Concept has only negative references; cannot build a Recommend "
+                "query (Qdrant requires ≥1 positive or a target).  Add a positive "
+                "example or a target_id, or use reverse=True if this concept is exculpatory."
             )
         query = RecommendQuery(
             recommend=RecommendInput(
@@ -312,7 +319,7 @@ def run_discovery(
 def run_discovery_dual(
     client: QdrantClient,
     collection: str,
-    concept: Concept,
+    concept: ConceptLike,
     *,
     limit: int = 50,
     filter_: Filter | None = None,
@@ -408,10 +415,80 @@ def run_discovery_dual(
 ModeName = Literal["dino", "sscd", "dual"]
 
 
+def run_explore(
+    client: QdrantClient,
+    collection: str,
+    positive_ids: list[str | int],
+    negative_ids: list[str | int],
+    *,
+    vector_name: str = "dino",
+    limit: int = 50,
+    filter_: Filter | None = None,
+) -> tuple[list[DiscoveryHit], str]:
+    """Surface candidates for tag bootstrapping and iterative diversity injection.
+
+    Two strategies, chosen automatically:
+
+    * **context** — both *positive_ids* and *negative_ids* non-empty:
+      ``ContextQuery`` ranks points by how many (positive, negative) triplet
+      pairs they satisfy.  Points near the decision boundary score at roughly
+      half the pair count, making them the most informative for labelling.
+    * **random** — one or both lists empty:
+      ``SampleQuery(Sample.Random)`` returns uniformly random points with no
+      vector scoring, giving unbiased cold-start coverage.
+
+    Already-labelled points (both lists combined) are excluded so successive
+    explore runs surface fresh candidates.
+
+    Returns ``(hits, strategy)`` where *strategy* is ``"context"`` or
+    ``"random"``.
+    """
+    exclude_ids: list[str | int] = list(positive_ids) + list(negative_ids)
+    query_filter = _merge_filter(filter_, _exclude_filter(exclude_ids))
+
+    use_context = bool(positive_ids) and bool(negative_ids)
+
+    if use_context:
+        pairs = _build_context_pairs(positive_ids, negative_ids)
+        query: ContextQuery | SampleQuery = ContextQuery(context=pairs)
+        using: str | None = vector_name
+    else:
+        query = SampleQuery(sample=Sample.RANDOM)
+        using = None  # random sampling is vector-agnostic
+
+    try:
+        result = client.query_points(
+            collection_name=collection,
+            query=query,
+            using=using,
+            limit=limit,
+            query_filter=query_filter,
+            with_payload=_TRIAGE_PAYLOAD_FIELDS,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Explore query failed on %s: %s", collection, exc)
+        return [], "random"
+
+    strategy = "context" if use_context else "random"
+    hits: list[DiscoveryHit] = []
+    for r in result.points:
+        triplet = int(round(r.score)) if use_context else None
+        hits.append(
+            DiscoveryHit(
+                point_id=r.id,
+                vector_name=vector_name if use_context else "random",
+                triplet_score=triplet,
+                cosine_margin=float(r.score) if use_context else 0.0,
+                payload=r.payload or {},
+            )
+        )
+    return hits, strategy
+
+
 def run_triage(
     client: QdrantClient,
     collection: str,
-    concept: Concept,
+    concept: ConceptLike,
     *,
     mode: ModeName = "dual",
     limit: int = 50,

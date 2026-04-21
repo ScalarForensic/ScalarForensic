@@ -1837,6 +1837,26 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .polarity-dot.incriminating { background: var(--danger); }
 .polarity-dot.exculpatory   { background: var(--success); }
 
+/* Tag membership strip shown below result images */
+.tag-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding: 4px 0 2px;
+}
+.tag-strip-badge {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-family: var(--display);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: rgba(147,51,234,0.12);
+  color: #c084fc;
+  border: 1px solid rgba(147,51,234,0.25);
+}
+
 /* Concept create form */
 .concept-create-form {
   padding: 8px 10px;
@@ -1906,6 +1926,13 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .triage-mode-btn:hover:not(.active) {
   background: var(--surface2);
   color: var(--text);
+}
+.triage-explore-hint {
+  font-size: 10px;
+  color: var(--text2);
+  margin-bottom: 8px;
+  line-height: 1.4;
+  font-style: italic;
 }
 .triage-reverse-row {
   display: flex;

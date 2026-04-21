@@ -84,6 +84,9 @@ class Settings:
         # vectors so concepts can outlive any single case and be reused.
         self.concepts_collection: str = os.environ.get("SFN_CONCEPTS_COLLECTION", "sfn_concepts")
 
+        # Sidecar collection for Tag objects (the web-UI tagging workflow).
+        self.tags_collection: str = os.environ.get("SFN_TAGS_COLLECTION", "sfn_tags")
+
         # Optional read-only reference collection holding vectors of externally
         # labelled known-bad / known-benign material (e.g. NCMEC / Project VIC /
         # CAID).  When set, concept queries may pass lookup_from=LookupLocation(

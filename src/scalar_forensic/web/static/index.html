@@ -1114,7 +1114,7 @@
       <template x-if="concepts.length > 0">
         <div style="display:flex;align-items:center;gap:6px;padding:4px 8px 2px;border-bottom:1px solid var(--border)">
           <span style="font-size:10px;color:var(--text2);white-space:nowrap;flex-shrink:0">Active tag</span>
-          <select class="tag-form-select" x-model="activeTagId"
+          <select class="concept-form-select" x-model="activeTagId"
                   style="flex:1;font-size:10px;height:22px;min-width:0">
             <option value="">— none —</option>
             <template x-for="c in concepts" :key="c.tag_id">
@@ -1274,28 +1274,28 @@
       </div>
 
       <!-- Create form -->
-      <div x-show="showConceptCreate" class="tag-create-form">
-        <div class="tag-form-row">
-          <label class="tag-form-label">Name *</label>
-          <input class="tag-form-input" x-model="newConceptName" placeholder="e.g. weapons"
+      <div x-show="showConceptCreate">
+        <div class="concept-form-row">
+          <label class="concept-form-label">Name *</label>
+          <input class="concept-form-input" x-model="newConceptName" placeholder="e.g. weapons"
                  @keydown.enter="createConcept()">
         </div>
-        <div class="tag-form-row">
-          <label class="tag-form-label">Notes (optional)</label>
-          <input class="tag-form-input" x-model="newConceptNotes" placeholder="Free-form description">
+        <div class="concept-form-row">
+          <label class="concept-form-label">Notes (optional)</label>
+          <input class="concept-form-input" x-model="newConceptNotes" placeholder="Free-form description">
         </div>
-        <div class="tag-form-row">
-          <label class="tag-form-label">Initial positive IDs (comma-separated)</label>
-          <textarea class="tag-form-textarea" x-model="newConceptPositive"
+        <div class="concept-form-row">
+          <label class="concept-form-label">Initial positive IDs (comma-separated)</label>
+          <textarea class="concept-form-textarea" x-model="newConceptPositive"
                     placeholder="point-uuid-1, point-uuid-2 …" rows="2"></textarea>
         </div>
-        <div class="tag-form-row">
-          <label class="tag-form-label">Initial negative IDs (comma-separated)</label>
-          <textarea class="tag-form-textarea" x-model="newConceptNegative"
+        <div class="concept-form-row">
+          <label class="concept-form-label">Initial negative IDs (comma-separated)</label>
+          <textarea class="concept-form-textarea" x-model="newConceptNegative"
                     placeholder="point-uuid-3, point-uuid-4 …" rows="2"></textarea>
         </div>
-        <div class="tag-form-error" x-show="conceptCreateError" x-text="conceptCreateError"></div>
-        <div class="tag-form-actions">
+        <div class="concept-form-error" x-show="conceptCreateError" x-text="conceptCreateError"></div>
+        <div class="concept-form-actions">
           <button class="btn-primary" style="flex:1"
                   :disabled="!newConceptName.trim() || conceptCreateLoading"
                   @click="createConcept()"
@@ -1313,16 +1313,16 @@
       </div>
 
       <!-- Tag list -->
-      <div class="tag-list">
+      <div class="concept-list">
         <template x-for="c in concepts" :key="c.tag_id">
-          <div class="tag-item" :class="{selected: c.tag_id === selectedConceptId}"
+          <div class="concept-item" :class="{selected: c.tag_id === selectedConceptId}"
                @click="selectConcept(c.tag_id)">
-            <div class="tag-item-body">
-              <div class="tag-item-name" :title="c.name" x-text="c.name"></div>
-              <div class="tag-item-counts"
+            <div class="concept-item-body">
+              <div class="concept-item-name" :title="c.name" x-text="c.name"></div>
+              <div class="concept-item-counts"
                    x-text="`+${c.positive_ids.length} / −${c.negative_ids.length}`"></div>
             </div>
-            <button class="tag-item-del" @click.stop="deleteConcept(c.tag_id)"
+            <button class="concept-item-del" @click.stop="deleteConcept(c.tag_id)"
                     title="Delete tag">✕</button>
           </div>
         </template>
@@ -1337,7 +1337,13 @@
                   @click="triageSource = 'indexed'">Dataset</button>
           <button class="triage-mode-btn" :class="{active: triageSource === 'query'}"
                   @click="triageSource = 'query'">Query images</button>
+          <button class="triage-mode-btn" :class="{active: triageSource === 'explore'}"
+                  @click="triageSource = 'explore'">Explore</button>
         </div>
+
+        <template x-if="triageSource === 'explore'">
+          <div class="triage-explore-hint" x-text="exploreStrategyHint"></div>
+        </template>
 
         <div class="slider-row">
           <div class="slider-label">
@@ -1352,8 +1358,8 @@
         </label>
         <button class="btn-primary" style="width:100%"
                 :disabled="triageRunning"
-                @click="runTriage()"
-                x-text="triageRunning ? 'Running…' : '▶ Run Triage'"></button>
+                @click="triageSource === 'explore' ? runExplore() : runTriage()"
+                x-text="triageRunning ? 'Running…' : (triageSource === 'explore' ? '▶ Explore' : '▶ Run Triage')"></button>
         <div class="triage-error-msg" x-show="triageError" x-text="triageError"></div>
       </div>
     </div><!-- /panel 1 -->
@@ -1368,16 +1374,16 @@
 
       <template x-if="selectedConcept">
         <div class="image-panel-inner" style="overflow-y:auto">
-          <div class="tag-editor-hdr">
+          <div class="concept-editor-hdr">
             <div style="display:flex;align-items:center;gap:8px">
-              <div class="tag-editor-name" x-text="selectedConcept.name"></div>
+              <div class="concept-editor-name" x-text="selectedConcept.name"></div>
               <button class="btn-tiny" x-show="!conceptEditing"
                       @click="startEditConcept()" title="Edit notes">Edit</button>
             </div>
             <!-- view mode -->
             <template x-if="!conceptEditing">
               <div>
-                <div class="tag-editor-meta">
+                <div class="concept-editor-meta">
                   <span x-text="`${selectedConcept.positive_ids.length} positive`"></span>
                   &nbsp;/&nbsp;
                   <span x-text="`${selectedConcept.negative_ids.length} negative`"></span>
@@ -1386,19 +1392,19 @@
                   </template>
                 </div>
                 <template x-if="selectedConcept.notes">
-                  <div class="tag-notes-txt" style="margin-top:4px" x-text="selectedConcept.notes"></div>
+                  <div class="concept-notes-txt" style="margin-top:4px" x-text="selectedConcept.notes"></div>
                 </template>
               </div>
             </template>
             <!-- edit mode -->
             <template x-if="conceptEditing">
               <div style="margin-top:6px">
-                <div class="tag-form-row">
-                  <label class="tag-form-label">Notes</label>
-                  <input class="tag-form-input" x-model="editNotes" placeholder="Free-form description">
+                <div class="concept-form-row">
+                  <label class="concept-form-label">Notes</label>
+                  <input class="concept-form-input" x-model="editNotes" placeholder="Free-form description">
                 </div>
-                <div class="tag-form-error" x-show="conceptEditError" x-text="conceptEditError"></div>
-                <div class="tag-form-actions">
+                <div class="concept-form-error" x-show="conceptEditError" x-text="conceptEditError"></div>
+                <div class="concept-form-actions">
                   <button class="btn-tiny" :disabled="conceptEditLoading"
                           @click="saveEditConcept()"
                           x-text="conceptEditLoading ? 'Saving…' : 'Save'"></button>
@@ -1409,24 +1415,24 @@
           </div>
 
           <!-- Positive examples -->
-          <div class="tag-section">
-            <div class="tag-section-hdr">
+          <div class="concept-section">
+            <div class="concept-section-hdr">
               <span>Positive examples</span>
               <span class="count-chip" x-text="selectedConcept.positive_ids.length"></span>
             </div>
-            <div class="tag-examples-grid">
+            <div class="concept-examples-grid">
               <template x-if="selectedConcept.positive_ids.length === 0">
-                <span class="tag-empty-msg">None yet — mark triage hits below</span>
+                <span class="concept-empty-msg">None yet — mark triage hits below</span>
               </template>
               <template x-for="pid in selectedConcept.positive_ids" :key="pid">
-                <div class="tag-example-cell"
+                <div class="concept-example-cell"
                      @click="openLightbox(conceptExampleSrc(pid))">
-                  <img class="tag-example-img"
+                  <img class="concept-example-img"
                        :src="conceptExampleThumb(pid)"
                        @error="$el.onerror=null;$el.src='/static/vector-fallback.svg'"
                        :title="String(pid)"
                        loading="lazy" alt="">
-                  <button class="tag-example-unmark"
+                  <button class="concept-example-unmark"
                           @click.stop="unmarkConceptPoint(pid)"
                           title="Remove from positive examples">×</button>
                 </div>
@@ -1435,24 +1441,24 @@
           </div>
 
           <!-- Negative examples -->
-          <div class="tag-section">
-            <div class="tag-section-hdr">
+          <div class="concept-section">
+            <div class="concept-section-hdr">
               <span>Negative examples</span>
               <span class="count-chip" x-text="selectedConcept.negative_ids.length"></span>
             </div>
-            <div class="tag-examples-grid">
+            <div class="concept-examples-grid">
               <template x-if="selectedConcept.negative_ids.length === 0">
-                <span class="tag-empty-msg">None yet — mark as benign below</span>
+                <span class="concept-empty-msg">None yet — mark as benign below</span>
               </template>
               <template x-for="pid in selectedConcept.negative_ids" :key="pid">
-                <div class="tag-example-cell"
+                <div class="concept-example-cell"
                      @click="openLightbox(conceptExampleSrc(pid))">
-                  <img class="tag-example-img"
+                  <img class="concept-example-img"
                        :src="conceptExampleThumb(pid)"
                        @error="$el.onerror=null;$el.src='/static/vector-fallback.svg'"
                        :title="String(pid)"
                        loading="lazy" alt="">
-                  <button class="tag-example-unmark"
+                  <button class="concept-example-unmark"
                           @click.stop="unmarkConceptPoint(pid)"
                           title="Remove from negative examples">×</button>
                 </div>
@@ -1461,8 +1467,8 @@
           </div>
 
           <!-- Anchor -->
-          <div class="tag-section">
-            <div class="tag-section-hdr" style="align-items:flex-start;flex-direction:column;gap:2px">
+          <div class="concept-section">
+            <div class="concept-section-hdr" style="align-items:flex-start;flex-direction:column;gap:2px">
               <span>Anchor</span>
               <span style="font-size:9px;color:var(--text2);font-weight:400;line-height:1.4">
                 The image the search starts from. Qdrant finds candidates similar to the anchor,
@@ -1478,9 +1484,9 @@
             </template>
             <template x-if="selectedConcept.target_id">
               <div style="display:flex;align-items:center;gap:8px">
-                <div class="tag-example-cell" style="flex-shrink:0"
+                <div class="concept-example-cell" style="flex-shrink:0"
                      @click="openLightbox(conceptExampleSrc(selectedConcept.target_id))">
-                  <img class="tag-example-img"
+                  <img class="concept-example-img"
                        :src="conceptExampleThumb(selectedConcept.target_id)"
                        @error="$el.onerror=null;$el.src='/static/vector-fallback.svg'"
                        :title="String(selectedConcept.target_id)"
@@ -1498,8 +1504,8 @@
           </div>
 
           <!-- Tag ID (for CLI use) -->
-          <div class="tag-section" style="border-bottom:none">
-            <div class="tag-section-hdr">Tag ID (CLI)</div>
+          <div class="concept-section" style="border-bottom:none">
+            <div class="concept-section-hdr">Tag ID (CLI)</div>
             <div style="font-family:var(--mono);font-size:10px;color:var(--text2);word-break:break-all;line-height:1.5"
                  x-text="selectedConcept.tag_id"></div>
           </div>
@@ -1651,7 +1657,8 @@
       <div x-show="!triageRunning && !selectedConceptId"
            class="triage-running-msg">← Select a tag</div>
       <div x-show="!triageRunning && selectedConceptId && triageResults.length === 0 && !triageError"
-           class="triage-running-msg">Click ▶ Run Triage to find candidates</div>
+           class="triage-running-msg"
+           x-text="triageSource === 'explore' ? 'Click ▶ Explore to find candidates' : 'Click ▶ Run Triage to find candidates'"></div>
 
       <!-- Results list -->
       <div class="hits-list" x-show="triageResults.length > 0 && !triageRunning">
@@ -1818,7 +1825,8 @@ function sfn() {
     triageError: null,
     triageLimit: 50,
     triageReverse: false,
-    triageSource: 'indexed',  // 'indexed' | 'query'
+    triageSource: 'indexed',  // 'indexed' | 'query' | 'explore'
+    exploreStrategy: null,    // 'random' | 'context' — returned by last /api/explore call
 
     // Triage hit selection
     selectedTriageHitId: null,
@@ -1915,6 +1923,13 @@ function sfn() {
     },
     get selectedConcept() {
       return this.concepts.find(c => c.tag_id === this.selectedConceptId) ?? null;
+    },
+    get exploreStrategyHint() {
+      const c = this.selectedConcept;
+      if (!c) return '';
+      if (c.positive_ids.length > 0 && c.negative_ids.length > 0)
+        return 'Boundary mode: surfaces points near the +/− decision boundary';
+      return 'Random mode: returns a uniform sample — mark +/− to enable boundary mode';
     },
     get selectedTriageHit() {
       if (this.selectedTriageHitId) {
@@ -2753,6 +2768,10 @@ function sfn() {
       this.triageMatchSrc = null;
       this.triageMatchMeta = null;
       const c = this.selectedConcept;
+      // Auto-select Explore for empty tags so the investigator can bootstrap
+      if (c && c.positive_ids.length === 0 && c.negative_ids.length === 0) {
+        this.triageSource = 'explore';
+      }
       if (c) this.loadConceptExamples(c);
     },
 
@@ -2839,6 +2858,44 @@ function sfn() {
         if (this.triageResults.length > 0) await this.selectTriageHit(this.triageResults[0]);
       } catch (e) {
         this.triageError = e?.message || 'Triage failed — check Qdrant connection';
+      } finally {
+        this.triageRunning = false;
+      }
+    },
+
+    async runExplore() {
+      if (!this.selectedConceptId) return;
+      this.triageRunning = true;
+      this.triageError = null;
+      this.triageResults = [];
+      this.selectedTriageHitId = null;
+      this.triageMatchSrc = null;
+      this.triageMatchMeta = null;
+      const fd = new FormData();
+      fd.append('tag_id', this.selectedConceptId);
+      fd.append('limit', this.triageLimit);
+      try {
+        const resp = await fetch('/api/explore', { method: 'POST', body: fd });
+        if (!resp.ok) {
+          const d = await resp.json().catch(() => ({}));
+          this.triageError = d.detail ?? `HTTP ${resp.status}`;
+          return;
+        }
+        const d = await resp.json();
+        this.exploreStrategy = d.strategy ?? null;
+        this.triageResults = d.hits ?? [];
+        if (d.tag) {
+          const idx = this.concepts.findIndex(c => c.tag_id === d.tag.tag_id);
+          if (idx >= 0) this.concepts[idx] = d.tag; else this.concepts.unshift(d.tag);
+        }
+        for (const h of this.triageResults) {
+          const sid = String(h.point_id);
+          if (!this.triageHitCache[sid])
+            this.triageHitCache = { ...this.triageHitCache, [sid]: { path: h.path, image_hash: h.image_hash } };
+        }
+        if (this.triageResults.length > 0) await this.selectTriageHit(this.triageResults[0]);
+      } catch (e) {
+        this.triageError = e?.message || 'Explore failed — check Qdrant connection';
       } finally {
         this.triageRunning = false;
       }
