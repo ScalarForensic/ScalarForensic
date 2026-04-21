@@ -9,7 +9,7 @@
   <script defer src="/static/alpine.js"></script>
 </head>
 <body>
-<div id="app" x-data="sfn()" x-init="init()" x-cloak>
+<div id="app" x-data="sfn()" x-init="init()" x-cloak @keydown.window="handleKeydown($event)">
 
   <!-- ── Error banner ── -->
   <div class="error-banner" x-show="serverError" x-text="serverError"></div>
@@ -563,28 +563,12 @@
         <div class="stat"><span class="stat-value" x-text="results.length"></span><span class="stat-label">Files</span></div>
         <div class="stat"><span class="stat-value" x-text="matchedFiles.length"></span><span class="stat-label">Matched</span></div>
         <div class="stat"><span class="stat-value" x-text="results.reduce((s,r)=>s+r.hits.length,0)"></span><span class="stat-label">Total hits</span></div>
-        <!-- Active concept indicator (search mode) -->
-        <template x-if="concepts.length > 0">
-          <div class="stats-concept-bar">
-            <span class="stats-concept-label">Concept</span>
-            <select @change="selectedConceptId = $event.target.value || null">
-              <option value="">— none —</option>
-              <template x-for="c in concepts" :key="c.concept_id">
-                <option :value="c.concept_id"
-                        :selected="c.concept_id === selectedConceptId"
-                        x-text="c.name"></option>
-              </template>
-            </select>
-            <span x-show="selectedConceptId" class="muted-text" style="font-size:10px"
-                  title="Select a concept to activate mark buttons on hit cards">↑ mark hits</span>
-          </div>
-        </template>
       </div>
     </template>
     <!-- Triage stats (only in triage mode) -->
     <template x-if="appMode === 'triage'">
       <div style="display:flex;align-items:center;gap:16px;flex:1">
-        <div class="stat"><span class="stat-value" x-text="concepts.length"></span><span class="stat-label">Concepts</span></div>
+        <div class="stat"><span class="stat-value" x-text="concepts.length"></span><span class="stat-label">Tags</span></div>
         <div class="stat"><span class="stat-value" x-text="triageResults.length"></span><span class="stat-label">Triage hits</span></div>
         <template x-if="selectedConcept">
           <div class="stat">
@@ -810,6 +794,14 @@
                       :disabled="queryFrameIdx >= queryFrames.length - 1">▶</button>
             </div>
           </template>
+          <!-- Tag membership strip for query image -->
+          <template x-if="queryMeta?.hash_sha256 && hitTags[queryMeta.hash_sha256]?.length > 0">
+            <div class="tag-strip">
+              <template x-for="tname in hitTags[queryMeta.hash_sha256]" :key="tname">
+                <span class="tag-strip-badge" x-text="tname"></span>
+              </template>
+            </div>
+          </template>
           <div class="image-subs">
             <div class="sub-row">
               <span class="sub-label">File</span>
@@ -928,6 +920,14 @@
               <button class="zoom-btn" @click.stop="matchZoom = 1" title="Reset" style="font-size:10px">⊡</button>
             </div>
           </div>
+          <!-- Tag membership strip for result image -->
+          <template x-if="selectedHit?.image_hash && hitTags[selectedHit.image_hash]?.length > 0">
+            <div class="tag-strip">
+              <template x-for="tname in hitTags[selectedHit.image_hash]" :key="tname">
+                <span class="tag-strip-badge" x-text="tname"></span>
+              </template>
+            </div>
+          </template>
           <div class="image-subs">
             <div class="sub-row"
                  :class="{'sub-match': selectedHit && queryMeta && shortName(selectedFile?.filename??'') === selectedHit.path.split('/').pop()}">
@@ -1110,6 +1110,20 @@
                 title="Merge hits with the same path across all modes into one row">UNIFIED</button>
       </div>
 
+      <!-- Active tag: global selector for keyboard +/- marking -->
+      <template x-if="concepts.length > 0">
+        <div style="display:flex;align-items:center;gap:6px;padding:4px 8px 2px;border-bottom:1px solid var(--border)">
+          <span style="font-size:10px;color:var(--text2);white-space:nowrap;flex-shrink:0">Active tag</span>
+          <select class="tag-form-select" x-model="activeTagId"
+                  style="flex:1;font-size:10px;height:22px;min-width:0">
+            <option value="">— none —</option>
+            <template x-for="c in concepts" :key="c.tag_id">
+              <option :value="c.tag_id" x-text="c.name"></option>
+            </template>
+          </select>
+        </div>
+      </template>
+
       <div x-show="!selectedFileId" class="no-hits-msg">No file selected</div>
 
       <template x-if="selectedFile?.errors?.length > 0">
@@ -1129,7 +1143,9 @@
           <div class="hit-card"
                :class="{
                  selected: hitKey(hit) === selectedHitKey,
-                 'hit-dim': activeQueryTimecode !== null && hit.query_timecodes != null && !hit.query_timecodes.includes(activeQueryTimecode)
+                 'hit-dim': activeQueryTimecode !== null && hit.query_timecodes != null && !hit.query_timecodes.includes(activeQueryTimecode),
+                 'mark-pos': searchHitMark(hit) === 'positive',
+                 'mark-neg': searchHitMark(hit) === 'negative',
                }"
                @click="selectHit(hit)">
             <img class="hit-thumb"
@@ -1176,19 +1192,28 @@
                         x-text="`▸ t\u202f=\u202f${((hit.best_query_timecode_ms ?? hit.query_timecodes[0])/1000).toFixed(2)}s`"></span>
                 </template>
               </div>
-              <!-- Concept mark buttons (visible when a concept is active in search mode) -->
-              <template x-if="selectedConceptId && hit.image_hash">
+              <!-- Tag membership badges -->
+              <template x-if="hit.image_hash && hitTags[hit.image_hash] && hitTags[hit.image_hash].length > 0">
+                <div style="display:flex;flex-wrap:wrap;gap:2px;margin-top:2px" @click.stop>
+                  <template x-for="tname in hitTags[hit.image_hash]" :key="tname">
+                    <span class="badge" style="font-size:8px;background:rgba(251,191,36,0.2);color:#f59e0b;border:1px solid rgba(251,191,36,0.4)"
+                          x-text="tname"></span>
+                  </template>
+                </div>
+              </template>
+              <!-- Tag mark buttons: mark for active tag directly -->
+              <template x-if="activeTagId && hit.image_hash">
                 <div class="hit-mark-row" @click.stop>
                   <button class="hit-mark-btn pos-btn"
                           :class="{'is-active': searchHitMark(hit) === 'positive'}"
                           :disabled="markingSearchHit === hit.image_hash"
-                          @click="markSearchHit(hit, 'positive')"
-                          title="Add to concept as positive example">+ Incrim</button>
+                          @click="markSearchHit(hit, 'positive', activeTagId)"
+                          title="Mark as positive for active tag (+)">+</button>
                   <button class="hit-mark-btn neg-btn"
                           :class="{'is-active': searchHitMark(hit) === 'negative'}"
                           :disabled="markingSearchHit === hit.image_hash"
-                          @click="markSearchHit(hit, 'negative')"
-                          title="Add to concept as negative example">− Benign</button>
+                          @click="markSearchHit(hit, 'negative', activeTagId)"
+                          title="Mark as negative for active tag (-)">−</button>
                   <span class="hit-mark-spinner" x-show="markingSearchHit === hit.image_hash">…</span>
                 </div>
               </template>
@@ -1240,90 +1265,80 @@
   <!-- ── Concept Triage layout ── -->
   <div class="triage-layout" x-show="phase === 'results' && appMode === 'triage'">
 
-    <!-- Panel 1: Concept browser + run controls -->
+    <!-- Panel 1: Tag browser + run controls -->
     <div class="left-panel">
       <div class="panel-header">
-        Concept Triage
+        Tag Triage
         <button class="btn-tiny" @click="showConceptCreate = !showConceptCreate"
                 x-text="showConceptCreate ? '✕ Cancel' : '+ New'"></button>
       </div>
 
       <!-- Create form -->
-      <div x-show="showConceptCreate" class="concept-create-form">
-        <div class="concept-form-row">
-          <label class="concept-form-label">Name *</label>
-          <input class="concept-form-input" x-model="newConceptName" placeholder="e.g. case-42-abuse"
+      <div x-show="showConceptCreate" class="tag-create-form">
+        <div class="tag-form-row">
+          <label class="tag-form-label">Name *</label>
+          <input class="tag-form-input" x-model="newConceptName" placeholder="e.g. weapons"
                  @keydown.enter="createConcept()">
         </div>
-        <div class="concept-form-row">
-          <label class="concept-form-label">Polarity</label>
-          <select class="concept-form-select" x-model="newConceptPolarity">
-            <option value="incriminating">Incriminating</option>
-            <option value="exculpatory">Exculpatory (benign)</option>
-          </select>
+        <div class="tag-form-row">
+          <label class="tag-form-label">Notes (optional)</label>
+          <input class="tag-form-input" x-model="newConceptNotes" placeholder="Free-form description">
         </div>
-        <div class="concept-form-row">
-          <label class="concept-form-label">Notes (optional)</label>
-          <input class="concept-form-input" x-model="newConceptNotes" placeholder="Free-form description">
-        </div>
-        <div class="concept-form-row">
-          <label class="concept-form-label">Initial positive IDs (comma-separated)</label>
-          <textarea class="concept-form-textarea" x-model="newConceptPositive"
+        <div class="tag-form-row">
+          <label class="tag-form-label">Initial positive IDs (comma-separated)</label>
+          <textarea class="tag-form-textarea" x-model="newConceptPositive"
                     placeholder="point-uuid-1, point-uuid-2 …" rows="2"></textarea>
         </div>
-        <div class="concept-form-row">
-          <label class="concept-form-label">Initial negative IDs (comma-separated)</label>
-          <textarea class="concept-form-textarea" x-model="newConceptNegative"
+        <div class="tag-form-row">
+          <label class="tag-form-label">Initial negative IDs (comma-separated)</label>
+          <textarea class="tag-form-textarea" x-model="newConceptNegative"
                     placeholder="point-uuid-3, point-uuid-4 …" rows="2"></textarea>
         </div>
-        <div class="concept-form-error" x-show="conceptCreateError" x-text="conceptCreateError"></div>
-        <div class="concept-form-actions">
+        <div class="tag-form-error" x-show="conceptCreateError" x-text="conceptCreateError"></div>
+        <div class="tag-form-actions">
           <button class="btn-primary" style="flex:1"
                   :disabled="!newConceptName.trim() || conceptCreateLoading"
                   @click="createConcept()"
-                  x-text="conceptCreateLoading ? 'Creating…' : 'Create Concept'"></button>
+                  x-text="conceptCreateLoading ? 'Creating…' : 'Create Tag'"></button>
         </div>
       </div>
 
-      <!-- Concepts loading / empty states -->
-      <div x-show="conceptsLoading" class="triage-running-msg">Loading concepts…</div>
+      <!-- Tags loading / empty states -->
+      <div x-show="conceptsLoading" class="triage-running-msg">Loading tags…</div>
       <div x-show="!conceptsLoading && !showConceptCreate && concepts.length === 0"
            class="triage-running-msg" style="padding:20px 12px;line-height:1.6">
-        No concepts yet.<br>
+        No tags yet.<br>
         Click <strong>+ New</strong> to create one,<br>
         or mark search hits in Search mode.
       </div>
 
-      <!-- Concept list -->
-      <div class="concept-list">
-        <template x-for="c in concepts" :key="c.concept_id">
-          <div class="concept-item" :class="{selected: c.concept_id === selectedConceptId}"
-               @click="selectConcept(c.concept_id)">
-            <div class="polarity-dot" :class="c.polarity"></div>
-            <div class="concept-item-body">
-              <div class="concept-item-name" :title="c.name" x-text="c.name"></div>
-              <div class="concept-item-counts"
-                   x-text="`+${c.positive_ids.length} / −${c.negative_ids.length}${c.target_id ? ' · target' : ''}`"></div>
+      <!-- Tag list -->
+      <div class="tag-list">
+        <template x-for="c in concepts" :key="c.tag_id">
+          <div class="tag-item" :class="{selected: c.tag_id === selectedConceptId}"
+               @click="selectConcept(c.tag_id)">
+            <div class="tag-item-body">
+              <div class="tag-item-name" :title="c.name" x-text="c.name"></div>
+              <div class="tag-item-counts"
+                   x-text="`+${c.positive_ids.length} / −${c.negative_ids.length}`"></div>
             </div>
-            <button class="concept-item-del" @click.stop="deleteConcept(c.concept_id)"
-                    title="Delete concept">✕</button>
+            <button class="tag-item-del" @click.stop="deleteConcept(c.tag_id)"
+                    title="Delete tag">✕</button>
           </div>
         </template>
       </div>
 
-      <!-- Run controls (when a concept is selected) -->
+      <!-- Run controls (when a tag is selected) -->
       <div class="triage-run-controls" x-show="selectedConceptId">
-        <div class="slider-label" style="margin-bottom:4px">
-          <span>Mode</span>
+        <!-- Source toggle -->
+        <div class="slider-label" style="margin-bottom:4px"><span>Source</span></div>
+        <div class="triage-mode-btns" style="margin-bottom:6px">
+          <button class="triage-mode-btn" :class="{active: triageSource === 'indexed'}"
+                  @click="triageSource = 'indexed'">Dataset</button>
+          <button class="triage-mode-btn" :class="{active: triageSource === 'query'}"
+                  @click="triageSource = 'query'">Query images</button>
         </div>
-        <div class="triage-mode-btns">
-          <button class="triage-mode-btn" :class="{active: triageMode === 'dual'}"
-                  @click="triageMode = 'dual'">DUAL</button>
-          <button class="triage-mode-btn" :class="{active: triageMode === 'dino'}"
-                  @click="triageMode = 'dino'">DINO</button>
-          <button class="triage-mode-btn" :class="{active: triageMode === 'sscd'}"
-                  @click="triageMode = 'sscd'">SSCD</button>
-        </div>
+
         <div class="slider-row">
           <div class="slider-label">
             <span title="Maximum hits returned">Limit</span>
@@ -1331,7 +1346,7 @@
           </div>
           <input type="range" min="10" max="200" step="10" x-model.number="triageLimit">
         </div>
-        <label class="triage-reverse-row">
+        <label class="triage-reverse-row" x-show="triageSource === 'indexed'">
           <input type="checkbox" x-model="triageReverse">
           <span>Reverse (surface benign)</span>
         </label>
@@ -1343,28 +1358,26 @@
       </div>
     </div><!-- /panel 1 -->
 
-    <!-- Panel 2: Concept editor (example thumbnails) -->
+    <!-- Panel 2: Tag editor (example thumbnails) -->
     <div class="image-panel">
-      <div class="panel-header">Concept Editor</div>
+      <div class="panel-header">Tag Editor</div>
 
       <template x-if="!selectedConcept">
-        <div class="placeholder">← Select a concept</div>
+        <div class="placeholder">← Select a tag</div>
       </template>
 
       <template x-if="selectedConcept">
         <div class="image-panel-inner" style="overflow-y:auto">
-          <div class="concept-editor-hdr">
+          <div class="tag-editor-hdr">
             <div style="display:flex;align-items:center;gap:8px">
-              <div class="concept-editor-name" x-text="selectedConcept.name"></div>
+              <div class="tag-editor-name" x-text="selectedConcept.name"></div>
               <button class="btn-tiny" x-show="!conceptEditing"
-                      @click="startEditConcept()" title="Edit notes and polarity">Edit</button>
+                      @click="startEditConcept()" title="Edit notes">Edit</button>
             </div>
             <!-- view mode -->
             <template x-if="!conceptEditing">
               <div>
-                <div class="concept-editor-meta">
-                  <span x-text="selectedConcept.polarity === 'incriminating' ? 'Incriminating' : 'Exculpatory (benign)'"></span>
-                  &nbsp;·&nbsp;
+                <div class="tag-editor-meta">
                   <span x-text="`${selectedConcept.positive_ids.length} positive`"></span>
                   &nbsp;/&nbsp;
                   <span x-text="`${selectedConcept.negative_ids.length} negative`"></span>
@@ -1373,26 +1386,19 @@
                   </template>
                 </div>
                 <template x-if="selectedConcept.notes">
-                  <div class="concept-notes-txt" style="margin-top:4px" x-text="selectedConcept.notes"></div>
+                  <div class="tag-notes-txt" style="margin-top:4px" x-text="selectedConcept.notes"></div>
                 </template>
               </div>
             </template>
             <!-- edit mode -->
             <template x-if="conceptEditing">
               <div style="margin-top:6px">
-                <div class="concept-form-row">
-                  <label class="concept-form-label">Polarity</label>
-                  <select class="concept-form-select" x-model="editPolarity">
-                    <option value="incriminating">Incriminating</option>
-                    <option value="exculpatory">Exculpatory (benign)</option>
-                  </select>
+                <div class="tag-form-row">
+                  <label class="tag-form-label">Notes</label>
+                  <input class="tag-form-input" x-model="editNotes" placeholder="Free-form description">
                 </div>
-                <div class="concept-form-row">
-                  <label class="concept-form-label">Notes</label>
-                  <input class="concept-form-input" x-model="editNotes" placeholder="Free-form description">
-                </div>
-                <div class="concept-form-error" x-show="conceptEditError" x-text="conceptEditError"></div>
-                <div class="concept-form-actions">
+                <div class="tag-form-error" x-show="conceptEditError" x-text="conceptEditError"></div>
+                <div class="tag-form-actions">
                   <button class="btn-tiny" :disabled="conceptEditLoading"
                           @click="saveEditConcept()"
                           x-text="conceptEditLoading ? 'Saving…' : 'Save'"></button>
@@ -1403,24 +1409,24 @@
           </div>
 
           <!-- Positive examples -->
-          <div class="concept-section">
-            <div class="concept-section-hdr">
+          <div class="tag-section">
+            <div class="tag-section-hdr">
               <span>Positive examples</span>
               <span class="count-chip" x-text="selectedConcept.positive_ids.length"></span>
             </div>
-            <div class="concept-examples-grid">
+            <div class="tag-examples-grid">
               <template x-if="selectedConcept.positive_ids.length === 0">
-                <span class="concept-empty-msg">None yet — mark triage hits below</span>
+                <span class="tag-empty-msg">None yet — mark triage hits below</span>
               </template>
               <template x-for="pid in selectedConcept.positive_ids" :key="pid">
-                <div class="concept-example-cell"
+                <div class="tag-example-cell"
                      @click="openLightbox(conceptExampleSrc(pid))">
-                  <img class="concept-example-img"
+                  <img class="tag-example-img"
                        :src="conceptExampleThumb(pid)"
                        @error="$el.onerror=null;$el.src='/static/vector-fallback.svg'"
                        :title="String(pid)"
                        loading="lazy" alt="">
-                  <button class="concept-example-unmark"
+                  <button class="tag-example-unmark"
                           @click.stop="unmarkConceptPoint(pid)"
                           title="Remove from positive examples">×</button>
                 </div>
@@ -1429,24 +1435,24 @@
           </div>
 
           <!-- Negative examples -->
-          <div class="concept-section">
-            <div class="concept-section-hdr">
+          <div class="tag-section">
+            <div class="tag-section-hdr">
               <span>Negative examples</span>
               <span class="count-chip" x-text="selectedConcept.negative_ids.length"></span>
             </div>
-            <div class="concept-examples-grid">
+            <div class="tag-examples-grid">
               <template x-if="selectedConcept.negative_ids.length === 0">
-                <span class="concept-empty-msg">None yet — mark as benign below</span>
+                <span class="tag-empty-msg">None yet — mark as benign below</span>
               </template>
               <template x-for="pid in selectedConcept.negative_ids" :key="pid">
-                <div class="concept-example-cell"
+                <div class="tag-example-cell"
                      @click="openLightbox(conceptExampleSrc(pid))">
-                  <img class="concept-example-img"
+                  <img class="tag-example-img"
                        :src="conceptExampleThumb(pid)"
                        @error="$el.onerror=null;$el.src='/static/vector-fallback.svg'"
                        :title="String(pid)"
                        loading="lazy" alt="">
-                  <button class="concept-example-unmark"
+                  <button class="tag-example-unmark"
                           @click.stop="unmarkConceptPoint(pid)"
                           title="Remove from negative examples">×</button>
                 </div>
@@ -1454,33 +1460,48 @@
             </div>
           </div>
 
-          <!-- Target -->
-          <div class="concept-section">
-            <div class="concept-section-hdr">Target anchor</div>
-            <div class="concept-target-row">
-              <template x-if="!selectedConcept.target_id">
-                <span class="muted-text">None</span>
-              </template>
-              <template x-if="selectedConcept.target_id">
-                <span class="concept-target-id" :title="String(selectedConcept.target_id)"
-                      x-text="String(selectedConcept.target_id).slice(0,20) + '…'"></span>
-                <button class="btn-tiny" @click="clearConceptTarget()"
-                        title="Remove target anchor" style="color:var(--danger)">Clear</button>
-              </template>
-              <template x-if="selectedTriageHit">
-                <button class="btn-tiny" @click="setConceptTarget()"
-                        title="Set the selected triage hit as the anchor for this concept">
-                  Set from hit
-                </button>
-              </template>
+          <!-- Anchor -->
+          <div class="tag-section">
+            <div class="tag-section-hdr" style="align-items:flex-start;flex-direction:column;gap:2px">
+              <span>Anchor</span>
+              <span style="font-size:9px;color:var(--text2);font-weight:400;line-height:1.4">
+                The image the search starts from. Qdrant finds candidates similar to the anchor,
+                then ranks them by how well they satisfy the positive/negative constraints.
+                Without an explicit anchor, the first positive is used automatically.
+              </span>
             </div>
+            <template x-if="!selectedConcept.target_id">
+              <div style="font-size:10px;color:var(--text2);padding:4px 0">
+                Auto — using first positive as anchor.
+                Use "⚓ Set as anchor" on any triage hit to pin a specific image.
+              </div>
+            </template>
+            <template x-if="selectedConcept.target_id">
+              <div style="display:flex;align-items:center;gap:8px">
+                <div class="tag-example-cell" style="flex-shrink:0"
+                     @click="openLightbox(conceptExampleSrc(selectedConcept.target_id))">
+                  <img class="tag-example-img"
+                       :src="conceptExampleThumb(selectedConcept.target_id)"
+                       @error="$el.onerror=null;$el.src='/static/vector-fallback.svg'"
+                       :title="String(selectedConcept.target_id)"
+                       loading="lazy" alt="">
+                </div>
+                <div style="display:flex;flex-direction:column;gap:4px;min-width:0">
+                  <span style="font-size:9px;color:var(--text2);word-break:break-all"
+                        x-text="String(selectedConcept.target_id)"></span>
+                  <button class="btn-tiny" :disabled="settingAnchor" @click="clearAnchor()">
+                    Clear anchor
+                  </button>
+                </div>
+              </div>
+            </template>
           </div>
 
-          <!-- Concept ID (for CLI use) -->
-          <div class="concept-section" style="border-bottom:none">
-            <div class="concept-section-hdr">Concept ID (CLI)</div>
+          <!-- Tag ID (for CLI use) -->
+          <div class="tag-section" style="border-bottom:none">
+            <div class="tag-section-hdr">Tag ID (CLI)</div>
             <div style="font-family:var(--mono);font-size:10px;color:var(--text2);word-break:break-all;line-height:1.5"
-                 x-text="selectedConcept.concept_id"></div>
+                 x-text="selectedConcept.tag_id"></div>
           </div>
         </div>
       </template>
@@ -1492,15 +1513,7 @@
         Triage Hit
         <template x-if="selectedTriageHit">
           <div class="header-pills">
-            <template x-if="selectedTriageHit.matched_modes.length >= 2">
-              <span class="badge badge-dual" style="font-size:9px">DUAL</span>
-            </template>
-            <template x-if="selectedTriageHit.matched_modes.length === 1">
-              <span class="badge"
-                    :class="selectedTriageHit.matched_modes[0] === 'dino' ? 'badge-dino' : 'badge-sscd'"
-                    style="font-size:9px"
-                    x-text="selectedTriageHit.matched_modes[0].toUpperCase()"></span>
-            </template>
+            <span class="badge badge-dino" style="font-size:9px">DINO</span>
           </div>
         </template>
       </div>
@@ -1527,56 +1540,66 @@
 
           <!-- Triplet scores -->
           <div class="triage-detail-scores">
-            <div class="triage-detail-score-row">
-              <span class="triage-detail-triplet"
-                    :class="{zero: !selectedTriageHit.fused_triplet_score}"
-                    x-text="selectedTriageHit.fused_triplet_score"></span>
-              <span style="font-size:11px;color:var(--text2)">pairs satisfied</span>
-              <template x-if="selectedTriageHit.matched_modes.length >= 2">
-                <span class="badge badge-dual" style="font-size:9px">DUAL</span>
-              </template>
-            </div>
-            <template x-if="selectedTriageHit.triplet_score_dino !== null">
-              <div class="triage-detail-margin">
-                <span class="badge badge-dino" style="font-size:9px">DINO</span>
-                triplet <span x-text="selectedTriageHit.triplet_score_dino"></span>
-                &nbsp;·&nbsp;margin <span x-text="(selectedTriageHit.cosine_margin_dino ?? 0).toFixed(3)"></span>
+            <template x-if="selectedTriageHit.triplet_score !== null">
+              <div>
+                <div class="triage-detail-score-row">
+                  <span class="triage-detail-triplet"
+                        :class="{zero: !selectedTriageHit.triplet_score}"
+                        x-text="selectedTriageHit.triplet_score"></span>
+                  <span style="font-size:11px;color:var(--text2)"
+                        title="Qdrant Discovery score: counts how many positive/negative constraint pairs this image satisfies, boosted by proximity to the anchor. Higher is stronger.">discovery score</span>
+                </div>
               </div>
             </template>
-            <template x-if="selectedTriageHit.triplet_score_sscd !== null">
-              <div class="triage-detail-margin" style="margin-top:2px">
-                <span class="badge badge-sscd" style="font-size:9px">SSCD</span>
-                triplet <span x-text="selectedTriageHit.triplet_score_sscd"></span>
-                &nbsp;·&nbsp;margin <span x-text="(selectedTriageHit.cosine_margin_sscd ?? 0).toFixed(3)"></span>
-              </div>
-            </template>
-            <template x-if="selectedTriageHit.fused_triplet_score === 0 && selectedTriageHit.fused_cosine_margin > 0">
-              <div class="triage-detail-margin" style="margin-top:2px">
-                Cosine margin: <span x-text="selectedTriageHit.fused_cosine_margin.toFixed(3)"></span>
+            <template x-if="selectedTriageHit.triplet_score === null">
+              <div>
+                <div class="triage-detail-score-row">
+                  <span class="triage-detail-triplet"
+                        x-text="(selectedTriageHit.cosine_margin ?? 0).toFixed(3)"></span>
+                  <span style="font-size:11px;color:var(--text2)">cosine similarity</span>
+                </div>
+                <div class="triage-detail-margin" style="font-style:italic">
+                  recommendation mode — add negatives to enable triplet scoring
+                </div>
               </div>
             </template>
           </div>
+
+          <!-- Set as anchor -->
+          <template x-if="selectedTriageHit.point_id && selectedConceptId">
+            <div style="display:flex;align-items:center;gap:6px;padding:4px 0 2px">
+              <button class="btn-tiny"
+                      :class="{'is-active': String(selectedConcept?.target_id) === String(selectedTriageHit.point_id)}"
+                      :disabled="settingAnchor"
+                      @click="setAnchor(selectedTriageHit)"
+                      title="The anchor is the image the search starts from — Qdrant finds candidates similar to it, then ranks them by how well they satisfy the tag's positive/negative constraints. Without an explicit anchor, the first positive example is used automatically.">
+                <span x-text="String(selectedConcept?.target_id) === String(selectedTriageHit.point_id) ? '⚓ Clear anchor' : '⚓ Set as anchor'"></span>
+              </button>
+              <span x-show="String(selectedConcept?.target_id) === String(selectedTriageHit.point_id)"
+                    style="font-size:9px;color:var(--accent)">active</span>
+            </div>
+          </template>
 
           <!-- File info -->
           <div class="image-subs">
             <div class="sub-row">
               <span class="sub-label">File</span>
               <span class="sub-val"
-                    x-text="(selectedTriageHit.path || '').split('/').pop() || '—'"></span>
+                    x-text="(selectedTriageHit.path || selectedTriageHit.filename || '').split('/').pop() || '—'"></span>
             </div>
             <div class="sub-row">
               <span class="sub-label">Path</span>
               <span class="sub-val mono"
-                    x-text="(selectedTriageHit.path || '').split('/').slice(0,-1).join('/') || '—'"></span>
+                    x-text="selectedTriageHit.path ? selectedTriageHit.path.split('/').slice(0,-1).join('/') : '—'"></span>
             </div>
             <div class="sub-row">
               <span class="sub-label">SHA-256</span>
               <span class="sub-val hash" x-text="selectedTriageHit.image_hash || '—'"></span>
             </div>
             <div class="sub-row">
-              <span class="sub-label">Point ID</span>
+              <span class="sub-label" x-text="selectedTriageHit.point_id != null ? 'Point ID' : 'File ID'"></span>
               <span class="sub-val mono" style="font-size:9px"
-                    x-text="String(selectedTriageHit.point_id)"></span>
+                    x-text="selectedTriageHit.point_id != null ? String(selectedTriageHit.point_id) : (selectedTriageHit.file_id || '—')"></span>
             </div>
             <div class="sub-row">
               <span class="sub-label">Meta</span>
@@ -1626,16 +1649,16 @@
       <!-- Empty / loading states -->
       <div x-show="triageRunning" class="triage-running-msg">Running triage…</div>
       <div x-show="!triageRunning && !selectedConceptId"
-           class="triage-running-msg">← Select a concept</div>
+           class="triage-running-msg">← Select a tag</div>
       <div x-show="!triageRunning && selectedConceptId && triageResults.length === 0 && !triageError"
            class="triage-running-msg">Click ▶ Run Triage to find candidates</div>
 
       <!-- Results list -->
       <div class="hits-list" x-show="triageResults.length > 0 && !triageRunning">
-        <template x-for="hit in triageResults" :key="hit.point_id">
+        <template x-for="hit in triageResults" :key="hit.point_id ?? hit.file_id">
           <div class="triage-hit-card"
                :class="{
-                 selected: String(hit.point_id) === selectedTriageHitId,
+                 selected: String(hit.point_id ?? hit.file_id) === selectedTriageHitId,
                  'mark-pos': triageHitMark(hit) === 'positive',
                  'mark-neg': triageHitMark(hit) === 'negative',
                }"
@@ -1647,36 +1670,29 @@
             <div class="triage-hit-body">
               <div class="triage-hit-scores">
                 <span class="triage-score-num"
-                      :class="{zero: !hit.fused_triplet_score}"
-                      x-text="hit.fused_triplet_score"></span>
-                <template x-if="hit.matched_modes.length >= 2">
-                  <span class="badge badge-dual" style="font-size:8px">DUAL</span>
-                </template>
-                <template x-if="hit.matched_modes.length === 1">
-                  <span class="badge"
-                        :class="hit.matched_modes[0] === 'dino' ? 'badge-dino' : 'badge-sscd'"
-                        style="font-size:8px"
-                        x-text="hit.matched_modes[0].toUpperCase()"></span>
-                </template>
+                      :class="{zero: hit.triplet_score !== null ? !hit.triplet_score : false}"
+                      x-text="hit.triplet_score !== null ? hit.triplet_score : (hit.cosine_margin ?? 0).toFixed(2)"></span>
                 <span style="font-size:9px;color:var(--muted);font-family:var(--mono)"
-                      x-text="hit.fused_cosine_margin.toFixed(3)"></span>
+                      x-text="hit.triplet_score !== null ? 'disc' : 'cos'"></span>
               </div>
               <div class="triage-hit-path"
                    x-text="hit.is_video_frame && hit.video_path
                      ? hit.video_path.split('/').pop()
-                     : (hit.path || '').split('/').pop() || String(hit.point_id)"></div>
+                     : (hit.path || hit.filename || '').split('/').pop() || String(hit.point_id ?? hit.file_id)"></div>
               <div class="triage-hit-dir"
                    x-text="(hit.path || '').split('/').slice(0,-1).join('/') || '—'"></div>
-              <!-- Mark buttons -->
+              <!-- Mark buttons — disabled for uncommitted query-image hits -->
               <div class="triage-mark-row" @click.stop>
                 <button class="triage-mark-btn pos-btn"
                         :class="{'is-active': triageHitMark(hit) === 'positive'}"
-                        @click="markTriageHit(hit, 'positive')"
-                        title="Mark as positive example">+</button>
+                        :disabled="!hit.point_id"
+                        @click="hit.point_id && markTriageHit(hit, 'positive')"
+                        :title="hit.point_id ? 'Mark as positive example' : 'Index this image first to mark it'">+</button>
                 <button class="triage-mark-btn neg-btn"
                         :class="{'is-active': triageHitMark(hit) === 'negative'}"
-                        @click="markTriageHit(hit, 'negative')"
-                        title="Mark as negative (benign) example">−</button>
+                        :disabled="!hit.point_id"
+                        @click="hit.point_id && markTriageHit(hit, 'negative')"
+                        :title="hit.point_id ? 'Mark as negative (benign) example' : 'Index this image first to mark it'">−</button>
                 <template x-if="triageHitMark(hit)">
                   <button class="triage-mark-btn"
                           style="color:var(--muted);border-color:transparent;font-size:8px"
@@ -1788,10 +1804,10 @@ function sfn() {
     hitsFilterSemantic: true,
     hitsUnified: true,
 
-    // ── Concept Triage ────────────────────────────────────────────────────
+    // ── Tag Triage ────────────────────────────────────────────────────────
     appMode: 'search',   // 'search' | 'triage'
 
-    // Concept store (shared between modes)
+    // Tag store (shared between modes)
     concepts: [],
     conceptsLoading: false,
     selectedConceptId: null,
@@ -1800,9 +1816,9 @@ function sfn() {
     triageRunning: false,
     triageResults: [],
     triageError: null,
-    triageMode: 'dual',
     triageLimit: 50,
     triageReverse: false,
+    triageSource: 'indexed',  // 'indexed' | 'query'
 
     // Triage hit selection
     selectedTriageHitId: null,
@@ -1813,28 +1829,34 @@ function sfn() {
 
     // Cache: {pointId: {path, image_hash}} — populated from triage runs
     triageHitCache: {},
-    // Optimistic mark overrides: {conceptId: {pointId: 'positive'|'negative'}}
+    // Optimistic mark overrides: {tagId: {pointId: 'positive'|'negative'}}
     markedOverrides: {},
 
-    // Concept create form
+    // Tag create form
     showConceptCreate: false,
     newConceptName: '',
-    newConceptPolarity: 'incriminating',
     newConceptNotes: '',
     newConceptPositive: '',
     newConceptNegative: '',
     conceptCreateError: null,
     conceptCreateLoading: false,
 
-    // Concept inline edit
+    // Tag inline edit
     conceptEditing: false,
-    editPolarity: 'incriminating',
     editNotes: '',
     conceptEditError: null,
     conceptEditLoading: false,
 
     // Search-mode mark: image_hash currently being looked up
     markingSearchHit: null,
+    // Set-anchor in-flight flag
+    settingAnchor: false,
+
+    // Global active tag for +/- keyboard marking and hit-card buttons
+    activeTagId: '',
+
+    // Tag membership badges: {image_hash: [tag_name, ...]}
+    hitTags: {},
 
     // ── Computed ──────────────────────────────────────────────────────────
     get progressPct() {
@@ -1892,11 +1914,11 @@ function sfn() {
       return hits;
     },
     get selectedConcept() {
-      return this.concepts.find(c => c.concept_id === this.selectedConceptId) ?? null;
+      return this.concepts.find(c => c.tag_id === this.selectedConceptId) ?? null;
     },
     get selectedTriageHit() {
       if (this.selectedTriageHitId) {
-        const h = this.triageResults.find(h => String(h.point_id) === this.selectedTriageHitId);
+        const h = this.triageResults.find(h => String(h.point_id ?? h.file_id) === this.selectedTriageHitId);
         if (h) return h;
       }
       return this.triageResults[0] ?? null;
@@ -2184,6 +2206,9 @@ function sfn() {
         this.provenance = d.provenance ?? null;
         this.embeddingModels = d.embedding_models ?? {};
 
+        // Fire-and-forget tag classification for badge display
+        this.loadHitTags().catch(() => {});
+
         // Re-sync selected hit after re-query
         if (this.selectedFileId) {
           const f = this.results.find(r => r.file_id === this.selectedFileId);
@@ -2388,6 +2413,7 @@ function sfn() {
         this.queryMeta = await fetch(
           `/api/query-metadata/${this.sessionId}/${this.selectedFileId}`
         ).then(r => r.json());
+        this.loadHitTags().catch(() => {});
       } catch { this.queryMeta = null; }
     },
 
@@ -2666,8 +2692,8 @@ function sfn() {
     async loadConcepts() {
       this.conceptsLoading = true;
       try {
-        const d = await fetch('/api/concepts').then(r => r.json());
-        this.concepts = d.concepts ?? [];
+        const d = await fetch('/api/tags').then(r => r.json());
+        this.concepts = d.tags ?? [];
       } catch { /* Qdrant may not be up yet */ }
       finally { this.conceptsLoading = false; }
     },
@@ -2678,42 +2704,39 @@ function sfn() {
       this.conceptCreateError = null;
       const fd = new FormData();
       fd.append('name', this.newConceptName.trim());
-      fd.append('polarity', this.newConceptPolarity);
       fd.append('notes', this.newConceptNotes.trim());
       fd.append('positive_ids', this.newConceptPositive.trim());
       fd.append('negative_ids', this.newConceptNegative.trim());
       fd.append('target_id', '');
       try {
-        const resp = await fetch('/api/concept', { method: 'POST', body: fd });
+        const resp = await fetch('/api/tag', { method: 'POST', body: fd });
         if (!resp.ok) {
           const d = await resp.json().catch(() => ({}));
           this.conceptCreateError = d.detail ?? `HTTP ${resp.status}`;
           return;
         }
-        const concept = await resp.json();
-        const idx = this.concepts.findIndex(c => c.concept_id === concept.concept_id);
-        if (idx >= 0) this.concepts[idx] = concept; else this.concepts.unshift(concept);
-        this.selectedConceptId = concept.concept_id;
+        const tag = await resp.json();
+        const idx = this.concepts.findIndex(c => c.tag_id === tag.tag_id);
+        if (idx >= 0) this.concepts[idx] = tag; else this.concepts.unshift(tag);
+        this.selectedConceptId = tag.tag_id;
         this.showConceptCreate = false;
         this.newConceptName = '';
-        this.newConceptPolarity = 'incriminating';
         this.newConceptNotes = '';
         this.newConceptPositive = '';
         this.newConceptNegative = '';
-        // Pre-load concept example thumbnails
-        this.loadConceptExamples(concept);
+        this.loadConceptExamples(tag);
       } catch (e) {
-        this.conceptCreateError = e?.message || 'Failed to create concept';
+        this.conceptCreateError = e?.message || 'Failed to create tag';
       } finally {
         this.conceptCreateLoading = false;
       }
     },
 
-    async deleteConcept(conceptId) {
-      const resp = await fetch(`/api/concept/${conceptId}`, { method: 'DELETE' }).catch(() => null);
+    async deleteConcept(tagId) {
+      const resp = await fetch(`/api/tag/${tagId}`, { method: 'DELETE' }).catch(() => null);
       if (!resp || resp.ok || resp.status === 404) {
-        this.concepts = this.concepts.filter(c => c.concept_id !== conceptId);
-        if (this.selectedConceptId === conceptId) {
+        this.concepts = this.concepts.filter(c => c.tag_id !== tagId);
+        if (this.selectedConceptId === tagId) {
           this.selectedConceptId = null;
           this.triageResults = [];
           this.selectedTriageHitId = null;
@@ -2721,8 +2744,9 @@ function sfn() {
       }
     },
 
-    async selectConcept(conceptId) {
-      this.selectedConceptId = conceptId;
+    async selectConcept(tagId) {
+      this.selectedConceptId = tagId;
+      this.activeTagId = tagId;
       this.conceptEditing = false;
       this.triageResults = [];
       this.selectedTriageHitId = null;
@@ -2777,12 +2801,17 @@ function sfn() {
       this.triageMatchSrc = null;
       this.triageMatchMeta = null;
       const fd = new FormData();
-      fd.append('concept_id', this.selectedConceptId);
-      fd.append('mode', this.triageMode);
+      fd.append('tag_id', this.selectedConceptId);
       fd.append('limit', this.triageLimit);
-      fd.append('reverse', this.triageReverse ? 'true' : 'false');
       try {
-        const resp = await fetch('/api/triage', { method: 'POST', body: fd });
+        let resp;
+        if (this.triageSource === 'query' && this.sessionId) {
+          fd.append('session_id', this.sessionId);
+          resp = await fetch('/api/triage/query-images', { method: 'POST', body: fd });
+        } else {
+          fd.append('reverse', this.triageReverse ? 'true' : 'false');
+          resp = await fetch('/api/triage', { method: 'POST', body: fd });
+        }
         if (!resp.ok) {
           const d = await resp.json().catch(() => ({}));
           this.triageError = d.detail ?? `HTTP ${resp.status}`;
@@ -2790,22 +2819,23 @@ function sfn() {
         }
         const d = await resp.json();
         this.triageResults = d.hits ?? [];
-        // Update concept in list (server may have refreshed it)
-        if (d.concept) {
-          const idx = this.concepts.findIndex(c => c.concept_id === d.concept.concept_id);
-          if (idx >= 0) this.concepts[idx] = d.concept; else this.concepts.unshift(d.concept);
+        // Update tag in list (server may have refreshed it)
+        if (d.tag) {
+          const idx = this.concepts.findIndex(c => c.tag_id === d.tag.tag_id);
+          if (idx >= 0) this.concepts[idx] = d.tag; else this.concepts.unshift(d.tag);
         }
-        // Populate hit cache for thumbnails
-        for (const h of this.triageResults) {
-          const sid = String(h.point_id);
-          if (!this.triageHitCache[sid]) {
-            this.triageHitCache = {
-              ...this.triageHitCache,
-              [sid]: { path: h.path, image_hash: h.image_hash },
-            };
+        // Populate hit cache for indexed-dataset results
+        if (this.triageSource !== 'query') {
+          for (const h of this.triageResults) {
+            const sid = String(h.point_id);
+            if (!this.triageHitCache[sid]) {
+              this.triageHitCache = {
+                ...this.triageHitCache,
+                [sid]: { path: h.path, image_hash: h.image_hash },
+              };
+            }
           }
         }
-        // Auto-select first hit
         if (this.triageResults.length > 0) await this.selectTriageHit(this.triageResults[0]);
       } catch (e) {
         this.triageError = e?.message || 'Triage failed — check Qdrant connection';
@@ -2815,7 +2845,7 @@ function sfn() {
     },
 
     async selectTriageHit(hit) {
-      this.selectedTriageHitId = String(hit.point_id);
+      this.selectedTriageHitId = String(hit.point_id ?? hit.file_id);
       this.triageMatchZoom = 1.0;
       this.triageMatchMeta = null;
       this.triageMatchMetaError = null;
@@ -2829,57 +2859,57 @@ function sfn() {
           if (r.ok) this.triageMatchMeta = await r.json();
           else this.triageMatchMetaError = `HTTP ${r.status}`;
         } catch (e) { this.triageMatchMetaError = e?.message; }
+      } else if (hit.file_id && this.sessionId) {
+        this.triageMatchSrc = `/api/query-image/${this.sessionId}/${hit.file_id}`;
       }
     },
 
-    async _applyMark(conceptId, pointId, role) {
+    async _applyMark(tagId, pointId, role) {
       // Optimistic update
       this.markedOverrides = {
         ...this.markedOverrides,
-        [conceptId]: { ...(this.markedOverrides[conceptId] ?? {}), [String(pointId)]: role },
+        [tagId]: { ...(this.markedOverrides[tagId] ?? {}), [String(pointId)]: role },
       };
       const fd = new FormData();
       fd.append('point_id', String(pointId));
       fd.append('role', role);
       try {
-        const resp = await fetch(`/api/concept/${conceptId}/mark`, { method: 'POST', body: fd });
+        const resp = await fetch(`/api/tag/${tagId}/mark`, { method: 'POST', body: fd });
         if (resp.ok) {
           const updated = await resp.json();
-          const idx = this.concepts.findIndex(c => c.concept_id === conceptId);
+          const idx = this.concepts.findIndex(c => c.tag_id === tagId);
           if (idx >= 0) this.concepts[idx] = updated; else this.concepts.unshift(updated);
         } else {
-          // Revert optimistic update
-          const ov = { ...this.markedOverrides[conceptId] };
+          const ov = { ...this.markedOverrides[tagId] };
           delete ov[String(pointId)];
-          this.markedOverrides = { ...this.markedOverrides, [conceptId]: ov };
+          this.markedOverrides = { ...this.markedOverrides, [tagId]: ov };
         }
       } catch {
-        const ov = { ...(this.markedOverrides[conceptId] ?? {}) };
+        const ov = { ...(this.markedOverrides[tagId] ?? {}) };
         delete ov[String(pointId)];
-        this.markedOverrides = { ...this.markedOverrides, [conceptId]: ov };
+        this.markedOverrides = { ...this.markedOverrides, [tagId]: ov };
       }
     },
 
     async markTriageHit(hit, role) {
-      if (!this.selectedConceptId) return;
+      if (!this.selectedConceptId || !hit.point_id) return;
       await this._applyMark(this.selectedConceptId, hit.point_id, role);
     },
 
     async unmarkTriageHit(hit) {
-      if (!this.selectedConceptId) return;
-      const conceptId = this.selectedConceptId;
+      if (!this.selectedConceptId || !hit.point_id) return;
+      const tagId = this.selectedConceptId;
       const sid = String(hit.point_id);
-      // Optimistic remove
-      const ov = { ...(this.markedOverrides[conceptId] ?? {}) };
+      const ov = { ...(this.markedOverrides[tagId] ?? {}) };
       delete ov[sid];
-      this.markedOverrides = { ...this.markedOverrides, [conceptId]: ov };
+      this.markedOverrides = { ...this.markedOverrides, [tagId]: ov };
       const fd = new FormData();
       fd.append('point_id', sid);
       try {
-        const resp = await fetch(`/api/concept/${conceptId}/unmark`, { method: 'POST', body: fd });
+        const resp = await fetch(`/api/tag/${tagId}/unmark`, { method: 'POST', body: fd });
         if (resp.ok) {
           const updated = await resp.json();
-          const idx = this.concepts.findIndex(c => c.concept_id === conceptId);
+          const idx = this.concepts.findIndex(c => c.tag_id === tagId);
           if (idx >= 0) this.concepts[idx] = updated;
         }
       } catch { /* ignore */ }
@@ -2887,67 +2917,64 @@ function sfn() {
 
     async unmarkConceptPoint(pointId) {
       if (!this.selectedConceptId) return;
-      const conceptId = this.selectedConceptId;
+      const tagId = this.selectedConceptId;
       const sid = String(pointId);
-      const ov = { ...(this.markedOverrides[conceptId] ?? {}) };
+      const ov = { ...(this.markedOverrides[tagId] ?? {}) };
       delete ov[sid];
-      this.markedOverrides = { ...this.markedOverrides, [conceptId]: ov };
+      this.markedOverrides = { ...this.markedOverrides, [tagId]: ov };
       const fd = new FormData();
       fd.append('point_id', sid);
       try {
-        const resp = await fetch(`/api/concept/${conceptId}/unmark`, { method: 'POST', body: fd });
+        const resp = await fetch(`/api/tag/${tagId}/unmark`, { method: 'POST', body: fd });
         if (resp.ok) {
           const updated = await resp.json();
-          const idx = this.concepts.findIndex(c => c.concept_id === conceptId);
+          const idx = this.concepts.findIndex(c => c.tag_id === tagId);
           if (idx >= 0) this.concepts[idx] = updated;
         }
       } catch { /* ignore */ }
     },
 
-    async setConceptTarget() {
-      if (!this.selectedConceptId || !this.selectedTriageHit) return;
-      const pointId = String(this.selectedTriageHit.point_id);
+    async setAnchor(hit) {
+      if (!this.selectedConceptId || !hit?.point_id) return;
+      const tagId = this.selectedConceptId;
+      const isCurrentAnchor = String(this.selectedConcept?.target_id) === String(hit.point_id);
       const fd = new FormData();
-      fd.append('name', this.selectedConcept.name);
-      fd.append('polarity', this.selectedConcept.polarity);
-      fd.append('notes', this.selectedConcept.notes ?? '');
-      fd.append('positive_ids', this.selectedConcept.positive_ids.join(','));
-      fd.append('negative_ids', this.selectedConcept.negative_ids.join(','));
-      fd.append('target_id', pointId);
+      fd.append('target_id', isCurrentAnchor ? '' : String(hit.point_id));
+      this.settingAnchor = true;
       try {
-        const resp = await fetch('/api/concept', { method: 'POST', body: fd });
+        const resp = await fetch(`/api/tag/${tagId}/set-target`, { method: 'POST', body: fd });
         if (resp.ok) {
           const updated = await resp.json();
-          const idx = this.concepts.findIndex(c => c.concept_id === updated.concept_id);
+          const idx = this.concepts.findIndex(c => c.tag_id === tagId);
           if (idx >= 0) this.concepts[idx] = updated;
+          if (updated.target_id) {
+            const tid = String(updated.target_id);
+            if (!this.triageHitCache[tid]) await this.loadConceptExamples(updated);
+          }
         }
       } catch { /* ignore */ }
+      finally { this.settingAnchor = false; }
     },
 
-    async clearConceptTarget() {
+    async clearAnchor() {
       if (!this.selectedConceptId) return;
-      const c = this.selectedConcept;
       const fd = new FormData();
-      fd.append('name', c.name);
-      fd.append('polarity', c.polarity);
-      fd.append('notes', c.notes ?? '');
-      fd.append('positive_ids', c.positive_ids.join(','));
-      fd.append('negative_ids', c.negative_ids.join(','));
       fd.append('target_id', '');
+      this.settingAnchor = true;
       try {
-        const resp = await fetch('/api/concept', { method: 'POST', body: fd });
+        const resp = await fetch(`/api/tag/${this.selectedConceptId}/set-target`, { method: 'POST', body: fd });
         if (resp.ok) {
           const updated = await resp.json();
-          const idx = this.concepts.findIndex(c => c.concept_id === updated.concept_id);
+          const idx = this.concepts.findIndex(c => c.tag_id === updated.tag_id);
           if (idx >= 0) this.concepts[idx] = updated;
         }
       } catch { /* ignore */ }
+      finally { this.settingAnchor = false; }
     },
 
     startEditConcept() {
       const c = this.selectedConcept;
       if (!c) return;
-      this.editPolarity = c.polarity;
       this.editNotes = c.notes ?? '';
       this.conceptEditError = null;
       this.conceptEditing = true;
@@ -2960,20 +2987,19 @@ function sfn() {
       const c = this.selectedConcept;
       const fd = new FormData();
       fd.append('name', c.name);
-      fd.append('polarity', this.editPolarity);
       fd.append('notes', this.editNotes.trim());
       fd.append('positive_ids', c.positive_ids.join(','));
       fd.append('negative_ids', c.negative_ids.join(','));
       fd.append('target_id', c.target_id != null ? String(c.target_id) : '');
       try {
-        const resp = await fetch('/api/concept', { method: 'POST', body: fd });
+        const resp = await fetch('/api/tag', { method: 'POST', body: fd });
         if (!resp.ok) {
           const d = await resp.json().catch(() => ({}));
           this.conceptEditError = d.detail ?? `HTTP ${resp.status}`;
           return;
         }
         const updated = await resp.json();
-        const idx = this.concepts.findIndex(c => c.concept_id === updated.concept_id);
+        const idx = this.concepts.findIndex(c => c.tag_id === updated.tag_id);
         if (idx >= 0) this.concepts[idx] = updated; else this.concepts.unshift(updated);
         this.conceptEditing = false;
       } catch (e) {
@@ -2985,18 +3011,13 @@ function sfn() {
 
     exportTriageResults() {
       if (!this.triageResults.length) return;
-      const concept = this.selectedConcept;
+      const tag = this.selectedConcept;
       const lines = this.triageResults.map(h => JSON.stringify({
-        concept_id: concept?.concept_id ?? null,
-        concept_name: concept?.name ?? null,
-        point_id: h.point_id,
-        matched_modes: h.matched_modes,
-        triplet_score_dino: h.triplet_score_dino ?? null,
-        triplet_score_sscd: h.triplet_score_sscd ?? null,
-        cosine_margin_dino: h.cosine_margin_dino ?? null,
-        cosine_margin_sscd: h.cosine_margin_sscd ?? null,
-        fused_triplet_score: h.fused_triplet_score,
-        fused_cosine_margin: h.fused_cosine_margin,
+        tag_id: tag?.tag_id ?? null,
+        tag_name: tag?.name ?? null,
+        point_id: h.point_id ?? h.file_id ?? null,
+        triplet_score: h.triplet_score ?? null,
+        cosine_margin: h.cosine_margin ?? null,
         path: h.path ?? null,
         image_hash: h.image_hash ?? null,
         is_video_frame: h.is_video_frame ?? false,
@@ -3008,7 +3029,7 @@ function sfn() {
       const a = document.createElement('a');
       a.href = url;
       const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      a.download = `triage-${(concept?.name ?? 'export').replace(/[^a-z0-9_-]/gi, '_')}-${ts}.jsonl`;
+      a.download = `triage-${(tag?.name ?? 'export').replace(/[^a-z0-9_-]/gi, '_')}-${ts}.jsonl`;
       a.click();
       URL.revokeObjectURL(url);
     },
@@ -3019,6 +3040,7 @@ function sfn() {
 
     triageHitThumb(hit) {
       if (hit.image_hash) return `/api/thumbnail/${hit.image_hash}`;
+      if (hit.file_id && this.sessionId) return `/api/query-image/${this.sessionId}/${hit.file_id}`;
       return '/static/vector-fallback.svg';
     },
 
@@ -3034,32 +3056,128 @@ function sfn() {
       return null;
     },
 
-    // Mark a search result hit for the active concept (looks up point_id first)
-    async markSearchHit(hit, role) {
-      if (!this.selectedConceptId || !hit.image_hash) return;
+    // Arrow-key navigation + +/- keyboard marking for search and triage hits
+    async handleKeydown(e) {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+      if (this.phase !== 'results') return;
+
+      if (this.appMode === 'search') {
+        const hits = this.filteredHits;
+        if (!hits.length) return;
+        const idx = hits.findIndex(h => this.hitKey(h) === this.selectedHitKey);
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          const next = idx < hits.length - 1 ? idx + 1 : idx;
+          if (next !== idx) { this.selectHit(hits[next]); await this.$nextTick(); document.querySelector('.hit-card.selected')?.scrollIntoView({block:'nearest'}); }
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          const prev = idx > 0 ? idx - 1 : 0;
+          if (prev !== idx) { this.selectHit(hits[prev]); await this.$nextTick(); document.querySelector('.hit-card.selected')?.scrollIntoView({block:'nearest'}); }
+        } else if ((e.key === '+' || e.key === '=') && this.activeTagId && idx >= 0) {
+          e.preventDefault();
+          this.markSearchHit(hits[idx], 'positive', this.activeTagId);
+          const next = idx < hits.length - 1 ? idx + 1 : idx;
+          if (next !== idx) { this.selectHit(hits[next]); await this.$nextTick(); document.querySelector('.hit-card.selected')?.scrollIntoView({block:'nearest'}); }
+        } else if (e.key === '-' && this.activeTagId && idx >= 0) {
+          e.preventDefault();
+          this.markSearchHit(hits[idx], 'negative', this.activeTagId);
+          const next = idx < hits.length - 1 ? idx + 1 : idx;
+          if (next !== idx) { this.selectHit(hits[next]); await this.$nextTick(); document.querySelector('.hit-card.selected')?.scrollIntoView({block:'nearest'}); }
+        }
+
+      } else if (this.appMode === 'triage') {
+        const hits = this.triageResults;
+        if (!hits.length) return;
+        const cur = this.selectedTriageHit;
+        const idx = cur ? hits.findIndex(h => String(h.point_id ?? h.file_id) === String(cur.point_id ?? cur.file_id)) : -1;
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          const next = idx < hits.length - 1 ? idx + 1 : idx;
+          if (next !== idx) { await this.selectTriageHit(hits[next]); await this.$nextTick(); document.querySelector('.triage-hit-card.selected')?.scrollIntoView({block:'nearest'}); }
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          const prev = idx > 0 ? idx - 1 : 0;
+          if (prev !== idx) { await this.selectTriageHit(hits[prev]); await this.$nextTick(); document.querySelector('.triage-hit-card.selected')?.scrollIntoView({block:'nearest'}); }
+        } else if ((e.key === '+' || e.key === '=') && idx >= 0) {
+          e.preventDefault();
+          this.markTriageHit(hits[idx], 'positive');
+          const next = idx < hits.length - 1 ? idx + 1 : idx;
+          if (next !== idx) { await this.selectTriageHit(hits[next]); await this.$nextTick(); document.querySelector('.triage-hit-card.selected')?.scrollIntoView({block:'nearest'}); }
+        } else if (e.key === '-' && idx >= 0) {
+          e.preventDefault();
+          this.markTriageHit(hits[idx], 'negative');
+          const next = idx < hits.length - 1 ? idx + 1 : idx;
+          if (next !== idx) { await this.selectTriageHit(hits[next]); await this.$nextTick(); document.querySelector('.triage-hit-card.selected')?.scrollIntoView({block:'nearest'}); }
+        }
+      }
+    },
+
+    // Mark a search result hit for a given tag (looks up point_id first)
+    async markSearchHit(hit, role, tagId) {
+      if (!tagId || !hit.image_hash) return;
       this.markingSearchHit = hit.image_hash;
       try {
         const r = await fetch(`/api/point-id?image_hash=${encodeURIComponent(hit.image_hash)}`);
         if (!r.ok) return;
         const { point_id } = await r.json();
-        await this._applyMark(this.selectedConceptId, point_id, role);
-        // Also cache for future thumbnail lookups
+        // Cache before _applyMark so the optimistic markedOverrides update
+        // is immediately visible via searchHitMark (which looks up by point_id).
         this.triageHitCache = {
           ...this.triageHitCache,
           [String(point_id)]: { path: hit.path, image_hash: hit.image_hash },
         };
+        await this._applyMark(tagId, point_id, role);
       } catch { /* ignore */ }
       finally { this.markingSearchHit = null; }
     },
 
     searchHitMark(hit) {
-      if (!this.selectedConceptId || !hit.image_hash) return null;
-      // Check if this image's point_id is in the effective marks.
-      // We can look up from triageHitCache in reverse (image_hash → point_id).
+      if (!this.activeTagId || !hit.image_hash) return null;
       const pid = Object.entries(this.triageHitCache).find(
         ([, v]) => v?.image_hash === hit.image_hash
       )?.[0];
-      return pid ? (this.effectiveMarks[pid] ?? null) : null;
+      if (!pid) return null;
+      const ov = (this.markedOverrides[this.activeTagId] ?? {})[String(pid)];
+      if (ov !== undefined) return ov;
+      const c = this.concepts.find(c => c.tag_id === this.activeTagId);
+      if (!c) return null;
+      if ((c.positive_ids ?? []).map(String).includes(String(pid))) return 'positive';
+      if ((c.negative_ids ?? []).map(String).includes(String(pid))) return 'negative';
+      return null;
+    },
+
+    // Load tag classifications for current search results + query image
+    async loadHitTags() {
+      if (!this.concepts.length) return;
+      const hashes = this.results.flatMap(r => r.hits.map(h => h.image_hash).filter(Boolean));
+      if (this.queryMeta?.hash_sha256) hashes.push(this.queryMeta.hash_sha256);
+
+      const fetches = [];
+      if (hashes.length) {
+        fetches.push(
+          fetch('/api/tags/classify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image_hashes: [...new Set(hashes)] }),
+          }).then(r => r.ok ? r.json() : {}).then(d => d.by_hash ?? {}).catch(() => ({}))
+        );
+      }
+      // Session-based classify for uploaded query images not in the dataset
+      if (this.sessionId) {
+        fetches.push(
+          fetch('/api/tags/classify-session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: this.sessionId }),
+          }).then(r => r.ok ? r.json() : {}).then(d => d.by_hash ?? {}).catch(() => ({}))
+        );
+      }
+      if (!fetches.length) return;
+      try {
+        const results = await Promise.all(fetches);
+        const merged = Object.assign({}, ...results);
+        this.hitTags = { ...this.hitTags, ...merged };
+      } catch { /* non-fatal */ }
     },
 
     // ── Reset ─────────────────────────────────────────────────────────────
@@ -3112,7 +3230,10 @@ function sfn() {
       this.triageMatchZoom = 1.0;
       this.triageRunning = false;
       this.triageError = null;
+      this.triageSource = 'indexed';
       this.markedOverrides = {};
+      this.hitTags = {};
+      this.activeTagId = '';
       // Restart background viz with client-cached point cloud
       this.$nextTick(() => {
         if (this._points3dData) initVectorViz(this._points3dData);

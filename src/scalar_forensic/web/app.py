@@ -20,16 +20,22 @@ from pathlib import Path
 
 import torch
 import uvicorn
-from fastapi import FastAPI, Form, HTTPException, UploadFile
+from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageDraw, UnidentifiedImageError
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
-from scalar_forensic.concepts import Concept, ConceptStore
 from scalar_forensic.config import ENV_ALLOW_ONLINE, Settings
-from scalar_forensic.discovery import FusedHit, run_triage
+from scalar_forensic.discovery import DiscoveryHit, _MAX_CONTEXT_PAIRS, run_triage
+
+# Cosine similarity floor used when a tag has no negatives and Qdrant falls
+# back to Recommendation (triplet_score is None).  DINOv2 cosine ≥ 0.5
+# reliably indicates semantic category membership.
+_RECOMMEND_COSINE_THRESHOLD = 0.5
+from scalar_forensic.query_eval import QueryEvalHit, score_query_entries
+from scalar_forensic.tags import Tag, TagStore
 from scalar_forensic.embedder import (
     _SSCD_INPUT_SIZE,
     _open_rgb,
@@ -1028,48 +1034,52 @@ async def points3d() -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# Concept Triage — investigator-in-the-loop Discovery
+# Tag Triage — investigator-in-the-loop Discovery
 # ---------------------------------------------------------------------------
 
 
-def _concept_store() -> ConceptStore:
-    """Construct a fresh :class:`ConceptStore` per request.
-
-    Mirrors the ``QdrantClient(...)`` pattern used by ``query_semantic_stats``
-    and the thumbnail route — cheap to re-create, avoids cross-request state,
-    and means Settings() is honoured for every call (allowing env-var overrides
-    at runtime without a restart).
-    """
+def _tag_store() -> TagStore:
+    """Construct a fresh :class:`TagStore` per request."""
     settings = Settings()
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-    return ConceptStore(client, settings.concepts_collection)
+    return TagStore(client, settings.tags_collection)
 
 
-def _concept_to_json(concept: Concept) -> dict:
+def _tag_to_json(tag: Tag) -> dict:
     return {
-        "concept_id": concept.concept_id,
-        "name": concept.name,
-        "positive_ids": list(concept.positive_ids),
-        "negative_ids": list(concept.negative_ids),
-        "target_id": concept.target_id,
-        "polarity": concept.polarity,
-        "notes": concept.notes,
-        "created_at": concept.created_at,
-        "updated_at": concept.updated_at,
+        "tag_id": tag.tag_id,
+        "name": tag.name,
+        "positive_ids": list(tag.positive_ids),
+        "negative_ids": list(tag.negative_ids),
+        "target_id": tag.target_id,
+        "notes": tag.notes,
+        "created_at": tag.created_at,
+        "updated_at": tag.updated_at,
     }
 
 
-def _fused_hit_to_json(hit: FusedHit) -> dict:
+def _hit_passes_classify_threshold(
+    triplet_score: int | None,
+    cosine_margin: float,
+    triplet_threshold: int,
+) -> bool:
+    """Return True if a hit meets the classification bar.
+
+    Discovery mode (triplet_score is not None): require ≥ triplet_threshold
+    pairs satisfied.  Recommend mode (triplet_score is None, tag has no
+    negatives): require cosine margin ≥ _RECOMMEND_COSINE_THRESHOLD.
+    """
+    if triplet_score is not None:
+        return triplet_score >= triplet_threshold
+    return cosine_margin >= _RECOMMEND_COSINE_THRESHOLD
+
+
+def _hit_to_json(hit: DiscoveryHit) -> dict:
     payload = hit.payload or {}
     return {
         "point_id": hit.point_id,
-        "matched_modes": list(hit.matched_modes),
-        "triplet_score_dino": hit.triplet_score_dino,
-        "triplet_score_sscd": hit.triplet_score_sscd,
-        "cosine_margin_dino": hit.cosine_margin_dino,
-        "cosine_margin_sscd": hit.cosine_margin_sscd,
-        "fused_triplet_score": hit.fused_triplet_score,
-        "fused_cosine_margin": hit.fused_cosine_margin,
+        "triplet_score": hit.triplet_score,
+        "cosine_margin": hit.cosine_margin,
         "path": payload.get("image_path", ""),
         "image_hash": payload.get("image_hash"),
         "exif": payload.get("exif"),
@@ -1081,155 +1091,155 @@ def _fused_hit_to_json(hit: FusedHit) -> dict:
     }
 
 
-@app.get("/api/concepts")
-async def list_concepts() -> JSONResponse:
+@app.get("/api/tags")
+async def list_tags() -> JSONResponse:
     try:
-        store = await asyncio.to_thread(_concept_store)
-        concepts = await asyncio.to_thread(store.list)
+        store = await asyncio.to_thread(_tag_store)
+        tags = await asyncio.to_thread(store.list)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
-    return JSONResponse({"concepts": [_concept_to_json(c) for c in concepts]})
+    return JSONResponse({"tags": [_tag_to_json(t) for t in tags]})
 
 
-@app.post("/api/concept")
-async def create_concept(
+@app.post("/api/tag")
+async def create_tag(
     name: str = Form(...),
     positive_ids: str = Form(default=""),
     negative_ids: str = Form(default=""),
     target_id: str = Form(default=""),
-    polarity: str = Form(default="incriminating"),
     notes: str = Form(default=""),
 ) -> JSONResponse:
-    """Create or replace a concept by *name*.
+    """Create or replace a tag by *name*.
 
-    ``positive_ids`` / ``negative_ids`` are comma-separated Qdrant point IDs
-    (UUID strings or integers).  ``target_id`` is optional.  ``polarity`` is
-    ``"incriminating"`` (default) or ``"exculpatory"`` — metadata only; it
-    does not swap pair roles at query time.  Pass ``reverse=true`` to the
-    triage endpoint to do that.
+    ``positive_ids`` / ``negative_ids`` are comma-separated Qdrant point IDs.
+    ``target_id`` is optional; when omitted the first positive is used as an
+    implicit anchor at query time.
     """
-    if polarity not in ("incriminating", "exculpatory"):
-        raise HTTPException(
-            status_code=400,
-            detail="polarity must be 'incriminating' or 'exculpatory'",
-        )
     pos = [x.strip() for x in positive_ids.split(",") if x.strip()]
     neg = [x.strip() for x in negative_ids.split(",") if x.strip()]
     tgt: str | None = target_id.strip() or None
     try:
-        store = await asyncio.to_thread(_concept_store)
-        concept = await asyncio.to_thread(
+        store = await asyncio.to_thread(_tag_store)
+        tag = await asyncio.to_thread(
             store.create,
             name,
             positive_ids=pos,
             negative_ids=neg,
             target_id=tgt,
-            polarity=polarity,  # type: ignore[arg-type]
             notes=notes,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
-    return JSONResponse(_concept_to_json(concept))
+    return JSONResponse(_tag_to_json(tag))
 
 
-@app.get("/api/concept/{concept_id}")
-async def get_concept(concept_id: str) -> JSONResponse:
+@app.get("/api/tag/{tag_id}")
+async def get_tag(tag_id: str) -> JSONResponse:
     try:
-        store = await asyncio.to_thread(_concept_store)
-        concept = await asyncio.to_thread(store.get, concept_id)
+        store = await asyncio.to_thread(_tag_store)
+        tag = await asyncio.to_thread(store.get, tag_id)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
-    if concept is None:
-        raise HTTPException(status_code=404, detail="Concept not found")
-    return JSONResponse(_concept_to_json(concept))
+    if tag is None:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    return JSONResponse(_tag_to_json(tag))
 
 
-@app.post("/api/concept/{concept_id}/mark")
-async def mark_concept(
-    concept_id: str,
+@app.post("/api/tag/{tag_id}/mark")
+async def mark_tag(
+    tag_id: str,
     point_id: str = Form(...),
     role: str = Form(...),
 ) -> JSONResponse:
-    """Append a single ``(point_id, "positive"|"negative")`` to the concept.
+    """Append a single ``(point_id, "positive"|"negative")`` to the tag.
 
-    Used by result-card "+ incriminating" / "− benign" buttons so the
-    concept refines in place during review.  A point already present in
-    the other role is moved — the latest mark wins.
+    A point already present in the other role is moved — the latest mark wins.
     """
     if role not in ("positive", "negative"):
         raise HTTPException(
             status_code=400, detail="role must be 'positive' or 'negative'"
         )
     try:
-        store = await asyncio.to_thread(_concept_store)
-        concept = await asyncio.to_thread(store.mark, concept_id, point_id, role)  # type: ignore[arg-type]
+        store = await asyncio.to_thread(_tag_store)
+        tag = await asyncio.to_thread(store.mark, tag_id, point_id, role)  # type: ignore[arg-type]
     except LookupError:
-        raise HTTPException(status_code=404, detail="Concept not found") from None
+        raise HTTPException(status_code=404, detail="Tag not found") from None
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
-    return JSONResponse(_concept_to_json(concept))
+    return JSONResponse(_tag_to_json(tag))
 
 
-@app.post("/api/concept/{concept_id}/unmark")
-async def unmark_concept(
-    concept_id: str,
+@app.post("/api/tag/{tag_id}/unmark")
+async def unmark_tag(
+    tag_id: str,
     point_id: str = Form(...),
 ) -> JSONResponse:
     try:
-        store = await asyncio.to_thread(_concept_store)
-        concept = await asyncio.to_thread(store.unmark, concept_id, point_id)
+        store = await asyncio.to_thread(_tag_store)
+        tag = await asyncio.to_thread(store.unmark, tag_id, point_id)
     except LookupError:
-        raise HTTPException(status_code=404, detail="Concept not found") from None
+        raise HTTPException(status_code=404, detail="Tag not found") from None
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
-    return JSONResponse(_concept_to_json(concept))
+    return JSONResponse(_tag_to_json(tag))
 
 
-@app.delete("/api/concept/{concept_id}")
-async def delete_concept(concept_id: str) -> JSONResponse:
+@app.post("/api/tag/{tag_id}/set-target")
+async def set_tag_target(
+    tag_id: str,
+    target_id: str = Form(default=""),
+) -> JSONResponse:
+    """Set or clear the explicit Discovery anchor for a tag.
+
+    The anchor is the reference point Qdrant uses as the starting direction of
+    the similarity search.  Candidates must be similar to the anchor *and*
+    satisfy the tag's positive/negative triplet constraints.
+
+    When ``target_id`` is empty the explicit anchor is cleared and the engine
+    falls back to using ``positives[0]`` automatically at query time.
+    """
+    tgt: str | None = target_id.strip() or None
     try:
-        store = await asyncio.to_thread(_concept_store)
-        existed = await asyncio.to_thread(store.delete, concept_id)
+        store = await asyncio.to_thread(_tag_store)
+        tag = await asyncio.to_thread(store.set_target, tag_id, tgt)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Tag not found") from None
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+    return JSONResponse(_tag_to_json(tag))
+
+
+@app.delete("/api/tag/{tag_id}")
+async def delete_tag(tag_id: str) -> JSONResponse:
+    try:
+        store = await asyncio.to_thread(_tag_store)
+        existed = await asyncio.to_thread(store.delete, tag_id)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
     if not existed:
-        raise HTTPException(status_code=404, detail="Concept not found")
-    return JSONResponse({"concept_id": concept_id, "deleted": True})
+        raise HTTPException(status_code=404, detail="Tag not found")
+    return JSONResponse({"tag_id": tag_id, "deleted": True})
 
 
 @app.post("/api/triage")
 async def triage(
-    concept_id: str = Form(...),
-    mode: str = Form(default="dual"),
+    tag_id: str = Form(...),
     limit: int = Form(default=50, ge=1, le=500),
     reverse: bool = Form(default=False),
 ) -> JSONResponse:
-    """Run a Concept-Triage query.
-
-    Returns hits ranked by Qdrant's triplet-satisfaction score (integer
-    number of context pairs where the candidate is closer to the
-    positive than the negative) fused across the configured named
-    vectors.  Items appearing in both the ``dino`` and the ``sscd``
-    rankings are prioritised — independent-embedding agreement is a
-    strong triage signal.
-    """
-    if mode not in ("dino", "sscd", "dual"):
-        raise HTTPException(
-            status_code=400, detail="mode must be 'dino', 'sscd', or 'dual'"
-        )
+    """Run a Tag-Triage query against the indexed dataset using DINOv2."""
     settings = Settings()
     try:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-        store = ConceptStore(client, settings.concepts_collection)
-        concept = await asyncio.to_thread(store.get, concept_id)
-        if concept is None:
-            raise HTTPException(status_code=404, detail="Concept not found")
+        store = TagStore(client, settings.tags_collection)
+        tag = await asyncio.to_thread(store.get, tag_id)
+        if tag is None:
+            raise HTTPException(status_code=404, detail="Tag not found")
         hits = await asyncio.to_thread(
             run_triage,
             client,
             settings.collection,
-            concept,
-            mode=mode,  # type: ignore[arg-type]
+            tag,
             limit=limit,
             reverse=reverse,
             reference_collection=settings.reference_collection,
@@ -1242,11 +1252,350 @@ async def triage(
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
     return JSONResponse(
         {
-            "concept": _concept_to_json(concept),
-            "mode": mode,
+            "tag": _tag_to_json(tag),
             "reverse": reverse,
             "limit": limit,
-            "hits": [_fused_hit_to_json(h) for h in hits],
+            "hits": [_hit_to_json(h) for h in hits],
+        }
+    )
+
+
+@app.post("/api/tags/classify")
+async def classify_tags_for_hashes(request: Request) -> JSONResponse:
+    """Evaluate tag membership for a list of image hashes.
+
+    Request body: ``{"image_hashes": ["sha256-1", "sha256-2", ...]}``.
+    Response: ``{"by_hash": {"sha256-1": ["weapons", "drugs"], "sha256-2": [], ...}}``.
+
+    Uses the same NumPy triplet scoring as classify-session so that tag badges
+    on search hits and on uploaded query images are computed identically.
+    """
+    body = await request.json()
+    image_hashes: list[str] = body.get("image_hashes") or []
+    if not image_hashes:
+        return JSONResponse({"by_hash": {}})
+
+    settings = Settings()
+
+    def _classify():
+        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+        store = TagStore(client, settings.tags_collection)
+        tags = store.list()
+
+        # Resolve hash → point_id, then fetch dino vectors for all candidates in
+        # one batch so we can score them locally (NumPy path, same as
+        # classify-session — avoids Qdrant Discovery on a tiny candidate pool).
+        hash_to_pid: dict[str, str] = {}
+        for h in image_hashes:
+            records, _ = client.scroll(
+                collection_name=settings.collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="image_hash", match=MatchValue(value=h))]
+                ),
+                limit=1,
+                with_payload=False,
+                with_vectors=False,
+            )
+            if records:
+                hash_to_pid[h] = str(records[0].id)
+
+        if not hash_to_pid:
+            return {h: [] for h in image_hashes}
+
+        candidate_records = client.retrieve(
+            collection_name=settings.collection,
+            ids=list(hash_to_pid.values()),
+            with_vectors=True,
+            with_payload=False,
+        )
+        # Build (file_id, filename, dino_vec, _) entries reusing score_query_entries
+        pid_to_hash = {v: k for k, v in hash_to_pid.items()}
+        entries: list[tuple[str, str, list[float] | None, None]] = []
+        for rec in candidate_records:
+            pid = str(rec.id)
+            image_hash = pid_to_hash.get(pid)
+            if image_hash is None:
+                continue
+            vecs = rec.vector or {}
+            dino_vec = list(vecs.get("dino")) if isinstance(vecs, dict) and vecs.get("dino") else None
+            entries.append((pid, image_hash, dino_vec, None))
+
+        by_hash: dict[str, list[str]] = {h: [] for h in image_hashes}
+
+        for tag in tags:
+            if not tag.positive_ids:
+                continue
+            all_ref_ids = [str(i) for i in tag.positive_ids + tag.negative_ids]
+            try:
+                ref_records = client.retrieve(
+                    collection_name=settings.collection,
+                    ids=all_ref_ids,
+                    with_vectors=True,
+                    with_payload=False,
+                )
+            except Exception:  # noqa: BLE001
+                continue
+
+            pos_ids_set = {str(i) for i in tag.positive_ids}
+
+            def _vecs(role: str) -> list[list[float]]:
+                result = []
+                for rec in ref_records:
+                    if role == "positive" and str(rec.id) not in pos_ids_set:
+                        continue
+                    if role == "negative" and str(rec.id) in pos_ids_set:
+                        continue
+                    vecs = rec.vector or {}
+                    v = vecs.get("dino") if isinstance(vecs, dict) else None
+                    if v is not None:
+                        result.append(list(v))
+                return result
+
+            pos_dino = _vecs("positive")
+            neg_dino = _vecs("negative")
+
+            # Fail safe: the tag declares negatives but none could be retrieved
+            # (stale point IDs, re-indexed collection, wrong collection).
+            # Do not fall back to permissive cosine classification — skip.
+            if tag.negative_ids and not neg_dino:
+                _log.warning(
+                    "classify: tag %r has %d negative ID(s) but none resolved — skipping",
+                    tag.name, len(tag.negative_ids),
+                )
+                continue
+
+            # Use actual retrieved vector counts for threshold so the bar
+            # matches what score_query_vector actually evaluates.
+            n_pairs = min(
+                len(pos_dino) * max(len(neg_dino), 1),
+                _MAX_CONTEXT_PAIRS,
+            )
+            threshold = max(1, n_pairs * 3 // 4)
+
+            hits = score_query_entries(entries, pos_dino, neg_dino, limit=len(entries))
+            for hit in hits:
+                if not _hit_passes_classify_threshold(hit.triplet_score, hit.cosine_margin, threshold):
+                    continue
+                # hit.filename holds the image_hash (we used it as the filename field)
+                by_hash[hit.filename].append(tag.name)
+
+        return by_hash
+
+    try:
+        by_hash = await asyncio.to_thread(_classify)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+    return JSONResponse({"by_hash": by_hash})
+
+
+@app.post("/api/tags/classify-session")
+async def classify_tags_for_session(request: Request) -> JSONResponse:
+    """Evaluate tag membership for all session files via their in-memory embeddings.
+
+    Used to badge uploaded query images that are not indexed in the dataset
+    collection.  Request body: ``{"session_id": "..."}``.
+    Response: ``{"by_hash": {"sha256-hash": ["tag-name", ...], ...}}``.
+
+    Uses the same NumPy triplet scoring as ``/api/triage/query-images`` but
+    iterates over every tag and returns results keyed by file SHA-256 so the
+    UI can merge them directly into ``hitTags``.
+    """
+    body = await request.json()
+    session_id: str = body.get("session_id") or ""
+    if not session_id:
+        return JSONResponse({"by_hash": {}})
+
+    session = get_session(session_id)
+    if session is None:
+        return JSONResponse({"by_hash": {}})
+
+    settings = Settings()
+
+    def _classify_session():
+        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+        store = TagStore(client, settings.tags_collection)
+        tags = store.list()
+
+        entries = [
+            (f.file_id, f.filename, f.dino_embedding, f.sscd_embedding)
+            for f in session.files
+            if not f.is_video and (f.dino_embedding or f.sscd_embedding)
+        ]
+        file_id_to_hash = {f.file_id: f.file_hash for f in session.files if f.file_hash}
+
+        by_hash: dict[str, list[str]] = {}
+        if not entries or not tags:
+            return by_hash
+
+        for tag in tags:
+            if not tag.positive_ids:
+                continue
+            all_ref_ids = [str(i) for i in tag.positive_ids + tag.negative_ids]
+            try:
+                ref_records = client.retrieve(
+                    collection_name=settings.collection,
+                    ids=all_ref_ids,
+                    with_vectors=True,
+                    with_payload=False,
+                )
+            except Exception:  # noqa: BLE001
+                continue
+
+            pos_ids_set = {str(i) for i in tag.positive_ids}
+
+            def _vecs(role: str) -> list[list[float]]:
+                result = []
+                for rec in ref_records:
+                    if role == "positive" and str(rec.id) not in pos_ids_set:
+                        continue
+                    if role == "negative" and str(rec.id) in pos_ids_set:
+                        continue
+                    vecs = rec.vector or {}
+                    v = vecs.get("dino") if isinstance(vecs, dict) else None
+                    if v is not None:
+                        result.append(list(v))
+                return result
+
+            pos_dino = _vecs("positive")
+            neg_dino = _vecs("negative")
+
+            if tag.negative_ids and not neg_dino:
+                _log.warning(
+                    "classify-session: tag %r has %d negative ID(s) but none resolved — skipping",
+                    tag.name, len(tag.negative_ids),
+                )
+                continue
+
+            n_pairs = min(
+                len(pos_dino) * max(len(neg_dino), 1),
+                _MAX_CONTEXT_PAIRS,
+            )
+            threshold = max(1, n_pairs * 3 // 4)
+
+            hits = score_query_entries(
+                entries, pos_dino, neg_dino,
+                limit=len(entries),
+            )
+            for hit in hits:
+                if not _hit_passes_classify_threshold(hit.triplet_score, hit.cosine_margin, threshold):
+                    continue
+                image_hash = file_id_to_hash.get(hit.file_id)
+                if image_hash:
+                    by_hash.setdefault(image_hash, []).append(tag.name)
+
+        return by_hash
+
+    try:
+        by_hash = await asyncio.to_thread(_classify_session)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+    return JSONResponse({"by_hash": by_hash})
+
+
+@app.post("/api/triage/query-images")
+async def triage_query_images(
+    tag_id: str = Form(...),
+    session_id: str = Form(...),
+    limit: int = Form(default=50, ge=1, le=500),
+) -> JSONResponse:
+    """Run tag triage against uploaded query images using DINOv2 embeddings."""
+
+    session = get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    settings = Settings()
+
+    def _run():
+        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+        store = TagStore(client, settings.tags_collection)
+        tag = store.get(tag_id)
+        if tag is None:
+            return None, None
+
+        all_ref_ids = [str(i) for i in tag.positive_ids + tag.negative_ids]
+        if not all_ref_ids:
+            return tag, []
+
+        # Fetch reference vectors for requested mode(s)
+        try:
+            ref_records = client.retrieve(
+                collection_name=settings.collection,
+                ids=all_ref_ids,
+                with_vectors=True,
+                with_payload=False,
+            )
+        except Exception:  # noqa: BLE001
+            return tag, []
+
+        pos_ids_set = {str(i) for i in tag.positive_ids}
+
+        def _extract_vecs(vec_name: str, role: str) -> list[list[float]]:
+            result = []
+            for r in ref_records:
+                if role == "positive" and str(r.id) not in pos_ids_set:
+                    continue
+                if role == "negative" and str(r.id) in pos_ids_set:
+                    continue
+                vecs = r.vector or {}
+                if isinstance(vecs, dict):
+                    v = vecs.get(vec_name)
+                else:
+                    v = None
+                if v is not None:
+                    result.append(list(v))
+            return result
+
+        pos_dino = _extract_vecs("dino", "positive")
+        neg_dino = _extract_vecs("dino", "negative")
+
+        if tag.negative_ids and not neg_dino:
+            _log.warning(
+                "triage-query-images: tag %r has %d negative ID(s) but none resolved — skipping",
+                tag.name, len(tag.negative_ids),
+            )
+            return tag, []
+
+        n_pairs = min(
+            len(pos_dino) * max(len(neg_dino), 1),
+            _MAX_CONTEXT_PAIRS,
+        )
+        threshold = max(1, n_pairs * 3 // 4)
+
+        entries = [
+            (f.file_id, f.filename, f.dino_embedding, None)
+            for f in session.files
+            if not f.is_video and f.dino_embedding
+        ]
+        all_hits = score_query_entries(entries, pos_dino, neg_dino, limit=limit)
+        hits = [h for h in all_hits if _hit_passes_classify_threshold(h.triplet_score, h.cosine_margin, threshold)]
+        return tag, hits
+
+    try:
+        tag, hits = await asyncio.to_thread(_run)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+
+    if tag is None:
+        raise HTTPException(status_code=404, detail="Tag not found")
+
+    file_hash_by_id = {f.file_id: f.file_hash for f in session.files}
+
+    def _qhit_to_json(h: QueryEvalHit) -> dict:
+        return {
+            "file_id": h.file_id,
+            "filename": h.filename,
+            "image_url": f"/api/query-image/{session_id}/{h.file_id}",
+            "image_hash": file_hash_by_id.get(h.file_id),
+            "triplet_score": h.triplet_score,
+            "cosine_margin": h.cosine_margin,
+        }
+
+    return JSONResponse(
+        {
+            "tag": _tag_to_json(tag),
+            "limit": limit,
+            "hits": [_qhit_to_json(h) for h in (hits or [])],
         }
     )
 
