@@ -76,6 +76,23 @@ class Settings:
         # --- Qdrant auth (optional) ---
         self.qdrant_api_key: str | None = os.environ.get("SFN_QDRANT_API_KEY") or None
 
+        # --- Concept Triage (Qdrant Discovery API) ---
+        # Sidecar collection storing payload-only points — one per "concept".
+        # A concept is a named set of positive and negative reference point IDs
+        # (and optionally a target anchor) used as input to Qdrant's Discovery
+        # and Recommendation APIs.  Kept in a separate collection from the case
+        # vectors so concepts can outlive any single case and be reused.
+        self.concepts_collection: str = os.environ.get("SFN_CONCEPTS_COLLECTION", "sfn_concepts")
+
+        # Optional read-only reference collection holding vectors of externally
+        # labelled known-bad / known-benign material (e.g. NCMEC / Project VIC /
+        # CAID).  When set, concept queries may pass lookup_from=LookupLocation(
+        # collection=<this>, vector=<name>) so the case collection never has to
+        # ingest those vectors — a chain-of-custody boundary.  Unset by default.
+        self.reference_collection: str | None = (
+            os.environ.get("SFN_REFERENCE_COLLECTION") or None
+        )
+
         # --- Vector visualization ---
         # Maximum number of points fetched per collection for the 3-D background viz.
         self.viz_max_points: int = self._parse_int("SFN_VIZ_MAX_POINTS", 5000)

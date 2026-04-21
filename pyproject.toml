@@ -23,6 +23,7 @@ dependencies = [
 [project.scripts]
 sfn = "scalar_forensic.cli:main"
 sfn-web = "scalar_forensic.web.app:start"
+sfn-triage = "scalar_forensic.triage_cli:main"
 
 [dependency-groups]
 dev = [

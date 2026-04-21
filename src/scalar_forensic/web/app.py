@@ -27,7 +27,9 @@ from PIL import Image, ImageDraw, UnidentifiedImageError
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
+from scalar_forensic.concepts import Concept, ConceptStore
 from scalar_forensic.config import ENV_ALLOW_ONLINE, Settings
+from scalar_forensic.discovery import FusedHit, run_triage
 from scalar_forensic.embedder import (
     _SSCD_INPUT_SIZE,
     _open_rgb,
@@ -1023,6 +1025,230 @@ async def points3d() -> JSONResponse:
     Set ``SFN_VIZ_MAX_POINTS=0`` to disable the visualization entirely.
     """
     return JSONResponse(_points3d_cache or {"sscd": [], "dino": []})
+
+
+# ---------------------------------------------------------------------------
+# Concept Triage — investigator-in-the-loop Discovery
+# ---------------------------------------------------------------------------
+
+
+def _concept_store() -> ConceptStore:
+    """Construct a fresh :class:`ConceptStore` per request.
+
+    Mirrors the ``QdrantClient(...)`` pattern used by ``query_semantic_stats``
+    and the thumbnail route — cheap to re-create, avoids cross-request state,
+    and means Settings() is honoured for every call (allowing env-var overrides
+    at runtime without a restart).
+    """
+    settings = Settings()
+    client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+    return ConceptStore(client, settings.concepts_collection)
+
+
+def _concept_to_json(concept: Concept) -> dict:
+    return {
+        "concept_id": concept.concept_id,
+        "name": concept.name,
+        "positive_ids": list(concept.positive_ids),
+        "negative_ids": list(concept.negative_ids),
+        "target_id": concept.target_id,
+        "polarity": concept.polarity,
+        "notes": concept.notes,
+        "created_at": concept.created_at,
+        "updated_at": concept.updated_at,
+    }
+
+
+def _fused_hit_to_json(hit: FusedHit) -> dict:
+    payload = hit.payload or {}
+    return {
+        "point_id": hit.point_id,
+        "matched_modes": list(hit.matched_modes),
+        "triplet_score_dino": hit.triplet_score_dino,
+        "triplet_score_sscd": hit.triplet_score_sscd,
+        "cosine_margin_dino": hit.cosine_margin_dino,
+        "cosine_margin_sscd": hit.cosine_margin_sscd,
+        "fused_triplet_score": hit.fused_triplet_score,
+        "fused_cosine_margin": hit.fused_cosine_margin,
+        "path": payload.get("image_path", ""),
+        "image_hash": payload.get("image_hash"),
+        "exif": payload.get("exif"),
+        "exif_geo_data": payload.get("exif_geo_data"),
+        "is_video_frame": bool(payload.get("is_video_frame")),
+        "video_path": payload.get("video_path"),
+        "video_hash": payload.get("video_hash"),
+        "frame_timecode_ms": payload.get("frame_timecode_ms"),
+    }
+
+
+@app.get("/api/concepts")
+async def list_concepts() -> JSONResponse:
+    try:
+        store = await asyncio.to_thread(_concept_store)
+        concepts = await asyncio.to_thread(store.list)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+    return JSONResponse({"concepts": [_concept_to_json(c) for c in concepts]})
+
+
+@app.post("/api/concept")
+async def create_concept(
+    name: str = Form(...),
+    positive_ids: str = Form(default=""),
+    negative_ids: str = Form(default=""),
+    target_id: str = Form(default=""),
+    polarity: str = Form(default="incriminating"),
+    notes: str = Form(default=""),
+) -> JSONResponse:
+    """Create or replace a concept by *name*.
+
+    ``positive_ids`` / ``negative_ids`` are comma-separated Qdrant point IDs
+    (UUID strings or integers).  ``target_id`` is optional.  ``polarity`` is
+    ``"incriminating"`` (default) or ``"exculpatory"`` — metadata only; it
+    does not swap pair roles at query time.  Pass ``reverse=true`` to the
+    triage endpoint to do that.
+    """
+    if polarity not in ("incriminating", "exculpatory"):
+        raise HTTPException(
+            status_code=400,
+            detail="polarity must be 'incriminating' or 'exculpatory'",
+        )
+    pos = [x.strip() for x in positive_ids.split(",") if x.strip()]
+    neg = [x.strip() for x in negative_ids.split(",") if x.strip()]
+    tgt: str | None = target_id.strip() or None
+    try:
+        store = await asyncio.to_thread(_concept_store)
+        concept = await asyncio.to_thread(
+            store.create,
+            name,
+            positive_ids=pos,
+            negative_ids=neg,
+            target_id=tgt,
+            polarity=polarity,  # type: ignore[arg-type]
+            notes=notes,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+    return JSONResponse(_concept_to_json(concept))
+
+
+@app.get("/api/concept/{concept_id}")
+async def get_concept(concept_id: str) -> JSONResponse:
+    try:
+        store = await asyncio.to_thread(_concept_store)
+        concept = await asyncio.to_thread(store.get, concept_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+    if concept is None:
+        raise HTTPException(status_code=404, detail="Concept not found")
+    return JSONResponse(_concept_to_json(concept))
+
+
+@app.post("/api/concept/{concept_id}/mark")
+async def mark_concept(
+    concept_id: str,
+    point_id: str = Form(...),
+    role: str = Form(...),
+) -> JSONResponse:
+    """Append a single ``(point_id, "positive"|"negative")`` to the concept.
+
+    Used by result-card "+ incriminating" / "− benign" buttons so the
+    concept refines in place during review.  A point already present in
+    the other role is moved — the latest mark wins.
+    """
+    if role not in ("positive", "negative"):
+        raise HTTPException(
+            status_code=400, detail="role must be 'positive' or 'negative'"
+        )
+    try:
+        store = await asyncio.to_thread(_concept_store)
+        concept = await asyncio.to_thread(store.mark, concept_id, point_id, role)  # type: ignore[arg-type]
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Concept not found") from None
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+    return JSONResponse(_concept_to_json(concept))
+
+
+@app.post("/api/concept/{concept_id}/unmark")
+async def unmark_concept(
+    concept_id: str,
+    point_id: str = Form(...),
+) -> JSONResponse:
+    try:
+        store = await asyncio.to_thread(_concept_store)
+        concept = await asyncio.to_thread(store.unmark, concept_id, point_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Concept not found") from None
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+    return JSONResponse(_concept_to_json(concept))
+
+
+@app.delete("/api/concept/{concept_id}")
+async def delete_concept(concept_id: str) -> JSONResponse:
+    try:
+        store = await asyncio.to_thread(_concept_store)
+        existed = await asyncio.to_thread(store.delete, concept_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+    if not existed:
+        raise HTTPException(status_code=404, detail="Concept not found")
+    return JSONResponse({"concept_id": concept_id, "deleted": True})
+
+
+@app.post("/api/triage")
+async def triage(
+    concept_id: str = Form(...),
+    mode: str = Form(default="dual"),
+    limit: int = Form(default=50, ge=1, le=500),
+    reverse: bool = Form(default=False),
+) -> JSONResponse:
+    """Run a Concept-Triage query.
+
+    Returns hits ranked by Qdrant's triplet-satisfaction score (integer
+    number of context pairs where the candidate is closer to the
+    positive than the negative) fused across the configured named
+    vectors.  Items appearing in both the ``dino`` and the ``sscd``
+    rankings are prioritised — independent-embedding agreement is a
+    strong triage signal.
+    """
+    if mode not in ("dino", "sscd", "dual"):
+        raise HTTPException(
+            status_code=400, detail="mode must be 'dino', 'sscd', or 'dual'"
+        )
+    settings = Settings()
+    try:
+        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+        store = ConceptStore(client, settings.concepts_collection)
+        concept = await asyncio.to_thread(store.get, concept_id)
+        if concept is None:
+            raise HTTPException(status_code=404, detail="Concept not found")
+        hits = await asyncio.to_thread(
+            run_triage,
+            client,
+            settings.collection,
+            concept,
+            mode=mode,  # type: ignore[arg-type]
+            limit=limit,
+            reverse=reverse,
+            reference_collection=settings.reference_collection,
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+    return JSONResponse(
+        {
+            "concept": _concept_to_json(concept),
+            "mode": mode,
+            "reverse": reverse,
+            "limit": limit,
+            "hits": [_fused_hit_to_json(h) for h in hits],
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
