@@ -1709,3 +1709,445 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   image-rendering: pixelated;
   cursor: zoom-in;
 }
+
+/* ── Concept Triage ─────────────────────────────────────────────────────── */
+
+/* Mode switch pill in stats bar */
+.mode-switch {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2px;
+}
+.mode-switch-btn {
+  padding: 3px 10px;
+  border-radius: calc(var(--radius) - 1px);
+  border: none;
+  background: transparent;
+  color: var(--text2);
+  font-size: 11px;
+  font-family: var(--display);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+  white-space: nowrap;
+}
+.mode-switch-btn.active {
+  background: var(--border2);
+  color: var(--text);
+}
+.mode-switch-btn:hover:not(.active) {
+  color: var(--text);
+  background: var(--surface2);
+}
+
+/* Concept selector in stats bar (search mode) */
+.stats-concept-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text2);
+  flex-shrink: 0;
+}
+.stats-concept-bar select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  max-width: 150px;
+}
+.stats-concept-bar select:focus { outline: none; border-color: var(--accent); }
+.stats-concept-label {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Triage 4-panel layout (same grid as results-layout) */
+.triage-layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 230px 1fr 1fr 270px;
+  grid-template-rows: 1fr;
+  gap: 0;
+  overflow: hidden;
+  border-top: 1px solid var(--border);
+}
+
+/* Concept list */
+.concept-list { overflow-y: auto; }
+.concept-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  transition: background 0.1s;
+}
+.concept-item:hover { background: var(--surface2); }
+.concept-item.selected {
+  background: rgba(232,147,32,0.07);
+  border-left: 2px solid var(--accent);
+}
+.concept-item-body { flex: 1; min-width: 0; }
+.concept-item-name {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+.concept-item-counts {
+  font-size: 10px;
+  color: var(--muted);
+  font-family: var(--mono);
+  margin-top: 1px;
+}
+.concept-item-del {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 2px;
+  font-size: 11px;
+  opacity: 0;
+  flex-shrink: 0;
+  transition: opacity 0.1s, color 0.1s;
+}
+.concept-item:hover .concept-item-del { opacity: 1; }
+.concept-item-del:hover { color: var(--danger) !important; }
+
+/* Polarity dot */
+.polarity-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.polarity-dot.incriminating { background: var(--danger); }
+.polarity-dot.exculpatory   { background: var(--success); }
+
+/* Concept create form */
+.concept-create-form {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+}
+.concept-form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 5px;
+}
+.concept-form-label {
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.concept-form-input,
+.concept-form-textarea,
+.concept-form-select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: var(--radius);
+  font-family: var(--body);
+  width: 100%;
+}
+.concept-form-input:focus,
+.concept-form-textarea:focus,
+.concept-form-select:focus { outline: none; border-color: var(--accent); }
+.concept-form-textarea { resize: vertical; min-height: 36px; font-family: var(--mono); font-size: 10px; }
+.concept-form-actions { display: flex; gap: 4px; margin-top: 6px; }
+.concept-form-error { color: var(--danger); font-size: 10px; margin-top: 4px; }
+
+/* Triage run controls */
+.triage-run-controls {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+}
+.triage-mode-btns {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+.triage-mode-btn {
+  flex: 1;
+  padding: 3px 0;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text2);
+  font-size: 10px;
+  font-family: var(--display);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all 0.1s;
+}
+.triage-mode-btn.active {
+  background: rgba(232,147,32,0.1);
+  color: var(--accent);
+  border-color: rgba(232,147,32,0.3);
+}
+.triage-mode-btn:hover:not(.active) {
+  background: var(--surface2);
+  color: var(--text);
+}
+.triage-reverse-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: var(--text2);
+  cursor: pointer;
+  user-select: none;
+}
+.triage-reverse-row input[type=checkbox] { cursor: pointer; accent-color: var(--accent); }
+.triage-error-msg {
+  font-size: 11px;
+  color: var(--danger);
+  margin-top: 6px;
+  line-height: 1.4;
+}
+.triage-running-msg {
+  padding: 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* Concept editor panel */
+.concept-editor-inner { overflow-y: auto; flex: 1; padding-bottom: 8px; }
+.concept-editor-hdr {
+  padding: 10px 14px 4px;
+}
+.concept-editor-name {
+  font-size: 14px;
+  font-family: var(--display);
+  font-weight: 700;
+  color: var(--text);
+}
+.concept-editor-meta {
+  font-size: 11px;
+  color: var(--text2);
+  margin-top: 2px;
+}
+.concept-section {
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.concept-section-hdr {
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.concept-examples-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-height: 20px;
+}
+.concept-example-cell {
+  position: relative;
+  width: 44px;
+  height: 44px;
+}
+.concept-example-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  display: block;
+}
+.concept-example-img:hover { border-color: var(--accent); }
+.concept-example-unmark {
+  position: absolute;
+  top: -5px; right: -5px;
+  background: var(--danger);
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  width: 14px; height: 14px;
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+  cursor: pointer;
+  display: none;
+  padding: 0;
+}
+.concept-example-cell:hover .concept-example-unmark { display: block; }
+.concept-empty-msg {
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+}
+.concept-notes-txt {
+  font-size: 11px;
+  color: var(--text2);
+  line-height: 1.5;
+  word-break: break-word;
+}
+.concept-target-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text2);
+}
+.concept-target-id {
+  font-family: var(--mono);
+  font-size: 10px;
+  background: var(--surface2);
+  padding: 2px 5px;
+  border-radius: 2px;
+  color: var(--text);
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Triage results (Panel 4) */
+.triage-hit-card {
+  display: grid;
+  grid-template-columns: 58px 1fr;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.1s;
+  border-left: 2px solid transparent;
+}
+.triage-hit-card:hover { background: var(--surface2); }
+.triage-hit-card.selected {
+  background: rgba(232,147,32,0.05);
+  border-left-color: var(--accent);
+}
+.triage-hit-card.mark-pos { border-left-color: var(--success); }
+.triage-hit-card.mark-neg { border-left-color: var(--danger); }
+.triage-hit-thumb {
+  width: 46px; height: 46px;
+  object-fit: cover;
+  border-radius: 3px;
+  align-self: center;
+  margin: 6px 0 6px 8px;
+  display: block;
+}
+.triage-hit-body {
+  padding: 5px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  justify-content: center;
+  min-width: 0;
+}
+.triage-hit-scores { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.triage-score-num {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--accent);
+  min-width: 18px;
+  text-align: right;
+  flex-shrink: 0;
+}
+.triage-score-num.zero { color: var(--muted); }
+.badge-dino { background: rgba(74,158,224,0.1);  color: var(--semantic); border: 1px solid rgba(74,158,224,0.2); }
+.badge-sscd { background: rgba(232,147,32,0.1);  color: var(--altered);  border: 1px solid rgba(232,147,32,0.2); }
+.badge-dual { background: rgba(46,204,113,0.1);  color: var(--success);  border: 1px solid rgba(46,204,113,0.25); }
+.triage-hit-path {
+  font-size: 11px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.triage-hit-dir {
+  font-size: 10px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.triage-mark-row { display: flex; gap: 3px; margin-top: 2px; }
+.triage-mark-btn {
+  padding: 1px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  font-size: 9px;
+  font-family: var(--display);
+  font-weight: 600;
+  cursor: pointer;
+  background: transparent;
+  transition: all 0.1s;
+}
+.triage-mark-btn.pos-btn { color: var(--success); border-color: rgba(46,204,113,0.3); }
+.triage-mark-btn.pos-btn:hover,
+.triage-mark-btn.pos-btn.is-active { background: rgba(46,204,113,0.15); border-color: var(--success); }
+.triage-mark-btn.neg-btn { color: var(--danger); border-color: rgba(192,57,43,0.3); }
+.triage-mark-btn.neg-btn:hover,
+.triage-mark-btn.neg-btn.is-active { background: rgba(192,57,43,0.15); border-color: var(--danger); }
+
+/* Triage selected hit detail (Panel 3) */
+.triage-detail-scores {
+  padding: 8px 14px;
+}
+.triage-detail-score-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.triage-detail-triplet {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 20px;
+  color: var(--accent);
+  min-width: 28px;
+  text-align: right;
+}
+.triage-detail-triplet.zero { color: var(--muted); }
+.triage-detail-margin {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text2);
+}
+
+/* Hit-card mark buttons in search mode */
+.hit-mark-row {
+  display: flex;
+  gap: 3px;
+  margin-top: 3px;
+}
+.hit-mark-btn {
+  padding: 1px 5px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  font-size: 9px;
+  font-family: var(--display);
+  font-weight: 600;
+  cursor: pointer;
+  background: transparent;
+  transition: all 0.1s;
+}
+.hit-mark-btn.pos-btn { color: var(--success); border-color: rgba(46,204,113,0.3); }
+.hit-mark-btn.pos-btn:hover,
+.hit-mark-btn.pos-btn.is-active { background: rgba(46,204,113,0.15); border-color: var(--success); }
+.hit-mark-btn.neg-btn { color: var(--danger); border-color: rgba(192,57,43,0.3); }
+.hit-mark-btn.neg-btn:hover,
+.hit-mark-btn.neg-btn.is-active { background: rgba(192,57,43,0.15); border-color: var(--danger); }
+.hit-mark-spinner { font-size: 9px; color: var(--muted); }

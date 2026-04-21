@@ -1252,6 +1252,75 @@ async def triage(
 
 
 # ---------------------------------------------------------------------------
+# Point-ID and payload lookup (bridge from image hashes to Qdrant IDs)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/point-id")
+async def lookup_point_id(image_hash: str) -> JSONResponse:
+    """Return the Qdrant point ID for an image identified by its SHA-256 hash.
+
+    Used by the Concept Triage UI to translate search-result image hashes
+    (which the operator can see) into Qdrant point IDs (which concepts need).
+    """
+    settings = Settings()
+
+    def _scroll():
+        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+        records, _ = client.scroll(
+            collection_name=settings.collection,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="image_hash", match=MatchValue(value=image_hash))]
+            ),
+            limit=1,
+            with_payload=False,
+            with_vectors=False,
+        )
+        return records
+
+    try:
+        records = await asyncio.to_thread(_scroll)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+    if not records:
+        raise HTTPException(status_code=404, detail="No indexed point found for that hash")
+    return JSONResponse({"point_id": str(records[0].id)})
+
+
+@app.get("/api/point-payload")
+async def get_point_payload(point_id: str) -> JSONResponse:
+    """Return image metadata (path + hash) for a Qdrant point by its ID.
+
+    Used by the Concept Triage UI to render thumbnails for concept example
+    IDs that were not seen in the current triage run (e.g. IDs that were
+    added via the CLI or pasted into the create form).
+    """
+    settings = Settings()
+
+    def _retrieve():
+        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+        return client.retrieve(
+            collection_name=settings.collection,
+            ids=[point_id],
+            with_payload=["image_hash", "image_path"],
+            with_vectors=False,
+        )
+
+    try:
+        records = await asyncio.to_thread(_retrieve)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+    if not records:
+        raise HTTPException(status_code=404, detail="Point not found")
+    payload = records[0].payload or {}
+    return JSONResponse({
+        "point_id": point_id,
+        "image_hash": payload.get("image_hash"),
+        "image_path": payload.get("image_path"),
+    })
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
