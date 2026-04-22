@@ -8,7 +8,7 @@ All Qdrant I/O is stubbed so no real server is required.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -183,7 +183,9 @@ class TestTriage:
         tag = _tag(pos=["p1"], neg=["n1"])
         from scalar_forensic.discovery import DiscoveryHit
 
-        hit = DiscoveryHit(point_id="pt-1", triplet_score=3, cosine_margin=0.9, payload={}, vector_name="dino")
+        hit = DiscoveryHit(
+            point_id="pt-1", triplet_score=3, cosine_margin=0.9, payload={}, vector_name="dino"
+        )
         with (
             patch("scalar_forensic.web.app.Settings"),
             patch("scalar_forensic.web.app.QdrantClient"),
@@ -229,7 +231,9 @@ class TestExplore:
         tag = _tag(pos=["p1"], neg=["n1"])
         from scalar_forensic.discovery import DiscoveryHit
 
-        hit = DiscoveryHit(point_id="pt-2", triplet_score=None, cosine_margin=0.5, payload={}, vector_name="dino")
+        hit = DiscoveryHit(
+            point_id="pt-2", triplet_score=None, cosine_margin=0.5, payload={}, vector_name="dino"
+        )
         with (
             patch("scalar_forensic.web.app.Settings"),
             patch("scalar_forensic.web.app.QdrantClient"),
