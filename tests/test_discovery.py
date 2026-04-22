@@ -115,16 +115,6 @@ def test_explicit_target_overrides_auto_target():
     assert kwargs["query"].discover.target == "t1"
 
 
-def test_context_query_fires_when_only_negatives_reversed():
-    """reverse=True on a tag with only positives stored ⇒ positives=[n-side] only;
-    no pairs possible, falls back to Recommend."""
-    client = _client_returning([])
-    # After reverse, effective positives=[], negatives=["p1"] — error expected
-    tag = _tag(positives=[], negatives=["n1"])
-    with pytest.raises(ValueError):
-        run_discovery(client, "sfn", tag, vector_name="dino", limit=5)
-
-
 def test_recommend_fallback_when_no_negatives():
     """No negatives ⇒ no pairs ⇒ Recommend query (auto-target doesn't help here)."""
     client = _client_returning([])

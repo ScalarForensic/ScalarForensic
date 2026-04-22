@@ -1817,6 +1817,7 @@ function sfn() {
     // Tag store (shared between modes)
     concepts: [],
     conceptsLoading: false,
+    _conceptsPromise: null,
     selectedConceptId: null,
 
     // Triage run state
@@ -2709,11 +2710,14 @@ function sfn() {
 
     async loadConcepts() {
       this.conceptsLoading = true;
-      try {
-        const d = await fetch('/api/tags').then(r => r.json());
-        this.concepts = d.tags ?? [];
-      } catch { /* Qdrant may not be up yet */ }
-      finally { this.conceptsLoading = false; }
+      this._conceptsPromise = (async () => {
+        try {
+          const d = await fetch('/api/tags').then(r => r.json());
+          this.concepts = d.tags ?? [];
+        } catch { /* Qdrant may not be up yet */ }
+        finally { this.conceptsLoading = false; this._conceptsPromise = null; }
+      })();
+      await this._conceptsPromise;
     },
 
     async createConcept() {
@@ -2816,6 +2820,10 @@ function sfn() {
 
     async runTriage() {
       if (!this.selectedConceptId) return;
+      if (this.triageSource === 'query' && !this.sessionId) {
+        this.triageError = 'No query session active. Upload a query image first.';
+        return;
+      }
       this.triageRunning = true;
       this.triageError = null;
       this.triageResults = [];
@@ -3217,7 +3225,10 @@ function sfn() {
 
     // Load tag classifications for current search results + query image
     async loadHitTags() {
-      if (!this.concepts.length) return;
+      if (!this.concepts.length) {
+        if (this._conceptsPromise) await this._conceptsPromise;
+        if (!this.concepts.length) return;
+      }
       const hashes = this.results.flatMap(r => r.hits.map(h => h.image_hash).filter(Boolean));
       if (this.queryMeta?.hash_sha256) hashes.push(this.queryMeta.hash_sha256);
 

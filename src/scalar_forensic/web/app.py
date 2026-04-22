@@ -1336,7 +1336,14 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="JSON body must be an object")
-    image_hashes: list[str] = body.get("image_hashes") or []
+    raw_hashes = body.get("image_hashes")
+    if raw_hashes is None:
+        return JSONResponse({"by_hash": {}})
+    if not isinstance(raw_hashes, list) or not all(isinstance(h, str) for h in raw_hashes):
+        raise HTTPException(status_code=400, detail="'image_hashes' must be a list of strings")
+    if len(raw_hashes) > 256:
+        raise HTTPException(status_code=400, detail="'image_hashes' must contain at most 256 items")
+    image_hashes: list[str] = raw_hashes
     if not image_hashes:
         return JSONResponse({"by_hash": {}})
 

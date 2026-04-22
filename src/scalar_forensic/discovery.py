@@ -25,8 +25,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
-
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     ContextPair,
@@ -44,16 +42,6 @@ from qdrant_client.models import (
 )
 
 from scalar_forensic.tags import Tag
-
-
-@runtime_checkable
-class ConceptLike(Protocol):
-    """Structural interface shared by Concept and Tag."""
-
-    positive_ids: list[str | int]
-    negative_ids: list[str | int]
-    target_id: str | int | None
-
 
 logger = logging.getLogger(__name__)
 
@@ -253,9 +241,10 @@ def run_discovery(
                 "or a target).  Add a positive example or a target_id, or use "
                 "reverse=True if this tag is exculpatory."
             )
+        pos_list = [target, *positives] if target is not None else positives
         query = RecommendQuery(
             recommend=RecommendInput(
-                positive=[target, *positives] if target is not None else positives,
+                positive=list(dict.fromkeys(pos_list)),
                 negative=None,
                 strategy=_DEFAULT_RECOMMEND_STRATEGY,
             )
