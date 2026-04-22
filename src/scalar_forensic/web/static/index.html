@@ -3241,12 +3241,14 @@ function sfn() {
       if (this.queryMeta?.hash_sha256) hashes.push(this.queryMeta.hash_sha256);
 
       const fetches = [];
-      if (hashes.length) {
+      const uniqueHashes = [...new Set(hashes)];
+      for (let i = 0; i < uniqueHashes.length; i += 256) {
+        const batch = uniqueHashes.slice(i, i + 256);
         fetches.push(
           fetch('/api/tags/classify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ image_hashes: [...new Set(hashes)] }),
+            body: JSON.stringify({ image_hashes: batch }),
           }).then(r => r.ok ? r.json() : {}).then(d => d.by_hash ?? {}).catch(() => ({}))
         );
       }

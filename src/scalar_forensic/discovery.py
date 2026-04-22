@@ -222,18 +222,11 @@ def run_discovery(
     pairs = _build_context_pairs(positives, negatives)
 
     if pairs:
-        # Qdrant distinguishes two context-based query kinds:
-        #   • ``DiscoverQuery`` requires a non-null ``target`` (an anchor).  It
-        #     returns points similar to the target AND satisfying the triplet
-        #     constraints encoded by the context pairs.
-        #   • ``ContextQuery`` is context-only (no target).  It returns points
-        #     ranked purely by triplet-satisfaction over the pairs.
-        # The auto-target logic above ensures target is set whenever a positive
-        # exists, so ContextQuery is only reached on negative-only (reversed) tags.
-        if target is not None:
-            query = DiscoverQuery(discover=DiscoverInput(target=target, context=pairs))
-        else:
-            query = ContextQuery(context=pairs)
+        # _build_context_pairs returns non-empty only when both positives and negatives
+        # are present; the auto-anchor above always sets target when positives exist,
+        # so target is guaranteed non-None here.
+        assert target is not None, "non-empty context pairs require a target anchor"
+        query = DiscoverQuery(discover=DiscoverInput(target=target, context=pairs))
     else:
         if not positives and target is None:
             raise ValueError(

@@ -906,6 +906,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "av" },
+    { name = "numpy" },
     { name = "pillow" },
     { name = "python-dotenv" },
     { name = "qdrant-client" },
@@ -937,6 +938,7 @@ web = [
 [package.metadata]
 requires-dist = [
     { name = "av", specifier = ">=12.0" },
+    { name = "numpy", specifier = ">=1.24" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "qdrant-client", specifier = ">=1.9" },

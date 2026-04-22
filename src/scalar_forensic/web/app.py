@@ -1375,6 +1375,8 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
             h = (record.payload or {}).get("image_hash")
             if isinstance(h, str) and h in unique_hashes and h not in hash_to_pid:
                 hash_to_pid[h] = str(record.id)
+            if len(hash_to_pid) == len(unique_hashes):
+                break
 
         if not hash_to_pid:
             return {h: [] for h in image_hashes}
