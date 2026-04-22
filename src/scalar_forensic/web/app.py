@@ -28,14 +28,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from scalar_forensic.config import ENV_ALLOW_ONLINE, Settings
-from scalar_forensic.discovery import DiscoveryHit, _MAX_CONTEXT_PAIRS, run_discovery, run_explore
-from scalar_forensic.query_eval import QueryEvalHit, score_query_entries
-from scalar_forensic.tags import Tag, TagStore
-
-# Cosine similarity floor used when a tag has no negatives and Qdrant falls
-# back to Recommendation (triplet_score is None).  DINOv2 cosine ≥ 0.5
-# reliably indicates semantic category membership.
-_RECOMMEND_COSINE_THRESHOLD = 0.5
+from scalar_forensic.discovery import _MAX_CONTEXT_PAIRS, DiscoveryHit, run_discovery, run_explore
 from scalar_forensic.embedder import (
     _SSCD_INPUT_SIZE,
     _open_rgb,
@@ -45,6 +38,8 @@ from scalar_forensic.embedder import (
     write_thumbnail,
 )
 from scalar_forensic.indexer import qdrant_scroll_all
+from scalar_forensic.query_eval import QueryEvalHit, score_query_entries
+from scalar_forensic.tags import Tag, TagStore
 from scalar_forensic.video import (
     VIDEO_EXTENSIONS,
     extract_frame_at,
@@ -61,6 +56,11 @@ from scalar_forensic.web.pipeline import (
     query_session,
 )
 from scalar_forensic.web.session import FileEntry, create_session, get_session
+
+# Cosine similarity floor used when a tag has no negatives and Qdrant falls
+# back to Recommendation (triplet_score is None).  DINOv2 cosine ≥ 0.5
+# reliably indicates semantic category membership.
+_RECOMMEND_COSINE_THRESHOLD = 0.5
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _VIZ_JS_SRC = (_STATIC_DIR / "viz.js").read_text(encoding="utf-8")
@@ -1121,7 +1121,9 @@ async def create_tag(
     tgt: str | None = target_id.strip() or None
     try:
         def _run():
-            return _tag_store().create(name, positive_ids=pos, negative_ids=neg, target_id=tgt, notes=notes)
+            return _tag_store().create(
+                name, positive_ids=pos, negative_ids=neg, target_id=tgt, notes=notes
+            )
         tag = await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
@@ -1366,7 +1368,9 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
             if image_hash is None:
                 continue
             vecs = rec.vector or {}
-            dino_vec = list(vecs.get("dino")) if isinstance(vecs, dict) and vecs.get("dino") else None
+            dino_vec = (
+                list(vecs.get("dino")) if isinstance(vecs, dict) and vecs.get("dino") else None
+            )
             entries.append((pid, image_hash, dino_vec, None))
 
         by_hash: dict[str, list[str]] = {h: [] for h in image_hashes}
@@ -1423,7 +1427,9 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
 
             hits = score_query_entries(entries, pos_dino, neg_dino, limit=len(entries))
             for hit in hits:
-                if not _hit_passes_classify_threshold(hit.triplet_score, hit.cosine_margin, threshold):
+                if not _hit_passes_classify_threshold(
+                    hit.triplet_score, hit.cosine_margin, threshold
+                ):
                     continue
                 # hit.filename holds the image_hash (we used it as the filename field)
                 by_hash[hit.filename].append(tag.name)
@@ -1526,7 +1532,9 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
                 limit=len(entries),
             )
             for hit in hits:
-                if not _hit_passes_classify_threshold(hit.triplet_score, hit.cosine_margin, threshold):
+                if not _hit_passes_classify_threshold(
+                    hit.triplet_score, hit.cosine_margin, threshold
+                ):
                     continue
                 image_hash = file_id_to_hash.get(hit.file_id)
                 if image_hash:
@@ -1617,7 +1625,10 @@ async def triage_query_images(
             if not f.is_video and f.dino_embedding
         ]
         all_hits = score_query_entries(entries, pos_dino, neg_dino, limit=limit)
-        hits = [h for h in all_hits if _hit_passes_classify_threshold(h.triplet_score, h.cosine_margin, threshold)]
+        hits = [
+            h for h in all_hits
+            if _hit_passes_classify_threshold(h.triplet_score, h.cosine_margin, threshold)
+        ]
         return tag, hits
 
     try:
