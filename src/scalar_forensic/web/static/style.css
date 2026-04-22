@@ -316,6 +316,24 @@ header::after {
 .btn-primary:hover { background: var(--surface); box-shadow: 0 0 12px rgba(232,147,32,0.2); }
 .btn-primary:disabled { opacity: 0.35; cursor: not-allowed; }
 
+.drop-zone-triage-link {
+  margin-top: 12px;
+}
+
+.btn-ghost {
+  background: none;
+  border: none;
+  color: var(--text2);
+  font-family: var(--display);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  opacity: 0.65;
+  transition: opacity 0.15s, color 0.15s;
+  padding: 4px 8px;
+}
+.btn-ghost:hover { opacity: 1; color: var(--accent); }
+
 /* ── Drop-zone progress overlay ── */
 .drop-zone-progress {
   display: flex;

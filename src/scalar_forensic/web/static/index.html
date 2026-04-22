@@ -546,6 +546,9 @@
             :disabled="pendingFiles.length === 0 || selectedModes.length === 0"
             @click="startAnalysis()">▶ Analyze</button>
         </div>
+        <div class="drop-zone-triage-link">
+          <button class="btn-ghost" @click.stop="enterTriageDirect()">or go straight to Triage →</button>
+        </div>
       </div>
 
       <input type="file" multiple accept="image/*,video/*,.mp4,.avi,.mov,.mkv,.wmv,.flv,.webm,.m4v,.mpg,.mpeg,.3gp,.ts,.mts" style="display:none" x-ref="fileInput"
@@ -2706,6 +2709,11 @@ function sfn() {
     async switchToTriage() {
       this.appMode = 'triage';
       if (!this.concepts.length && !this.conceptsLoading) await this.loadConcepts();
+    },
+
+    async enterTriageDirect() {
+      this.phase = 'results';
+      await this.switchToTriage();
     },
 
     async loadConcepts() {
