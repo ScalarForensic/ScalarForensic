@@ -889,6 +889,26 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .badge-altered  { background: rgba(232,147,32,0.1);  color: var(--altered); border: 1px solid rgba(232,147,32,0.2); }
 .badge-semantic { background: rgba(74,158,224,0.1);  color: var(--semantic);border: 1px solid rgba(74,158,224,0.2); }
 
+/* ── Tag strip (below image box in query and match panels) ── */
+.tag-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(251,191,36,0.04);
+}
+.tag-strip-badge {
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .03em;
+  background: rgba(251,191,36,0.15);
+  color: #f59e0b;
+  border: 1px solid rgba(251,191,36,0.35);
+}
+
 .pill-group {
   display: flex;
   flex-direction: column;
@@ -994,6 +1014,8 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 }
 .hit-card:hover   { border-color: var(--border2); background: #1f242e; }
 .hit-card.selected { border-color: var(--accent); background: rgba(232,147,32,0.05); }
+.hit-card.mark-pos { border-left: 3px solid var(--success); }
+.hit-card.mark-neg { border-left: 3px solid var(--danger); }
 
 .hit-thumb {
   width: 80px;
@@ -1746,7 +1768,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 }
 
 /* Concept selector in stats bar (search mode) */
-.stats-concept-bar {
+.stats-tag-bar {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1754,7 +1776,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   color: var(--text2);
   flex-shrink: 0;
 }
-.stats-concept-bar select {
+.stats-tag-bar select {
   background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text);
@@ -1764,8 +1786,8 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   cursor: pointer;
   max-width: 150px;
 }
-.stats-concept-bar select:focus { outline: none; border-color: var(--accent); }
-.stats-concept-label {
+.stats-tag-bar select:focus { outline: none; border-color: var(--accent); }
+.stats-tag-label {
   color: var(--muted);
   font-size: 10px;
   text-transform: uppercase;
@@ -1784,8 +1806,8 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 }
 
 /* Concept list */
-.concept-list { overflow-y: auto; }
-.concept-item {
+.tag-list { overflow-y: auto; }
+.tag-item {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1794,26 +1816,26 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   border-bottom: 1px solid var(--border);
   transition: background 0.1s;
 }
-.concept-item:hover { background: var(--surface2); }
-.concept-item.selected {
+.tag-item:hover { background: var(--surface2); }
+.tag-item.selected {
   background: rgba(232,147,32,0.07);
   border-left: 2px solid var(--accent);
 }
-.concept-item-body { flex: 1; min-width: 0; }
-.concept-item-name {
+.tag-item-body { flex: 1; min-width: 0; }
+.tag-item-name {
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--text);
 }
-.concept-item-counts {
+.tag-item-counts {
   font-size: 10px;
   color: var(--muted);
   font-family: var(--mono);
   margin-top: 1px;
 }
-.concept-item-del {
+.tag-item-del {
   background: none;
   border: none;
   color: var(--muted);
@@ -1825,59 +1847,30 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   flex-shrink: 0;
   transition: opacity 0.1s, color 0.1s;
 }
-.concept-item:hover .concept-item-del { opacity: 1; }
-.concept-item-del:hover { color: var(--danger) !important; }
+.tag-item:hover .tag-item-del { opacity: 1; }
+.tag-item-del:hover { color: var(--danger) !important; }
 
-/* Polarity dot */
-.polarity-dot {
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.polarity-dot.incriminating { background: var(--danger); }
-.polarity-dot.exculpatory   { background: var(--success); }
-
-/* Tag membership strip shown below result images */
-.tag-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 3px;
-  padding: 4px 0 2px;
-}
-.tag-strip-badge {
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-size: 10px;
-  font-family: var(--display);
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  background: rgba(147,51,234,0.12);
-  color: #c084fc;
-  border: 1px solid rgba(147,51,234,0.25);
-}
-
-/* Concept create form */
-.concept-create-form {
+/* Tag create form */
+.tag-create-form {
   padding: 8px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--surface2);
 }
-.concept-form-row {
+.tag-form-row {
   display: flex;
   flex-direction: column;
   gap: 3px;
   margin-bottom: 5px;
 }
-.concept-form-label {
+.tag-form-label {
   font-size: 10px;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
-.concept-form-input,
-.concept-form-textarea,
-.concept-form-select {
+.tag-form-input,
+.tag-form-textarea,
+.tag-form-select {
   background: var(--bg);
   border: 1px solid var(--border);
   color: var(--text);
@@ -1887,12 +1880,12 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   font-family: var(--body);
   width: 100%;
 }
-.concept-form-input:focus,
-.concept-form-textarea:focus,
-.concept-form-select:focus { outline: none; border-color: var(--accent); }
-.concept-form-textarea { resize: vertical; min-height: 36px; font-family: var(--mono); font-size: 10px; }
-.concept-form-actions { display: flex; gap: 4px; margin-top: 6px; }
-.concept-form-error { color: var(--danger); font-size: 10px; margin-top: 4px; }
+.tag-form-input:focus,
+.tag-form-textarea:focus,
+.tag-form-select:focus { outline: none; border-color: var(--accent); }
+.tag-form-textarea { resize: vertical; min-height: 36px; font-family: var(--mono); font-size: 10px; }
+.tag-form-actions { display: flex; gap: 4px; margin-top: 6px; }
+.tag-form-error { color: var(--danger); font-size: 10px; margin-top: 4px; }
 
 /* Triage run controls */
 .triage-run-controls {
@@ -1959,26 +1952,26 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 }
 
 /* Concept editor panel */
-.concept-editor-inner { overflow-y: auto; flex: 1; padding-bottom: 8px; }
-.concept-editor-hdr {
+.tag-editor-inner { overflow-y: auto; flex: 1; padding-bottom: 8px; }
+.tag-editor-hdr {
   padding: 10px 14px 4px;
 }
-.concept-editor-name {
+.tag-editor-name {
   font-size: 14px;
   font-family: var(--display);
   font-weight: 700;
   color: var(--text);
 }
-.concept-editor-meta {
+.tag-editor-meta {
   font-size: 11px;
   color: var(--text2);
   margin-top: 2px;
 }
-.concept-section {
+.tag-section {
   padding: 6px 14px;
   border-bottom: 1px solid var(--border);
 }
-.concept-section-hdr {
+.tag-section-hdr {
   font-size: 10px;
   color: var(--muted);
   text-transform: uppercase;
@@ -1988,18 +1981,18 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   align-items: center;
   justify-content: space-between;
 }
-.concept-examples-grid {
+.tag-examples-grid {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
   min-height: 20px;
 }
-.concept-example-cell {
+.tag-example-cell {
   position: relative;
   width: 44px;
   height: 44px;
 }
-.concept-example-img {
+.tag-example-img {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -2008,8 +2001,8 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   cursor: pointer;
   display: block;
 }
-.concept-example-img:hover { border-color: var(--accent); }
-.concept-example-unmark {
+.tag-example-img:hover { border-color: var(--accent); }
+.tag-example-unmark {
   position: absolute;
   top: -5px; right: -5px;
   background: var(--danger);
@@ -2024,26 +2017,26 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   display: none;
   padding: 0;
 }
-.concept-example-cell:hover .concept-example-unmark { display: block; }
-.concept-empty-msg {
+.tag-example-cell:hover .tag-example-unmark { display: block; }
+.tag-empty-msg {
   font-size: 11px;
   color: var(--muted);
   font-style: italic;
 }
-.concept-notes-txt {
+.tag-notes-txt {
   font-size: 11px;
   color: var(--text2);
   line-height: 1.5;
   word-break: break-word;
 }
-.concept-target-row {
+.tag-target-row {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 11px;
   color: var(--text2);
 }
-.concept-target-id {
+.tag-target-id {
   font-family: var(--mono);
   font-size: 10px;
   background: var(--surface2);

@@ -76,15 +76,12 @@ class Settings:
         # --- Qdrant auth (optional) ---
         self.qdrant_api_key: str | None = os.environ.get("SFN_QDRANT_API_KEY") or None
 
-        # --- Concept Triage (Qdrant Discovery API) ---
-        # Sidecar collection storing payload-only points — one per "concept".
-        # A concept is a named set of positive and negative reference point IDs
+        # --- Tag Triage (Qdrant Discovery API) ---
+        # Sidecar collection storing payload-only points — one per "tag".
+        # A tag is a named set of positive and negative reference point IDs
         # (and optionally a target anchor) used as input to Qdrant's Discovery
         # and Recommendation APIs.  Kept in a separate collection from the case
-        # vectors so concepts can outlive any single case and be reused.
-        self.concepts_collection: str = os.environ.get("SFN_CONCEPTS_COLLECTION", "sfn_concepts")
-
-        # Sidecar collection for Tag objects (the web-UI tagging workflow).
+        # vectors so tags can outlive any single case and be reused.
         self.tags_collection: str = os.environ.get("SFN_TAGS_COLLECTION", "sfn_tags")
 
         # Optional read-only reference collection holding vectors of externally

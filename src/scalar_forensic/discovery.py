@@ -2,29 +2,19 @@
 
 Builds :class:`~qdrant_client.models.DiscoverInput` or
 :class:`~qdrant_client.models.RecommendInput` queries from a
-:class:`~scalar_forensic.concepts.Concept` and runs them through the
-unified ``client.query_points`` endpoint against one or both of the
-named vectors already used by ScalarForensic (``dino``, ``sscd``).
-
-The "dual" entry point,
-:func:`run_discovery_dual`, runs the same concept query against both
-named vectors and fuses the rankings — items that appear in *both*
-result sets rank above items that appear in only one, because semantic
-(DINOv2) and copy-detection (SSCD) agreement is a strong signal that
-the candidate really does match the concept rather than being a generic
-visual lookalike.
+:class:`~scalar_forensic.tags.Tag` and runs them through the
+unified ``client.query_points`` endpoint against the DINOv2 (``dino``)
+named vector.  Only DINOv2 is used for semantic triage — SSCD is a
+copy-detector and is not appropriate for category-based tagging.
 
 Scoring semantics
 -----------------
 
-* When the concept has at least one ``(positive, negative)`` pair,
+* When the tag has at least one ``(positive, negative)`` pair,
   Qdrant Discovery is used and the returned ``score`` is an *integer*
   triplet-satisfaction count — for each pair the candidate is closer
   to the positive than the negative, the score increments by one.
-  This is the main triage signal: it is legible to non-technical
-  reviewers ("this candidate satisfies 8 of 10 reference pairs") and
-  does not depend on choosing a cosine threshold.
-* When the concept has only positive examples (or only a target, no
+* When the tag has only positive examples (or only a target, no
   negatives), Qdrant Recommendation is used instead and the returned
   ``score`` is a cosine similarity.  The ``triplet_score`` field on
   the returned :class:`DiscoveryHit` is left as ``None`` in that case
@@ -35,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -52,6 +42,8 @@ from qdrant_client.models import (
     Sample,
     SampleQuery,
 )
+
+from scalar_forensic.tags import Tag
 
 
 @runtime_checkable
@@ -109,25 +101,6 @@ class DiscoveryHit:
     cosine_margin: float
     payload: dict = field(default_factory=dict)
 
-
-@dataclass
-class FusedHit:
-    """One ranked result after fusing DINOv2 and SSCD query results."""
-
-    point_id: str | int
-    # Which vector spaces placed this hit on the positive side of the
-    # boundary.  Length-2 means agreement — a strong signal.
-    matched_modes: list[str]
-    triplet_score_dino: int | None
-    triplet_score_sscd: int | None
-    cosine_margin_dino: float | None
-    cosine_margin_sscd: float | None
-    # The sum of available triplet scores (0 if neither vector used
-    # Discovery).  Used as the primary sort key.
-    fused_triplet_score: int
-    # Max of the two cosine margins; used as the secondary sort key.
-    fused_cosine_margin: float
-    payload: dict = field(default_factory=dict)
 
 
 def _build_context_pairs(
@@ -188,25 +161,24 @@ def _merge_filter(user_filter: Filter | None, exclude: Filter | None) -> Filter 
 
 
 def _resolve_polarity(
-    concept: ConceptLike, reverse: bool
+    tag: Tag, reverse: bool
 ) -> tuple[list[str | int], list[str | int]]:
     """Apply reverse-polarity by swapping positive and negative lists.
 
     Reverse triage turns "more like positives, less like negatives"
     into "more like negatives, less like positives" — used to surface
-    provably-benign material that can be excluded from review.  The
-    concept's stored ``polarity`` field is metadata and does not by
-    itself trigger the swap; callers opt in via the *reverse* flag.
+    provably-benign material that can be excluded from review.  Callers
+    opt in via the *reverse* flag.
     """
     if reverse:
-        return list(concept.negative_ids), list(concept.positive_ids)
-    return list(concept.positive_ids), list(concept.negative_ids)
+        return list(tag.negative_ids), list(tag.positive_ids)
+    return list(tag.positive_ids), list(tag.negative_ids)
 
 
 def run_discovery(
     client: QdrantClient,
     collection: str,
-    concept: ConceptLike,
+    tag: Tag,
     *,
     vector_name: str,
     limit: int = 50,
@@ -215,33 +187,41 @@ def run_discovery(
     reference_collection: str | None = None,
     exclude_references: bool = True,
 ) -> list[DiscoveryHit]:
-    """Run a concept query against a single named vector.
+    """Run a tag query against a single named vector.
 
     Chooses the query kind automatically:
 
-    * Concept has negatives → Discovery (target+context or context-only).
-    * Concept has only positives (and optionally a target) → Recommend.
-    * Concept has neither → raises :class:`ValueError`.
+    * Tag has negatives → Discovery (target+context or context-only).
+    * Tag has only positives (and optionally a target) → Recommend.
+    * Tag has neither → raises :class:`ValueError`.
 
-    When *exclude_references* is True (the default), the concept's own
+    When at least one positive is present and no explicit target is set,
+    the first positive is used as an implicit anchor so DiscoverQuery fires
+    immediately without the user needing to call "Set from hit".
+
+    When *exclude_references* is True (the default), the tag's own
     reference points are filtered out of the result set so the top hits
     are discovered material rather than the examples the investigator
     already labelled.
     """
-    positives, negatives = _resolve_polarity(concept, reverse)
-    target = concept.target_id
+    positives, negatives = _resolve_polarity(tag, reverse)
+    target = tag.target_id
+    # Auto-anchor: use the first positive as implicit target when no
+    # explicit target is set — always fires DiscoverQuery when possible.
+    if target is None and positives:
+        target = positives[0]
 
     if not positives and not negatives and target is None:
         raise ValueError(
-            "Concept has no positive, negative, or target references; "
-            "cannot build a Discovery or Recommend query."
+            f"Tag {tag.tag_id!r} has no positive, negative, or target "
+            "references; cannot build a Discovery or Recommend query."
         )
 
     ref_ids: list[str | int] = []
     if exclude_references:
         ref_ids.extend(positives)
         ref_ids.extend(negatives)
-        if target is not None:
+        if target is not None and target not in ref_ids:
             ref_ids.append(target)
     query_filter = _merge_filter(filter_, _exclude_filter(ref_ids))
 
@@ -256,13 +236,12 @@ def run_discovery(
     if pairs:
         # Qdrant distinguishes two context-based query kinds:
         #   • ``DiscoverQuery`` requires a non-null ``target`` (an anchor).  It
-        #     returns points that are similar to the target AND satisfy the
-        #     triplet constraints encoded by the context pairs.
+        #     returns points similar to the target AND satisfying the triplet
+        #     constraints encoded by the context pairs.
         #   • ``ContextQuery`` is context-only (no target).  It returns points
         #     ranked purely by triplet-satisfaction over the pairs.
-        # Picking the right one here is load-bearing: ``DiscoverInput.target``
-        # is a required field and rejects ``None``, so a context-only concept
-        # MUST go through ``ContextQuery``.
+        # The auto-target logic above ensures target is set whenever a positive
+        # exists, so ContextQuery is only reached on negative-only (reversed) tags.
         if target is not None:
             query = DiscoverQuery(
                 discover=DiscoverInput(target=target, context=pairs)
@@ -272,9 +251,10 @@ def run_discovery(
     else:
         if not positives and target is None:
             raise ValueError(
-                "Concept has only negative references; cannot build a Recommend "
-                "query (Qdrant requires ≥1 positive or a target).  Add a positive "
-                "example or a target_id, or use reverse=True if this concept is exculpatory."
+                f"Tag {tag.tag_id!r} has only negative references; "
+                "cannot build a Recommend query (Qdrant requires ≥1 positive "
+                "or a target).  Add a positive example or a target_id, or use "
+                "reverse=True if this tag is exculpatory."
             )
         query = RecommendQuery(
             recommend=RecommendInput(
@@ -314,105 +294,6 @@ def run_discovery(
             )
         )
     return hits
-
-
-def run_discovery_dual(
-    client: QdrantClient,
-    collection: str,
-    concept: ConceptLike,
-    *,
-    limit: int = 50,
-    filter_: Filter | None = None,
-    reverse: bool = False,
-    reference_collection: str | None = None,
-    vector_names: tuple[str, ...] = ("dino", "sscd"),
-) -> list[FusedHit]:
-    """Run the concept query on multiple named vectors and fuse the rankings.
-
-    Items in *all* per-vector result sets are ranked above items in
-    fewer, because agreement across independent embedding spaces is
-    forensically meaningful: DINOv2 finds semantic cousins, SSCD finds
-    re-encoded / cropped / watermarked variants; an item that both
-    embedding spaces place on the positive side of the concept boundary
-    is a stronger candidate than one that only one space agrees with.
-
-    Fusion order:
-
-    1. ``matched_modes_count`` (how many vector spaces ranked it).
-    2. ``fused_triplet_score`` (sum of per-vector triplet scores).
-    3. ``fused_cosine_margin`` (max of per-vector cosine scores).
-    """
-    by_id: dict[str | int, FusedHit] = {}
-
-    for vec in vector_names:
-        # Each per-vector query pulls 2× the final limit so cross-vector
-        # agreement can still fill the top-K even when the per-vector
-        # rankings disagree in their tails.
-        per_hits = run_discovery(
-            client,
-            collection,
-            concept,
-            vector_name=vec,
-            limit=max(limit * 2, limit),
-            filter_=filter_,
-            reverse=reverse,
-            reference_collection=reference_collection,
-        )
-        for h in per_hits:
-            entry = by_id.get(h.point_id)
-            if entry is None:
-                entry = FusedHit(
-                    point_id=h.point_id,
-                    matched_modes=[],
-                    triplet_score_dino=None,
-                    triplet_score_sscd=None,
-                    cosine_margin_dino=None,
-                    cosine_margin_sscd=None,
-                    fused_triplet_score=0,
-                    fused_cosine_margin=0.0,
-                    payload=dict(h.payload),
-                )
-                by_id[h.point_id] = entry
-            if vec not in entry.matched_modes:
-                entry.matched_modes.append(vec)
-            if vec == "dino":
-                entry.triplet_score_dino = h.triplet_score
-                entry.cosine_margin_dino = h.cosine_margin
-            elif vec == "sscd":
-                entry.triplet_score_sscd = h.triplet_score
-                entry.cosine_margin_sscd = h.cosine_margin
-            # Merge payload non-destructively — the later vector may
-            # carry provenance fields the earlier one didn't request.
-            for k, v in (h.payload or {}).items():
-                entry.payload.setdefault(k, v)
-
-    # Compute fused scores now that every per-vector pass has landed.
-    for entry in by_id.values():
-        entry.fused_triplet_score = sum(
-            score
-            for score in (entry.triplet_score_dino, entry.triplet_score_sscd)
-            if score is not None
-        )
-        margins = [
-            m
-            for m in (entry.cosine_margin_dino, entry.cosine_margin_sscd)
-            if m is not None
-        ]
-        entry.fused_cosine_margin = max(margins) if margins else 0.0
-
-    fused = list(by_id.values())
-    fused.sort(
-        key=lambda h: (
-            len(h.matched_modes),
-            h.fused_triplet_score,
-            h.fused_cosine_margin,
-        ),
-        reverse=True,
-    )
-    return fused[:limit]
-
-
-ModeName = Literal["dino", "sscd", "dual"]
 
 
 def run_explore(
@@ -488,56 +369,23 @@ def run_explore(
 def run_triage(
     client: QdrantClient,
     collection: str,
-    concept: ConceptLike,
+    tag: Tag,
     *,
-    mode: ModeName = "dual",
     limit: int = 50,
     filter_: Filter | None = None,
     reverse: bool = False,
     reference_collection: str | None = None,
-) -> list[FusedHit]:
-    """High-level entry point used by the web and CLI layers.
-
-    Wraps :func:`run_discovery_dual` (for ``mode="dual"``) or
-    :func:`run_discovery` (for a single named vector) in a uniform
-    :class:`FusedHit` return shape so the API envelope is identical
-    regardless of which mode the caller picked.
-    """
-    if mode == "dual":
-        return run_discovery_dual(
-            client,
-            collection,
-            concept,
-            limit=limit,
-            filter_=filter_,
-            reverse=reverse,
-            reference_collection=reference_collection,
-        )
-    if mode not in ("dino", "sscd"):
-        raise ValueError(f"Unknown triage mode: {mode!r}")
-    per_hits = run_discovery(
+    exclude_references: bool = True,
+) -> list[DiscoveryHit]:
+    """Run a tag triage query using DINOv2 semantic embeddings only."""
+    return run_discovery(
         client,
         collection,
-        concept,
-        vector_name=mode,
+        tag,
+        vector_name="dino",
         limit=limit,
         filter_=filter_,
         reverse=reverse,
         reference_collection=reference_collection,
+        exclude_references=exclude_references,
     )
-    fused: list[FusedHit] = []
-    for h in per_hits:
-        fused.append(
-            FusedHit(
-                point_id=h.point_id,
-                matched_modes=[mode],
-                triplet_score_dino=h.triplet_score if mode == "dino" else None,
-                triplet_score_sscd=h.triplet_score if mode == "sscd" else None,
-                cosine_margin_dino=h.cosine_margin if mode == "dino" else None,
-                cosine_margin_sscd=h.cosine_margin if mode == "sscd" else None,
-                fused_triplet_score=h.triplet_score or 0,
-                fused_cosine_margin=h.cosine_margin,
-                payload=h.payload,
-            )
-        )
-    return fused
