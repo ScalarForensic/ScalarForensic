@@ -1094,8 +1094,9 @@ def _hit_to_json(hit: DiscoveryHit) -> dict:
 @app.get("/api/tags")
 async def list_tags() -> JSONResponse:
     try:
-        store = await asyncio.to_thread(_tag_store)
-        tags = await asyncio.to_thread(store.list)
+        def _run() -> list:
+            return _tag_store().list()
+        tags = await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
     return JSONResponse({"tags": [_tag_to_json(t) for t in tags]})
@@ -1119,15 +1120,9 @@ async def create_tag(
     neg = [x.strip() for x in negative_ids.split(",") if x.strip()]
     tgt: str | None = target_id.strip() or None
     try:
-        store = await asyncio.to_thread(_tag_store)
-        tag = await asyncio.to_thread(
-            store.create,
-            name,
-            positive_ids=pos,
-            negative_ids=neg,
-            target_id=tgt,
-            notes=notes,
-        )
+        def _run():
+            return _tag_store().create(name, positive_ids=pos, negative_ids=neg, target_id=tgt, notes=notes)
+        tag = await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
     return JSONResponse(_tag_to_json(tag))
@@ -1136,8 +1131,9 @@ async def create_tag(
 @app.get("/api/tag/{tag_id}")
 async def get_tag(tag_id: str) -> JSONResponse:
     try:
-        store = await asyncio.to_thread(_tag_store)
-        tag = await asyncio.to_thread(store.get, tag_id)
+        def _run():
+            return _tag_store().get(tag_id)
+        tag = await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
     if tag is None:
@@ -1160,8 +1156,9 @@ async def mark_tag(
             status_code=400, detail="role must be 'positive' or 'negative'"
         )
     try:
-        store = await asyncio.to_thread(_tag_store)
-        tag = await asyncio.to_thread(store.mark, tag_id, point_id, role)  # type: ignore[arg-type]
+        def _run():
+            return _tag_store().mark(tag_id, point_id, role)  # type: ignore[arg-type]
+        tag = await asyncio.to_thread(_run)
     except LookupError:
         raise HTTPException(status_code=404, detail="Tag not found") from None
     except Exception as exc:  # noqa: BLE001
@@ -1175,8 +1172,9 @@ async def unmark_tag(
     point_id: str = Form(...),
 ) -> JSONResponse:
     try:
-        store = await asyncio.to_thread(_tag_store)
-        tag = await asyncio.to_thread(store.unmark, tag_id, point_id)
+        def _run():
+            return _tag_store().unmark(tag_id, point_id)
+        tag = await asyncio.to_thread(_run)
     except LookupError:
         raise HTTPException(status_code=404, detail="Tag not found") from None
     except Exception as exc:  # noqa: BLE001
@@ -1200,8 +1198,9 @@ async def set_tag_target(
     """
     tgt: str | None = target_id.strip() or None
     try:
-        store = await asyncio.to_thread(_tag_store)
-        tag = await asyncio.to_thread(store.set_target, tag_id, tgt)
+        def _run():
+            return _tag_store().set_target(tag_id, tgt)
+        tag = await asyncio.to_thread(_run)
     except LookupError:
         raise HTTPException(status_code=404, detail="Tag not found") from None
     except Exception as exc:  # noqa: BLE001
@@ -1212,8 +1211,9 @@ async def set_tag_target(
 @app.delete("/api/tag/{tag_id}")
 async def delete_tag(tag_id: str) -> JSONResponse:
     try:
-        store = await asyncio.to_thread(_tag_store)
-        existed = await asyncio.to_thread(store.delete, tag_id)
+        def _run() -> bool:
+            return _tag_store().delete(tag_id)
+        existed = await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
     if not existed:

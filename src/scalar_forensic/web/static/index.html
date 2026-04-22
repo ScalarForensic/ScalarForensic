@@ -1114,7 +1114,7 @@
       <template x-if="concepts.length > 0">
         <div style="display:flex;align-items:center;gap:6px;padding:4px 8px 2px;border-bottom:1px solid var(--border)">
           <span style="font-size:10px;color:var(--text2);white-space:nowrap;flex-shrink:0">Active tag</span>
-          <select class="concept-form-select" x-model="activeTagId"
+          <select class="tag-form-select" x-model="activeTagId"
                   style="flex:1;font-size:10px;height:22px;min-width:0">
             <option value="">— none —</option>
             <template x-for="c in concepts" :key="c.tag_id">
@@ -1275,27 +1275,27 @@
 
       <!-- Create form -->
       <div x-show="showConceptCreate">
-        <div class="concept-form-row">
-          <label class="concept-form-label">Name *</label>
-          <input class="concept-form-input" x-model="newConceptName" placeholder="e.g. weapons"
+        <div class="tag-form-row">
+          <label class="tag-form-label">Name *</label>
+          <input class="tag-form-input" x-model="newConceptName" placeholder="e.g. weapons"
                  @keydown.enter="createConcept()">
         </div>
-        <div class="concept-form-row">
-          <label class="concept-form-label">Notes (optional)</label>
-          <input class="concept-form-input" x-model="newConceptNotes" placeholder="Free-form description">
+        <div class="tag-form-row">
+          <label class="tag-form-label">Notes (optional)</label>
+          <input class="tag-form-input" x-model="newConceptNotes" placeholder="Free-form description">
         </div>
-        <div class="concept-form-row">
-          <label class="concept-form-label">Initial positive IDs (comma-separated)</label>
-          <textarea class="concept-form-textarea" x-model="newConceptPositive"
+        <div class="tag-form-row">
+          <label class="tag-form-label">Initial positive IDs (comma-separated)</label>
+          <textarea class="tag-form-textarea" x-model="newConceptPositive"
                     placeholder="point-uuid-1, point-uuid-2 …" rows="2"></textarea>
         </div>
-        <div class="concept-form-row">
-          <label class="concept-form-label">Initial negative IDs (comma-separated)</label>
-          <textarea class="concept-form-textarea" x-model="newConceptNegative"
+        <div class="tag-form-row">
+          <label class="tag-form-label">Initial negative IDs (comma-separated)</label>
+          <textarea class="tag-form-textarea" x-model="newConceptNegative"
                     placeholder="point-uuid-3, point-uuid-4 …" rows="2"></textarea>
         </div>
-        <div class="concept-form-error" x-show="conceptCreateError" x-text="conceptCreateError"></div>
-        <div class="concept-form-actions">
+        <div class="tag-form-error" x-show="conceptCreateError" x-text="conceptCreateError"></div>
+        <div class="tag-form-actions">
           <button class="btn-primary" style="flex:1"
                   :disabled="!newConceptName.trim() || conceptCreateLoading"
                   @click="createConcept()"
@@ -1313,16 +1313,16 @@
       </div>
 
       <!-- Tag list -->
-      <div class="concept-list">
+      <div class="tag-list">
         <template x-for="c in concepts" :key="c.tag_id">
-          <div class="concept-item" :class="{selected: c.tag_id === selectedConceptId}"
+          <div class="tag-item" :class="{selected: c.tag_id === selectedConceptId}"
                @click="selectConcept(c.tag_id)">
-            <div class="concept-item-body">
-              <div class="concept-item-name" :title="c.name" x-text="c.name"></div>
-              <div class="concept-item-counts"
+            <div class="tag-item-body">
+              <div class="tag-item-name" :title="c.name" x-text="c.name"></div>
+              <div class="tag-item-counts"
                    x-text="`+${c.positive_ids.length} / −${c.negative_ids.length}`"></div>
             </div>
-            <button class="concept-item-del" @click.stop="deleteConcept(c.tag_id)"
+            <button class="tag-item-del" @click.stop="deleteConcept(c.tag_id)"
                     title="Delete tag">✕</button>
           </div>
         </template>
@@ -1374,16 +1374,16 @@
 
       <template x-if="selectedConcept">
         <div class="image-panel-inner" style="overflow-y:auto">
-          <div class="concept-editor-hdr">
+          <div class="tag-editor-hdr">
             <div style="display:flex;align-items:center;gap:8px">
-              <div class="concept-editor-name" x-text="selectedConcept.name"></div>
+              <div class="tag-editor-name" x-text="selectedConcept.name"></div>
               <button class="btn-tiny" x-show="!conceptEditing"
                       @click="startEditConcept()" title="Edit notes">Edit</button>
             </div>
             <!-- view mode -->
             <template x-if="!conceptEditing">
               <div>
-                <div class="concept-editor-meta">
+                <div class="tag-editor-meta">
                   <span x-text="`${selectedConcept.positive_ids.length} positive`"></span>
                   &nbsp;/&nbsp;
                   <span x-text="`${selectedConcept.negative_ids.length} negative`"></span>
@@ -1392,19 +1392,19 @@
                   </template>
                 </div>
                 <template x-if="selectedConcept.notes">
-                  <div class="concept-notes-txt" style="margin-top:4px" x-text="selectedConcept.notes"></div>
+                  <div class="tag-notes-txt" style="margin-top:4px" x-text="selectedConcept.notes"></div>
                 </template>
               </div>
             </template>
             <!-- edit mode -->
             <template x-if="conceptEditing">
               <div style="margin-top:6px">
-                <div class="concept-form-row">
-                  <label class="concept-form-label">Notes</label>
-                  <input class="concept-form-input" x-model="editNotes" placeholder="Free-form description">
+                <div class="tag-form-row">
+                  <label class="tag-form-label">Notes</label>
+                  <input class="tag-form-input" x-model="editNotes" placeholder="Free-form description">
                 </div>
-                <div class="concept-form-error" x-show="conceptEditError" x-text="conceptEditError"></div>
-                <div class="concept-form-actions">
+                <div class="tag-form-error" x-show="conceptEditError" x-text="conceptEditError"></div>
+                <div class="tag-form-actions">
                   <button class="btn-tiny" :disabled="conceptEditLoading"
                           @click="saveEditConcept()"
                           x-text="conceptEditLoading ? 'Saving…' : 'Save'"></button>
@@ -1415,24 +1415,24 @@
           </div>
 
           <!-- Positive examples -->
-          <div class="concept-section">
-            <div class="concept-section-hdr">
+          <div class="tag-section">
+            <div class="tag-section-hdr">
               <span>Positive examples</span>
               <span class="count-chip" x-text="selectedConcept.positive_ids.length"></span>
             </div>
-            <div class="concept-examples-grid">
+            <div class="tag-examples-grid">
               <template x-if="selectedConcept.positive_ids.length === 0">
-                <span class="concept-empty-msg">None yet — mark triage hits below</span>
+                <span class="tag-empty-msg">None yet — mark triage hits below</span>
               </template>
               <template x-for="pid in selectedConcept.positive_ids" :key="pid">
-                <div class="concept-example-cell"
+                <div class="tag-example-cell"
                      @click="openLightbox(conceptExampleSrc(pid))">
-                  <img class="concept-example-img"
+                  <img class="tag-example-img"
                        :src="conceptExampleThumb(pid)"
                        @error="$el.onerror=null;$el.src='/static/vector-fallback.svg'"
                        :title="String(pid)"
                        loading="lazy" alt="">
-                  <button class="concept-example-unmark"
+                  <button class="tag-example-unmark"
                           @click.stop="unmarkConceptPoint(pid)"
                           title="Remove from positive examples">×</button>
                 </div>
@@ -1441,24 +1441,24 @@
           </div>
 
           <!-- Negative examples -->
-          <div class="concept-section">
-            <div class="concept-section-hdr">
+          <div class="tag-section">
+            <div class="tag-section-hdr">
               <span>Negative examples</span>
               <span class="count-chip" x-text="selectedConcept.negative_ids.length"></span>
             </div>
-            <div class="concept-examples-grid">
+            <div class="tag-examples-grid">
               <template x-if="selectedConcept.negative_ids.length === 0">
-                <span class="concept-empty-msg">None yet — mark as benign below</span>
+                <span class="tag-empty-msg">None yet — mark as benign below</span>
               </template>
               <template x-for="pid in selectedConcept.negative_ids" :key="pid">
-                <div class="concept-example-cell"
+                <div class="tag-example-cell"
                      @click="openLightbox(conceptExampleSrc(pid))">
-                  <img class="concept-example-img"
+                  <img class="tag-example-img"
                        :src="conceptExampleThumb(pid)"
                        @error="$el.onerror=null;$el.src='/static/vector-fallback.svg'"
                        :title="String(pid)"
                        loading="lazy" alt="">
-                  <button class="concept-example-unmark"
+                  <button class="tag-example-unmark"
                           @click.stop="unmarkConceptPoint(pid)"
                           title="Remove from negative examples">×</button>
                 </div>
@@ -1467,8 +1467,8 @@
           </div>
 
           <!-- Anchor -->
-          <div class="concept-section">
-            <div class="concept-section-hdr" style="align-items:flex-start;flex-direction:column;gap:2px">
+          <div class="tag-section">
+            <div class="tag-section-hdr" style="align-items:flex-start;flex-direction:column;gap:2px">
               <span>Anchor</span>
               <span style="font-size:9px;color:var(--text2);font-weight:400;line-height:1.4">
                 The image the search starts from. Qdrant finds candidates similar to the anchor,
@@ -1484,9 +1484,9 @@
             </template>
             <template x-if="selectedConcept.target_id">
               <div style="display:flex;align-items:center;gap:8px">
-                <div class="concept-example-cell" style="flex-shrink:0"
+                <div class="tag-example-cell" style="flex-shrink:0"
                      @click="openLightbox(conceptExampleSrc(selectedConcept.target_id))">
-                  <img class="concept-example-img"
+                  <img class="tag-example-img"
                        :src="conceptExampleThumb(selectedConcept.target_id)"
                        @error="$el.onerror=null;$el.src='/static/vector-fallback.svg'"
                        :title="String(selectedConcept.target_id)"
@@ -1504,8 +1504,8 @@
           </div>
 
           <!-- Tag ID (for CLI use) -->
-          <div class="concept-section" style="border-bottom:none">
-            <div class="concept-section-hdr">Tag ID (CLI)</div>
+          <div class="tag-section" style="border-bottom:none">
+            <div class="tag-section-hdr">Tag ID (CLI)</div>
             <div style="font-family:var(--mono);font-size:10px;color:var(--text2);word-break:break-all;line-height:1.5"
                  x-text="selectedConcept.tag_id"></div>
           </div>
@@ -1837,6 +1837,9 @@ function sfn() {
 
     // Cache: {pointId: {path, image_hash}} — populated from triage runs
     triageHitCache: {},
+    // Reverse index: {image_hash: pointId} — rebuilt lazily in searchHitMark
+    _hashToPid: {},
+    _hashToPidCacheKey: -1,
     // Optimistic mark overrides: {tagId: {pointId: 'positive'|'negative'}}
     markedOverrides: {},
 
@@ -3190,9 +3193,17 @@ function sfn() {
 
     searchHitMark(hit) {
       if (!this.activeTagId || !hit.image_hash) return null;
-      const pid = Object.entries(this.triageHitCache).find(
-        ([, v]) => v?.image_hash === hit.image_hash
-      )?.[0];
+      // Rebuild reverse index only when the cache grows (O(n) rebuild, O(1) lookups).
+      const cacheKey = Object.keys(this.triageHitCache).length;
+      if (this._hashToPidCacheKey !== cacheKey) {
+        this._hashToPid = Object.fromEntries(
+          Object.entries(this.triageHitCache)
+            .filter(([, v]) => v?.image_hash)
+            .map(([pid, v]) => [v.image_hash, pid])
+        );
+        this._hashToPidCacheKey = cacheKey;
+      }
+      const pid = this._hashToPid[hit.image_hash];
       if (!pid) return null;
       const ov = (this.markedOverrides[this.activeTagId] ?? {})[String(pid)];
       if (ov !== undefined) return ov;

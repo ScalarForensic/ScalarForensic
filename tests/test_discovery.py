@@ -12,8 +12,6 @@ from unittest.mock import MagicMock
 
 import pytest
 from qdrant_client.models import (
-    ContextPair,
-    ContextQuery,
     DiscoverQuery,
     Filter,
     HasIdCondition,
