@@ -24,6 +24,7 @@ def _unit(v: list[float]) -> list[float]:
 
 # ── _cosine_sims ─────────────────────────────────────────────────────────────
 
+
 def test_cosine_sims_identical_vectors_score_one():
     q = _unit([1.0, 0.0, 0.0])
     refs = [_unit([1.0, 0.0, 0.0])]
@@ -47,10 +48,11 @@ def test_cosine_sims_zero_query_returns_zeros():
 
 # ── _pair_indices ─────────────────────────────────────────────────────────────
 
+
 def test_pair_indices_covers_all_pairs_under_cap():
     pairs = _pair_indices(3, 2)
     assert len(pairs) == 6  # 3 × 2 = 6, below cap
-    assert set(pairs) == {(0,0),(0,1),(1,0),(1,1),(2,0),(2,1)}
+    assert set(pairs) == {(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)}
 
 
 def test_pair_indices_caps_at_max():
@@ -67,6 +69,7 @@ def test_pair_indices_diagonal_first():
 
 
 # ── score_query_vector ────────────────────────────────────────────────────────
+
 
 def test_score_query_vector_all_pairs_satisfied():
     # Query is identical to positive, far from negative
@@ -114,6 +117,7 @@ def test_score_query_vector_three_pairs_two_satisfied():
 
 # ── score_query_entries ───────────────────────────────────────────────────────
 
+
 def test_score_query_entries_ranks_by_triplet_score():
     pos_dino = [_unit([1.0, 0.0])]
     neg_dino = [_unit([0.0, 1.0])]
@@ -142,10 +146,7 @@ def test_score_query_entries_excludes_zero_score():
 def test_score_query_entries_respects_limit():
     pos_dino = [_unit([1.0, 0.0])]
     neg_dino = [_unit([0.0, 1.0])]
-    entries = [
-        (f"file{i}", f"f{i}.jpg", _unit([1.0, 0.0]), None)
-        for i in range(10)
-    ]
+    entries = [(f"file{i}", f"f{i}.jpg", _unit([1.0, 0.0]), None) for i in range(10)]
     hits = score_query_entries(entries, pos_dino, neg_dino, limit=3)
     assert len(hits) <= 3
 

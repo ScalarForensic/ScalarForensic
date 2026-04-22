@@ -49,9 +49,11 @@ from scalar_forensic.tags import Tag
 @runtime_checkable
 class ConceptLike(Protocol):
     """Structural interface shared by Concept and Tag."""
+
     positive_ids: list[str | int]
     negative_ids: list[str | int]
     target_id: str | int | None
+
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +102,6 @@ class DiscoveryHit:
     # cosine similarity to the best positive example.
     cosine_margin: float
     payload: dict = field(default_factory=dict)
-
 
 
 def _build_context_pairs(
@@ -160,9 +161,7 @@ def _merge_filter(user_filter: Filter | None, exclude: Filter | None) -> Filter 
     )
 
 
-def _resolve_polarity(
-    tag: Tag, reverse: bool
-) -> tuple[list[str | int], list[str | int]]:
+def _resolve_polarity(tag: Tag, reverse: bool) -> tuple[list[str | int], list[str | int]]:
     """Apply reverse-polarity by swapping positive and negative lists.
 
     Reverse triage turns "more like positives, less like negatives"
@@ -243,9 +242,7 @@ def run_discovery(
         # The auto-target logic above ensures target is set whenever a positive
         # exists, so ContextQuery is only reached on negative-only (reversed) tags.
         if target is not None:
-            query = DiscoverQuery(
-                discover=DiscoverInput(target=target, context=pairs)
-            )
+            query = DiscoverQuery(discover=DiscoverInput(target=target, context=pairs))
         else:
             query = ContextQuery(context=pairs)
     else:
@@ -275,9 +272,7 @@ def run_discovery(
             lookup_from=lookup_from,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Discovery query failed on %s/%s: %s", collection, vector_name, exc
-        )
+        logger.warning("Discovery query failed on %s/%s: %s", collection, vector_name, exc)
         return []
 
     is_discover = bool(pairs)

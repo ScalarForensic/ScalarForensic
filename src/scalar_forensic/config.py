@@ -89,9 +89,7 @@ class Settings:
         # CAID).  When set, concept queries may pass lookup_from=LookupLocation(
         # collection=<this>, vector=<name>) so the case collection never has to
         # ingest those vectors — a chain-of-custody boundary.  Unset by default.
-        self.reference_collection: str | None = (
-            os.environ.get("SFN_REFERENCE_COLLECTION") or None
-        )
+        self.reference_collection: str | None = os.environ.get("SFN_REFERENCE_COLLECTION") or None
 
         # --- Vector visualization ---
         # Maximum number of points fetched per collection for the 3-D background viz.

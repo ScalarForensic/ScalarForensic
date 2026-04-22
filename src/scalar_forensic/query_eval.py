@@ -96,9 +96,9 @@ def score_query_entries(
             continue
         ts, cm = score_query_vector(dino_vec, pos_vecs, neg_vecs)
         if (ts is not None and ts > 0) or cm > 0:
-            results.append(QueryEvalHit(
-                file_id=file_id, filename=filename, triplet_score=ts, cosine_margin=cm
-            ))
+            results.append(
+                QueryEvalHit(file_id=file_id, filename=filename, triplet_score=ts, cosine_margin=cm)
+            )
 
     results.sort(key=lambda h: (h.triplet_score or 0, h.cosine_margin), reverse=True)
     return results[:limit]

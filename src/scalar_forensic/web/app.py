@@ -1094,8 +1094,10 @@ def _hit_to_json(hit: DiscoveryHit) -> dict:
 @app.get("/api/tags")
 async def list_tags() -> JSONResponse:
     try:
+
         def _run() -> list:
             return _tag_store().list()
+
         tags = await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
@@ -1120,10 +1122,12 @@ async def create_tag(
     neg = [x.strip() for x in negative_ids.split(",") if x.strip()]
     tgt: str | None = target_id.strip() or None
     try:
+
         def _run():
             return _tag_store().create(
                 name, positive_ids=pos, negative_ids=neg, target_id=tgt, notes=notes
             )
+
         tag = await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
@@ -1133,8 +1137,10 @@ async def create_tag(
 @app.get("/api/tag/{tag_id}")
 async def get_tag(tag_id: str) -> JSONResponse:
     try:
+
         def _run():
             return _tag_store().get(tag_id)
+
         tag = await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
@@ -1154,12 +1160,12 @@ async def mark_tag(
     A point already present in the other role is moved — the latest mark wins.
     """
     if role not in ("positive", "negative"):
-        raise HTTPException(
-            status_code=400, detail="role must be 'positive' or 'negative'"
-        )
+        raise HTTPException(status_code=400, detail="role must be 'positive' or 'negative'")
     try:
+
         def _run():
             return _tag_store().mark(tag_id, point_id, role)  # type: ignore[arg-type]
+
         tag = await asyncio.to_thread(_run)
     except LookupError:
         raise HTTPException(status_code=404, detail="Tag not found") from None
@@ -1174,8 +1180,10 @@ async def unmark_tag(
     point_id: str = Form(...),
 ) -> JSONResponse:
     try:
+
         def _run():
             return _tag_store().unmark(tag_id, point_id)
+
         tag = await asyncio.to_thread(_run)
     except LookupError:
         raise HTTPException(status_code=404, detail="Tag not found") from None
@@ -1200,8 +1208,10 @@ async def set_tag_target(
     """
     tgt: str | None = target_id.strip() or None
     try:
+
         def _run():
             return _tag_store().set_target(tag_id, tgt)
+
         tag = await asyncio.to_thread(_run)
     except LookupError:
         raise HTTPException(status_code=404, detail="Tag not found") from None
@@ -1213,8 +1223,10 @@ async def set_tag_target(
 @app.delete("/api/tag/{tag_id}")
 async def delete_tag(tag_id: str) -> JSONResponse:
     try:
+
         def _run() -> bool:
             return _tag_store().delete(tag_id)
+
         existed = await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
@@ -1413,7 +1425,8 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
             if tag.negative_ids and not neg_dino:
                 _log.warning(
                     "classify: tag %r has %d negative ID(s) but none resolved — skipping",
-                    tag.name, len(tag.negative_ids),
+                    tag.name,
+                    len(tag.negative_ids),
                 )
                 continue
 
@@ -1517,7 +1530,8 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
             if tag.negative_ids and not neg_dino:
                 _log.warning(
                     "classify-session: tag %r has %d negative ID(s) but none resolved — skipping",
-                    tag.name, len(tag.negative_ids),
+                    tag.name,
+                    len(tag.negative_ids),
                 )
                 continue
 
@@ -1528,7 +1542,9 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
             threshold = max(1, n_pairs * 3 // 4)
 
             hits = score_query_entries(
-                entries, pos_dino, neg_dino,
+                entries,
+                pos_dino,
+                neg_dino,
                 limit=len(entries),
             )
             for hit in hits:
@@ -1609,7 +1625,8 @@ async def triage_query_images(
         if tag.negative_ids and not neg_dino:
             _log.warning(
                 "triage-query-images: tag %r has %d negative ID(s) but none resolved — skipping",
-                tag.name, len(tag.negative_ids),
+                tag.name,
+                len(tag.negative_ids),
             )
             return tag, []
 
@@ -1626,7 +1643,8 @@ async def triage_query_images(
         ]
         all_hits = score_query_entries(entries, pos_dino, neg_dino, limit=limit)
         hits = [
-            h for h in all_hits
+            h
+            for h in all_hits
             if _hit_passes_classify_threshold(h.triplet_score, h.cosine_margin, threshold)
         ]
         return tag, hits
@@ -1722,11 +1740,13 @@ async def get_point_payload(point_id: str) -> JSONResponse:
     if not records:
         raise HTTPException(status_code=404, detail="Point not found")
     payload = records[0].payload or {}
-    return JSONResponse({
-        "point_id": point_id,
-        "image_hash": payload.get("image_hash"),
-        "image_path": payload.get("image_path"),
-    })
+    return JSONResponse(
+        {
+            "point_id": point_id,
+            "image_hash": payload.get("image_hash"),
+            "image_path": payload.get("image_path"),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------

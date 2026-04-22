@@ -187,7 +187,7 @@ def test_auto_target_excluded_only_once():
     run_discovery(client, "sfn", tag, vector_name="dino", limit=5)
     _, kwargs = client.query_points.call_args
     must_not_ids: list[str] = []
-    for cond in (kwargs["query_filter"].must_not or []):
+    for cond in kwargs["query_filter"].must_not or []:
         if isinstance(cond, HasIdCondition):
             must_not_ids.extend(cond.has_id)
     # "p1" should appear exactly once even though it is both a positive and the auto-target
@@ -206,7 +206,11 @@ def test_reference_collection_plumbs_lookup_from():
     client = _client_returning([])
     tag = _tag(positives=["p1"], negatives=["n1"])
     run_discovery(
-        client, "sfn", tag, vector_name="dino", limit=5,
+        client,
+        "sfn",
+        tag,
+        vector_name="dino",
+        limit=5,
         reference_collection="sfn_references",
     )
     _, kwargs = client.query_points.call_args

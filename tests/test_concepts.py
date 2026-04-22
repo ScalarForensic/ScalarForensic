@@ -160,9 +160,7 @@ def test_delete_returns_false_when_concept_missing():
 def test_delete_returns_true_and_calls_qdrant_when_concept_exists():
     store, client = _store()
     rec = MagicMock()
-    rec.payload = Concept(
-        concept_id="c1", name="n", created_at="", updated_at=""
-    ).to_payload()
+    rec.payload = Concept(concept_id="c1", name="n", created_at="", updated_at="").to_payload()
     client.retrieve.return_value = [rec]
     deleted = store.delete("c1")
     assert deleted is True

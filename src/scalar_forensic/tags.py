@@ -188,9 +188,7 @@ class TagStore:
         for r in qdrant_scroll_all(
             self.client,
             self.collection,
-            scroll_filter=Filter(
-                must=[FieldCondition(key="is_tag", match=MatchValue(value=True))]
-            ),
+            scroll_filter=Filter(must=[FieldCondition(key="is_tag", match=MatchValue(value=True))]),
             limit=256,
             with_payload=True,
             with_vectors=False,
