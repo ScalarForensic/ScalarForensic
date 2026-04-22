@@ -1330,7 +1330,12 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
     Uses the same NumPy triplet scoring as classify-session so that tag badges
     on search hits and on uploaded query images are computed identically.
     """
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON body must be an object")
     image_hashes: list[str] = body.get("image_hashes") or []
     if not image_hashes:
         return JSONResponse({"by_hash": {}})
@@ -1355,7 +1360,7 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
                 ]
             ),
             limit=256,
-            with_payload=True,
+            with_payload=["image_hash"],
             with_vectors=False,
         ):
             h = (record.payload or {}).get("image_hash")
@@ -1468,7 +1473,12 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
     iterates over every tag and returns results keyed by file SHA-256 so the
     UI can merge them directly into ``hitTags``.
     """
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON body must be an object")
     session_id: str = body.get("session_id") or ""
     if not session_id:
         return JSONResponse({"by_hash": {}})

@@ -3099,6 +3099,7 @@ function sfn() {
     },
 
     triageHitThumb(hit) {
+      if (hit.file_id && this.sessionId && hit.point_id == null) return `/api/query-image/${this.sessionId}/${hit.file_id}`;
       if (hit.image_hash) return `/api/thumbnail/${hit.image_hash}`;
       if (hit.file_id && this.sessionId) return `/api/query-image/${this.sessionId}/${hit.file_id}`;
       return '/static/vector-fallback.svg';

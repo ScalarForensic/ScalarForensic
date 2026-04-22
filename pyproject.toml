@@ -14,6 +14,7 @@ dependencies = [
     "Pillow>=10.0",
     "python-dotenv>=1.0",
     "av>=12.0",
+    "numpy>=1.24",
     # AMD ROCm only: pytorch-triton-rocm must be pinned as a direct dependency with a
     # hard-coded wheel URL to work around uv's wheel-tag validation.  Uncomment this
     # line when switching to a ROCm index — see INSTALL.md for full instructions.
