@@ -188,7 +188,7 @@ class Settings:
         raw = os.environ.get(key)
         if raw is not None:
             return Path(raw) if raw else None
-        if not default:
+        if default is None:
             return None
         p = Path(default)
         if not p.is_absolute():

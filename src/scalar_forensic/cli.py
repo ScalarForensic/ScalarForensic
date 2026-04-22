@@ -273,7 +273,6 @@ def _print_summary(
 ) -> None:
     counts = Counter(r.status for r in records.values())
     total = len(records)
-    n_image = n_images
 
     # Per-model breakdown
     typer.echo("\nDone.")
@@ -289,7 +288,7 @@ def _print_summary(
     typer.echo(sep)
     rows: list[tuple[str, int | None]] = [
         ("Total files found", total),
-        ("  image files", n_image),
+        ("  image files", n_images),
         ("  video files", n_videos),
         ("  non-image files (unsupported)", counts[_S_UNSUPPORTED]),
         ("", None),
@@ -618,11 +617,6 @@ def index(
         if not unique_pairs:
             return
 
-        # Recompute duplicate-skip count after failure reclassification.
-        duplicate_skips_in_batch = sum(
-            1 for p, _ in ctx.path_hash_pairs if records[p].status == _S_SKIP_DUP
-        )
-
         # ── Per-model loop: normalize + embed, collect upsert jobs ────────────
         n_frames_in_batch = sum(1 for p, _ in ctx.path_hash_pairs if p in vmeta_by_path)
         n_plain_in_batch = len(ctx.path_hash_pairs) - n_frames_in_batch
@@ -631,7 +625,7 @@ def index(
 
         for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
             to_embed = [(p, h) for p, h in ctx.to_embed_per_spec[spec_idx] if p not in pre_failures]
-            n_skipped = duplicate_skips_in_batch + (len(unique_pairs) - len(to_embed))
+            n_skipped = len(unique_pairs) - len(to_embed)
             skipped_counts[spec_idx] += n_skipped
 
             to_embed_set = {p for p, _ in to_embed}

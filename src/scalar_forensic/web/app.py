@@ -607,7 +607,7 @@ async def hit_provenance(image_hash: str) -> JSONResponse:
 
 def _sscd_annotated(img: Image.Image, n_crops: int) -> Image.Image:
     resized = _sscd_resize(img)
-    out = resized.copy().convert("RGB")
+    out = resized.convert("RGB")
     draw = ImageDraw.Draw(out)
     s = _SSCD_INPUT_SIZE
     w, h = resized.size
@@ -815,8 +815,9 @@ async def hit_metadata(path: str) -> JSONResponse:
                 with_vectors=False,
             )
             if _records:
-                frame_sha256 = _records[0].payload.get("image_hash")
-                video_path_str = _records[0].payload.get("video_path")
+                _payload = _records[0].payload or {}
+                frame_sha256 = _payload.get("image_hash")
+                video_path_str = _payload.get("video_path")
         except Exception:  # noqa: BLE001
             pass
 

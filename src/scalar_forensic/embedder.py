@@ -116,18 +116,6 @@ def hash_file(path: Path, chunk_size: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
-def hash_file_md5(path: Path, chunk_size: int = 1 << 20) -> str:
-    """Return MD5 hex digest of a file, reading it in chunks."""
-    h = hashlib.md5()  # noqa: S324
-    with path.open("rb") as fh:
-        while True:
-            buf = fh.read(chunk_size)
-            if not buf:
-                break
-            h.update(buf)
-    return h.hexdigest()
-
-
 def hash_file_both(path: Path, chunk_size: int = 1 << 20) -> tuple[str, str]:
     """Return ``(sha256, md5)`` hex digests of a file in a single read pass."""
     h_sha = hashlib.sha256()
