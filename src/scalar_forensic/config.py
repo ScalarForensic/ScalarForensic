@@ -86,7 +86,7 @@ class Settings:
 
         # Optional read-only reference collection holding vectors of externally
         # labelled known-bad / known-benign material (e.g. NCMEC / Project VIC /
-        # CAID).  When set, concept queries may pass lookup_from=LookupLocation(
+        # CAID).  When set, tag triage queries may pass lookup_from=LookupLocation(
         # collection=<this>, vector=<name>) so the case collection never has to
         # ingest those vectors — a chain-of-custody boundary.  Unset by default.
         self.reference_collection: str | None = os.environ.get("SFN_REFERENCE_COLLECTION") or None

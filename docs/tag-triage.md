@@ -270,7 +270,7 @@ Evaluate a tag against uploaded query images in the current session, without run
 1. Index the case collection with `sfn --dino`.
 2. Run an initial semantic query (`/api/query`) to surface a first batch of candidates.
 3. Create a tag with a few clearly relevant (positive) and clearly benign (negative) points from that batch.
-4. Run `/api/triage` — the triplet-ranked results replace the cosine-ranked list. The first positive is used as the Discovery anchor automatically; the UI shows scores as `N / M pairs satisfied`.
+4. Run `/api/triage` — the triplet-ranked results replace the cosine-ranked list. The first positive is used as the Discovery anchor automatically; the UI shows the triplet satisfaction count as a single integer score.
 5. For each new result card, click **+** or **−** to mark the point as positive or negative for the active tag.
 6. Re-run triage. The ranking adapts to accumulated labels without retraining any model.
 7. If the default anchor (first positive) is not giving good results, use "⚓ Set as anchor" on any hit to pin a more representative image.

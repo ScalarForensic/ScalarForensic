@@ -1,4 +1,4 @@
-"""Concept-Triage: Qdrant Discovery and Recommendation query engine.
+"""Tag Triage: Qdrant Discovery and Recommendation query engine.
 
 Builds :class:`~qdrant_client.models.DiscoverInput` or
 :class:`~qdrant_client.models.RecommendInput` queries from a
@@ -64,7 +64,7 @@ _TRIAGE_PAYLOAD_FIELDS: list[str] = [
     "sscd_model_hash",
 ]
 
-# Hard cap on the number of context pairs built from a concept's
+# Hard cap on the number of context pairs built from a tag's
 # positive × negative cartesian product.  More pairs tighten the
 # decision boundary but also slow the server-side triplet evaluation.
 # 64 is well below any Qdrant operational limit while still giving
@@ -300,7 +300,7 @@ def run_explore(
       pairs they satisfy.  Points near the decision boundary score at roughly
       half the pair count, making them the most informative for labelling.
     * **random** — one or both lists empty:
-      ``SampleQuery(Sample.Random)`` returns uniformly random points with no
+      ``SampleQuery(sample=Sample.RANDOM)`` returns uniformly random points with no
       vector scoring, giving unbiased cold-start coverage.
 
     Already-labelled points (both lists combined) are excluded so successive

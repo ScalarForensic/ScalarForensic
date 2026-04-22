@@ -17,6 +17,7 @@ import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal, cast
 
 import torch
 import uvicorn
@@ -1164,7 +1165,8 @@ async def mark_tag(
     try:
 
         def _run():
-            return _tag_store().mark(tag_id, point_id, role)  # type: ignore[arg-type]
+            role_lit = cast("Literal['positive', 'negative']", role)
+            return _tag_store().mark(tag_id, point_id, role_lit)
 
         tag = await asyncio.to_thread(_run)
     except LookupError:
@@ -1604,6 +1606,8 @@ async def triage_query_images(
             return None, None
 
         all_ref_ids = [str(i) for i in tag.positive_ids + tag.negative_ids]
+        if tag.target_id is not None and str(tag.target_id) not in all_ref_ids:
+            all_ref_ids.append(str(tag.target_id))
         if not all_ref_ids:
             return tag, []
 
@@ -1704,8 +1708,8 @@ async def triage_query_images(
 async def lookup_point_id(image_hash: str) -> JSONResponse:
     """Return the Qdrant point ID for an image identified by its SHA-256 hash.
 
-    Used by the Concept Triage UI to translate search-result image hashes
-    (which the operator can see) into Qdrant point IDs (which concepts need).
+    Used by the Tag Triage UI to translate search-result image hashes
+    (which the operator can see) into Qdrant point IDs (which tags need).
     """
     settings = Settings()
 
@@ -1735,7 +1739,7 @@ async def lookup_point_id(image_hash: str) -> JSONResponse:
 async def get_point_payload(point_id: str) -> JSONResponse:
     """Return image metadata (path + hash) for a Qdrant point by its ID.
 
-    Used by the Concept Triage UI to render thumbnails for concept example
+    Used by the Tag Triage UI to render thumbnails for tag example
     IDs that were not seen in the current triage run (e.g. IDs that were
     added via the CLI or pasted into the create form).
     """
