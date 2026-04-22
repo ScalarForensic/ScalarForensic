@@ -223,7 +223,7 @@ Run a tag query against the indexed case collection using DINOv2.
 
 Bulk-evaluate a list of image hashes against all tags using in-memory triplet scoring.
 
-For each hash, returns the names of tags whose triplet threshold the image satisfies (≥ half the defined pairs).
+For each hash, returns the names of tags whose triplet threshold the image satisfies (≥ 75% of the defined pairs).
 
 **JSON body**
 ```json

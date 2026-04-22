@@ -143,7 +143,8 @@ def test_mark_raises_lookup_error_for_missing_tag():
 def test_delete_returns_false_when_tag_missing():
     store, client = _store()
     client.retrieve.return_value = []
-    assert store.delete("missing") is False
+    deleted = store.delete("missing")
+    assert deleted is False
     client.delete.assert_not_called()
 
 
@@ -152,7 +153,8 @@ def test_delete_returns_true_and_calls_qdrant_when_tag_exists():
     rec = MagicMock()
     rec.payload = Tag(tag_id="c1", name="n", created_at="", updated_at="").to_payload()
     client.retrieve.return_value = [rec]
-    assert store.delete("c1") is True
+    deleted = store.delete("c1")
+    assert deleted is True
     client.delete.assert_called_once()
 
 

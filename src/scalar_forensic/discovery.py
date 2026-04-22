@@ -115,26 +115,26 @@ def _build_context_pairs(
     pairs: list[ContextPair] = []
     if not positives or not negatives:
         return pairs
-    # Round-robin interleaving: for each pair index k, pick positive
-    # k % len(pos) and negative k % len(neg).  This guarantees coverage
-    # until the cap is hit.
-    total = len(positives) * len(negatives)
-    limit = min(total, _MAX_CONTEXT_PAIRS)
-    full: list[tuple[str | int, str | int]] = [
-        (p, n) for p in positives for n in negatives
-    ]
-    # Re-order so that the first min(len(pos), len(neg)) entries cover a
-    # distinct positive *and* a distinct negative, guaranteeing each
-    # reference contributes to the boundary even when the cap is low.
-    reordered: list[tuple[str | int, str | int]] = []
+    limit = min(len(positives) * len(negatives), _MAX_CONTEXT_PAIRS)
+    seen: set[tuple[str | int, str | int]] = set()
+    # Diagonal-first: guarantees every positive and every negative appears
+    # at least once even when the cap is hit before the full product.
     short = min(len(positives), len(negatives))
     for i in range(short):
-        reordered.append((positives[i], negatives[i]))
-    for pair in full:
-        if pair not in reordered:
-            reordered.append(pair)
-    for pos, neg in reordered[:limit]:
-        pairs.append(ContextPair(positive=pos, negative=neg))
+        pair = (positives[i], negatives[i])
+        seen.add(pair)
+        pairs.append(ContextPair(positive=pair[0], negative=pair[1]))
+        if len(pairs) >= limit:
+            return pairs
+    for pos in positives:
+        for neg in negatives:
+            pair = (pos, neg)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            pairs.append(ContextPair(positive=pos, negative=neg))
+            if len(pairs) >= limit:
+                return pairs
     return pairs
 
 

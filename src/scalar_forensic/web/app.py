@@ -29,13 +29,13 @@ from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from scalar_forensic.config import ENV_ALLOW_ONLINE, Settings
 from scalar_forensic.discovery import DiscoveryHit, _MAX_CONTEXT_PAIRS, run_discovery, run_explore
+from scalar_forensic.query_eval import QueryEvalHit, score_query_entries
+from scalar_forensic.tags import Tag, TagStore
 
 # Cosine similarity floor used when a tag has no negatives and Qdrant falls
 # back to Recommendation (triplet_score is None).  DINOv2 cosine ≥ 0.5
 # reliably indicates semantic category membership.
 _RECOMMEND_COSINE_THRESHOLD = 0.5
-from scalar_forensic.query_eval import QueryEvalHit, score_query_entries
-from scalar_forensic.tags import Tag, TagStore
 from scalar_forensic.embedder import (
     _SSCD_INPUT_SIZE,
     _open_rgb,
@@ -1328,22 +1328,25 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
         store = TagStore(client, settings.tags_collection)
         tags = store.list()
 
-        # Resolve hash → point_id, then fetch dino vectors for all candidates in
-        # one batch so we can score them locally (NumPy path, same as
-        # classify-session — avoids Qdrant Discovery on a tiny candidate pool).
+        # Resolve all hashes → point_ids in one scroll using a should-filter.
+        unique_hashes = list(dict.fromkeys(image_hashes))
         hash_to_pid: dict[str, str] = {}
-        for h in image_hashes:
-            records, _ = client.scroll(
-                collection_name=settings.collection,
-                scroll_filter=Filter(
-                    must=[FieldCondition(key="image_hash", match=MatchValue(value=h))]
-                ),
-                limit=1,
-                with_payload=False,
-                with_vectors=False,
-            )
-            if records:
-                hash_to_pid[h] = str(records[0].id)
+        for record in qdrant_scroll_all(
+            client,
+            settings.collection,
+            scroll_filter=Filter(
+                should=[
+                    FieldCondition(key="image_hash", match=MatchValue(value=h))
+                    for h in unique_hashes
+                ]
+            ),
+            limit=256,
+            with_payload=True,
+            with_vectors=False,
+        ):
+            h = (record.payload or {}).get("image_hash")
+            if isinstance(h, str) and h in unique_hashes and h not in hash_to_pid:
+                hash_to_pid[h] = str(record.id)
 
         if not hash_to_pid:
             return {h: [] for h in image_hashes}

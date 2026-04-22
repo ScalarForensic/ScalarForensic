@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import math
 
-import pytest
-
 from scalar_forensic.query_eval import (
     _MAX_CONTEXT_PAIRS,
     _cosine_sims,

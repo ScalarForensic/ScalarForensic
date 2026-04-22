@@ -37,11 +37,24 @@ def _cosine_sims(query: list[float], refs: list[list[float]]) -> np.ndarray:
 
 
 def _pair_indices(n_pos: int, n_neg: int) -> list[tuple[int, int]]:
-    """Return pair indices in the same round-robin order as _build_context_pairs."""
-    full = [(p, n) for p in range(n_pos) for n in range(n_neg)]
+    """Return pair indices in the same diagonal-first order as _build_context_pairs."""
+    limit = min(n_pos * n_neg, _MAX_CONTEXT_PAIRS)
+    seen: set[tuple[int, int]] = set()
+    result: list[tuple[int, int]] = []
     short = min(n_pos, n_neg)
-    reordered: list[tuple[int, int]] = list(dict.fromkeys([(i, i) for i in range(short)] + full))
-    return reordered[:_MAX_CONTEXT_PAIRS]
+    for i in range(short):
+        seen.add((i, i))
+        result.append((i, i))
+        if len(result) >= limit:
+            return result
+    for p in range(n_pos):
+        for n in range(n_neg):
+            if (p, n) in seen:
+                continue
+            result.append((p, n))
+            if len(result) >= limit:
+                return result
+    return result
 
 
 def score_query_vector(
@@ -75,7 +88,7 @@ def score_query_entries(
     """Score ``(file_id, filename, dino_vec, _)`` entries against dino references.
 
     Returns hits sorted by triplet score then cosine margin, limited to *limit*.
-    Only entries that scored > 0 on the dino vector are included.
+    Entries with triplet_score == 0 and cosine_margin == 0 are excluded.
     """
     results: list[QueryEvalHit] = []
     for file_id, filename, dino_vec, _sscd_vec in entries:
