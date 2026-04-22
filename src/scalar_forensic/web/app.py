@@ -1166,7 +1166,7 @@ async def mark_tag(
     try:
 
         def _run():
-            role_lit = cast("Literal['positive', 'negative']", role)
+            role_lit = cast(Literal["positive", "negative"], role)
             return _tag_store().mark(tag_id, point_id, role_lit)
 
         tag = await asyncio.to_thread(_run)
@@ -1248,8 +1248,11 @@ async def triage(
     settings = Settings()
     try:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-        store = TagStore(client, settings.tags_collection)
-        tag = await asyncio.to_thread(store.get, tag_id)
+
+        def _get_tag() -> Tag | None:
+            return _tag_store().get(tag_id)
+
+        tag = await asyncio.to_thread(_get_tag)
         if tag is None:
             raise HTTPException(status_code=404, detail="Tag not found")
         hits = await asyncio.to_thread(
@@ -1296,7 +1299,7 @@ async def explore(
     settings = Settings()
     try:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-        store = TagStore(client, settings.tags_collection)
+        store = await asyncio.to_thread(TagStore, client, settings.tags_collection)
         tag = await asyncio.to_thread(store.get, tag_id)
         if tag is None:
             raise HTTPException(status_code=404, detail="Tag not found")
