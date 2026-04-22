@@ -2798,10 +2798,6 @@ function sfn() {
       ];
       for (const id of allIds) {
         const sid = String(id);
-        // First try triageHitCache
-        if (!this.triageHitCache[sid] && this.triageHitCache[sid] !== null) {
-          // not cached yet; leave for lazy fetch
-        }
         if (this.triageHitCache[sid]) {
           this.triageHitCache = { ...this.triageHitCache };  // trigger reactivity
         }

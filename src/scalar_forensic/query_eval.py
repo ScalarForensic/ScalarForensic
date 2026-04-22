@@ -11,8 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-# Must match scalar_forensic.discovery._MAX_CONTEXT_PAIRS.
-_MAX_CONTEXT_PAIRS = 64
+from scalar_forensic.discovery import _MAX_CONTEXT_PAIRS
 
 
 @dataclass
