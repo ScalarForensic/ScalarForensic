@@ -1625,6 +1625,10 @@ async def triage_query_images(
             return tag, []
 
         pos_ids_set = {str(i) for i in tag.positive_ids}
+        # Mirror run_discovery auto-anchor: treat target_id as implicit positive
+        # when positive_ids is empty so target-only tags score correctly.
+        if not pos_ids_set and tag.target_id is not None:
+            pos_ids_set.add(str(tag.target_id))
 
         def _extract_vecs(vec_name: str, role: str) -> list[list[float]]:
             result = []
