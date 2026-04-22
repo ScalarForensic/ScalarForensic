@@ -196,8 +196,8 @@ async def index() -> FileResponse:
 @app.get("/api/collections")
 async def collections() -> JSONResponse:
     settings = Settings()
-    modes, error = await get_available_modes(settings)
-    payload: dict = {"modes": modes}
+    modes, has_reference, error = await get_available_modes(settings)
+    payload: dict = {"modes": modes, "has_reference": has_reference}
     if error:
         payload["error"] = f"Qdrant unavailable: {error}"
     return JSONResponse(payload)
@@ -287,6 +287,7 @@ async def query(
     threshold_semantic: float = Form(default=0.55, ge=0.0, le=1.0),
     limit: int = Form(default=10, ge=1, le=50),
     unify: bool = Form(default=True),
+    include_reference: bool = Form(default=False),
 ) -> JSONResponse:
     session = get_session(session_id)
     if session is None:
@@ -302,6 +303,7 @@ async def query(
         limit,
         settings,
         unify=unify,
+        include_reference=include_reference,
     )
     provenance = QueryProvenance(
         modes=mode_list,
@@ -344,6 +346,7 @@ async def query(
                             else None,
                             "query_timecodes": h.query_timecodes,
                             "best_query_timecode_ms": h.best_query_timecode_ms,
+                            "is_reference": h.is_reference,
                         }
                         for h in r.hits
                     ],
@@ -1089,6 +1092,7 @@ def _hit_to_json(hit: DiscoveryHit) -> dict:
         "video_path": payload.get("video_path"),
         "video_hash": payload.get("video_hash"),
         "frame_timecode_ms": payload.get("frame_timecode_ms"),
+        "is_reference": bool(payload.get("is_reference")),
     }
 
 
@@ -1242,9 +1246,27 @@ async def triage(
     tag_id: str = Form(...),
     limit: int = Form(default=50, ge=1, le=500),
     reverse: bool = Form(default=False),
+    source: str = Form(default="indexed"),
 ) -> JSONResponse:
-    """Run a Tag-Triage query against the indexed dataset using DINOv2."""
+    """Run a Tag-Triage query against the indexed dataset using DINOv2.
+
+    source='indexed' (default): search the case collection; tag IDs may reference
+    the reference collection via lookup_from when SFN_REFERENCE_COLLECTION is set.
+    source='reference': search the reference collection directly for high-quality
+    tagging using known material.
+    """
     settings = Settings()
+    if source == "reference":
+        if not settings.reference_collection:
+            raise HTTPException(
+                status_code=400,
+                detail="SFN_REFERENCE_COLLECTION is not configured",
+            )
+        triage_collection = settings.reference_collection
+        ref_coll_for_lookup = None
+    else:
+        triage_collection = settings.collection
+        ref_coll_for_lookup = settings.reference_collection
     try:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
         store = TagStore(client, settings.tags_collection)
@@ -1254,12 +1276,12 @@ async def triage(
         hits = await asyncio.to_thread(
             run_discovery,
             client,
-            settings.collection,
+            triage_collection,
             tag,
             vector_name="dino",
             limit=limit,
             reverse=reverse,
-            reference_collection=settings.reference_collection,
+            reference_collection=ref_coll_for_lookup,
         )
     except HTTPException:
         raise

@@ -1150,6 +1150,7 @@
                  'mark-pos': searchHitMark(hit) === 'positive',
                  'mark-neg': searchHitMark(hit) === 'negative',
                }"
+               :style="hit.is_reference ? 'border-left:2px solid var(--reference)' : ''"
                @click="selectHit(hit)">
             <img class="hit-thumb"
                  :src="hit.image_hash ? `/api/thumbnail/${hit.image_hash}` : '/static/vector-fallback.svg'"
@@ -1181,6 +1182,7 @@
                 </div>
               </div>
               <div class="hit-filename">
+                <span x-show="hit.is_reference" class="badge badge-reference" style="margin-right:4px;font-size:8px;padding:1px 4px" title="Reference material">REF</span>
                 <span x-show="hit.is_video_frame" class="meta-tag" style="background:#7c3aed;color:#fff;margin-right:4px" title="Video frame">▶</span>
                 <span x-text="hit.is_video_frame && hit.video_path ? hit.video_path.split('/').pop() : hit.path.split('/').pop()"></span>
               </div>
@@ -1260,6 +1262,16 @@
             </template>
           </div>
         </template>
+      </div>
+
+      <!-- Reference collection toggle -->
+      <div x-show="hasReferenceCollection"
+           style="padding:6px 12px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:var(--text2)">
+          <input type="checkbox" x-model="includeReference" @change="results.length ? runQuery() : null">
+          <span>Include reference collection</span>
+          <span class="badge badge-reference" style="font-size:8px;padding:1px 4px">REF</span>
+        </label>
       </div>
     </div>
 
@@ -1342,6 +1354,9 @@
                   @click="triageSource = 'query'">Query images</button>
           <button class="triage-mode-btn" :class="{active: triageSource === 'explore'}"
                   @click="triageSource = 'explore'">Explore</button>
+          <button class="triage-mode-btn" x-show="hasReferenceCollection"
+                  :class="{active: triageSource === 'reference'}"
+                  @click="triageSource = 'reference'">Reference</button>
         </div>
 
         <template x-if="triageSource === 'explore'">
@@ -1355,7 +1370,7 @@
           </div>
           <input type="range" min="10" max="200" step="10" x-model.number="triageLimit">
         </div>
-        <label class="triage-reverse-row" x-show="triageSource === 'indexed'">
+        <label class="triage-reverse-row" x-show="triageSource === 'indexed' || triageSource === 'reference'">
           <input type="checkbox" x-model="triageReverse">
           <span>Reverse (surface benign)</span>
         </label>
@@ -1672,6 +1687,7 @@
                  'mark-pos': triageHitMark(hit) === 'positive',
                  'mark-neg': triageHitMark(hit) === 'negative',
                }"
+               :style="hit.is_reference ? 'border-left:2px solid var(--reference)' : ''"
                @click="selectTriageHit(hit)">
             <img class="triage-hit-thumb"
                  :src="triageHitThumb(hit)"
@@ -1679,6 +1695,7 @@
                  loading="lazy" alt="">
             <div class="triage-hit-body">
               <div class="triage-hit-scores">
+                <span x-show="hit.is_reference" class="badge badge-reference" style="font-size:8px;padding:1px 4px;margin-bottom:2px">REF</span>
                 <span class="triage-score-num"
                       :class="{zero: hit.triplet_score !== null ? !hit.triplet_score : false}"
                       x-text="hit.triplet_score !== null ? hit.triplet_score : (hit.cosine_margin ?? 0).toFixed(2)"></span>
@@ -1813,6 +1830,8 @@ function sfn() {
     hitsFilterAltered: true,
     hitsFilterSemantic: true,
     hitsUnified: true,
+    includeReference: false,
+    hasReferenceCollection: false,
 
     // ── Tag Triage ────────────────────────────────────────────────────────
     appMode: 'search',   // 'search' | 'triage'
@@ -1829,7 +1848,7 @@ function sfn() {
     triageError: null,
     triageLimit: 50,
     triageReverse: false,
-    triageSource: 'indexed',  // 'indexed' | 'query' | 'explore'
+    triageSource: 'indexed',  // 'indexed' | 'query' | 'explore' | 'reference'
     exploreStrategy: null,    // 'random' | 'context' — returned by last /api/explore call
 
     // Triage hit selection
@@ -2070,6 +2089,7 @@ function sfn() {
         this.availableModes = d.modes;
         // EXACT is always selected; add other available modes
         this.selectedModes = ['exact', ...d.modes.filter(m => m !== 'exact')];
+        this.hasReferenceCollection = d.has_reference ?? false;
         if (d.error) this.serverError = d.error;
       } catch {
         this.availableModes = ['exact'];
@@ -2215,6 +2235,7 @@ function sfn() {
       fd.append('threshold_semantic', this.thresholdSemantic);
       fd.append('limit', this.limit);
       fd.append('unify', this.hitsUnified ? 'true' : 'false');
+      fd.append('include_reference', this.includeReference ? 'true' : 'false');
       this.queryError = '';
       this.provenance = null;
       try {
@@ -2848,6 +2869,7 @@ function sfn() {
           resp = await fetch('/api/triage/query-images', { method: 'POST', body: fd });
         } else {
           fd.append('reverse', this.triageReverse ? 'true' : 'false');
+          fd.append('source', this.triageSource === 'reference' ? 'reference' : 'indexed');
           resp = await fetch('/api/triage', { method: 'POST', body: fd });
         }
         if (!resp.ok) {

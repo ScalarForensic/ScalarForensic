@@ -13,6 +13,7 @@ def _settings(**kwargs) -> Settings:
         qdrant_url="http://localhost:6333",
         qdrant_api_key=None,
         collection="sfn",
+        reference_collection=None,
     )
     defaults.update(kwargs)
     s = MagicMock(spec=Settings)
@@ -49,7 +50,7 @@ def test_get_available_modes_both_vectors():
         MockClient.return_value.get_collection.return_value = _make_collection_info(
             ["dino", "sscd"]
         )
-        modes, error = asyncio.run(get_available_modes(settings))
+        modes, _has_ref, error = asyncio.run(get_available_modes(settings))
 
     assert error is None
     assert set(modes) == {"exact", "altered", "semantic"}
@@ -63,7 +64,7 @@ def test_get_available_modes_only_sscd():
     with patch("scalar_forensic.web.pipeline.QdrantClient") as MockClient:
         MockClient.return_value.get_collections.return_value = collections_response
         MockClient.return_value.get_collection.return_value = _make_collection_info(["sscd"])
-        modes, error = asyncio.run(get_available_modes(settings))
+        modes, _has_ref, error = asyncio.run(get_available_modes(settings))
 
     assert error is None
     assert "exact" in modes
@@ -79,7 +80,7 @@ def test_get_available_modes_only_dino():
     with patch("scalar_forensic.web.pipeline.QdrantClient") as MockClient:
         MockClient.return_value.get_collections.return_value = collections_response
         MockClient.return_value.get_collection.return_value = _make_collection_info(["dino"])
-        modes, error = asyncio.run(get_available_modes(settings))
+        modes, _has_ref, error = asyncio.run(get_available_modes(settings))
 
     assert error is None
     assert "exact" in modes
@@ -94,7 +95,7 @@ def test_get_available_modes_collection_absent():
 
     with patch("scalar_forensic.web.pipeline.QdrantClient") as MockClient:
         MockClient.return_value.get_collections.return_value = collections_response
-        modes, error = asyncio.run(get_available_modes(settings))
+        modes, _has_ref, error = asyncio.run(get_available_modes(settings))
 
     assert modes == []
     assert error is None
@@ -124,7 +125,7 @@ def test_get_available_modes_all_retries_exhausted():
         patch("scalar_forensic.web.pipeline.QdrantClient", side_effect=_raising_client),
         patch("scalar_forensic.web.pipeline.asyncio.sleep", side_effect=_noop_sleep),
     ):
-        modes, error = asyncio.run(get_available_modes(settings))
+        modes, _has_ref, error = asyncio.run(get_available_modes(settings))
 
     assert modes == []
     assert error is not None
@@ -157,7 +158,7 @@ def test_get_available_modes_succeeds_on_second_attempt():
         patch("scalar_forensic.web.pipeline.QdrantClient", side_effect=_flaky_client),
         patch("scalar_forensic.web.pipeline.asyncio.sleep", side_effect=_noop_sleep),
     ):
-        modes, error = asyncio.run(get_available_modes(settings))
+        modes, _has_ref, error = asyncio.run(get_available_modes(settings))
 
     assert error is None
     assert set(modes) == {"exact", "altered", "semantic"}

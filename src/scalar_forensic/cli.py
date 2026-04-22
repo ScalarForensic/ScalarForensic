@@ -334,6 +334,15 @@ def index(
             "model downloads). Offline by default — see SFN_ALLOW_ONLINE in .env."
         ),
     ),
+    reference: bool = typer.Option(
+        False,
+        "--reference",
+        help=(
+            "Index into the reference collection instead of the case collection. "
+            "Requires SFN_REFERENCE_COLLECTION to be set in .env. "
+            "Points are tagged with is_reference=true in their payload."
+        ),
+    ),
 ) -> None:
     """Embed all images under INPUT_DIR and store vectors in Qdrant."""
     # Write back to os.environ so Settings() reads the correct value,
@@ -342,6 +351,17 @@ def index(
         os.environ[ENV_ALLOW_ONLINE] = "true"
 
     settings = Settings()
+
+    if reference:
+        if not settings.reference_collection:
+            typer.echo(
+                "[ERROR] --reference requires SFN_REFERENCE_COLLECTION to be set in .env",
+                err=True,
+            )
+            raise typer.Exit(1)
+        target_collection = settings.reference_collection
+    else:
+        target_collection = settings.collection
 
     # Apply HuggingFace offline guard before any model loading occurs.
     settings.apply_network_policy()
@@ -441,16 +461,17 @@ def index(
     specs: list[tuple[AnyEmbedder, Indexer, str]] = []
     for embedder, vector_name in _loaded:
         typer.echo(
-            f"Connecting to Qdrant  collection={settings.collection!r}  vector={vector_name!r} ..."
+            f"Connecting to Qdrant  collection={target_collection!r}  vector={vector_name!r} ..."
         )
         try:
             indexer = Indexer(
                 url=settings.qdrant_url,
-                collection=settings.collection,
+                collection=target_collection,
                 vector_name=vector_name,
                 embedding_dim=embedder.embedding_dim,
                 api_key=settings.qdrant_api_key,
                 initial_vectors_config=_initial_vectors_config,
+                is_reference=reference,
             )
         except ValueError as exc:
             typer.echo(f"[ERROR] {exc}", err=True)
