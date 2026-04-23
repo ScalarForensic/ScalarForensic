@@ -1150,6 +1150,7 @@
                  'mark-pos': searchHitMark(hit) === 'positive',
                  'mark-neg': searchHitMark(hit) === 'negative',
                }"
+               :style="hit.is_reference ? 'border-left:2px solid var(--reference)' : ''"
                @click="selectHit(hit)">
             <img class="hit-thumb"
                  :src="hit.image_hash ? `/api/thumbnail/${hit.image_hash}` : '/static/vector-fallback.svg'"
@@ -1181,6 +1182,7 @@
                 </div>
               </div>
               <div class="hit-filename">
+                <span x-show="hit.is_reference" class="badge badge-reference badge-sm" style="margin-right:4px" title="Reference material">REF</span>
                 <span x-show="hit.is_video_frame" class="meta-tag" style="background:#7c3aed;color:#fff;margin-right:4px" title="Video frame">▶</span>
                 <span x-text="hit.is_video_frame && hit.video_path ? hit.video_path.split('/').pop() : hit.path.split('/').pop()"></span>
               </div>
@@ -1261,6 +1263,16 @@
           </div>
         </template>
       </div>
+
+      <!-- Reference collection toggle -->
+      <div x-show="hasReferenceCollection"
+           style="padding:6px 12px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:var(--text2)">
+          <input type="checkbox" x-model="includeReference" @change="results.length ? runQuery() : null">
+          <span>Include reference collection</span>
+          <span class="badge badge-reference badge-sm">REF</span>
+        </label>
+      </div>
     </div>
 
   </div><!-- /results-layout -->
@@ -1277,7 +1289,7 @@
       </div>
 
       <!-- Create form -->
-      <div x-show="showConceptCreate">
+      <div class="tag-create-form" x-show="showConceptCreate">
         <div class="tag-form-row">
           <label class="tag-form-label">Name *</label>
           <input class="tag-form-input" x-model="newConceptName" placeholder="e.g. weapons"
@@ -1333,16 +1345,29 @@
 
       <!-- Run controls (when a tag is selected) -->
       <div class="triage-run-controls" x-show="selectedConceptId">
-        <!-- Source toggle -->
-        <div class="slider-label" style="margin-bottom:4px"><span>Source</span></div>
+        <!-- Mode buttons -->
+        <div class="slider-label" style="margin-bottom:4px"><span>Mode</span></div>
         <div class="triage-mode-btns" style="margin-bottom:6px">
           <button class="triage-mode-btn" :class="{active: triageSource === 'indexed'}"
-                  @click="triageSource = 'indexed'">Dataset</button>
+                  @click="triageSource = 'indexed'">Triage</button>
           <button class="triage-mode-btn" :class="{active: triageSource === 'query'}"
-                  @click="triageSource = 'query'">Query images</button>
+                  @click="triageSource = 'query'; triageCollection = 'dataset'">Query</button>
           <button class="triage-mode-btn" :class="{active: triageSource === 'explore'}"
                   @click="triageSource = 'explore'">Explore</button>
         </div>
+
+        <!-- Collection toggle (hidden in Query mode and when no reference collection) -->
+        <template x-if="hasReferenceCollection && triageSource !== 'query'">
+          <div style="margin-bottom:6px">
+            <div class="slider-label" style="margin-bottom:4px"><span>Collection</span></div>
+            <div class="triage-mode-btns">
+              <button class="triage-mode-btn" :class="{active: triageCollection === 'dataset'}"
+                      @click="triageCollection = 'dataset'">Dataset</button>
+              <button class="triage-mode-btn" :class="{active: triageCollection === 'reference'}"
+                      @click="triageCollection = 'reference'">Reference</button>
+            </div>
+          </div>
+        </template>
 
         <template x-if="triageSource === 'explore'">
           <div class="triage-explore-hint" x-text="exploreStrategyHint"></div>
@@ -1672,6 +1697,7 @@
                  'mark-pos': triageHitMark(hit) === 'positive',
                  'mark-neg': triageHitMark(hit) === 'negative',
                }"
+               :style="hit.is_reference ? 'border-left:2px solid var(--reference)' : ''"
                @click="selectTriageHit(hit)">
             <img class="triage-hit-thumb"
                  :src="triageHitThumb(hit)"
@@ -1679,6 +1705,7 @@
                  loading="lazy" alt="">
             <div class="triage-hit-body">
               <div class="triage-hit-scores">
+                <span x-show="hit.is_reference" class="badge badge-reference badge-sm" style="margin-bottom:2px">REF</span>
                 <span class="triage-score-num"
                       :class="{zero: hit.triplet_score !== null ? !hit.triplet_score : false}"
                       x-text="hit.triplet_score !== null ? hit.triplet_score : (hit.cosine_margin ?? 0).toFixed(2)"></span>
@@ -1813,6 +1840,8 @@ function sfn() {
     hitsFilterAltered: true,
     hitsFilterSemantic: true,
     hitsUnified: true,
+    includeReference: false,
+    hasReferenceCollection: false,
 
     // ── Tag Triage ────────────────────────────────────────────────────────
     appMode: 'search',   // 'search' | 'triage'
@@ -1829,8 +1858,9 @@ function sfn() {
     triageError: null,
     triageLimit: 50,
     triageReverse: false,
-    triageSource: 'indexed',  // 'indexed' | 'query' | 'explore'
-    exploreStrategy: null,    // 'random' | 'context' — returned by last /api/explore call
+    triageSource: 'indexed',     // 'indexed' | 'query' | 'explore'
+    triageCollection: 'dataset', // 'dataset' | 'reference' — applies to Triage and Explore
+    exploreStrategy: null,       // 'random' | 'context' — returned by last /api/explore call
 
     // Triage hit selection
     selectedTriageHitId: null,
@@ -2070,6 +2100,7 @@ function sfn() {
         this.availableModes = d.modes;
         // EXACT is always selected; add other available modes
         this.selectedModes = ['exact', ...d.modes.filter(m => m !== 'exact')];
+        this.hasReferenceCollection = d.has_reference ?? false;
         if (d.error) this.serverError = d.error;
       } catch {
         this.availableModes = ['exact'];
@@ -2215,6 +2246,7 @@ function sfn() {
       fd.append('threshold_semantic', this.thresholdSemantic);
       fd.append('limit', this.limit);
       fd.append('unify', this.hitsUnified ? 'true' : 'false');
+      fd.append('include_reference', this.includeReference ? 'true' : 'false');
       this.queryError = '';
       this.provenance = null;
       try {
@@ -2844,6 +2876,7 @@ function sfn() {
           resp = await fetch('/api/triage/query-images', { method: 'POST', body: fd });
         } else {
           fd.append('reverse', this.triageReverse ? 'true' : 'false');
+          fd.append('source', this.triageCollection === 'reference' ? 'reference' : 'indexed');
           resp = await fetch('/api/triage', { method: 'POST', body: fd });
         }
         if (!resp.ok) {
@@ -2889,6 +2922,7 @@ function sfn() {
       const fd = new FormData();
       fd.append('tag_id', this.selectedConceptId);
       fd.append('limit', this.triageLimit);
+      if (this.triageCollection === 'reference') fd.append('collection', 'reference');
       try {
         const resp = await fetch('/api/explore', { method: 'POST', body: fd });
         if (!resp.ok) {
@@ -3317,6 +3351,7 @@ function sfn() {
       this.triageRunning = false;
       this.triageError = null;
       this.triageSource = 'indexed';
+      this.triageCollection = 'dataset';
       this.markedOverrides = {};
       this.hitTags = {};
       this.activeTagId = '';

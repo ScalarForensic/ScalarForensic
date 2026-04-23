@@ -65,6 +65,8 @@ Modes are automatically disabled in the UI if the corresponding collection has n
 
 **EXIF metadata extraction** (`SFN_EXTRACT_EXIF=true`): stores two boolean fields on every indexed point — `exif` (any EXIF data present) and `exif_geo_data` (GPS coordinates present).
 
+**Reference collection** (`SFN_REFERENCE_COLLECTION`): index external reference material into a separate Qdrant collection via `sfn --reference`, keeping it isolated from the case collection. See [INSTALL.md § Reference collection](INSTALL.md#reference-collection).
+
 **Offline / airgapped by default:** the HuggingFace SDK is blocked from making any network requests at runtime. Connections to Qdrant and any configured remote embedder endpoint are the only outward traffic. Pass `--allow-online` (or set `SFN_ALLOW_ONLINE=true`) for first-time model downloads; omit it for all subsequent runs. Models and Python wheels can also be pre-bundled for fully airgapped deployment. See [INSTALL.md § Network policy](INSTALL.md#network-policy) and [INSTALL.md § Offline deployment](INSTALL.md#offline--airgapped-deployment).
 
 **GPU acceleration:** NVIDIA CUDA (default) and AMD ROCm are both supported, including RDNA 4 (RX 9070 / 9070 XT) natively on ROCm 6.4. See [INSTALL.md § GPU setup](INSTALL.md#gpu--hardware-acceleration).

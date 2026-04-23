@@ -28,7 +28,7 @@ Tag {
     tag_id       # UUIDv5 derived deterministically from the name
     name         # human-readable, stable ID key
     positive_ids # Qdrant point IDs of reference hits
-    negative_ids # Qdrant point IDs of known-benign material
+    negative_ids # Qdrant point IDs of negative examples
     target_id    # optional explicit anchor (see below)
     notes        # free-form text
 }
@@ -114,7 +114,7 @@ This is useful for rapid triage of suspected material before deciding whether to
 | Env var | Default | Purpose |
 |---|---|---|
 | `SFN_TAGS_COLLECTION` | `sfn_tags` | Qdrant sidecar collection for tag persistence |
-| `SFN_REFERENCE_COLLECTION` | *(unset)* | Separate collection for externally-labelled reference material (NCMEC/CAID). When set, tag point IDs are resolved against this collection instead of the case collection — a chain-of-custody boundary so known-bad hashes never enter the case collection. |
+| `SFN_REFERENCE_COLLECTION` | *(unset)* | Separate collection for externally-labelled reference material. When set, tag point IDs are resolved against this collection instead of the case collection, keeping the two datasets isolated. |
 
 ---
 

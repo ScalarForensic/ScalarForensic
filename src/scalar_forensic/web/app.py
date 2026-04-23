@@ -196,8 +196,8 @@ async def index() -> FileResponse:
 @app.get("/api/collections")
 async def collections() -> JSONResponse:
     settings = Settings()
-    modes, error = await get_available_modes(settings)
-    payload: dict = {"modes": modes}
+    modes, has_reference, error = await get_available_modes(settings)
+    payload: dict = {"modes": modes, "has_reference": has_reference}
     if error:
         payload["error"] = f"Qdrant unavailable: {error}"
     return JSONResponse(payload)
@@ -287,6 +287,7 @@ async def query(
     threshold_semantic: float = Form(default=0.55, ge=0.0, le=1.0),
     limit: int = Form(default=10, ge=1, le=50),
     unify: bool = Form(default=True),
+    include_reference: bool = Form(default=False),
 ) -> JSONResponse:
     session = get_session(session_id)
     if session is None:
@@ -302,6 +303,7 @@ async def query(
         limit,
         settings,
         unify=unify,
+        include_reference=include_reference,
     )
     provenance = QueryProvenance(
         modes=mode_list,
@@ -344,6 +346,7 @@ async def query(
                             else None,
                             "query_timecodes": h.query_timecodes,
                             "best_query_timecode_ms": h.best_query_timecode_ms,
+                            "is_reference": h.is_reference,
                         }
                         for h in r.hits
                     ],
@@ -1076,6 +1079,38 @@ def _hit_passes_classify_threshold(
     return cosine_margin >= _RECOMMEND_COSINE_THRESHOLD
 
 
+def _fetch_tag_ref_records(
+    client: QdrantClient,
+    settings: Settings,
+    all_ref_ids: list[str],
+) -> list:
+    """Retrieve tag reference records from case and (if needed) reference collection.
+
+    Tags built with source='reference' store point IDs from the reference
+    collection; those IDs won't exist in the case collection. Checking both
+    ensures classification works regardless of which collection the tag came from.
+    """
+    records: list = list(
+        client.retrieve(
+            collection_name=settings.collection,
+            ids=all_ref_ids,
+            with_vectors=True,
+            with_payload=False,
+        )
+    )
+    if settings.reference_collection:
+        found = {str(r.id) for r in records}
+        missing = [i for i in all_ref_ids if i not in found]
+        if missing:
+            records += client.retrieve(
+                collection_name=settings.reference_collection,
+                ids=missing,
+                with_vectors=True,
+                with_payload=False,
+            )
+    return records
+
+
 def _hit_to_json(hit: DiscoveryHit) -> dict:
     payload = hit.payload or {}
     return {
@@ -1090,6 +1125,7 @@ def _hit_to_json(hit: DiscoveryHit) -> dict:
         "video_path": payload.get("video_path"),
         "video_hash": payload.get("video_hash"),
         "frame_timecode_ms": payload.get("frame_timecode_ms"),
+        "is_reference": bool(payload.get("is_reference")),
     }
 
 
@@ -1243,9 +1279,29 @@ async def triage(
     tag_id: str = Form(...),
     limit: int = Form(default=50, ge=1, le=500),
     reverse: bool = Form(default=False),
+    source: str = Form(default="indexed"),
 ) -> JSONResponse:
-    """Run a Tag-Triage query against the indexed dataset using DINOv2."""
+    """Run a Tag-Triage query against the indexed dataset using DINOv2.
+
+    source='indexed' (default): search the case collection; tag IDs may reference
+    the reference collection via lookup_from when SFN_REFERENCE_COLLECTION is set.
+    source='reference': search the reference collection directly for high-quality
+    tagging using known material.
+    """
     settings = Settings()
+    if source not in {"indexed", "reference"}:
+        raise HTTPException(status_code=400, detail="source must be 'indexed' or 'reference'")
+    if source == "reference":
+        if not settings.reference_collection:
+            raise HTTPException(
+                status_code=400,
+                detail="SFN_REFERENCE_COLLECTION is not configured",
+            )
+        triage_collection = settings.reference_collection
+        ref_coll_for_lookup = None
+    else:
+        triage_collection = settings.collection
+        ref_coll_for_lookup = settings.reference_collection
     try:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
 
@@ -1258,12 +1314,12 @@ async def triage(
         hits = await asyncio.to_thread(
             run_discovery,
             client,
-            settings.collection,
+            triage_collection,
             tag,
             vector_name="dino",
             limit=limit,
             reverse=reverse,
-            reference_collection=settings.reference_collection,
+            reference_collection=ref_coll_for_lookup,
         )
     except HTTPException:
         raise
@@ -1285,6 +1341,7 @@ async def triage(
 async def explore(
     tag_id: str = Form(...),
     limit: int = Form(default=50, ge=1, le=200),
+    collection: str = Form(default="dataset"),
 ) -> JSONResponse:
     """Surface exploration candidates for tag bootstrapping.
 
@@ -1295,8 +1352,22 @@ async def explore(
     Already-labelled points are excluded so successive runs surface fresh
     candidates.  Returns the same hit envelope as /api/triage so the UI
     can reuse the existing mark/unmark flow.
+
+    ``collection`` controls which collection is explored: ``"dataset"`` (default)
+    uses SFN_COLLECTION; ``"reference"`` uses SFN_REFERENCE_COLLECTION.
     """
     settings = Settings()
+    if collection not in {"dataset", "reference"}:
+        raise HTTPException(status_code=400, detail="collection must be 'dataset' or 'reference'")
+    if collection == "reference":
+        if not settings.reference_collection:
+            raise HTTPException(
+                status_code=400,
+                detail="SFN_REFERENCE_COLLECTION is not configured.",
+            )
+        explore_collection = settings.reference_collection
+    else:
+        explore_collection = settings.collection
     try:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
         store = await asyncio.to_thread(TagStore, client, settings.tags_collection)
@@ -1309,7 +1380,7 @@ async def explore(
         hits, strategy = await asyncio.to_thread(
             run_explore,
             client,
-            settings.collection,
+            explore_collection,
             pos_ids,
             list(tag.negative_ids),
             vector_name="dino",
@@ -1418,12 +1489,7 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
                 continue
             all_ref_ids = [str(i) for i in effective_pos + list(tag.negative_ids)]
             try:
-                ref_records = client.retrieve(
-                    collection_name=settings.collection,
-                    ids=all_ref_ids,
-                    with_vectors=True,
-                    with_payload=False,
-                )
+                ref_records = _fetch_tag_ref_records(client, settings, all_ref_ids)
             except Exception:  # noqa: BLE001
                 continue
 
@@ -1531,12 +1597,7 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
                 continue
             all_ref_ids = [str(i) for i in tag.positive_ids + tag.negative_ids]
             try:
-                ref_records = client.retrieve(
-                    collection_name=settings.collection,
-                    ids=all_ref_ids,
-                    with_vectors=True,
-                    with_payload=False,
-                )
+                ref_records = _fetch_tag_ref_records(client, settings, all_ref_ids)
             except Exception:  # noqa: BLE001
                 continue
 
@@ -1625,12 +1686,7 @@ async def triage_query_images(
 
         # Fetch reference vectors for requested mode(s)
         try:
-            ref_records = client.retrieve(
-                collection_name=settings.collection,
-                ids=all_ref_ids,
-                with_vectors=True,
-                with_payload=False,
-            )
+            ref_records = _fetch_tag_ref_records(client, settings, all_ref_ids)
         except Exception:  # noqa: BLE001
             return tag, []
 

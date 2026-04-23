@@ -48,6 +48,7 @@
   --exact:      #c8cfd8;
   --altered:    #e89320;
   --semantic:   #4a9ee0;
+  --reference:  #f59e0b;
   --danger:     #c0392b;
   --success:    #2ecc71;
   --radius:     4px;
@@ -903,9 +904,11 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
-.badge-exact    { background: rgba(200,207,216,0.1); color: var(--exact);   border: 1px solid rgba(200,207,216,0.2); }
-.badge-altered  { background: rgba(232,147,32,0.1);  color: var(--altered); border: 1px solid rgba(232,147,32,0.2); }
-.badge-semantic { background: rgba(74,158,224,0.1);  color: var(--semantic);border: 1px solid rgba(74,158,224,0.2); }
+.badge-exact     { background: rgba(200,207,216,0.1); color: var(--exact);     border: 1px solid rgba(200,207,216,0.2); }
+.badge-altered   { background: rgba(232,147,32,0.1);  color: var(--altered);   border: 1px solid rgba(232,147,32,0.2); }
+.badge-semantic  { background: rgba(74,158,224,0.1);  color: var(--semantic);  border: 1px solid rgba(74,158,224,0.2); }
+.badge-reference { background: rgba(245,158,11,0.12); color: var(--reference); border: 1px solid rgba(245,158,11,0.25); }
+.badge-sm        { font-size: 8px; padding: 1px 4px; }
 
 /* ── Tag strip (below image box in query and match panels) ── */
 .tag-strip {
@@ -1917,7 +1920,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 }
 .triage-mode-btn {
   flex: 1;
-  padding: 3px 0;
+  padding: 5px 0;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text2);

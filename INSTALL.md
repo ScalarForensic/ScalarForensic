@@ -101,9 +101,30 @@ there. Environment variables already set in the shell take precedence over the f
 | `SFN_INPUT_DIR` | _(none)_ | Default input folder (can be passed as CLI argument instead) |
 | `SFN_DUPLICATE_CHECK_MODE` | `hash` | Dedup strategy: `hash` \| `filepath` \| `both` |
 | `SFN_EXTRACT_EXIF` | `false` | Store EXIF presence flags in the database |
+| `SFN_REFERENCE_COLLECTION` | _(unset)_ | Qdrant collection holding external reference vectors. When set, reference material is indexed here instead of the main collection, keeping the two datasets separate. See [Reference collection](#reference-collection). |
 | `SFN_ALLOW_ONLINE` | `false` | Allow HuggingFace Hub connections (for first-time model downloads only) |
 | `SFN_VIDEO_FPS` | `1.0` | Frames to extract per second of video |
 | `SFN_VIDEO_MAX_FRAMES` | `500` | Hard cap on frames extracted per video file (0 = no cap) |
+
+## Reference collection
+
+The reference collection is an optional, separate Qdrant collection that holds vectors for externally labelled reference material. Keeping it separate from the case collection means your case vectors are never co-mingled with third-party reference material, and the reference collection can be reused across cases.
+
+**Setup:**
+
+1. Add `SFN_REFERENCE_COLLECTION=sfn_reference` to `.env` (or choose any name).
+2. Index your reference material into that collection using the `--reference` flag:
+   ```bash
+   sfn /path/to/reference/images --dino --sscd --reference
+   ```
+   Points are stored in `sfn_reference` and tagged `is_reference=true` in their payload.
+3. Start the web UI as normal. The reference collection is available as a lookup source in the tag triage workflow — query embeddings can be compared against it without touching the case collection.
+
+**Notes:**
+
+- `SFN_REFERENCE_COLLECTION` must be set before running `sfn --reference`. The indexer exits with an error if the variable is unset.
+- The case collection (`SFN_COLLECTION`) is unaffected — `--reference` routes all writes to the reference collection only.
+- The reference collection can be on the same Qdrant instance as the case collection; it is just a separate named collection.
 
 ## Model setup (one-time)
 
