@@ -1079,6 +1079,38 @@ def _hit_passes_classify_threshold(
     return cosine_margin >= _RECOMMEND_COSINE_THRESHOLD
 
 
+def _fetch_tag_ref_records(
+    client: QdrantClient,
+    settings: Settings,
+    all_ref_ids: list[str],
+) -> list:
+    """Retrieve tag reference records from case and (if needed) reference collection.
+
+    Tags built with source='reference' store point IDs from the reference
+    collection; those IDs won't exist in the case collection. Checking both
+    ensures classification works regardless of which collection the tag came from.
+    """
+    records: list = list(
+        client.retrieve(
+            collection_name=settings.collection,
+            ids=all_ref_ids,
+            with_vectors=True,
+            with_payload=False,
+        )
+    )
+    if settings.reference_collection:
+        found = {str(r.id) for r in records}
+        missing = [i for i in all_ref_ids if i not in found]
+        if missing:
+            records += client.retrieve(
+                collection_name=settings.reference_collection,
+                ids=missing,
+                with_vectors=True,
+                with_payload=False,
+            )
+    return records
+
+
 def _hit_to_json(hit: DiscoveryHit) -> dict:
     payload = hit.payload or {}
     return {
@@ -1257,6 +1289,8 @@ async def triage(
     tagging using known material.
     """
     settings = Settings()
+    if source not in {"indexed", "reference"}:
+        raise HTTPException(status_code=400, detail="source must be 'indexed' or 'reference'")
     if source == "reference":
         if not settings.reference_collection:
             raise HTTPException(
@@ -1440,12 +1474,7 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
                 continue
             all_ref_ids = [str(i) for i in effective_pos + list(tag.negative_ids)]
             try:
-                ref_records = client.retrieve(
-                    collection_name=settings.collection,
-                    ids=all_ref_ids,
-                    with_vectors=True,
-                    with_payload=False,
-                )
+                ref_records = _fetch_tag_ref_records(client, settings, all_ref_ids)
             except Exception:  # noqa: BLE001
                 continue
 
@@ -1553,12 +1582,7 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
                 continue
             all_ref_ids = [str(i) for i in tag.positive_ids + tag.negative_ids]
             try:
-                ref_records = client.retrieve(
-                    collection_name=settings.collection,
-                    ids=all_ref_ids,
-                    with_vectors=True,
-                    with_payload=False,
-                )
+                ref_records = _fetch_tag_ref_records(client, settings, all_ref_ids)
             except Exception:  # noqa: BLE001
                 continue
 
@@ -1647,12 +1671,7 @@ async def triage_query_images(
 
         # Fetch reference vectors for requested mode(s)
         try:
-            ref_records = client.retrieve(
-                collection_name=settings.collection,
-                ids=all_ref_ids,
-                with_vectors=True,
-                with_payload=False,
-            )
+            ref_records = _fetch_tag_ref_records(client, settings, all_ref_ids)
         except Exception:  # noqa: BLE001
             return tag, []
 
