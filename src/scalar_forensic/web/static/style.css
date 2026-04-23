@@ -1919,7 +1919,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 }
 .triage-mode-btn {
   flex: 1;
-  padding: 3px 0;
+  padding: 5px 0;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text2);

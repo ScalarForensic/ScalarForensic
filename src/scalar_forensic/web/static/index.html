@@ -1289,7 +1289,7 @@
       </div>
 
       <!-- Create form -->
-      <div x-show="showConceptCreate">
+      <div class="tag-create-form" x-show="showConceptCreate">
         <div class="tag-form-row">
           <label class="tag-form-label">Name *</label>
           <input class="tag-form-input" x-model="newConceptName" placeholder="e.g. weapons"
@@ -1345,19 +1345,29 @@
 
       <!-- Run controls (when a tag is selected) -->
       <div class="triage-run-controls" x-show="selectedConceptId">
-        <!-- Source toggle -->
-        <div class="slider-label" style="margin-bottom:4px"><span>Source</span></div>
+        <!-- Mode buttons -->
+        <div class="slider-label" style="margin-bottom:4px"><span>Mode</span></div>
         <div class="triage-mode-btns" style="margin-bottom:6px">
           <button class="triage-mode-btn" :class="{active: triageSource === 'indexed'}"
-                  @click="triageSource = 'indexed'">Dataset</button>
+                  @click="triageSource = 'indexed'">Triage</button>
           <button class="triage-mode-btn" :class="{active: triageSource === 'query'}"
-                  @click="triageSource = 'query'">Query images</button>
+                  @click="triageSource = 'query'">Query</button>
           <button class="triage-mode-btn" :class="{active: triageSource === 'explore'}"
                   @click="triageSource = 'explore'">Explore</button>
-          <button class="triage-mode-btn" x-show="hasReferenceCollection"
-                  :class="{active: triageSource === 'reference'}"
-                  @click="triageSource = 'reference'">Reference</button>
         </div>
+
+        <!-- Collection toggle (hidden in Query mode and when no reference collection) -->
+        <template x-if="hasReferenceCollection && triageSource !== 'query'">
+          <div style="margin-bottom:6px">
+            <div class="slider-label" style="margin-bottom:4px"><span>Collection</span></div>
+            <div class="triage-mode-btns">
+              <button class="triage-mode-btn" :class="{active: triageCollection === 'dataset'}"
+                      @click="triageCollection = 'dataset'">Dataset</button>
+              <button class="triage-mode-btn" :class="{active: triageCollection === 'reference'}"
+                      @click="triageCollection = 'reference'">Reference</button>
+            </div>
+          </div>
+        </template>
 
         <template x-if="triageSource === 'explore'">
           <div class="triage-explore-hint" x-text="exploreStrategyHint"></div>
@@ -1370,7 +1380,7 @@
           </div>
           <input type="range" min="10" max="200" step="10" x-model.number="triageLimit">
         </div>
-        <label class="triage-reverse-row" x-show="triageSource === 'indexed' || triageSource === 'reference'">
+        <label class="triage-reverse-row" x-show="triageSource === 'indexed'">
           <input type="checkbox" x-model="triageReverse">
           <span>Reverse (surface benign)</span>
         </label>
@@ -1848,8 +1858,9 @@ function sfn() {
     triageError: null,
     triageLimit: 50,
     triageReverse: false,
-    triageSource: 'indexed',  // 'indexed' | 'query' | 'explore' | 'reference'
-    exploreStrategy: null,    // 'random' | 'context' — returned by last /api/explore call
+    triageSource: 'indexed',     // 'indexed' | 'query' | 'explore'
+    triageCollection: 'dataset', // 'dataset' | 'reference' — applies to Triage and Explore
+    exploreStrategy: null,       // 'random' | 'context' — returned by last /api/explore call
 
     // Triage hit selection
     selectedTriageHitId: null,
@@ -2865,7 +2876,7 @@ function sfn() {
           resp = await fetch('/api/triage/query-images', { method: 'POST', body: fd });
         } else {
           fd.append('reverse', this.triageReverse ? 'true' : 'false');
-          fd.append('source', this.triageSource === 'reference' ? 'reference' : 'indexed');
+          fd.append('source', this.triageCollection === 'reference' ? 'reference' : 'indexed');
           resp = await fetch('/api/triage', { method: 'POST', body: fd });
         }
         if (!resp.ok) {
@@ -2911,6 +2922,7 @@ function sfn() {
       const fd = new FormData();
       fd.append('tag_id', this.selectedConceptId);
       fd.append('limit', this.triageLimit);
+      if (this.triageCollection === 'reference') fd.append('collection', 'reference');
       try {
         const resp = await fetch('/api/explore', { method: 'POST', body: fd });
         if (!resp.ok) {
@@ -3339,6 +3351,7 @@ function sfn() {
       this.triageRunning = false;
       this.triageError = null;
       this.triageSource = 'indexed';
+      this.triageCollection = 'dataset';
       this.markedOverrides = {};
       this.hitTags = {};
       this.activeTagId = '';

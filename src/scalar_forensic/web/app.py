@@ -1341,6 +1341,7 @@ async def triage(
 async def explore(
     tag_id: str = Form(...),
     limit: int = Form(default=50, ge=1, le=200),
+    collection: str = Form(default="dataset"),
 ) -> JSONResponse:
     """Surface exploration candidates for tag bootstrapping.
 
@@ -1351,8 +1352,20 @@ async def explore(
     Already-labelled points are excluded so successive runs surface fresh
     candidates.  Returns the same hit envelope as /api/triage so the UI
     can reuse the existing mark/unmark flow.
+
+    ``collection`` controls which collection is explored: ``"dataset"`` (default)
+    uses SFN_COLLECTION; ``"reference"`` uses SFN_REFERENCE_COLLECTION.
     """
     settings = Settings()
+    if collection == "reference":
+        if not settings.reference_collection:
+            raise HTTPException(
+                status_code=400,
+                detail="SFN_REFERENCE_COLLECTION is not configured.",
+            )
+        explore_collection = settings.reference_collection
+    else:
+        explore_collection = settings.collection
     try:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
         store = await asyncio.to_thread(TagStore, client, settings.tags_collection)
@@ -1365,7 +1378,7 @@ async def explore(
         hits, strategy = await asyncio.to_thread(
             run_explore,
             client,
-            settings.collection,
+            explore_collection,
             pos_ids,
             list(tag.negative_ids),
             vector_name="dino",
