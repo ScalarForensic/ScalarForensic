@@ -3148,12 +3148,12 @@ function sfn() {
           if (prev !== idx) { this.selectHit(hits[prev]); await this.$nextTick(); document.querySelector('.hit-card.selected')?.scrollIntoView({block:'nearest'}); }
         } else if ((e.key === '+' || e.key === '=') && this.activeTagId && idx >= 0) {
           e.preventDefault();
-          this.markSearchHit(hits[idx], 'positive', this.activeTagId);
+          await this.markSearchHit(hits[idx], 'positive', this.activeTagId);
           const next = idx < hits.length - 1 ? idx + 1 : idx;
           if (next !== idx) { this.selectHit(hits[next]); await this.$nextTick(); document.querySelector('.hit-card.selected')?.scrollIntoView({block:'nearest'}); }
         } else if (e.key === '-' && this.activeTagId && idx >= 0) {
           e.preventDefault();
-          this.markSearchHit(hits[idx], 'negative', this.activeTagId);
+          await this.markSearchHit(hits[idx], 'negative', this.activeTagId);
           const next = idx < hits.length - 1 ? idx + 1 : idx;
           if (next !== idx) { this.selectHit(hits[next]); await this.$nextTick(); document.querySelector('.hit-card.selected')?.scrollIntoView({block:'nearest'}); }
         }
@@ -3173,12 +3173,12 @@ function sfn() {
           if (prev !== idx) { await this.selectTriageHit(hits[prev]); await this.$nextTick(); document.querySelector('.triage-hit-card.selected')?.scrollIntoView({block:'nearest'}); }
         } else if ((e.key === '+' || e.key === '=') && idx >= 0) {
           e.preventDefault();
-          this.markTriageHit(hits[idx], 'positive');
+          await this.markTriageHit(hits[idx], 'positive');
           const next = idx < hits.length - 1 ? idx + 1 : idx;
           if (next !== idx) { await this.selectTriageHit(hits[next]); await this.$nextTick(); document.querySelector('.triage-hit-card.selected')?.scrollIntoView({block:'nearest'}); }
         } else if (e.key === '-' && idx >= 0) {
           e.preventDefault();
-          this.markTriageHit(hits[idx], 'negative');
+          await this.markTriageHit(hits[idx], 'negative');
           const next = idx < hits.length - 1 ? idx + 1 : idx;
           if (next !== idx) { await this.selectTriageHit(hits[next]); await this.$nextTick(); document.querySelector('.triage-hit-card.selected')?.scrollIntoView({block:'nearest'}); }
         }

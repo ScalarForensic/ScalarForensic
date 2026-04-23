@@ -231,8 +231,10 @@ def _analyze_video_file(
                 file_id=entry.file_id,
             )
 
-    except Exception:
-        raise
+    except Exception as exc:
+        raise RuntimeError(
+            f"Video frame extraction failed for {entry.filename}: {exc}"
+        ) from exc
 
     if not frame_entries:
         raise RuntimeError("No frames could be extracted from the video")

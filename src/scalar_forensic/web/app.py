@@ -1250,7 +1250,7 @@ async def triage(
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
 
         def _get_tag() -> Tag | None:
-            return _tag_store().get(tag_id)
+            return TagStore(client, settings.tags_collection).get(tag_id)
 
         tag = await asyncio.to_thread(_get_tag)
         if tag is None:
@@ -1303,11 +1303,14 @@ async def explore(
         tag = await asyncio.to_thread(store.get, tag_id)
         if tag is None:
             raise HTTPException(status_code=404, detail="Tag not found")
+        pos_ids = list(tag.positive_ids)
+        if tag.target_id is not None and tag.target_id not in {str(i) for i in pos_ids}:
+            pos_ids = pos_ids + [tag.target_id]
         hits, strategy = await asyncio.to_thread(
             run_explore,
             client,
             settings.collection,
-            list(tag.positive_ids),
+            pos_ids,
             list(tag.negative_ids),
             vector_name="dino",
             limit=limit,
@@ -1408,9 +1411,12 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
         by_hash: dict[str, list[str]] = {h: [] for h in image_hashes}
 
         for tag in tags:
-            if not tag.positive_ids:
+            effective_pos = list(tag.positive_ids)
+            if tag.target_id is not None and tag.target_id not in {str(i) for i in effective_pos}:
+                effective_pos = effective_pos + [tag.target_id]
+            if not effective_pos:
                 continue
-            all_ref_ids = [str(i) for i in tag.positive_ids + tag.negative_ids]
+            all_ref_ids = [str(i) for i in effective_pos + list(tag.negative_ids)]
             try:
                 ref_records = client.retrieve(
                     collection_name=settings.collection,
@@ -1421,7 +1427,7 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
             except Exception:  # noqa: BLE001
                 continue
 
-            pos_ids_set = {str(i) for i in tag.positive_ids}
+            pos_ids_set = {str(i) for i in effective_pos}
 
             def _vecs(role: str) -> list[list[float]]:
                 result = []
