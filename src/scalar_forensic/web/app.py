@@ -1357,6 +1357,8 @@ async def explore(
     uses SFN_COLLECTION; ``"reference"`` uses SFN_REFERENCE_COLLECTION.
     """
     settings = Settings()
+    if collection not in {"dataset", "reference"}:
+        raise HTTPException(status_code=400, detail="collection must be 'dataset' or 'reference'")
     if collection == "reference":
         if not settings.reference_collection:
             raise HTTPException(

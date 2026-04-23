@@ -1351,7 +1351,7 @@
           <button class="triage-mode-btn" :class="{active: triageSource === 'indexed'}"
                   @click="triageSource = 'indexed'">Triage</button>
           <button class="triage-mode-btn" :class="{active: triageSource === 'query'}"
-                  @click="triageSource = 'query'">Query</button>
+                  @click="triageSource = 'query'; triageCollection = 'dataset'">Query</button>
           <button class="triage-mode-btn" :class="{active: triageSource === 'explore'}"
                   @click="triageSource = 'explore'">Explore</button>
         </div>

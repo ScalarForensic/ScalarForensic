@@ -131,9 +131,7 @@ def do_export(
         print("  No matching tags.")
         return
 
-    # Build the full plan first so we can show a summary before asking.
-    Plan = list[tuple[str, str, Path, Path]]  # (tag, role, src, dest)
-    plan: Plan = []
+    plan: list[tuple[str, str, Path, Path]] = []  # (tag, role, src, dest)
     warnings: list[str] = []
 
     print(f"\n  Resolving {sum(len(t.positive_ids) + len(t.negative_ids) for t in selected):,}"
@@ -263,15 +261,18 @@ def run_interactive(
             if not out:
                 print("  (empty — cancelled)")
                 continue
-            do_export(
-                client=client,
-                case_collection=case_collection,
-                reference_collection=reference_collection,
-                tags=tags,
-                output_dir=Path(out),
-                tag_filter=None,
-                dry_run=dry,
-            )
+            try:
+                do_export(
+                    client=client,
+                    case_collection=case_collection,
+                    reference_collection=reference_collection,
+                    tags=tags,
+                    output_dir=Path(out),
+                    tag_filter=None,
+                    dry_run=dry,
+                )
+            except Exception as exc:
+                print(f"  [error] {exc}")
 
         elif choice in ("t", "T"):
             dry = choice == "T"
@@ -293,15 +294,18 @@ def run_interactive(
             if not out:
                 print("  (empty — cancelled)")
                 continue
-            do_export(
-                client=client,
-                case_collection=case_collection,
-                reference_collection=reference_collection,
-                tags=tags,
-                output_dir=Path(out),
-                tag_filter=tag_filter,
-                dry_run=dry,
-            )
+            try:
+                do_export(
+                    client=client,
+                    case_collection=case_collection,
+                    reference_collection=reference_collection,
+                    tags=tags,
+                    output_dir=Path(out),
+                    tag_filter=tag_filter,
+                    dry_run=dry,
+                )
+            except Exception as exc:
+                print(f"  [error] {exc}")
 
         else:
             print("  Unknown option.")
