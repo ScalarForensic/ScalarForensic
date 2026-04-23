@@ -624,47 +624,66 @@ def query_session(
 
         # Reference collection overlay: query the reference collection with the
         # same per-mode embeddings used for the main case search and append hits
-        # as is_reference=True. Reference hits are never merged with case hits,
-        # but video hits are grouped across frames consistently with normal search.
+        # as is_reference=True.  Mirrors the per-qtc + merge/group structure of
+        # the case-collection loop above so reference hits honour unify=True
+        # (mode-merge per path), unify=False (per-mode rows), and propagate
+        # query_timecodes from video-query frames.
         if include_reference and settings.reference_collection:
-            ref_frame_unmerged: list[Hit] = []
-            if "altered" in modes:
-                for ref_sscd, _ in sscd_vecs:
-                    ref_hits, ref_errs = _query_vector(
-                        client,
-                        collection=settings.reference_collection,
-                        vector=ref_sscd,
-                        mode="altered",
-                        threshold=threshold_altered,
-                        limit=limit,
-                        vector_name="sscd",
-                        is_reference_result=True,
-                    )
-                    ref_frame_unmerged.extend(ref_hits)
-                    file_result.errors.extend(ref_errs)
-            if "semantic" in modes:
-                for ref_dino, _ in dino_vecs:
-                    ref_hits, ref_errs = _query_vector(
-                        client,
-                        collection=settings.reference_collection,
-                        vector=ref_dino,
-                        mode="semantic",
-                        threshold=threshold_semantic,
-                        limit=limit,
-                        vector_name="dino",
-                        is_reference_result=True,
-                    )
-                    ref_frame_unmerged.extend(ref_hits)
-                    file_result.errors.extend(ref_errs)
-            if unify:
-                all_flat_hits.extend(_group_video_hits(ref_frame_unmerged))
-            else:
-                for mode_hits in (
-                    [h for h in ref_frame_unmerged if "altered" in h.scores],
-                    [h for h in ref_frame_unmerged if "semantic" in h.scores],
-                ):
-                    if mode_hits:
-                        all_flat_hits.extend(_group_video_hits(mode_hits))
+            for qtc in all_qtcs:
+                ref_frame_merged: dict[str, Hit] = {}  # used when unify=True
+                ref_frame_unmerged: list[Hit] = []  # used when unify=False
+
+                if "altered" in modes:
+                    for vec in sscd_by_qtc.get(qtc, []):
+                        ref_hits, ref_errs = _query_vector(
+                            client,
+                            collection=settings.reference_collection,
+                            vector=vec,
+                            mode="altered",
+                            threshold=threshold_altered,
+                            limit=limit,
+                            vector_name="sscd",
+                            is_reference_result=True,
+                        )
+                        for h in ref_hits:
+                            if qtc is not None:
+                                h.query_timecodes = [qtc]
+                            if unify:
+                                _merge_hit(h, ref_frame_merged)
+                            else:
+                                ref_frame_unmerged.append(h)
+                        file_result.errors.extend(ref_errs)
+
+                if "semantic" in modes:
+                    for vec in dino_by_qtc.get(qtc, []):
+                        ref_hits, ref_errs = _query_vector(
+                            client,
+                            collection=settings.reference_collection,
+                            vector=vec,
+                            mode="semantic",
+                            threshold=threshold_semantic,
+                            limit=limit,
+                            vector_name="dino",
+                            is_reference_result=True,
+                        )
+                        for h in ref_hits:
+                            if qtc is not None:
+                                h.query_timecodes = [qtc]
+                            if unify:
+                                _merge_hit(h, ref_frame_merged)
+                            else:
+                                ref_frame_unmerged.append(h)
+                        file_result.errors.extend(ref_errs)
+
+                if unify:
+                    all_flat_hits.extend(_group_video_hits(list(ref_frame_merged.values())))
+                else:
+                    for mode_hits in (
+                        [h for h in ref_frame_unmerged if "altered" in h.scores],
+                        [h for h in ref_frame_unmerged if "semantic" in h.scores],
+                    ):
+                        if mode_hits:
+                            all_flat_hits.extend(_group_video_hits(mode_hits))
 
         # Final merge pass (unify only): exact hits and vector hits for the
         # same dataset path must end up on one row.  Exact hits were added to
@@ -677,7 +696,11 @@ def query_session(
                 # Video hits: key by video_path so all query-frame × dataset-video
                 # pairs collapse into one card regardless of which frame was chosen
                 # as the representative.  Image hits: key by path as before.
-                key = h.video_path if h.is_video_frame and h.video_path else None
+                # Prefix with is_reference so an accidental path overlap between
+                # the case and reference collections cannot collapse the two
+                # onto one row — the overlay is always kept distinct.
+                base = h.video_path if h.is_video_frame and h.video_path else h.path
+                key = f"{'ref' if h.is_reference else 'case'}:{base}"
                 _merge_hit(h, final_merged, key=key)
             # Sort matched_frames once after all merges (deferred from _merge_hit).
             for h in final_merged.values():

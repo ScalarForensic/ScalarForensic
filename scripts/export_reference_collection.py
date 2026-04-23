@@ -98,19 +98,27 @@ def print_tag_table(tags: list[Tag]) -> None:
 # Export logic
 # ---------------------------------------------------------------------------
 
-def _safe_filename(src: Path, dest_dir: Path) -> Path:
-    """Return a collision-free destination path under dest_dir."""
+def _safe_filename(src: Path, dest_dir: Path, reserved: set[Path]) -> Path:
+    """Return a collision-free destination path under dest_dir.
+
+    ``reserved`` holds paths already claimed by earlier plan entries in the
+    same run — the plan is built before any files are written, so we cannot
+    rely on filesystem existence alone to detect collisions.
+    """
+    def _taken(p: Path) -> bool:
+        return p in reserved or p.exists()
+
     candidate = dest_dir / src.name
-    if not candidate.exists():
+    if not _taken(candidate):
         return candidate
     short = hashlib.sha256(str(src).encode()).hexdigest()[:8]
     candidate = dest_dir / f"{src.stem}_{short}{src.suffix}"
-    if not candidate.exists():
+    if not _taken(candidate):
         return candidate
     counter = 2
     while True:
         candidate = dest_dir / f"{src.stem}_{short}_{counter}{src.suffix}"
-        if not candidate.exists():
+        if not _taken(candidate):
             return candidate
         counter += 1
 
@@ -132,6 +140,7 @@ def do_export(
         return
 
     plan: list[tuple[str, str, Path, Path]] = []  # (tag, role, src, dest)
+    reserved_dests: set[Path] = set()
     warnings: list[str] = []
 
     print(f"\n  Resolving {sum(len(t.positive_ids) + len(t.negative_ids) for t in selected):,}"
@@ -166,7 +175,8 @@ def do_export(
                         f"  [warn] {tag.name}/{role}: file not found: {src}"
                     )
                     continue
-                dest = _safe_filename(src, dest_dir)
+                dest = _safe_filename(src, dest_dir, reserved_dests)
+                reserved_dests.add(dest)
                 plan.append((tag.name, role, src, dest))
 
     # Show plan summary.

@@ -336,6 +336,7 @@ class Indexer:
             )
         vn = self.vector_name
         indexed_at = datetime.now(UTC).isoformat()
+        ref_tag: dict = {"is_reference": True} if self._is_reference else {}
 
         # Model-specific provenance — prefixed with the vector name so a single
         # point can hold provenance for multiple models side by side.
@@ -379,7 +380,7 @@ class Indexer:
                 "image_path": str(Path(image_path).resolve()),
                 # EXIF flags (only present when extraction is enabled)
                 **(exif_payloads.get(image_path, {}) if exif_payloads else {}),
-                **({"is_reference": True} if self._is_reference else {}),
+                **ref_tag,
             }
 
             # Video-frame provenance fields
@@ -433,9 +434,6 @@ class Indexer:
             # model_provenance is identical for every point in the batch — one call suffices.
             self.client.set_payload(
                 collection_name=self.collection,
-                payload={
-                    **model_provenance,
-                    **({"is_reference": True} if self._is_reference else {}),
-                },
+                payload={**model_provenance, **ref_tag},
                 points=existing_point_ids,
             )
