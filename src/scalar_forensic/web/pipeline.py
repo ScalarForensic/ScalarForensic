@@ -623,37 +623,48 @@ def query_session(
                         all_flat_hits.extend(_group_video_hits(mode_hits))
 
         # Reference collection overlay: query the reference collection with the
-        # first available embedding per mode and append hits as is_reference=True.
-        # Reference hits have distinct paths and are never merged with case hits.
+        # same per-mode embeddings used for the main case search and append hits
+        # as is_reference=True. Reference hits are never merged with case hits,
+        # but video hits are grouped across frames consistently with normal search.
         if include_reference and settings.reference_collection:
-            ref_sscd = next((v for v, _ in sscd_vecs), None)
-            ref_dino = next((v for v, _ in dino_vecs), None)
-            if "altered" in modes and ref_sscd is not None:
-                ref_hits, ref_errs = _query_vector(
-                    client,
-                    collection=settings.reference_collection,
-                    vector=ref_sscd,
-                    mode="altered",
-                    threshold=threshold_altered,
-                    limit=limit,
-                    vector_name="sscd",
-                    is_reference_result=True,
-                )
-                all_flat_hits.extend(ref_hits)
-                file_result.errors.extend(ref_errs)
-            if "semantic" in modes and ref_dino is not None:
-                ref_hits, ref_errs = _query_vector(
-                    client,
-                    collection=settings.reference_collection,
-                    vector=ref_dino,
-                    mode="semantic",
-                    threshold=threshold_semantic,
-                    limit=limit,
-                    vector_name="dino",
-                    is_reference_result=True,
-                )
-                all_flat_hits.extend(ref_hits)
-                file_result.errors.extend(ref_errs)
+            ref_frame_unmerged: list[Hit] = []
+            if "altered" in modes:
+                for ref_sscd, _ in sscd_vecs:
+                    ref_hits, ref_errs = _query_vector(
+                        client,
+                        collection=settings.reference_collection,
+                        vector=ref_sscd,
+                        mode="altered",
+                        threshold=threshold_altered,
+                        limit=limit,
+                        vector_name="sscd",
+                        is_reference_result=True,
+                    )
+                    ref_frame_unmerged.extend(ref_hits)
+                    file_result.errors.extend(ref_errs)
+            if "semantic" in modes:
+                for ref_dino, _ in dino_vecs:
+                    ref_hits, ref_errs = _query_vector(
+                        client,
+                        collection=settings.reference_collection,
+                        vector=ref_dino,
+                        mode="semantic",
+                        threshold=threshold_semantic,
+                        limit=limit,
+                        vector_name="dino",
+                        is_reference_result=True,
+                    )
+                    ref_frame_unmerged.extend(ref_hits)
+                    file_result.errors.extend(ref_errs)
+            if unify:
+                all_flat_hits.extend(_group_video_hits(ref_frame_unmerged))
+            else:
+                for mode_hits in (
+                    [h for h in ref_frame_unmerged if "altered" in h.scores],
+                    [h for h in ref_frame_unmerged if "semantic" in h.scores],
+                ):
+                    if mode_hits:
+                        all_flat_hits.extend(_group_video_hits(mode_hits))
 
         # Final merge pass (unify only): exact hits and vector hits for the
         # same dataset path must end up on one row.  Exact hits were added to

@@ -50,9 +50,30 @@ def test_get_available_modes_both_vectors():
         MockClient.return_value.get_collection.return_value = _make_collection_info(
             ["dino", "sscd"]
         )
-        modes, _has_ref, error = asyncio.run(get_available_modes(settings))
+        modes, has_ref, error = asyncio.run(get_available_modes(settings))
 
     assert error is None
+    assert has_ref is False
+    assert set(modes) == {"exact", "altered", "semantic"}
+
+
+def test_get_available_modes_with_reference_collection():
+    settings = _settings(reference_collection="sfn_ref")
+    collections_response = MagicMock()
+    collections_response.collections = [
+        _make_collection("sfn"),
+        _make_collection("sfn_ref"),
+    ]
+
+    with patch("scalar_forensic.web.pipeline.QdrantClient") as MockClient:
+        MockClient.return_value.get_collections.return_value = collections_response
+        MockClient.return_value.get_collection.return_value = _make_collection_info(
+            ["dino", "sscd"]
+        )
+        modes, has_ref, error = asyncio.run(get_available_modes(settings))
+
+    assert error is None
+    assert has_ref is True
     assert set(modes) == {"exact", "altered", "semantic"}
 
 

@@ -433,6 +433,9 @@ class Indexer:
             # model_provenance is identical for every point in the batch — one call suffices.
             self.client.set_payload(
                 collection_name=self.collection,
-                payload=model_provenance,
+                payload={
+                    **model_provenance,
+                    **({"is_reference": True} if self._is_reference else {}),
+                },
                 points=existing_point_ids,
             )
