@@ -104,7 +104,15 @@ def _safe_filename(src: Path, dest_dir: Path) -> Path:
     if not candidate.exists():
         return candidate
     short = hashlib.sha256(str(src).encode()).hexdigest()[:8]
-    return dest_dir / f"{src.stem}_{short}{src.suffix}"
+    candidate = dest_dir / f"{src.stem}_{short}{src.suffix}"
+    if not candidate.exists():
+        return candidate
+    counter = 2
+    while True:
+        candidate = dest_dir / f"{src.stem}_{short}_{counter}{src.suffix}"
+        if not candidate.exists():
+            return candidate
+        counter += 1
 
 
 def do_export(
@@ -233,15 +241,15 @@ def run_interactive(
         print("  q  Quit")
         print("─" * 60)
 
-        choice = input("  > ").strip().lower()
+        choice = input("  > ").strip()
 
-        if choice == "q":
+        if choice.lower() == "q":
             break
 
-        elif choice == "l":
+        elif choice.lower() == "l":
             print_tag_table(tags)
 
-        elif choice == "r":
+        elif choice.lower() == "r":
             print("Reloading …")
             tags = store.list()
             print(f"  {len(tags)} tag(s) found.")

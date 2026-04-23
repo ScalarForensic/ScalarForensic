@@ -1182,7 +1182,7 @@
                 </div>
               </div>
               <div class="hit-filename">
-                <span x-show="hit.is_reference" class="badge badge-reference" style="margin-right:4px;font-size:8px;padding:1px 4px" title="Reference material">REF</span>
+                <span x-show="hit.is_reference" class="badge badge-reference badge-sm" style="margin-right:4px" title="Reference material">REF</span>
                 <span x-show="hit.is_video_frame" class="meta-tag" style="background:#7c3aed;color:#fff;margin-right:4px" title="Video frame">▶</span>
                 <span x-text="hit.is_video_frame && hit.video_path ? hit.video_path.split('/').pop() : hit.path.split('/').pop()"></span>
               </div>
@@ -1270,7 +1270,7 @@
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:var(--text2)">
           <input type="checkbox" x-model="includeReference" @change="results.length ? runQuery() : null">
           <span>Include reference collection</span>
-          <span class="badge badge-reference" style="font-size:8px;padding:1px 4px">REF</span>
+          <span class="badge badge-reference badge-sm">REF</span>
         </label>
       </div>
     </div>
@@ -1705,7 +1705,7 @@
                  loading="lazy" alt="">
             <div class="triage-hit-body">
               <div class="triage-hit-scores">
-                <span x-show="hit.is_reference" class="badge badge-reference" style="font-size:8px;padding:1px 4px;margin-bottom:2px">REF</span>
+                <span x-show="hit.is_reference" class="badge badge-reference badge-sm" style="margin-bottom:2px">REF</span>
                 <span class="triage-score-num"
                       :class="{zero: hit.triplet_score !== null ? !hit.triplet_score : false}"
                       x-text="hit.triplet_score !== null ? hit.triplet_score : (hit.cosine_margin ?? 0).toFixed(2)"></span>
