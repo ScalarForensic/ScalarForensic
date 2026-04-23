@@ -296,7 +296,9 @@ def test_reference_hits_separate_from_case_hits_unify_false():
     assert case_hits, "case hits must be present in unify=False results"
     ref_paths = {h.path for h in ref_hits}
     case_paths = {h.path for h in case_hits}
-    assert ref_paths.isdisjoint(case_paths), "reference and case paths must not overlap in unify=False results"
+    assert ref_paths.isdisjoint(case_paths), (
+        "reference and case paths must not overlap in unify=False results"
+    )
 
 
 # ---------------------------------------------------------------------------
