@@ -70,8 +70,16 @@ def _ref_hit(path: str = PATH_REF, mode: str = "semantic") -> Hit:
     return Hit(path=path, scores={mode: 0.85}, is_reference=True)
 
 
-def _dispatch_query_vector(client, collection, vector, mode, threshold, limit,
-                           vector_name="dino", is_reference_result=False):
+def _dispatch_query_vector(
+    client,
+    collection,
+    vector,
+    mode,
+    threshold,
+    limit,
+    vector_name="dino",
+    is_reference_result=False,
+):
     """Return a case or reference hit depending on which collection is queried."""
     if collection == REF_COLLECTION:
         return ([Hit(path=PATH_REF, scores={mode: 0.85}, is_reference=True)], [])
@@ -95,9 +103,7 @@ def test_reference_collection_queried_when_include_reference_true():
             side_effect=_dispatch_query_vector,
         ) as mock_qv,
     ):
-        query_session(
-            session, ["semantic"], 0.75, 0.55, 10, settings, include_reference=True
-        )
+        query_session(session, ["semantic"], 0.75, 0.55, 10, settings, include_reference=True)
 
     collections_queried = {c.kwargs.get("collection") or c.args[1] for c in mock_qv.call_args_list}
     assert REF_COLLECTION in collections_queried, (
@@ -117,9 +123,7 @@ def test_reference_collection_not_queried_when_include_reference_false():
             side_effect=_dispatch_query_vector,
         ) as mock_qv,
     ):
-        query_session(
-            session, ["semantic"], 0.75, 0.55, 10, settings, include_reference=False
-        )
+        query_session(session, ["semantic"], 0.75, 0.55, 10, settings, include_reference=False)
 
     collections_queried = {c.kwargs.get("collection") or c.args[1] for c in mock_qv.call_args_list}
     assert REF_COLLECTION not in collections_queried, (
@@ -139,9 +143,7 @@ def test_reference_collection_not_queried_when_not_configured():
             return_value=([_case_hit()], []),
         ) as mock_qv,
     ):
-        query_session(
-            session, ["semantic"], 0.75, 0.55, 10, settings, include_reference=True
-        )
+        query_session(session, ["semantic"], 0.75, 0.55, 10, settings, include_reference=True)
 
     # Only the case collection should have been queried
     collections_queried = {c.kwargs.get("collection") or c.args[1] for c in mock_qv.call_args_list}
@@ -192,9 +194,7 @@ def test_case_hits_have_is_reference_false():
 
     case_hits = [h for h in results[0].hits if h.path == PATH_CASE]
     assert case_hits, "at least one case hit must be present"
-    assert all(not h.is_reference for h in case_hits), (
-        "case hits must not have is_reference=True"
-    )
+    assert all(not h.is_reference for h in case_hits), "case hits must not have is_reference=True"
 
 
 # ---------------------------------------------------------------------------
@@ -219,8 +219,14 @@ def test_reference_hits_not_merged_with_case_hits_unify_true():
         ),
     ):
         results, _ = query_session(
-            session, ["semantic"], 0.75, 0.55, 10, settings,
-            unify=True, include_reference=True,
+            session,
+            ["semantic"],
+            0.75,
+            0.55,
+            10,
+            settings,
+            unify=True,
+            include_reference=True,
         )
 
     hits = results[0].hits
@@ -246,19 +252,39 @@ def test_both_modes_query_reference_collection():
 
     ref_calls: list[str] = []
 
-    def _tracking_dispatch(client, collection, vector, mode, threshold, limit,
-                           vector_name="dino", is_reference_result=False):
+    def _tracking_dispatch(
+        client,
+        collection,
+        vector,
+        mode,
+        threshold,
+        limit,
+        vector_name="dino",
+        is_reference_result=False,
+    ):
         if collection == REF_COLLECTION:
             ref_calls.append(mode)
-        return ([Hit(path=PATH_CASE if collection == CASE_COLLECTION else PATH_REF,
-                     scores={mode: 0.90})], [])
+        return (
+            [
+                Hit(
+                    path=PATH_CASE if collection == CASE_COLLECTION else PATH_REF,
+                    scores={mode: 0.90},
+                )
+            ],
+            [],
+        )
 
     with (
         patch("scalar_forensic.web.pipeline.QdrantClient"),
         patch("scalar_forensic.web.pipeline._query_vector", side_effect=_tracking_dispatch),
     ):
         query_session(
-            session, ["altered", "semantic"], 0.75, 0.55, 10, settings,
+            session,
+            ["altered", "semantic"],
+            0.75,
+            0.55,
+            10,
+            settings,
             include_reference=True,
         )
 
@@ -285,8 +311,14 @@ def test_reference_hits_separate_from_case_hits_unify_false():
         ),
     ):
         results, _ = query_session(
-            session, ["semantic"], 0.75, 0.55, 10, settings,
-            unify=False, include_reference=True,
+            session,
+            ["semantic"],
+            0.75,
+            0.55,
+            10,
+            settings,
+            unify=False,
+            include_reference=True,
         )
 
     hits = results[0].hits
@@ -313,8 +345,16 @@ def test_reference_modes_merged_on_same_path_unify_true():
     session = _make_session([_make_entry(dino=True, sscd=True)])
     settings = _mock_settings()
 
-    def _dispatch(client, collection, vector, mode, threshold, limit,
-                  vector_name="dino", is_reference_result=False):
+    def _dispatch(
+        client,
+        collection,
+        vector,
+        mode,
+        threshold,
+        limit,
+        vector_name="dino",
+        is_reference_result=False,
+    ):
         # Reference collection matches the same PATH_REF for both modes.
         if collection == REF_COLLECTION:
             score = 0.85 if mode == "semantic" else 0.80
@@ -326,8 +366,14 @@ def test_reference_modes_merged_on_same_path_unify_true():
         patch("scalar_forensic.web.pipeline._query_vector", side_effect=_dispatch),
     ):
         results, _ = query_session(
-            session, ["altered", "semantic"], 0.75, 0.55, 10, settings,
-            unify=True, include_reference=True,
+            session,
+            ["altered", "semantic"],
+            0.75,
+            0.55,
+            10,
+            settings,
+            unify=True,
+            include_reference=True,
         )
 
     ref_hits = [h for h in results[0].hits if h.is_reference]
@@ -368,8 +414,16 @@ def test_reference_hits_carry_query_timecodes_for_video_query():
     session = _make_session([entry])
     settings = _mock_settings()
 
-    def _dispatch(client, collection, vector, mode, threshold, limit,
-                  vector_name="dino", is_reference_result=False):
+    def _dispatch(
+        client,
+        collection,
+        vector,
+        mode,
+        threshold,
+        limit,
+        vector_name="dino",
+        is_reference_result=False,
+    ):
         if collection == REF_COLLECTION:
             return ([Hit(path=PATH_REF, scores={mode: 0.85}, is_reference=True)], [])
         return ([Hit(path=PATH_CASE, scores={mode: 0.90})], [])
@@ -379,8 +433,14 @@ def test_reference_hits_carry_query_timecodes_for_video_query():
         patch("scalar_forensic.web.pipeline._query_vector", side_effect=_dispatch),
     ):
         results, _ = query_session(
-            session, ["semantic"], 0.75, 0.55, 10, settings,
-            unify=True, include_reference=True,
+            session,
+            ["semantic"],
+            0.75,
+            0.55,
+            10,
+            settings,
+            unify=True,
+            include_reference=True,
         )
 
     ref_hits = [h for h in results[0].hits if h.is_reference]
@@ -389,11 +449,10 @@ def test_reference_hits_carry_query_timecodes_for_video_query():
     # into one hit whose query_timecodes holds both 1000 and 2000.
     all_qtcs: set[int] = set()
     for h in ref_hits:
-        for tc in (h.query_timecodes or []):
+        for tc in h.query_timecodes or []:
             all_qtcs.add(tc)
     assert {1000, 2000} <= all_qtcs, (
-        f"reference hits must carry query_timecodes from every matching "
-        f"query frame, got {all_qtcs}"
+        f"reference hits must carry query_timecodes from every matching query frame, got {all_qtcs}"
     )
 
 
@@ -411,8 +470,16 @@ def test_reference_and_case_hits_isolated_on_path_overlap():
 
     shared_path = "/overlap/shared.jpg"
 
-    def _dispatch(client, collection, vector, mode, threshold, limit,
-                  vector_name="dino", is_reference_result=False):
+    def _dispatch(
+        client,
+        collection,
+        vector,
+        mode,
+        threshold,
+        limit,
+        vector_name="dino",
+        is_reference_result=False,
+    ):
         if collection == REF_COLLECTION:
             return ([Hit(path=shared_path, scores={mode: 0.85}, is_reference=True)], [])
         return ([Hit(path=shared_path, scores={mode: 0.90})], [])
@@ -422,8 +489,14 @@ def test_reference_and_case_hits_isolated_on_path_overlap():
         patch("scalar_forensic.web.pipeline._query_vector", side_effect=_dispatch),
     ):
         results, _ = query_session(
-            session, ["semantic"], 0.75, 0.55, 10, settings,
-            unify=True, include_reference=True,
+            session,
+            ["semantic"],
+            0.75,
+            0.55,
+            10,
+            settings,
+            unify=True,
+            include_reference=True,
         )
 
     hits = results[0].hits
