@@ -68,7 +68,7 @@ def _get_embedder(key: str, settings: Settings) -> AnyEmbedder:
 class ProgressEvent:
     type: str  # "progress" | "file_done" | "error" | "done"
     current: int = 0
-    total: int = 0
+    total: int | None = 0
     filename: str = ""
     file_id: str = ""
     message: str = ""
@@ -226,13 +226,13 @@ def _analyze_video_file(
             yield ProgressEvent(
                 type="video_progress",
                 current=len(frame_entries),
-                total=settings.video_max_frames,
+                total=settings.video_max_frames or None,
                 filename=entry.filename,
                 file_id=entry.file_id,
             )
 
     except Exception as exc:
-        raise RuntimeError(f"Video frame extraction failed: {exc}") from exc
+        raise RuntimeError(f"Video frame extraction failed for {entry.filename}: {exc}") from exc
 
     if not frame_entries:
         raise RuntimeError("No frames could be extracted from the video")

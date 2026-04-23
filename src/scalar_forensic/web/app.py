@@ -610,7 +610,7 @@ async def hit_provenance(image_hash: str) -> JSONResponse:
 
 def _sscd_annotated(img: Image.Image, n_crops: int) -> Image.Image:
     resized = _sscd_resize(img)
-    out = resized.copy().convert("RGB")
+    out = resized.convert("RGB")
     draw = ImageDraw.Draw(out)
     s = _SSCD_INPUT_SIZE
     w, h = resized.size
@@ -818,8 +818,9 @@ async def hit_metadata(path: str) -> JSONResponse:
                 with_vectors=False,
             )
             if _records:
-                frame_sha256 = _records[0].payload.get("image_hash")
-                video_path_str = _records[0].payload.get("video_path")
+                _payload = _records[0].payload or {}
+                frame_sha256 = _payload.get("image_hash")
+                video_path_str = _payload.get("video_path")
         except Exception:  # noqa: BLE001
             pass
 
@@ -1169,7 +1170,7 @@ async def mark_tag(
     try:
 
         def _run():
-            role_lit = cast("Literal['positive', 'negative']", role)
+            role_lit = cast(Literal["positive", "negative"], role)
             return _tag_store().mark(tag_id, point_id, role_lit)
 
         tag = await asyncio.to_thread(_run)
@@ -1269,8 +1270,11 @@ async def triage(
         ref_coll_for_lookup = settings.reference_collection
     try:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-        store = TagStore(client, settings.tags_collection)
-        tag = await asyncio.to_thread(store.get, tag_id)
+
+        def _get_tag() -> Tag | None:
+            return TagStore(client, settings.tags_collection).get(tag_id)
+
+        tag = await asyncio.to_thread(_get_tag)
         if tag is None:
             raise HTTPException(status_code=404, detail="Tag not found")
         hits = await asyncio.to_thread(
@@ -1317,15 +1321,18 @@ async def explore(
     settings = Settings()
     try:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-        store = TagStore(client, settings.tags_collection)
+        store = await asyncio.to_thread(TagStore, client, settings.tags_collection)
         tag = await asyncio.to_thread(store.get, tag_id)
         if tag is None:
             raise HTTPException(status_code=404, detail="Tag not found")
+        pos_ids = list(tag.positive_ids)
+        if tag.target_id is not None and tag.target_id not in {str(i) for i in pos_ids}:
+            pos_ids = pos_ids + [tag.target_id]
         hits, strategy = await asyncio.to_thread(
             run_explore,
             client,
             settings.collection,
-            list(tag.positive_ids),
+            pos_ids,
             list(tag.negative_ids),
             vector_name="dino",
             limit=limit,
@@ -1397,6 +1404,8 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
             h = (record.payload or {}).get("image_hash")
             if isinstance(h, str) and h in unique_hashes and h not in hash_to_pid:
                 hash_to_pid[h] = str(record.id)
+            if len(hash_to_pid) == len(unique_hashes):
+                break
 
         if not hash_to_pid:
             return {h: [] for h in image_hashes}
@@ -1424,9 +1433,12 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
         by_hash: dict[str, list[str]] = {h: [] for h in image_hashes}
 
         for tag in tags:
-            if not tag.positive_ids:
+            effective_pos = list(tag.positive_ids)
+            if tag.target_id is not None and tag.target_id not in {str(i) for i in effective_pos}:
+                effective_pos = effective_pos + [tag.target_id]
+            if not effective_pos:
                 continue
-            all_ref_ids = [str(i) for i in tag.positive_ids + tag.negative_ids]
+            all_ref_ids = [str(i) for i in effective_pos + list(tag.negative_ids)]
             try:
                 ref_records = client.retrieve(
                     collection_name=settings.collection,
@@ -1437,7 +1449,7 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
             except Exception:  # noqa: BLE001
                 continue
 
-            pos_ids_set = {str(i) for i in tag.positive_ids}
+            pos_ids_set = {str(i) for i in effective_pos}
 
             def _vecs(role: str) -> list[list[float]]:
                 result = []
@@ -1645,6 +1657,10 @@ async def triage_query_images(
             return tag, []
 
         pos_ids_set = {str(i) for i in tag.positive_ids}
+        # Mirror run_discovery auto-anchor: treat target_id as implicit positive
+        # when positive_ids is empty so target-only tags score correctly.
+        if not pos_ids_set and tag.target_id is not None:
+            pos_ids_set.add(str(tag.target_id))
 
         def _extract_vecs(vec_name: str, role: str) -> list[list[float]]:
             result = []

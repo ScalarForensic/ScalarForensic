@@ -2819,10 +2819,6 @@ function sfn() {
       ];
       for (const id of allIds) {
         const sid = String(id);
-        // First try triageHitCache
-        if (!this.triageHitCache[sid] && this.triageHitCache[sid] !== null) {
-          // not cached yet; leave for lazy fetch
-        }
         if (this.triageHitCache[sid]) {
           this.triageHitCache = { ...this.triageHitCache };  // trigger reactivity
         }
@@ -3174,12 +3170,12 @@ function sfn() {
           if (prev !== idx) { this.selectHit(hits[prev]); await this.$nextTick(); document.querySelector('.hit-card.selected')?.scrollIntoView({block:'nearest'}); }
         } else if ((e.key === '+' || e.key === '=') && this.activeTagId && idx >= 0) {
           e.preventDefault();
-          this.markSearchHit(hits[idx], 'positive', this.activeTagId);
+          await this.markSearchHit(hits[idx], 'positive', this.activeTagId);
           const next = idx < hits.length - 1 ? idx + 1 : idx;
           if (next !== idx) { this.selectHit(hits[next]); await this.$nextTick(); document.querySelector('.hit-card.selected')?.scrollIntoView({block:'nearest'}); }
         } else if (e.key === '-' && this.activeTagId && idx >= 0) {
           e.preventDefault();
-          this.markSearchHit(hits[idx], 'negative', this.activeTagId);
+          await this.markSearchHit(hits[idx], 'negative', this.activeTagId);
           const next = idx < hits.length - 1 ? idx + 1 : idx;
           if (next !== idx) { this.selectHit(hits[next]); await this.$nextTick(); document.querySelector('.hit-card.selected')?.scrollIntoView({block:'nearest'}); }
         }
@@ -3199,12 +3195,12 @@ function sfn() {
           if (prev !== idx) { await this.selectTriageHit(hits[prev]); await this.$nextTick(); document.querySelector('.triage-hit-card.selected')?.scrollIntoView({block:'nearest'}); }
         } else if ((e.key === '+' || e.key === '=') && idx >= 0) {
           e.preventDefault();
-          this.markTriageHit(hits[idx], 'positive');
+          await this.markTriageHit(hits[idx], 'positive');
           const next = idx < hits.length - 1 ? idx + 1 : idx;
           if (next !== idx) { await this.selectTriageHit(hits[next]); await this.$nextTick(); document.querySelector('.triage-hit-card.selected')?.scrollIntoView({block:'nearest'}); }
         } else if (e.key === '-' && idx >= 0) {
           e.preventDefault();
-          this.markTriageHit(hits[idx], 'negative');
+          await this.markTriageHit(hits[idx], 'negative');
           const next = idx < hits.length - 1 ? idx + 1 : idx;
           if (next !== idx) { await this.selectTriageHit(hits[next]); await this.$nextTick(); document.querySelector('.triage-hit-card.selected')?.scrollIntoView({block:'nearest'}); }
         }
@@ -3263,12 +3259,14 @@ function sfn() {
       if (this.queryMeta?.hash_sha256) hashes.push(this.queryMeta.hash_sha256);
 
       const fetches = [];
-      if (hashes.length) {
+      const uniqueHashes = [...new Set(hashes)];
+      for (let i = 0; i < uniqueHashes.length; i += 256) {
+        const batch = uniqueHashes.slice(i, i + 256);
         fetches.push(
           fetch('/api/tags/classify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ image_hashes: [...new Set(hashes)] }),
+            body: JSON.stringify({ image_hashes: batch }),
           }).then(r => r.ok ? r.json() : {}).then(d => d.by_hash ?? {}).catch(() => ({}))
         );
       }
