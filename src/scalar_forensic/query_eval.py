@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from scalar_forensic.discovery import _MAX_CONTEXT_PAIRS
+from scalar_forensic.discovery import MAX_CONTEXT_PAIRS
 
 
 @dataclass
@@ -37,7 +37,7 @@ def _cosine_sims(query: list[float], refs: list[list[float]]) -> np.ndarray:
 
 def _pair_indices(n_pos: int, n_neg: int) -> list[tuple[int, int]]:
     """Return pair indices in the same diagonal-first order as _build_context_pairs."""
-    limit = min(n_pos * n_neg, _MAX_CONTEXT_PAIRS)
+    limit = min(n_pos * n_neg, MAX_CONTEXT_PAIRS)
     seen: set[tuple[int, int]] = set()
     result: list[tuple[int, int]] = []
     short = min(n_pos, n_neg)
@@ -79,18 +79,18 @@ def score_query_vector(
 
 
 def score_query_entries(
-    entries: list[tuple[str, str, list[float] | None, list[float] | None]],
+    entries: list[tuple[str, str, list[float] | None]],
     pos_vecs: list[list[float]],
     neg_vecs: list[list[float]],
     limit: int = 50,
 ) -> list[QueryEvalHit]:
-    """Score ``(file_id, filename, dino_vec, _)`` entries against dino references.
+    """Score ``(file_id, filename, dino_vec)`` entries against dino references.
 
     Returns hits sorted by triplet score then cosine margin, limited to *limit*.
     Entries with triplet_score == 0 and cosine_margin == 0 are excluded.
     """
     results: list[QueryEvalHit] = []
-    for file_id, filename, dino_vec, _sscd_vec in entries:
+    for file_id, filename, dino_vec in entries:
         if dino_vec is None:
             continue
         ts, cm = score_query_vector(dino_vec, pos_vecs, neg_vecs)

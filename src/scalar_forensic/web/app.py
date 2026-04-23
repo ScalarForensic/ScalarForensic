@@ -29,7 +29,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from scalar_forensic.config import ENV_ALLOW_ONLINE, Settings
-from scalar_forensic.discovery import _MAX_CONTEXT_PAIRS, DiscoveryHit, run_discovery, run_explore
+from scalar_forensic.discovery import MAX_CONTEXT_PAIRS, DiscoveryHit, run_discovery, run_explore
 from scalar_forensic.embedder import (
     _SSCD_INPUT_SIZE,
     _open_rgb,
@@ -1111,6 +1111,34 @@ def _fetch_tag_ref_records(
     return records
 
 
+def _split_ref_vectors(
+    ref_records: list,
+    pos_ids_set: set[str],
+    *,
+    vector_name: str = "dino",
+) -> tuple[list[list[float]], list[list[float]]]:
+    """Return ``(positive_vecs, negative_vecs)`` extracted from retrieved ref records.
+
+    A record is placed in the positive bucket when ``str(rec.id)`` is in
+    *pos_ids_set*, otherwise in the negative bucket. Records whose named vector
+    is missing (or whose ``vector`` payload is not a dict) are skipped.
+    """
+    pos_vecs: list[list[float]] = []
+    neg_vecs: list[list[float]] = []
+    for rec in ref_records:
+        vecs = rec.vector or {}
+        if not isinstance(vecs, dict):
+            continue
+        v = vecs.get(vector_name)
+        if v is None:
+            continue
+        if str(rec.id) in pos_ids_set:
+            pos_vecs.append(list(v))
+        else:
+            neg_vecs.append(list(v))
+    return pos_vecs, neg_vecs
+
+
 def _hit_to_json(hit: DiscoveryHit) -> dict:
     payload = hit.payload or {}
     return {
@@ -1465,9 +1493,9 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
             with_vectors=True,
             with_payload=False,
         )
-        # Build (file_id, filename, dino_vec, _) entries reusing score_query_entries
+        # Build (file_id, filename, dino_vec) entries reusing score_query_entries
         pid_to_hash = {v: k for k, v in hash_to_pid.items()}
-        entries: list[tuple[str, str, list[float] | None, None]] = []
+        entries: list[tuple[str, str, list[float] | None]] = []
         for rec in candidate_records:
             pid = str(rec.id)
             image_hash = pid_to_hash.get(pid)
@@ -1477,7 +1505,7 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
             dino_vec = (
                 list(vecs.get("dino")) if isinstance(vecs, dict) and vecs.get("dino") else None
             )
-            entries.append((pid, image_hash, dino_vec, None))
+            entries.append((pid, image_hash, dino_vec))
 
         by_hash: dict[str, list[str]] = {h: [] for h in image_hashes}
 
@@ -1494,22 +1522,7 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
                 continue
 
             pos_ids_set = {str(i) for i in effective_pos}
-
-            def _vecs(role: str) -> list[list[float]]:
-                result = []
-                for rec in ref_records:
-                    if role == "positive" and str(rec.id) not in pos_ids_set:
-                        continue
-                    if role == "negative" and str(rec.id) in pos_ids_set:
-                        continue
-                    vecs = rec.vector or {}
-                    v = vecs.get("dino") if isinstance(vecs, dict) else None
-                    if v is not None:
-                        result.append(list(v))
-                return result
-
-            pos_dino = _vecs("positive")
-            neg_dino = _vecs("negative")
+            pos_dino, neg_dino = _split_ref_vectors(ref_records, pos_ids_set)
 
             # Fail safe: the tag declares negatives but none could be retrieved
             # (stale point IDs, re-indexed collection, wrong collection).
@@ -1526,7 +1539,7 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
             # matches what score_query_vector actually evaluates.
             n_pairs = min(
                 len(pos_dino) * max(len(neg_dino), 1),
-                _MAX_CONTEXT_PAIRS,
+                MAX_CONTEXT_PAIRS,
             )
             threshold = max(1, n_pairs * 3 // 4)
 
@@ -1582,9 +1595,9 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
         tags = store.list()
 
         entries = [
-            (f.file_id, f.filename, f.dino_embedding, f.sscd_embedding)
+            (f.file_id, f.filename, f.dino_embedding)
             for f in session.files
-            if not f.is_video and (f.dino_embedding or f.sscd_embedding)
+            if not f.is_video and f.dino_embedding
         ]
         file_id_to_hash = {f.file_id: f.file_hash for f in session.files if f.file_hash}
 
@@ -1602,22 +1615,7 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
                 continue
 
             pos_ids_set = {str(i) for i in tag.positive_ids}
-
-            def _vecs(role: str) -> list[list[float]]:
-                result = []
-                for rec in ref_records:
-                    if role == "positive" and str(rec.id) not in pos_ids_set:
-                        continue
-                    if role == "negative" and str(rec.id) in pos_ids_set:
-                        continue
-                    vecs = rec.vector or {}
-                    v = vecs.get("dino") if isinstance(vecs, dict) else None
-                    if v is not None:
-                        result.append(list(v))
-                return result
-
-            pos_dino = _vecs("positive")
-            neg_dino = _vecs("negative")
+            pos_dino, neg_dino = _split_ref_vectors(ref_records, pos_ids_set)
 
             if tag.negative_ids and not neg_dino:
                 _log.warning(
@@ -1629,7 +1627,7 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
 
             n_pairs = min(
                 len(pos_dino) * max(len(neg_dino), 1),
-                _MAX_CONTEXT_PAIRS,
+                MAX_CONTEXT_PAIRS,
             )
             threshold = max(1, n_pairs * 3 // 4)
 
@@ -1696,24 +1694,7 @@ async def triage_query_images(
         if not pos_ids_set and tag.target_id is not None:
             pos_ids_set.add(str(tag.target_id))
 
-        def _extract_vecs(vec_name: str, role: str) -> list[list[float]]:
-            result = []
-            for r in ref_records:
-                if role == "positive" and str(r.id) not in pos_ids_set:
-                    continue
-                if role == "negative" and str(r.id) in pos_ids_set:
-                    continue
-                vecs = r.vector or {}
-                if isinstance(vecs, dict):
-                    v = vecs.get(vec_name)
-                else:
-                    v = None
-                if v is not None:
-                    result.append(list(v))
-            return result
-
-        pos_dino = _extract_vecs("dino", "positive")
-        neg_dino = _extract_vecs("dino", "negative")
+        pos_dino, neg_dino = _split_ref_vectors(ref_records, pos_ids_set)
 
         if tag.negative_ids and not neg_dino:
             _log.warning(
@@ -1725,12 +1706,12 @@ async def triage_query_images(
 
         n_pairs = min(
             len(pos_dino) * max(len(neg_dino), 1),
-            _MAX_CONTEXT_PAIRS,
+            MAX_CONTEXT_PAIRS,
         )
         threshold = max(1, n_pairs * 3 // 4)
 
         entries = [
-            (f.file_id, f.filename, f.dino_embedding, None)
+            (f.file_id, f.filename, f.dino_embedding)
             for f in session.files
             if not f.is_video and f.dino_embedding
         ]

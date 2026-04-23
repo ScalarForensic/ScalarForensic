@@ -19,7 +19,7 @@ from qdrant_client.models import (
 )
 
 from scalar_forensic.discovery import (
-    _MAX_CONTEXT_PAIRS,
+    MAX_CONTEXT_PAIRS,
     _build_context_pairs,
     run_discovery,
     run_triage,
@@ -76,7 +76,7 @@ def test_build_pairs_covers_every_reference_under_cap():
     positives = [f"p{i}" for i in range(10)]
     negatives = [f"n{i}" for i in range(10)]
     pairs = _build_context_pairs(positives, negatives)
-    assert len(pairs) <= _MAX_CONTEXT_PAIRS
+    assert len(pairs) <= MAX_CONTEXT_PAIRS
     assert {p.positive for p in pairs} == set(positives)
     assert {p.negative for p in pairs} == set(negatives)
 

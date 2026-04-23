@@ -56,7 +56,7 @@ The engine picks the Qdrant API automatically based on what the tag contains:
 
 For each `(positive_ref, negative_ref, candidate)` triplet, Qdrant increments the score by 1 if the candidate is closer to `positive_ref` than to `negative_ref`. The final score is the count of satisfied triplets.
 
-Pairs are built as the cartesian product of `positive_ids × negative_ids`, capped at 64 (`_MAX_CONTEXT_PAIRS`). When the cap applies, sampling is round-robin so every positive and every negative appears in at least one pair.
+Pairs are built as the cartesian product of `positive_ids × negative_ids`, capped at 64 (`MAX_CONTEXT_PAIRS`). When the cap applies, sampling is round-robin so every positive and every negative appears in at least one pair.
 
 **How to read the score:** the UI shows it as `N / M` where `N` is the satisfied count and `M` is the total pairs for that tag. A tag with 5 positives × 5 negatives defines 25 pairs. A score of 23/25 is a very strong signal; 2/25 suggests the candidate is on the benign side.
 

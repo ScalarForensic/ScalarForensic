@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 
 from scalar_forensic.query_eval import (
-    _MAX_CONTEXT_PAIRS,
+    MAX_CONTEXT_PAIRS,
     _cosine_sims,
     _pair_indices,
     score_query_entries,
@@ -57,7 +57,7 @@ def test_pair_indices_covers_all_pairs_under_cap():
 
 def test_pair_indices_caps_at_max():
     pairs = _pair_indices(10, 10)
-    assert len(pairs) == _MAX_CONTEXT_PAIRS
+    assert len(pairs) == MAX_CONTEXT_PAIRS
 
 
 def test_pair_indices_diagonal_first():
@@ -125,8 +125,8 @@ def test_score_query_entries_ranks_by_triplet_score():
     # File A: close to positive → triplet_score=1
     # File B: close to negative → triplet_score=0, lower margin
     entries = [
-        ("fileB", "b.jpg", _unit([0.0, 1.0]), None),  # far from pos
-        ("fileA", "a.jpg", _unit([1.0, 0.0]), None),  # close to pos
+        ("fileB", "b.jpg", _unit([0.0, 1.0])),  # far from pos
+        ("fileA", "a.jpg", _unit([1.0, 0.0])),  # close to pos
     ]
     hits = score_query_entries(entries, pos_dino, neg_dino, limit=10)
     assert hits[0].file_id == "fileA"
@@ -134,19 +134,21 @@ def test_score_query_entries_ranks_by_triplet_score():
 
 
 def test_score_query_entries_excludes_zero_score():
+    """Entries orthogonal to every positive (ts=0, cm=0) must not be returned."""
     pos_dino = [_unit([1.0, 0.0])]
     neg_dino = [_unit([0.0, 1.0])]
     entries = [
-        ("fileA", "a.jpg", _unit([0.0, 1.0]), None),  # far from positive
+        # Orthogonal to pos: cosine_margin == 0; closer to neg: triplet_score == 0.
+        ("fileA", "a.jpg", _unit([0.0, 1.0])),
     ]
     hits = score_query_entries(entries, pos_dino, neg_dino, limit=10)
-    assert isinstance(hits, list)
+    assert hits == [], "zero-score entries must be excluded from the result list"
 
 
 def test_score_query_entries_respects_limit():
     pos_dino = [_unit([1.0, 0.0])]
     neg_dino = [_unit([0.0, 1.0])]
-    entries = [(f"file{i}", f"f{i}.jpg", _unit([1.0, 0.0]), None) for i in range(10)]
+    entries = [(f"file{i}", f"f{i}.jpg", _unit([1.0, 0.0])) for i in range(10)]
     hits = score_query_entries(entries, pos_dino, neg_dino, limit=3)
     assert len(hits) <= 3
 
@@ -154,6 +156,6 @@ def test_score_query_entries_respects_limit():
 def test_score_query_entries_skips_entries_without_dino_vec():
     pos_dino = [_unit([1.0, 0.0])]
     neg_dino = [_unit([0.0, 1.0])]
-    entries = [("f", "f.jpg", None, None)]
+    entries = [("f", "f.jpg", None)]
     hits = score_query_entries(entries, pos_dino, neg_dino, limit=10)
     assert hits == []

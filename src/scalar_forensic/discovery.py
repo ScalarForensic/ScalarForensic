@@ -70,7 +70,7 @@ _TRIAGE_PAYLOAD_FIELDS: list[str] = [
 # 64 is well below any Qdrant operational limit while still giving
 # the investigator a lot of expressive headroom (e.g. 8 positives ×
 # 8 negatives = 64 pairs).
-_MAX_CONTEXT_PAIRS = 64
+MAX_CONTEXT_PAIRS = 64
 
 # Recommendation strategy used when the concept has no negatives.
 # BEST_SCORE matches the intent "most similar to any of my positives"
@@ -105,7 +105,7 @@ def _build_context_pairs(
     pairs: list[ContextPair] = []
     if not positives or not negatives:
         return pairs
-    limit = min(len(positives) * len(negatives), _MAX_CONTEXT_PAIRS)
+    limit = min(len(positives) * len(negatives), MAX_CONTEXT_PAIRS)
     seen: set[tuple[str | int, str | int]] = set()
     # Diagonal-first: guarantees every positive and every negative appears
     # at least once even when the cap is hit before the full product.

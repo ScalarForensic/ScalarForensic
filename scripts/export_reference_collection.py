@@ -115,12 +115,17 @@ def _safe_filename(src: Path, dest_dir: Path, reserved: set[Path]) -> Path:
     candidate = dest_dir / f"{src.stem}_{short}{src.suffix}"
     if not _taken(candidate):
         return candidate
-    counter = 2
-    while True:
+    # Bound the disambiguation loop so a pathological collision pattern
+    # fails loudly instead of hanging.  10_000 is far above anything that
+    # would happen in practice given the 8-char hash prefix already in use.
+    for counter in range(2, 10_000):
         candidate = dest_dir / f"{src.stem}_{short}_{counter}{src.suffix}"
         if not _taken(candidate):
             return candidate
-        counter += 1
+    raise RuntimeError(
+        f"Could not find a collision-free filename under {dest_dir} for {src.name!r} "
+        "after 10,000 attempts"
+    )
 
 
 def do_export(

@@ -954,11 +954,16 @@ def _query_vector(
                 "video_path",
                 "video_hash",
                 "frame_timecode_ms",
+                "is_reference",
             ],
         )
         hits = []
         for r in result.points:
             mp = _payload_model_provenance(r.payload)
+            # Source of truth for is_reference is the point's payload.  Fall back
+            # to the caller-supplied flag when the payload does not carry the
+            # field (case-collection points indexed before --reference existed).
+            payload_is_ref = bool(r.payload.get("is_reference"))
             hits.append(
                 Hit(
                     path=r.payload.get("image_path", ""),
@@ -971,7 +976,7 @@ def _query_vector(
                     video_path=r.payload.get("video_path"),
                     video_hash=r.payload.get("video_hash"),
                     frame_timecode_ms=r.payload.get("frame_timecode_ms"),
-                    is_reference=is_reference_result,
+                    is_reference=payload_is_ref or is_reference_result,
                 )
             )
         return hits, []
