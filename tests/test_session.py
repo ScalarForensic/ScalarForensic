@@ -77,6 +77,21 @@ def test_create_session_cleans_up_temp_files():
 # ---------------------------------------------------------------------------
 
 
+def test_create_session_cleans_up_temp_dir():
+    with tempfile.TemporaryDirectory() as outer:
+        session_tmp = Path(outer) / "session_upload_dir"
+        session_tmp.mkdir()
+        sentinel = session_tmp / "uploaded.jpg"
+        sentinel.write_bytes(b"data")
+
+        first = asyncio.run(create_session())
+        first.temp_dir = session_tmp
+        assert session_tmp.exists()
+
+        asyncio.run(create_session())
+        assert not session_tmp.exists()
+
+
 def test_create_session_concurrent_single_winner():
     """Concurrent create_session() calls must leave exactly one live session."""
 

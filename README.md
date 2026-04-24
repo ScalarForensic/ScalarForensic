@@ -3,7 +3,8 @@
 Large-scale image vector indexer for forensic use. Embeds images into a Qdrant vector database for similarity search and deduplication — designed for evidence rooms where you need to find exact copies, edited versions, and visually related images across tens of thousands of files.
 
 <img width="1895" height="1272" alt="image" src="https://github.com/user-attachments/assets/cd51803e-cce1-4501-a4f5-d70833ae1afd" />
-<img width="1895" height="1272" alt="image" src="https://github.com/user-attachments/assets/4d592a75-50dd-4059-9559-2c4709c58397" />
+
+<img width="804" height="1201" alt="image" src="https://github.com/user-attachments/assets/fd925dd6-3c98-4cca-88a4-bc481ab801ac" />
 
 
 **→ [Installation & setup guide](INSTALL.md)**

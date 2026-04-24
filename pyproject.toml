@@ -10,7 +10,7 @@ dependencies = [
     "qdrant-client>=1.9",
     "torch>=2.2",
     "torchvision>=0.15",
-    "transformers>=4.40",
+    "transformers>=5.5.4",
     "Pillow>=10.0",
     "python-dotenv>=1.0",
     "av>=12.0",
@@ -29,7 +29,7 @@ dev = [
     { include-group = "web" },
     "pytest>=8.0",
     "pytest-cov>=6.0",
-    "ruff>=0.11",
+    "ruff>=0.15.11",
     "httpx>=0.27",
 ]
 heif = [
