@@ -200,6 +200,36 @@ class TestTriage:
         assert len(body["hits"]) == 1
         assert body["hits"][0]["point_id"] == "pt-1"
 
+    def test_response_includes_pair_count(self, client):
+        tag = _tag(pos=["p1", "p2"], neg=["n1"])
+        from scalar_forensic.discovery import DiscoveryHit
+
+        with (
+            patch("scalar_forensic.web.app.Settings"),
+            patch("scalar_forensic.web.app.QdrantClient"),
+            patch("scalar_forensic.web.app.TagStore") as mock_ts,
+            patch("scalar_forensic.web.app.run_discovery", return_value=[]),
+        ):
+            mock_ts.return_value.get.return_value = tag
+            r = client.post("/api/triage", data={"tag_id": "tag-1"})
+        assert r.status_code == 200
+        body = r.json()
+        # 2 positives × 1 negative = 2 pairs
+        assert body["pair_count"] == 2
+
+    def test_cosine_threshold_param_accepted(self, client):
+        """A non-default cosine_threshold must be accepted without error."""
+        tag = _tag(pos=["p1"])  # no negatives → Recommend mode, cosine threshold applies
+        with (
+            patch("scalar_forensic.web.app.Settings"),
+            patch("scalar_forensic.web.app.QdrantClient"),
+            patch("scalar_forensic.web.app.TagStore") as mock_ts,
+            patch("scalar_forensic.web.app.run_discovery", return_value=[]),
+        ):
+            mock_ts.return_value.get.return_value = tag
+            r = client.post("/api/triage", data={"tag_id": "tag-1", "cosine_threshold": "0.8"})
+        assert r.status_code == 200
+
 
 # ---------------------------------------------------------------------------
 # POST /api/explore

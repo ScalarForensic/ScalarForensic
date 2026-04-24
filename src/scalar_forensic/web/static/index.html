@@ -1380,6 +1380,15 @@
           </div>
           <input type="range" min="10" max="200" step="10" x-model.number="triageLimit">
         </div>
+        <div class="slider-row"
+             x-show="triageSource !== 'explore' && selectedConcept && selectedConcept.negative_ids.length === 0">
+          <div class="slider-label">
+            <span title="Minimum cosine similarity when the tag has no negatives (Recommend mode)">Cosine threshold</span>
+            <span class="slider-value" x-text="triageCosineThreshold.toFixed(2)"></span>
+          </div>
+          <input type="range" min="0" max="1" step="0.01"
+                 x-model.number="triageCosineThreshold" class="range-semantic">
+        </div>
         <label class="triage-reverse-row" x-show="triageSource === 'indexed'">
           <input type="checkbox" x-model="triageReverse">
           <span>Reverse (surface benign)</span>
@@ -1858,9 +1867,10 @@ function sfn() {
     triageError: null,
     triageLimit: 50,
     triageReverse: false,
-    triageSource: 'indexed',     // 'indexed' | 'query' | 'explore'
-    triageCollection: 'dataset', // 'dataset' | 'reference' — applies to Triage and Explore
-    exploreStrategy: null,       // 'random' | 'context' — returned by last /api/explore call
+    triageSource: 'indexed',        // 'indexed' | 'query' | 'explore'
+    triageCollection: 'dataset',   // 'dataset' | 'reference' — applies to Triage and Explore
+    triageCosineThreshold: 0.5,    // cosine floor used in Recommend mode (tag has no negatives)
+    exploreStrategy: null,         // 'random' | 'context' — returned by last /api/explore call
 
     // Triage hit selection
     selectedTriageHitId: null,
@@ -2871,6 +2881,7 @@ function sfn() {
       fd.append('limit', this.triageLimit);
       try {
         let resp;
+        fd.append('cosine_threshold', this.triageCosineThreshold);
         if (this.triageSource === 'query' && this.sessionId) {
           fd.append('session_id', this.sessionId);
           resp = await fetch('/api/triage/query-images', { method: 'POST', body: fd });
@@ -3278,7 +3289,7 @@ function sfn() {
           fetch('/api/tags/classify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ image_hashes: batch }),
+            body: JSON.stringify({ image_hashes: batch, cosine_threshold: this.triageCosineThreshold }),
           }).then(r => r.ok ? r.json() : {}).then(d => d.by_hash ?? {}).catch(() => ({}))
         );
       }
@@ -3288,7 +3299,7 @@ function sfn() {
           fetch('/api/tags/classify-session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_id: this.sessionId }),
+            body: JSON.stringify({ session_id: this.sessionId, cosine_threshold: this.triageCosineThreshold }),
           }).then(r => r.ok ? r.json() : {}).then(d => d.by_hash ?? {}).catch(() => ({}))
         );
       }
@@ -3352,6 +3363,7 @@ function sfn() {
       this.triageError = null;
       this.triageSource = 'indexed';
       this.triageCollection = 'dataset';
+      this.triageCosineThreshold = 0.5;
       this.markedOverrides = {};
       this.hitTags = {};
       this.activeTagId = '';

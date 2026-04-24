@@ -224,8 +224,13 @@ def run_discovery(
     if pairs:
         # _build_context_pairs returns non-empty only when both positives and negatives
         # are present; the auto-anchor above always sets target when positives exist,
-        # so target is guaranteed non-None here.
-        assert target is not None, "non-empty context pairs require a target anchor"
+        # so target is guaranteed non-None here.  Raise explicitly so the invariant
+        # is enforced even when Python is run with -O (which silences assert).
+        if target is None:
+            raise RuntimeError(
+                "Internal invariant violated: non-empty context pairs require a "
+                "target anchor.  This should be unreachable — please file a bug."
+            )
         query = DiscoverQuery(discover=DiscoverInput(target=target, context=pairs))
     else:
         if not positives and target is None:

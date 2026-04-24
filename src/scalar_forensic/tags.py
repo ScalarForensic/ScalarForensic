@@ -102,6 +102,12 @@ class TagStore:
     One payload-only point per tag in the configured sidecar collection.
     The point ID is a UUIDv5 derived from the tag name so tag identity is
     stable across re-creates with the same name.
+
+    Mutation methods (:meth:`mark`, :meth:`unmark`, :meth:`set_target`) use
+    read-modify-write without distributed locking.  This is intentional — the
+    expected deployment model is a single forensic investigator per machine.
+    Concurrent writes from multiple browser tabs would produce a last-writer-
+    wins race; that risk is accepted for this use case.
     """
 
     def __init__(self, client: QdrantClient, collection: str) -> None:
@@ -153,17 +159,23 @@ class TagStore:
         """Create or replace a tag by *name*.
 
         Name-derived IDs mean re-running with the same name overwrites the
-        existing tag in place — intentional for scripted workflows.
+        existing tag in place — intentional for scripted workflows.  The
+        original ``created_at`` timestamp is preserved across re-creates so
+        that editing a tag's notes or IDs via the UI does not destroy its
+        creation time.
         """
         now = datetime.now(UTC).isoformat()
+        tag_id = self.derive_tag_id(name)
+        existing = self.get(tag_id)
+        created_at = existing.created_at if existing else now
         tag = Tag(
-            tag_id=self.derive_tag_id(name),
+            tag_id=tag_id,
             name=name,
             positive_ids=list(positive_ids or []),
             negative_ids=list(negative_ids or []),
             target_id=target_id,
             notes=notes,
-            created_at=now,
+            created_at=created_at,
             updated_at=now,
         )
         self._upsert(tag)

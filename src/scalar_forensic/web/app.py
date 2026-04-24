@@ -58,10 +58,7 @@ from scalar_forensic.web.pipeline import (
 )
 from scalar_forensic.web.session import FileEntry, create_session, get_session
 
-# Cosine similarity floor used when a tag has no negatives and Qdrant falls
-# back to Recommendation (triplet_score is None).  DINOv2 cosine ≥ 0.5
-# reliably indicates semantic category membership.
-_RECOMMEND_COSINE_THRESHOLD = 0.5
+_DEFAULT_COSINE_THRESHOLD = 0.5
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _VIZ_JS_SRC = (_STATIC_DIR / "viz.js").read_text(encoding="utf-8")
@@ -1043,11 +1040,28 @@ async def points3d() -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
-def _tag_store() -> TagStore:
-    """Construct a fresh :class:`TagStore` per request."""
+def _tag_client_and_store() -> tuple[QdrantClient, TagStore]:
+    """Construct a fresh QdrantClient and TagStore for this request."""
     settings = Settings()
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-    return TagStore(client, settings.tags_collection)
+    return client, TagStore(client, settings.tags_collection)
+
+
+def _tag_store() -> TagStore:
+    """Construct a fresh :class:`TagStore` per request."""
+    return _tag_client_and_store()[1]
+
+
+def _triplet_threshold(pos_dino: list, neg_dino: list) -> int:
+    """Return the triplet-count threshold (75 % of defined pairs, min 1).
+
+    When *neg_dino* is empty the tag is in Recommend mode and triplet scoring
+    does not apply — callers must gate on ``triplet_score is None`` separately.
+    """
+    if not neg_dino:
+        return 0  # unused in recommend mode; cosine threshold gates that path
+    n_pairs = min(len(pos_dino) * len(neg_dino), MAX_CONTEXT_PAIRS)
+    return max(1, n_pairs * 3 // 4)
 
 
 def _tag_to_json(tag: Tag) -> dict:
@@ -1067,16 +1081,17 @@ def _hit_passes_classify_threshold(
     triplet_score: int | None,
     cosine_margin: float,
     triplet_threshold: int,
+    cosine_threshold: float = _DEFAULT_COSINE_THRESHOLD,
 ) -> bool:
     """Return True if a hit meets the classification bar.
 
     Discovery mode (triplet_score is not None): require ≥ triplet_threshold
     pairs satisfied.  Recommend mode (triplet_score is None, tag has no
-    negatives): require cosine margin ≥ _RECOMMEND_COSINE_THRESHOLD.
+    negatives): require cosine margin ≥ cosine_threshold.
     """
     if triplet_score is not None:
         return triplet_score >= triplet_threshold
-    return cosine_margin >= _RECOMMEND_COSINE_THRESHOLD
+    return cosine_margin >= cosine_threshold
 
 
 def _fetch_tag_ref_records(
@@ -1308,6 +1323,7 @@ async def triage(
     limit: int = Form(default=50, ge=1, le=500),
     reverse: bool = Form(default=False),
     source: str = Form(default="indexed"),
+    cosine_threshold: float = Form(default=_DEFAULT_COSINE_THRESHOLD, ge=0.0, le=1.0),
 ) -> JSONResponse:
     """Run a Tag-Triage query against the indexed dataset using DINOv2.
 
@@ -1315,6 +1331,8 @@ async def triage(
     the reference collection via lookup_from when SFN_REFERENCE_COLLECTION is set.
     source='reference': search the reference collection directly for high-quality
     tagging using known material.
+
+    cosine_threshold applies only when the tag has no negatives (Recommend mode).
     """
     settings = Settings()
     if source not in {"indexed", "reference"}:
@@ -1331,10 +1349,10 @@ async def triage(
         triage_collection = settings.collection
         ref_coll_for_lookup = settings.reference_collection
     try:
-        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+        client, store = _tag_client_and_store()
 
         def _get_tag() -> Tag | None:
-            return TagStore(client, settings.tags_collection).get(tag_id)
+            return store.get(tag_id)
 
         tag = await asyncio.to_thread(_get_tag)
         if tag is None:
@@ -1355,11 +1373,13 @@ async def triage(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+    pair_count = min(len(tag.positive_ids) * len(tag.negative_ids), MAX_CONTEXT_PAIRS)
     return JSONResponse(
         {
             "tag": _tag_to_json(tag),
             "reverse": reverse,
             "limit": limit,
+            "pair_count": pair_count,
             "hits": [_hit_to_json(h) for h in hits],
         }
     )
@@ -1397,8 +1417,7 @@ async def explore(
     else:
         explore_collection = settings.collection
     try:
-        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-        store = await asyncio.to_thread(TagStore, client, settings.tags_collection)
+        client, store = _tag_client_and_store()
         tag = await asyncio.to_thread(store.get, tag_id)
         if tag is None:
             raise HTTPException(status_code=404, detail="Tag not found")
@@ -1418,11 +1437,13 @@ async def explore(
         raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
+    pair_count = min(len(tag.positive_ids) * len(tag.negative_ids), MAX_CONTEXT_PAIRS)
     return JSONResponse(
         {
             "tag": _tag_to_json(tag),
             "strategy": strategy,
             "limit": limit,
+            "pair_count": pair_count,
             "hits": [_hit_to_json(h) for h in hits],
         }
     )
@@ -1454,12 +1475,13 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
     image_hashes: list[str] = raw_hashes
     if not image_hashes:
         return JSONResponse({"by_hash": {}})
+    raw_ct = body.get("cosine_threshold", _DEFAULT_COSINE_THRESHOLD)
+    cosine_threshold: float = float(max(0.0, min(1.0, raw_ct))) if isinstance(raw_ct, (int, float)) else _DEFAULT_COSINE_THRESHOLD
 
     settings = Settings()
 
     def _classify():
-        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-        store = TagStore(client, settings.tags_collection)
+        client, store = _tag_client_and_store()
         tags = store.list()
 
         # Resolve all hashes → point_ids in one scroll using a should-filter.
@@ -1535,18 +1557,12 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
                 )
                 continue
 
-            # Use actual retrieved vector counts for threshold so the bar
-            # matches what score_query_vector actually evaluates.
-            n_pairs = min(
-                len(pos_dino) * max(len(neg_dino), 1),
-                MAX_CONTEXT_PAIRS,
-            )
-            threshold = max(1, n_pairs * 3 // 4)
+            threshold = _triplet_threshold(pos_dino, neg_dino)
 
             hits = score_query_entries(entries, pos_dino, neg_dino, limit=len(entries))
             for hit in hits:
                 if not _hit_passes_classify_threshold(
-                    hit.triplet_score, hit.cosine_margin, threshold
+                    hit.triplet_score, hit.cosine_margin, threshold, cosine_threshold
                 ):
                     continue
                 # hit.filename holds the image_hash (we used it as the filename field)
@@ -1587,11 +1603,13 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
     if session is None:
         return JSONResponse({"by_hash": {}})
 
+    raw_ct = body.get("cosine_threshold", _DEFAULT_COSINE_THRESHOLD)
+    cosine_threshold: float = float(max(0.0, min(1.0, raw_ct))) if isinstance(raw_ct, (int, float)) else _DEFAULT_COSINE_THRESHOLD
+
     settings = Settings()
 
     def _classify_session():
-        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-        store = TagStore(client, settings.tags_collection)
+        cs_client, store = _tag_client_and_store()
         tags = store.list()
 
         entries = [
@@ -1610,7 +1628,7 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
                 continue
             all_ref_ids = [str(i) for i in tag.positive_ids + tag.negative_ids]
             try:
-                ref_records = _fetch_tag_ref_records(client, settings, all_ref_ids)
+                ref_records = _fetch_tag_ref_records(cs_client, settings, all_ref_ids)
             except Exception:  # noqa: BLE001
                 continue
 
@@ -1625,11 +1643,7 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
                 )
                 continue
 
-            n_pairs = min(
-                len(pos_dino) * max(len(neg_dino), 1),
-                MAX_CONTEXT_PAIRS,
-            )
-            threshold = max(1, n_pairs * 3 // 4)
+            threshold = _triplet_threshold(pos_dino, neg_dino)
 
             hits = score_query_entries(
                 entries,
@@ -1639,7 +1653,7 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
             )
             for hit in hits:
                 if not _hit_passes_classify_threshold(
-                    hit.triplet_score, hit.cosine_margin, threshold
+                    hit.triplet_score, hit.cosine_margin, threshold, cosine_threshold
                 ):
                     continue
                 image_hash = file_id_to_hash.get(hit.file_id)
@@ -1660,6 +1674,7 @@ async def triage_query_images(
     tag_id: str = Form(...),
     session_id: str = Form(...),
     limit: int = Form(default=50, ge=1, le=500),
+    cosine_threshold: float = Form(default=_DEFAULT_COSINE_THRESHOLD, ge=0.0, le=1.0),
 ) -> JSONResponse:
     """Run tag triage against uploaded query images using DINOv2 embeddings."""
 
@@ -1670,8 +1685,7 @@ async def triage_query_images(
     settings = Settings()
 
     def _run():
-        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-        store = TagStore(client, settings.tags_collection)
+        _client, store = _tag_client_and_store()
         tag = store.get(tag_id)
         if tag is None:
             return None, None
@@ -1684,7 +1698,7 @@ async def triage_query_images(
 
         # Fetch reference vectors for requested mode(s)
         try:
-            ref_records = _fetch_tag_ref_records(client, settings, all_ref_ids)
+            ref_records = _fetch_tag_ref_records(_client, settings, all_ref_ids)
         except Exception:  # noqa: BLE001
             return tag, []
 
@@ -1704,11 +1718,7 @@ async def triage_query_images(
             )
             return tag, []
 
-        n_pairs = min(
-            len(pos_dino) * max(len(neg_dino), 1),
-            MAX_CONTEXT_PAIRS,
-        )
-        threshold = max(1, n_pairs * 3 // 4)
+        threshold = _triplet_threshold(pos_dino, neg_dino)
 
         entries = [
             (f.file_id, f.filename, f.dino_embedding)
@@ -1719,7 +1729,7 @@ async def triage_query_images(
         hits = [
             h
             for h in all_hits
-            if _hit_passes_classify_threshold(h.triplet_score, h.cosine_margin, threshold)
+            if _hit_passes_classify_threshold(h.triplet_score, h.cosine_margin, threshold, cosine_threshold)
         ]
         return tag, hits
 
@@ -1743,10 +1753,12 @@ async def triage_query_images(
             "cosine_margin": h.cosine_margin,
         }
 
+    pair_count = min(len(tag.positive_ids) * len(tag.negative_ids), MAX_CONTEXT_PAIRS)
     return JSONResponse(
         {
             "tag": _tag_to_json(tag),
             "limit": limit,
+            "pair_count": pair_count,
             "hits": [_qhit_to_json(h) for h in (hits or [])],
         }
     )

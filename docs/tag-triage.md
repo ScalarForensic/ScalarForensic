@@ -195,6 +195,7 @@ Run a tag query against the indexed case collection using DINOv2.
 | `tag_id` | required | UUID of the tag to run |
 | `limit` | `50` | Maximum result count (1–500) |
 | `reverse` | `false` | Swap positive/negative roles (exculpatory mode) |
+| `cosine_threshold` | `0.5` | Minimum cosine similarity to include a hit when the tag has no negatives (Recommend mode). Has no effect in Discovery mode. |
 
 **Response**
 ```json
@@ -202,6 +203,7 @@ Run a tag query against the indexed case collection using DINOv2.
   "tag": { "tag_id": "...", "name": "...", ... },
   "reverse": false,
   "limit": 50,
+  "pair_count": 25,
   "hits": [
     {
       "point_id": "...",
@@ -217,7 +219,7 @@ Run a tag query against the indexed case collection using DINOv2.
 }
 ```
 
-`triplet_score` is `null` when the tag has no negatives (Recommend mode); in that case `cosine_margin` carries the cosine similarity.
+`triplet_score` is `null` when the tag has no negatives (Recommend mode); in that case `cosine_margin` carries the cosine similarity. `pair_count` is the number of (positive, negative) constraint pairs evaluated — the same value as the denominator in the "N / M" score display (e.g. a score of 9 with `pair_count: 25` reads as 9/25).
 
 ### `POST /api/tags/classify`
 
@@ -228,9 +230,12 @@ For each hash, returns the names of tags whose triplet threshold the image satis
 **JSON body**
 ```json
 {
-  "image_hashes": ["sha256hex1", "sha256hex2"]
+  "image_hashes": ["sha256hex1", "sha256hex2"],
+  "cosine_threshold": 0.5
 }
 ```
+
+`cosine_threshold` is optional (default `0.5`) and controls the minimum cosine similarity required to classify a hit for tags in Recommend mode (no negatives).
 
 **Response**
 ```json

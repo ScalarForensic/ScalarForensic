@@ -31,6 +31,8 @@ def _fresh_client() -> MagicMock:
 
 def _store() -> tuple[TagStore, MagicMock]:
     client = _fresh_client()
+    # Default: no pre-existing tag records (create() calls get() internally).
+    client.retrieve.return_value = []
     store = TagStore(client, "sfn_tags")
     return store, client
 
@@ -203,3 +205,30 @@ def test_migration_payload_rewrite():
     assert tag.name == "weapons"
     assert tag.positive_ids == ["p1"]
     assert "polarity" not in tag.to_payload()
+
+
+def test_create_preserves_created_at_on_upsert():
+    """Re-creating a tag with the same name must not clobber its created_at."""
+    store, client = _store()
+
+    # First creation: no existing record → new timestamps.
+    tag1 = store.create("weapons", positive_ids=["p1"], notes="v1")
+    original_created_at = tag1.created_at
+    original_updated_at = tag1.updated_at
+
+    # Simulate the tag now existing in Qdrant so the next create() finds it.
+    existing_rec = MagicMock()
+    existing_rec.payload = tag1.to_payload()
+    client.retrieve.return_value = [existing_rec]
+
+    # Second creation with the same name — only notes change.
+    tag2 = store.create("weapons", positive_ids=["p1", "p2"], notes="v2")
+
+    assert tag2.created_at == original_created_at, (
+        "created_at must not change when re-creating a tag with the same name"
+    )
+    assert tag2.updated_at >= original_updated_at, (
+        "updated_at must advance on re-create"
+    )
+    assert tag2.notes == "v2"
+    assert tag2.positive_ids == ["p1", "p2"]
