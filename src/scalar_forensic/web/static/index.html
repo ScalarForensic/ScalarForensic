@@ -801,7 +801,9 @@
           <template x-if="queryMeta?.hash_sha256 && hitTags[queryMeta.hash_sha256]?.length > 0">
             <div class="tag-strip">
               <template x-for="tname in hitTags[queryMeta.hash_sha256]" :key="tname">
-                <span class="tag-strip-badge" x-text="tname"></span>
+                <span class="tag-strip-badge"
+                      :class="`health-badge-${tagHealthByName[tname] ?? 'marginal'}`"
+                      x-text="tname"></span>
               </template>
             </div>
           </template>
@@ -927,7 +929,9 @@
           <template x-if="selectedHit?.image_hash && hitTags[selectedHit.image_hash]?.length > 0">
             <div class="tag-strip">
               <template x-for="tname in hitTags[selectedHit.image_hash]" :key="tname">
-                <span class="tag-strip-badge" x-text="tname"></span>
+                <span class="tag-strip-badge"
+                      :class="`health-badge-${tagHealthByName[tname] ?? 'marginal'}`"
+                      x-text="tname"></span>
               </template>
             </div>
           </template>
@@ -1333,7 +1337,10 @@
           <div class="tag-item" :class="{selected: c.tag_id === selectedConceptId}"
                @click="selectConcept(c.tag_id)">
             <div class="tag-item-body">
-              <div class="tag-item-name" :title="c.name" x-text="c.name"></div>
+              <div style="display:flex;align-items:center;gap:4px;min-width:0">
+                <div class="health-dot" :class="`health-${tagHealth(c)}`"></div>
+                <div class="tag-item-name" :title="c.name" x-text="c.name"></div>
+              </div>
               <div class="tag-item-counts"
                    x-text="`+${c.positive_ids.length} / −${c.negative_ids.length}`"></div>
             </div>
@@ -1503,41 +1510,42 @@
             </div>
           </div>
 
-          <!-- Anchor -->
+          <!-- Collection health -->
           <div class="tag-section">
-            <div class="tag-section-hdr" style="align-items:flex-start;flex-direction:column;gap:2px">
-              <span>Anchor</span>
-              <span style="font-size:9px;color:var(--text2);font-weight:400;line-height:1.4">
-                The image the search starts from. Qdrant finds candidates similar to the anchor,
-                then ranks them by how well they satisfy the positive/negative constraints.
-                Without an explicit anchor, the first positive is used automatically.
-              </span>
+            <div class="tag-section-hdr">Collection health</div>
+            <div x-data="{ get h() { return $root.tagHealth(selectedConcept); } }">
+              <div class="health-summary" :class="`col-${h}`">
+                <div class="health-dot" :class="`health-${h}`"></div>
+                <span x-text="h === 'healthy' ? 'Healthy' : h === 'marginal' ? 'Marginal' : 'Insufficient'"></span>
+              </div>
+              <div class="health-metrics">
+                <div class="health-metric-row">
+                  <span class="health-metric-lbl">Positives</span>
+                  <span class="health-metric-val"
+                        :class="selectedConcept.positive_ids.length>=200?'col-healthy':selectedConcept.positive_ids.length>=50?'col-marginal':'col-critical'"
+                        x-text="selectedConcept.positive_ids.length"></span>
+                  <span class="health-metric-hint"
+                        x-text="selectedConcept.positive_ids.length>=200?'good (≥200)':selectedConcept.positive_ids.length>=50?'marginal (50–199)':'insufficient (<50)'"></span>
+                </div>
+                <div class="health-metric-row">
+                  <span class="health-metric-lbl">Negatives</span>
+                  <span class="health-metric-val"
+                        :class="selectedConcept.negative_ids.length>=100?'col-healthy':selectedConcept.negative_ids.length>=20?'col-marginal':'col-critical'"
+                        x-text="selectedConcept.negative_ids.length"></span>
+                  <span class="health-metric-hint"
+                        x-text="selectedConcept.negative_ids.length>=100?'good (≥100)':selectedConcept.negative_ids.length>=20?'marginal (20–99)':'insufficient (<20)'"></span>
+                </div>
+                <template x-if="selectedConcept.positive_ids.length>0 && selectedConcept.negative_ids.length>0">
+                  <div class="health-metric-row">
+                    <span class="health-metric-lbl">Balance</span>
+                    <span class="health-metric-val"
+                          :class="(selectedConcept.positive_ids.length/selectedConcept.negative_ids.length<=5 && selectedConcept.negative_ids.length/selectedConcept.positive_ids.length<=5)?'col-healthy':'col-marginal'"
+                          x-text="`${selectedConcept.positive_ids.length} : ${selectedConcept.negative_ids.length}`"></span>
+                    <span class="health-metric-hint">ratio (aim ≤5:1)</span>
+                  </div>
+                </template>
+              </div>
             </div>
-            <template x-if="!selectedConcept.target_id">
-              <div style="font-size:10px;color:var(--text2);padding:4px 0">
-                Auto — using first positive as anchor.
-                Use "⚓ Set as anchor" on any triage hit to pin a specific image.
-              </div>
-            </template>
-            <template x-if="selectedConcept.target_id">
-              <div style="display:flex;align-items:center;gap:8px">
-                <div class="tag-example-cell" style="flex-shrink:0"
-                     @click="openLightbox(conceptExampleSrc(selectedConcept.target_id))">
-                  <img class="tag-example-img"
-                       :src="conceptExampleThumb(selectedConcept.target_id)"
-                       @error="$el.onerror=null;$el.src='/static/vector-fallback.svg'"
-                       :title="String(selectedConcept.target_id)"
-                       loading="lazy" alt="">
-                </div>
-                <div style="display:flex;flex-direction:column;gap:4px;min-width:0">
-                  <span style="font-size:9px;color:var(--text2);word-break:break-all"
-                        x-text="String(selectedConcept.target_id)"></span>
-                  <button class="btn-tiny" :disabled="settingAnchor" @click="clearAnchor()">
-                    Clear anchor
-                  </button>
-                </div>
-              </div>
-            </template>
           </div>
 
           <!-- Tag ID (for CLI use) -->
@@ -1970,6 +1978,19 @@ function sfn() {
     },
     get selectedConcept() {
       return this.concepts.find(c => c.tag_id === this.selectedConceptId) ?? null;
+    },
+    tagHealth(tag) {
+      const p = tag.positive_ids.length;
+      const n = tag.negative_ids.length;
+      if (p < 50 || n < 20) return 'critical';
+      if (p < 200 || n < 100) return 'marginal';
+      if (p / n > 5 || n / p > 5) return 'marginal';
+      return 'healthy';
+    },
+    get tagHealthByName() {
+      const m = {};
+      for (const c of this.concepts) m[c.name] = this.tagHealth(c);
+      return m;
     },
     get exploreStrategyHint() {
       const c = this.selectedConcept;
