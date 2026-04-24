@@ -74,9 +74,10 @@ MAX_CONTEXT_PAIRS = 64
 # better than AVERAGE_VECTOR when the positive set is visually diverse.
 _DEFAULT_RECOMMEND_STRATEGY = RecommendStrategy.BEST_SCORE
 
-# Sentinel raw_score written into DiscoveryHit for random-mode explore results
-# that carry no vector scoring.  Distinguishable from a genuine 0.0 cosine score
-# (orthogonal vectors) by checking triplet_score is None or vector_name == "random".
+# Sentinel raw_score for random-mode explore results that carry no vector scoring.
+# NaN would be structurally unambiguous but breaks JSON serialisation, so 0.0 is
+# used instead.  Callers must not treat this as a genuine cosine score; the
+# canonical discriminant is ``vector_name == "random"`` or ``triplet_score is None``.
 _RANDOM_RAW_SCORE = 0.0
 
 

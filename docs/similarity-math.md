@@ -232,6 +232,9 @@ For a tag with 5 positives × 4 negatives = 20 pairs, the threshold is
 `max(1, 15) = 15`.  An image must satisfy at least 15 of the 20 constraints
 to be classified under that tag.
 
+Implementation note: the code uses `n_pairs * 3 // 4`, which is identical to
+`⌊n_pairs × 0.75⌋` for all non-negative integers (`n × 3 // 4 = ⌊3n/4⌋ = ⌊n × 0.75⌋`).
+
 In Recommend mode (no negatives) the classify threshold is replaced by the
 configurable `cosine_threshold` parameter (default 0.5).
 

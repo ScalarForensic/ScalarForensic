@@ -1431,7 +1431,10 @@ async def triage(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
-    pair_count = min(len(tag.positive_ids) * len(tag.negative_ids), MAX_CONTEXT_PAIRS)
+    eff_pos = list(tag.positive_ids)
+    if tag.target_id is not None and tag.target_id not in set(str(i) for i in eff_pos):
+        eff_pos.append(tag.target_id)
+    pair_count = min(len(eff_pos) * len(tag.negative_ids), MAX_CONTEXT_PAIRS)
     return JSONResponse(
         {
             "tag": _tag_to_json(tag),
@@ -1772,10 +1775,10 @@ async def triage_query_images(
             return tag, [], False
 
         vecs_by_id = _get_cached_tag_ref_vecs(_client, settings, tag, vector_name="dino")
-        # Mirror run_discovery auto-anchor: promote target to positive only
-        # when positive_ids is empty so target-only tags score correctly.
+        # Mirror classify_tags_for_hashes: fold target into effective_pos so
+        # it does not fall through to neg_vecs in _split_cached_vecs.
         effective_pos = [str(i) for i in tag.positive_ids]
-        if not effective_pos and tag.target_id is not None:
+        if tag.target_id is not None and str(tag.target_id) not in set(effective_pos):
             effective_pos.append(str(tag.target_id))
         pos_dino, neg_dino = _split_cached_vecs(vecs_by_id, effective_pos)
 
@@ -1824,7 +1827,10 @@ async def triage_query_images(
             "raw_score": h.raw_score,
         }
 
-    pair_count = min(len(tag.positive_ids) * len(tag.negative_ids), MAX_CONTEXT_PAIRS)
+    eff_pos_count = len(tag.positive_ids)
+    if tag.target_id is not None and tag.target_id not in {str(i) for i in tag.positive_ids}:
+        eff_pos_count += 1
+    pair_count = min(eff_pos_count * len(tag.negative_ids), MAX_CONTEXT_PAIRS)
     return JSONResponse(
         {
             "tag": _tag_to_json(tag),
