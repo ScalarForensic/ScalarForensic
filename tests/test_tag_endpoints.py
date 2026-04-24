@@ -82,6 +82,38 @@ class TestCreateTag:
             r = client.post("/api/tag", data={"name": "weapons"})
         assert r.status_code == 503
 
+    def test_empty_name_rejected(self, client):
+        """Empty form field is rejected by FastAPI's Form(...) validator."""
+        r = client.post("/api/tag", data={"name": ""})
+        # FastAPI returns 422 for missing/empty required fields.
+        assert r.status_code in (400, 422)
+
+    def test_whitespace_only_name_rejected_with_400(self, client):
+        """Whitespace-only names reach the handler and are rejected there."""
+        r = client.post("/api/tag", data={"name": "   "})
+        assert r.status_code == 400
+
+    def test_name_is_stripped_before_persistence(self, client):
+        tag = _tag(name="weapons")
+        with patch("scalar_forensic.web.app._tag_store") as mock_store_fn:
+            mock_store_fn.return_value.create.return_value = tag
+            r = client.post("/api/tag", data={"name": "  weapons  "})
+        assert r.status_code == 200
+        # The store should have been called with the stripped name.
+        passed_name = mock_store_fn.return_value.create.call_args.args[0]
+        assert passed_name == "weapons"
+
+    def test_overlong_name_rejected_with_400(self, client):
+        r = client.post("/api/tag", data={"name": "x" * 5000})
+        assert r.status_code == 400
+
+    def test_overlong_notes_rejected_with_400(self, client):
+        r = client.post(
+            "/api/tag",
+            data={"name": "weapons", "notes": "x" * 10_000},
+        )
+        assert r.status_code == 400
+
 
 # ---------------------------------------------------------------------------
 # POST /api/tags/classify
@@ -128,12 +160,33 @@ class TestClassifyTags:
     def test_empty_hashes_returns_empty(self, client):
         r = client.post("/api/tags/classify", json={"image_hashes": []})
         assert r.status_code == 200
-        assert r.json() == {"by_hash": {}}
+        assert r.json() == {"by_hash": {}, "skipped_tags": []}
 
     def test_missing_key_returns_empty(self, client):
         r = client.post("/api/tags/classify", json={})
         assert r.status_code == 200
-        assert r.json() == {"by_hash": {}}
+        assert r.json() == {"by_hash": {}, "skipped_tags": []}
+
+    def test_out_of_range_cosine_threshold_rejected_with_400(self, client):
+        r = client.post(
+            "/api/tags/classify",
+            json={"image_hashes": ["a"], "cosine_threshold": 1.5},
+        )
+        assert r.status_code == 400
+
+    def test_negative_cosine_threshold_rejected_with_400(self, client):
+        r = client.post(
+            "/api/tags/classify",
+            json={"image_hashes": ["a"], "cosine_threshold": -0.1},
+        )
+        assert r.status_code == 400
+
+    def test_non_numeric_cosine_threshold_rejected_with_400(self, client):
+        r = client.post(
+            "/api/tags/classify",
+            json={"image_hashes": ["a"], "cosine_threshold": "high"},
+        )
+        assert r.status_code == 400
 
     def test_no_matching_records_returns_empty_per_hash(self, client):
         """Scroll returns nothing → every requested hash maps to an empty tag list."""
@@ -149,8 +202,27 @@ class TestClassifyTags:
                 json={"image_hashes": ["sha256-a", "sha256-b"]},
             )
         assert r.status_code == 200
+        body = r.json()
+        assert body["by_hash"] == {"sha256-a": [], "sha256-b": []}
+        # skipped_tags must be present in every success envelope.
+        assert body["skipped_tags"] == []
+
+    def test_duplicate_input_hashes_are_deduplicated(self, client):
+        """Callers may pass duplicates; the response keys should be unique."""
+        with (
+            patch("scalar_forensic.web.app.Settings"),
+            patch("scalar_forensic.web.app.QdrantClient"),
+            patch("scalar_forensic.web.app.TagStore") as mock_ts,
+            patch("scalar_forensic.web.app.qdrant_scroll_all", return_value=iter([])),
+        ):
+            mock_ts.return_value.list.return_value = []
+            r = client.post(
+                "/api/tags/classify",
+                json={"image_hashes": ["sha256-a", "sha256-a", "sha256-b"]},
+            )
+        assert r.status_code == 200
         by_hash = r.json()["by_hash"]
-        assert by_hash == {"sha256-a": [], "sha256-b": []}
+        assert set(by_hash.keys()) == {"sha256-a", "sha256-b"}
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +256,7 @@ class TestTriage:
         from scalar_forensic.discovery import DiscoveryHit
 
         hit = DiscoveryHit(
-            point_id="pt-1", triplet_score=3, cosine_margin=0.9, payload={}, vector_name="dino"
+            point_id="pt-1", triplet_score=3, raw_score=0.9, payload={}, vector_name="dino"
         )
         with (
             patch("scalar_forensic.web.app.Settings"),
@@ -228,6 +300,22 @@ class TestTriage:
             r = client.post("/api/triage", data={"tag_id": "tag-1", "cosine_threshold": "0.8"})
         assert r.status_code == 200
 
+    def test_discovery_failure_surfaces_as_503_not_empty_hits(self, client):
+        """A failing Qdrant query must not be masked as an empty result set."""
+        tag = _tag(pos=["p1"], neg=["n1"])
+        with (
+            patch("scalar_forensic.web.app.Settings"),
+            patch("scalar_forensic.web.app.QdrantClient"),
+            patch("scalar_forensic.web.app.TagStore") as mock_ts,
+            patch(
+                "scalar_forensic.web.app.run_discovery",
+                side_effect=RuntimeError("qdrant down"),
+            ),
+        ):
+            mock_ts.return_value.get.return_value = tag
+            r = client.post("/api/triage", data={"tag_id": "tag-1"})
+        assert r.status_code == 503
+
 
 # ---------------------------------------------------------------------------
 # POST /api/explore
@@ -260,7 +348,7 @@ class TestExplore:
         from scalar_forensic.discovery import DiscoveryHit
 
         hit = DiscoveryHit(
-            point_id="pt-2", triplet_score=None, cosine_margin=0.5, payload={}, vector_name="dino"
+            point_id="pt-2", triplet_score=None, raw_score=0.5, payload={}, vector_name="dino"
         )
         with (
             patch("scalar_forensic.web.app.Settings"),

@@ -18,12 +18,11 @@ Scoring semantics
   negatives), Qdrant Recommendation is used instead and the returned
   ``score`` is a cosine similarity.  The ``triplet_score`` field on
   the returned :class:`DiscoveryHit` is left as ``None`` in that case
-  and the ``cosine_margin`` field carries the cosine score.
+  and the ``raw_score`` field carries the cosine score.
 """
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 
 from qdrant_client import QdrantClient
@@ -43,8 +42,6 @@ from qdrant_client.models import (
 )
 
 from scalar_forensic.tags import Tag
-
-logger = logging.getLogger(__name__)
 
 # The "with_payload" field list that every triage hit needs — a superset
 # of what the existing vector-search results carry, so the web response
@@ -87,9 +84,11 @@ class DiscoveryHit:
     # None when the concept has no negatives (Recommend fallback path).
     triplet_score: int | None
     # Raw Qdrant score.  For Discovery queries this is the same integer
-    # value reported as triplet_score; for Recommend queries it is the
-    # cosine similarity to the best positive example.
-    cosine_margin: float
+    # value reported as triplet_score cast to float; for Recommend queries
+    # it is the cosine similarity to the best positive example.  Use
+    # ``triplet_score`` for Discovery-mode comparisons and ``raw_score``
+    # only for Recommend-mode (cosine) thresholding.
+    raw_score: float
     payload: dict = field(default_factory=dict)
 
 
@@ -249,19 +248,15 @@ def run_discovery(
             )
         )
 
-    try:
-        result = client.query_points(
-            collection_name=collection,
-            query=query,
-            using=vector_name,
-            limit=limit,
-            query_filter=query_filter,
-            with_payload=_TRIAGE_PAYLOAD_FIELDS,
-            lookup_from=lookup_from,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Discovery query failed on %s/%s: %s", collection, vector_name, exc)
-        return []
+    result = client.query_points(
+        collection_name=collection,
+        query=query,
+        using=vector_name,
+        limit=limit,
+        query_filter=query_filter,
+        with_payload=_TRIAGE_PAYLOAD_FIELDS,
+        lookup_from=lookup_from,
+    )
 
     is_discover = bool(pairs)
     hits: list[DiscoveryHit] = []
@@ -272,7 +267,7 @@ def run_discovery(
                 point_id=r.id,
                 vector_name=vector_name,
                 triplet_score=triplet,
-                cosine_margin=float(r.score),
+                raw_score=float(r.score),
                 payload=r.payload or {},
             )
         )
@@ -320,18 +315,14 @@ def run_explore(
         query = SampleQuery(sample=Sample.RANDOM)
         using = None  # random sampling is vector-agnostic
 
-    try:
-        result = client.query_points(
-            collection_name=collection,
-            query=query,
-            using=using,
-            limit=limit,
-            query_filter=query_filter,
-            with_payload=_TRIAGE_PAYLOAD_FIELDS,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Explore query failed on %s: %s", collection, exc)
-        return [], "random"
+    result = client.query_points(
+        collection_name=collection,
+        query=query,
+        using=using,
+        limit=limit,
+        query_filter=query_filter,
+        with_payload=_TRIAGE_PAYLOAD_FIELDS,
+    )
 
     strategy = "context" if use_context else "random"
     hits: list[DiscoveryHit] = []
@@ -342,7 +333,7 @@ def run_explore(
                 point_id=r.id,
                 vector_name=vector_name if use_context else "random",
                 triplet_score=triplet,
-                cosine_margin=float(r.score) if use_context else 0.0,
+                raw_score=float(r.score) if use_context else 0.0,
                 payload=r.payload or {},
             )
         )

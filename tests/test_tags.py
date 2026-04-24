@@ -227,8 +227,6 @@ def test_create_preserves_created_at_on_upsert():
     assert tag2.created_at == original_created_at, (
         "created_at must not change when re-creating a tag with the same name"
     )
-    assert tag2.updated_at >= original_updated_at, (
-        "updated_at must advance on re-create"
-    )
+    assert tag2.updated_at >= original_updated_at, "updated_at must advance on re-create"
     assert tag2.notes == "v2"
     assert tag2.positive_ids == ["p1", "p2"]

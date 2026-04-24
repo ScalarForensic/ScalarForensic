@@ -223,15 +223,21 @@ def test_recommend_score_keeps_float_and_none_triplet():
     tag = _tag(positives=["p1"])
     hits = run_discovery(client, "sfn", tag, vector_name="dino", limit=5)
     assert hits[0].triplet_score is None
-    assert hits[0].cosine_margin == pytest.approx(0.88)
+    assert hits[0].raw_score == pytest.approx(0.88)
 
 
-def test_query_failure_is_swallowed_and_returns_empty_list():
+def test_query_failure_propagates_to_caller():
+    """Qdrant errors must surface so the web layer can map them to 503.
+
+    Previously :func:`run_discovery` swallowed failures and returned ``[]``,
+    which made a broken query indistinguishable from a genuinely empty
+    result set — a hazard for forensic triage.
+    """
     client = MagicMock()
     client.query_points.side_effect = RuntimeError("qdrant down")
     tag = _tag(positives=["p1"], negatives=["n1"])
-    hits = run_discovery(client, "sfn", tag, vector_name="dino", limit=5)
-    assert hits == []
+    with pytest.raises(RuntimeError, match="qdrant down"):
+        run_discovery(client, "sfn", tag, vector_name="dino", limit=5)
 
 
 # ---------------------------------------------------------------------------

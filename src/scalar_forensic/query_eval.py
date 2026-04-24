@@ -16,12 +16,17 @@ from scalar_forensic.discovery import MAX_CONTEXT_PAIRS
 
 @dataclass
 class QueryEvalHit:
-    """Ranked result for one uploaded query image evaluated against a Tag."""
+    """Ranked result for one uploaded query image evaluated against a Tag.
+
+    ``raw_score`` is the cosine similarity to the best positive reference.
+    Mirrors the Recommend-mode meaning of :attr:`DiscoveryHit.raw_score`
+    so both paths expose the same field to callers.
+    """
 
     file_id: str
     filename: str
     triplet_score: int | None = None
-    cosine_margin: float = 0.0
+    raw_score: float = 0.0
 
 
 def _cosine_sims(query: list[float], refs: list[list[float]]) -> np.ndarray:
@@ -61,21 +66,21 @@ def score_query_vector(
     pos_vecs: list[list[float]],
     neg_vecs: list[list[float]],
 ) -> tuple[int | None, float]:
-    """Return ``(triplet_score, cosine_margin)`` for a single query vector.
+    """Return ``(triplet_score, raw_score)`` for a single query vector.
 
-    *cosine_margin* is the max cosine similarity to any positive reference.
+    *raw_score* is the max cosine similarity to any positive reference.
     *triplet_score* is ``None`` when the tag has no negatives.
     """
     if not pos_vecs:
         return None, 0.0
     pos_sims = _cosine_sims(query_vec, pos_vecs)
-    cosine_margin = float(pos_sims.max())
+    raw_score = float(pos_sims.max())
     if not neg_vecs:
-        return None, cosine_margin
+        return None, raw_score
     neg_sims = _cosine_sims(query_vec, neg_vecs)
     pairs = _pair_indices(len(pos_vecs), len(neg_vecs))
     score = int(sum(1 for pi, ni in pairs if pos_sims[pi] > neg_sims[ni]))
-    return score, cosine_margin
+    return score, raw_score
 
 
 def score_query_entries(
@@ -86,18 +91,18 @@ def score_query_entries(
 ) -> list[QueryEvalHit]:
     """Score ``(file_id, filename, dino_vec)`` entries against dino references.
 
-    Returns hits sorted by triplet score then cosine margin, limited to *limit*.
-    Entries with triplet_score == 0 and cosine_margin == 0 are excluded.
+    Returns hits sorted by triplet score then raw score, limited to *limit*.
+    Entries with triplet_score == 0 and raw_score == 0 are excluded.
     """
     results: list[QueryEvalHit] = []
     for file_id, filename, dino_vec in entries:
         if dino_vec is None:
             continue
-        ts, cm = score_query_vector(dino_vec, pos_vecs, neg_vecs)
-        if (ts is not None and ts > 0) or cm > 0:
+        ts, rs = score_query_vector(dino_vec, pos_vecs, neg_vecs)
+        if (ts is not None and ts > 0) or rs > 0:
             results.append(
-                QueryEvalHit(file_id=file_id, filename=filename, triplet_score=ts, cosine_margin=cm)
+                QueryEvalHit(file_id=file_id, filename=filename, triplet_score=ts, raw_score=rs)
             )
 
-    results.sort(key=lambda h: (h.triplet_score or 0, h.cosine_margin), reverse=True)
+    results.sort(key=lambda h: (h.triplet_score or 0, h.raw_score), reverse=True)
     return results[:limit]

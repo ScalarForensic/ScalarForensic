@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
+from scalar_forensic.discovery import _build_context_pairs
 from scalar_forensic.query_eval import (
     MAX_CONTEXT_PAIRS,
     _cosine_sims,
@@ -66,6 +69,34 @@ def test_pair_indices_diagonal_first():
     assert pairs[0] == (0, 0)
     assert pairs[1] == (1, 1)
     assert pairs[2] == (2, 2)
+
+
+# ── cross-module parity ──────────────────────────────────────────────────────
+# The NumPy path (_pair_indices) and the Qdrant path (_build_context_pairs)
+# MUST emit pairs in the same order: the Qdrant server scores the Nth pair
+# using the Nth (positive, negative) reference on its side, and our NumPy
+# mirror uses the same indices to score uploaded-but-unindexed images.  Any
+# drift between the two orderings silently changes scoring semantics.
+
+
+@pytest.mark.parametrize(
+    "n_pos, n_neg",
+    [(1, 1), (1, 5), (5, 1), (3, 3), (4, 7), (10, 10), (16, 16)],
+)
+def test_pair_ordering_matches_discovery_builder(n_pos, n_neg):
+    positives = [f"p{i}" for i in range(n_pos)]
+    negatives = [f"n{i}" for i in range(n_neg)]
+
+    # Discovery emits ContextPair objects; dereference to (positive, negative) strings.
+    discovery_pairs = [(p.positive, p.negative) for p in _build_context_pairs(positives, negatives)]
+
+    # NumPy emits index tuples; map via positives/negatives to the same string pairs.
+    numpy_pairs = [(positives[pi], negatives[ni]) for pi, ni in _pair_indices(n_pos, n_neg)]
+
+    assert numpy_pairs == discovery_pairs, (
+        "pair ordering drift: _build_context_pairs (discovery.py) and "
+        "_pair_indices (query_eval.py) must emit pairs in the same order"
+    )
 
 
 # ── score_query_vector ────────────────────────────────────────────────────────
@@ -138,7 +169,7 @@ def test_score_query_entries_excludes_zero_score():
     pos_dino = [_unit([1.0, 0.0])]
     neg_dino = [_unit([0.0, 1.0])]
     entries = [
-        # Orthogonal to pos: cosine_margin == 0; closer to neg: triplet_score == 0.
+        # Orthogonal to pos: raw_score == 0; closer to neg: triplet_score == 0.
         ("fileA", "a.jpg", _unit([0.0, 1.0])),
     ]
     hits = score_query_entries(entries, pos_dino, neg_dino, limit=10)

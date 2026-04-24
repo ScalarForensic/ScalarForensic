@@ -1598,7 +1598,7 @@
               <div>
                 <div class="triage-detail-score-row">
                   <span class="triage-detail-triplet"
-                        x-text="(selectedTriageHit.cosine_margin ?? 0).toFixed(3)"></span>
+                        x-text="(selectedTriageHit.raw_score ?? 0).toFixed(3)"></span>
                   <span style="font-size:11px;color:var(--text2)">cosine similarity</span>
                 </div>
                 <div class="triage-detail-margin" style="font-style:italic">
@@ -1717,7 +1717,7 @@
                 <span x-show="hit.is_reference" class="badge badge-reference badge-sm" style="margin-bottom:2px">REF</span>
                 <span class="triage-score-num"
                       :class="{zero: hit.triplet_score !== null ? !hit.triplet_score : false}"
-                      x-text="hit.triplet_score !== null ? hit.triplet_score : (hit.cosine_margin ?? 0).toFixed(2)"></span>
+                      x-text="hit.triplet_score !== null ? hit.triplet_score : (hit.raw_score ?? 0).toFixed(2)"></span>
                 <span style="font-size:9px;color:var(--muted);font-family:var(--mono)"
                       x-text="hit.triplet_score !== null ? 'disc' : 'cos'"></span>
               </div>
@@ -3134,7 +3134,7 @@ function sfn() {
         tag_name: tag?.name ?? null,
         point_id: h.point_id ?? h.file_id ?? null,
         triplet_score: h.triplet_score ?? null,
-        cosine_margin: h.cosine_margin ?? null,
+        raw_score: h.raw_score ?? null,
         path: h.path ?? null,
         image_hash: h.image_hash ?? null,
         is_video_frame: h.is_video_frame ?? false,
