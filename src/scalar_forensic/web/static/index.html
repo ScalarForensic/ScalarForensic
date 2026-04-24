@@ -1352,21 +1352,21 @@
 
       <!-- Run controls (when a tag is selected) -->
       <div class="triage-run-controls" x-show="selectedConceptId">
-        <!-- Mode buttons -->
-        <div class="slider-label" style="margin-bottom:4px"><span>Mode</span></div>
+        <!-- Source buttons -->
+        <div class="slider-label" style="margin-bottom:4px"><span>Source</span></div>
         <div class="triage-mode-btns" style="margin-bottom:6px">
           <button class="triage-mode-btn" :class="{active: triageSource === 'indexed'}"
-                  @click="triageSource = 'indexed'">Triage</button>
+                  @click="triageSource = 'indexed'">Indexed</button>
           <button class="triage-mode-btn" :class="{active: triageSource === 'query'}"
-                  @click="triageSource = 'query'; triageCollection = 'dataset'">Query</button>
+                  @click="triageSource = 'query'; triageCollection = 'dataset'">Uploaded</button>
           <button class="triage-mode-btn" :class="{active: triageSource === 'explore'}"
                   @click="triageSource = 'explore'">Explore</button>
         </div>
 
-        <!-- Collection toggle (hidden in Query mode and when no reference collection) -->
+        <!-- Corpus toggle (hidden in Uploaded mode and when no reference collection) -->
         <template x-if="hasReferenceCollection && triageSource !== 'query'">
           <div style="margin-bottom:6px">
-            <div class="slider-label" style="margin-bottom:4px"><span>Collection</span></div>
+            <div class="slider-label" style="margin-bottom:4px"><span>Corpus</span></div>
             <div class="triage-mode-btns">
               <button class="triage-mode-btn" :class="{active: triageCollection === 'dataset'}"
                       @click="triageCollection = 'dataset'">Dataset</button>
