@@ -202,8 +202,6 @@ class TestTriage:
 
     def test_response_includes_pair_count(self, client):
         tag = _tag(pos=["p1", "p2"], neg=["n1"])
-        from scalar_forensic.discovery import DiscoveryHit
-
         with (
             patch("scalar_forensic.web.app.Settings"),
             patch("scalar_forensic.web.app.QdrantClient"),

@@ -1476,7 +1476,11 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
     if not image_hashes:
         return JSONResponse({"by_hash": {}})
     raw_ct = body.get("cosine_threshold", _DEFAULT_COSINE_THRESHOLD)
-    cosine_threshold: float = float(max(0.0, min(1.0, raw_ct))) if isinstance(raw_ct, (int, float)) else _DEFAULT_COSINE_THRESHOLD
+    cosine_threshold: float = (
+        float(max(0.0, min(1.0, raw_ct)))
+        if isinstance(raw_ct, (int, float))
+        else _DEFAULT_COSINE_THRESHOLD
+    )
 
     settings = Settings()
 
@@ -1604,7 +1608,11 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
         return JSONResponse({"by_hash": {}})
 
     raw_ct = body.get("cosine_threshold", _DEFAULT_COSINE_THRESHOLD)
-    cosine_threshold: float = float(max(0.0, min(1.0, raw_ct))) if isinstance(raw_ct, (int, float)) else _DEFAULT_COSINE_THRESHOLD
+    cosine_threshold: float = (
+        float(max(0.0, min(1.0, raw_ct)))
+        if isinstance(raw_ct, (int, float))
+        else _DEFAULT_COSINE_THRESHOLD
+    )
 
     settings = Settings()
 
@@ -1729,7 +1737,9 @@ async def triage_query_images(
         hits = [
             h
             for h in all_hits
-            if _hit_passes_classify_threshold(h.triplet_score, h.cosine_margin, threshold, cosine_threshold)
+            if _hit_passes_classify_threshold(
+                h.triplet_score, h.cosine_margin, threshold, cosine_threshold
+            )
         ]
         return tag, hits
 
