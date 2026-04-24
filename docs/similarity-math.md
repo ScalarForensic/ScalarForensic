@@ -180,7 +180,11 @@ To override, use "⚓ Set as anchor" in the UI.
 
 ### 4.2 Recommend mode (no negatives)
 
-Used when the tag has **positives but no negatives**.
+Used when `/api/triage` is called on a tag that has **positives but no
+negatives** — a degenerate state that should not arise in normal use.  The
+intended workflow (see `docs/tag-triage.md`) creates tags with at least one
+positive and one negative from the outset so that Discovery mode is active
+from the very first triage run.
 
 **Score:** maximum cosine similarity to any positive reference:
 
