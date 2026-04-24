@@ -92,7 +92,14 @@ def score_query_entries(
     """Score ``(file_id, filename, dino_vec)`` entries against dino references.
 
     Returns hits sorted by triplet score then raw score, limited to *limit*.
-    Entries with triplet_score == 0 and raw_score == 0 are excluded.
+
+    Filtering logic:
+    - Discovery mode (negatives present): entries with ts == 0 are included —
+      they are on the fully-benign side of the boundary and useful for review.
+      Only entries where *both* ts == 0 and rs == 0 (orthogonal to all positives)
+      are excluded as genuinely uninformative.
+    - Recommend mode (no negatives, ts is None): entries are included when
+      rs > 0, i.e. there is some positive-side cosine signal.
     """
     results: list[QueryEvalHit] = []
     for file_id, filename, dino_vec in entries:

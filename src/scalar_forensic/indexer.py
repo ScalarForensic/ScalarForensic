@@ -160,6 +160,11 @@ class Indexer:
                 field_name="is_video",
                 field_schema=PayloadSchemaType.BOOL,
             )
+        # Index is created unconditionally (not gated on self._is_reference) so
+        # that case collections can filter out reference material even when the
+        # current Indexer was not instantiated with --reference.  This is always
+        # a case/image collection; the tags sidecar is managed by TagStore, not
+        # Indexer, so this index is never applied to sfn_tags in normal usage.
         if "is_reference" not in schema:
             self.client.create_payload_index(
                 collection_name=self.collection,

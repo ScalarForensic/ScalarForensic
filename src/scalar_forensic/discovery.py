@@ -74,6 +74,11 @@ MAX_CONTEXT_PAIRS = 64
 # better than AVERAGE_VECTOR when the positive set is visually diverse.
 _DEFAULT_RECOMMEND_STRATEGY = RecommendStrategy.BEST_SCORE
 
+# Sentinel raw_score written into DiscoveryHit for random-mode explore results
+# that carry no vector scoring.  Distinguishable from a genuine 0.0 cosine score
+# (orthogonal vectors) by checking triplet_score is None or vector_name == "random".
+_RANDOM_RAW_SCORE = 0.0
+
 
 @dataclass
 class DiscoveryHit:
@@ -145,6 +150,7 @@ def _merge_filter(user_filter: Filter | None, exclude: Filter | None) -> Filter 
     return Filter(
         must=user_filter.must,
         should=user_filter.should,
+        min_should=user_filter.min_should,
         must_not=combined_must_not,
     )
 
@@ -333,7 +339,7 @@ def run_explore(
                 point_id=r.id,
                 vector_name=vector_name if use_context else "random",
                 triplet_score=triplet,
-                raw_score=float(r.score) if use_context else 0.0,
+                raw_score=float(r.score) if use_context else _RANDOM_RAW_SCORE,
                 payload=r.payload or {},
             )
         )

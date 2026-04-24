@@ -1980,6 +1980,8 @@ function sfn() {
       return this.concepts.find(c => c.tag_id === this.selectedConceptId) ?? null;
     },
     tagHealth(tag) {
+      // Thresholds derived from high-dimensional metric learning practice.
+      // See docs/tag-triage.md §Collection health for the rationale.
       const p = tag.positive_ids.length;
       const n = tag.negative_ids.length;
       if (p < 50 || n < 20) return 'critical';
