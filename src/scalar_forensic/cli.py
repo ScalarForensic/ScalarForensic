@@ -358,6 +358,14 @@ def index(
                 err=True,
             )
             raise typer.Exit(1)
+        if settings.reference_collection == settings.collection:
+            typer.echo(
+                "[ERROR] SFN_REFERENCE_COLLECTION must differ from SFN_COLLECTION — "
+                "indexing with --reference into the case collection would stamp "
+                "is_reference=true onto existing case points.",
+                err=True,
+            )
+            raise typer.Exit(1)
         target_collection = settings.reference_collection
     else:
         target_collection = settings.collection

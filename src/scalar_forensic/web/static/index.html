@@ -1904,11 +1904,15 @@ function sfn() {
     triageMatchMetaError: null,
     triageMatchZoom: 1.0,
 
-    // Cache: {pointId: {path, image_hash}} — populated from triage runs
+    // Cache: {pointId: {path, image_hash}} — populated from triage runs.
+    // All writes go through _putTriageHitCache so reverse-index invalidation
+    // is reliable even when an entry is replaced in place (same key count).
     triageHitCache: {},
+    _triageHitCacheVersion: 0,
     // Reverse index: {image_hash: pointId} — rebuilt lazily in searchHitMark
+    // when the cache version advances past the cached version.
     _hashToPid: {},
-    _hashToPidCacheKey: -1,
+    _hashToPidCacheVersion: -1,
     // Optimistic mark overrides: {tagId: {pointId: 'positive'|'negative'}}
     markedOverrides: {},
 
@@ -1940,7 +1944,9 @@ function sfn() {
 
     // ── Computed ──────────────────────────────────────────────────────────
     get progressPct() {
-      return this.progress.total === 0 ? 0
+      // Total may be null on error events — treat as no-progress rather than dividing by zero.
+      return !this.progress.total
+        ? 0
         : Math.round(this.progress.current / this.progress.total * 100);
     },
     get selectedFile() {
@@ -2872,6 +2878,19 @@ function sfn() {
       if (c) this.loadConceptExamples(c);
     },
 
+    // Single write path for triageHitCache so the version counter and
+    // reactivity stay in sync with the data.  Pass payload=null to refresh
+    // reactivity without changing the value.
+    _putTriageHitCache(id, payload) {
+      const sid = String(id);
+      if (payload !== null) {
+        this.triageHitCache = { ...this.triageHitCache, [sid]: payload };
+      } else {
+        this.triageHitCache = { ...this.triageHitCache };
+      }
+      this._triageHitCacheVersion++;
+    },
+
     async loadConceptExamples(concept) {
       const allIds = [
         ...concept.positive_ids,
@@ -2881,7 +2900,7 @@ function sfn() {
       for (const id of allIds) {
         const sid = String(id);
         if (this.triageHitCache[sid]) {
-          this.triageHitCache = { ...this.triageHitCache };  // trigger reactivity
+          this._putTriageHitCache(sid, null);  // trigger reactivity
         }
       }
       // Fetch any unknown IDs
@@ -2891,15 +2910,12 @@ function sfn() {
           const r = await fetch(`/api/point-payload?point_id=${encodeURIComponent(id)}`);
           if (r.ok) {
             const d = await r.json();
-            this.triageHitCache = {
-              ...this.triageHitCache,
-              [String(id)]: { path: d.image_path, image_hash: d.image_hash },
-            };
+            this._putTriageHitCache(id, { path: d.image_path, image_hash: d.image_hash });
           } else {
-            this.triageHitCache = { ...this.triageHitCache, [String(id)]: { path: null, image_hash: null } };
+            this._putTriageHitCache(id, { path: null, image_hash: null });
           }
         } catch {
-          this.triageHitCache = { ...this.triageHitCache, [String(id)]: { path: null, image_hash: null } };
+          this._putTriageHitCache(id, { path: null, image_hash: null });
         }
       }));
     },
@@ -2950,10 +2966,7 @@ function sfn() {
           for (const h of this.triageResults) {
             const sid = String(h.point_id);
             if (!this.triageHitCache[sid]) {
-              this.triageHitCache = {
-                ...this.triageHitCache,
-                [sid]: { path: h.path, image_hash: h.image_hash },
-              };
+              this._putTriageHitCache(sid, { path: h.path, image_hash: h.image_hash });
             }
           }
         }
@@ -2994,7 +3007,7 @@ function sfn() {
         for (const h of this.triageResults) {
           const sid = String(h.point_id);
           if (!this.triageHitCache[sid])
-            this.triageHitCache = { ...this.triageHitCache, [sid]: { path: h.path, image_hash: h.image_hash } };
+            this._putTriageHitCache(sid, { path: h.path, image_hash: h.image_hash });
         }
         if (this.triageResults.length > 0) await this.selectTriageHit(this.triageResults[0]);
       } catch (e) {
@@ -3273,7 +3286,9 @@ function sfn() {
       }
     },
 
-    // Mark a search result hit for a given tag (looks up point_id first)
+    // Mark a search result hit for a given tag (looks up point_id first).
+    // The point-id endpoint searches the case collection then the reference
+    // collection, so reference hits can be marked too.
     async markSearchHit(hit, role, tagId) {
       if (!tagId || !hit.image_hash) return;
       this.markingSearchHit = hit.image_hash;
@@ -3283,10 +3298,7 @@ function sfn() {
         const { point_id } = await r.json();
         // Cache before _applyMark so the optimistic markedOverrides update
         // is immediately visible via searchHitMark (which looks up by point_id).
-        this.triageHitCache = {
-          ...this.triageHitCache,
-          [String(point_id)]: { path: hit.path, image_hash: hit.image_hash },
-        };
+        this._putTriageHitCache(point_id, { path: hit.path, image_hash: hit.image_hash });
         await this._applyMark(tagId, point_id, role);
       } catch { /* ignore */ }
       finally { this.markingSearchHit = null; }
@@ -3294,15 +3306,16 @@ function sfn() {
 
     searchHitMark(hit) {
       if (!this.activeTagId || !hit.image_hash) return null;
-      // Rebuild reverse index only when the cache grows (O(n) rebuild, O(1) lookups).
-      const cacheKey = Object.keys(this.triageHitCache).length;
-      if (this._hashToPidCacheKey !== cacheKey) {
+      // Rebuild the reverse index only when the cache version advances.
+      // Using the version counter (rather than Object.keys(...).length)
+      // catches in-place replacements where the key count is unchanged.
+      if (this._hashToPidCacheVersion !== this._triageHitCacheVersion) {
         this._hashToPid = Object.fromEntries(
           Object.entries(this.triageHitCache)
             .filter(([, v]) => v?.image_hash)
             .map(([pid, v]) => [v.image_hash, pid])
         );
-        this._hashToPidCacheKey = cacheKey;
+        this._hashToPidCacheVersion = this._triageHitCacheVersion;
       }
       const pid = this._hashToPid[hit.image_hash];
       if (!pid) return null;

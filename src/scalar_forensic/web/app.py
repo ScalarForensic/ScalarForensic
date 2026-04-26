@@ -1409,7 +1409,8 @@ async def triage(
     source='reference': search the reference collection directly for high-quality
     tagging using known material.
 
-    cosine_threshold applies only when the tag has no negatives (Recommend mode).
+    cosine_threshold filters Recommend-mode hits (tag has no negatives).
+    Discovery-mode triage ignores it because the score is an integer triplet count.
     """
     settings = Settings()
     if source not in {"indexed", "reference"}:
@@ -1450,6 +1451,7 @@ async def triage(
             limit=limit,
             reverse=reverse,
             reference_collection=ref_coll_for_lookup,
+            cosine_threshold=cosine_threshold,
         )
     except HTTPException:
         raise
@@ -1885,13 +1887,17 @@ async def lookup_point_id(image_hash: str) -> JSONResponse:
 
     Used by the Tag Triage UI to translate search-result image hashes
     (which the operator can see) into Qdrant point IDs (which tags need).
+
+    Checks the case collection first, then falls back to the reference
+    collection (if configured).  The response includes which collection
+    the point was found in so the caller can preserve that context.
     """
     settings = Settings()
 
-    def _scroll():
+    def _scroll(collection_name: str):
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
         records, _ = client.scroll(
-            collection_name=settings.collection,
+            collection_name=collection_name,
             scroll_filter=Filter(
                 must=[FieldCondition(key="image_hash", match=MatchValue(value=image_hash))]
             ),
@@ -1902,12 +1908,22 @@ async def lookup_point_id(image_hash: str) -> JSONResponse:
         return records
 
     try:
-        records = await asyncio.to_thread(_scroll)
+        records = await asyncio.to_thread(_scroll, settings.collection)
+        found_in = settings.collection
+        if not records and settings.reference_collection:
+            records = await asyncio.to_thread(_scroll, settings.reference_collection)
+            found_in = settings.reference_collection
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
     if not records:
         raise HTTPException(status_code=404, detail="No indexed point found for that hash")
-    return JSONResponse({"point_id": str(records[0].id)})
+    return JSONResponse(
+        {
+            "point_id": str(records[0].id),
+            "collection": found_in,
+            "is_reference": found_in == settings.reference_collection,
+        }
+    )
 
 
 @app.get("/api/point-payload")
@@ -1917,20 +1933,28 @@ async def get_point_payload(point_id: str) -> JSONResponse:
     Used by the Tag Triage UI to render thumbnails for tag example
     IDs that were not seen in the current triage run (e.g. IDs that were
     added via the CLI or pasted into the create form).
+
+    Checks the case collection first, then falls back to the reference
+    collection (if configured) so tags built from reference material can
+    still resolve their thumbnails.
     """
     settings = Settings()
 
-    def _retrieve():
+    def _retrieve(collection_name: str):
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
         return client.retrieve(
-            collection_name=settings.collection,
+            collection_name=collection_name,
             ids=[point_id],
             with_payload=["image_hash", "image_path"],
             with_vectors=False,
         )
 
     try:
-        records = await asyncio.to_thread(_retrieve)
+        records = await asyncio.to_thread(_retrieve, settings.collection)
+        found_in = settings.collection
+        if not records and settings.reference_collection:
+            records = await asyncio.to_thread(_retrieve, settings.reference_collection)
+            found_in = settings.reference_collection
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
     if not records:
@@ -1941,6 +1965,8 @@ async def get_point_payload(point_id: str) -> JSONResponse:
             "point_id": point_id,
             "image_hash": payload.get("image_hash"),
             "image_path": payload.get("image_path"),
+            "collection": found_in,
+            "is_reference": found_in == settings.reference_collection,
         }
     )
 

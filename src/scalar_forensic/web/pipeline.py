@@ -68,7 +68,7 @@ def _get_embedder(key: str, settings: Settings) -> AnyEmbedder:
 class ProgressEvent:
     type: str  # "progress" | "file_done" | "error" | "done"
     current: int = 0
-    total: int | None = 0
+    total: int | None = None
     filename: str = ""
     file_id: str = ""
     message: str = ""

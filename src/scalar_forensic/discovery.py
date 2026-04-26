@@ -204,14 +204,17 @@ def run_discovery(
     reverse: bool = False,
     reference_collection: str | None = None,
     exclude_references: bool = True,
+    cosine_threshold: float | None = None,
 ) -> list[DiscoveryHit]:
     """Run a tag query against a single named vector.
 
     Chooses the query kind automatically:
 
-    * Tag has negatives → Discovery (target+context or context-only).
+    * Tag has positives + negatives → Discovery (target+context).
     * Tag has only positives (and optionally a target) → Recommend.
-    * Tag has neither → raises :class:`ValueError`.
+    * Tag has only target + negatives → Recommend with negatives applied.
+    * Tag has only negatives, no target → raises :class:`ValueError`.
+    * Tag has nothing → raises :class:`ValueError`.
 
     When at least one positive is present and no explicit target is set,
     the first positive is used as an implicit anchor so DiscoverQuery fires
@@ -226,6 +229,11 @@ def run_discovery(
     reference points are filtered out of the result set so the top hits
     are discovered material rather than the examples the investigator
     already labelled.
+
+    *cosine_threshold* — when set (Recommend mode only), hits whose raw
+    cosine score is below the threshold are dropped.  Ignored in Discovery
+    mode where scoring is integer triplet counts, not cosine.  Pass
+    ``None`` (the default) to disable filtering.
     """
     positives, negatives = _resolve_polarity(tag, reverse)
     target = tag.target_id
@@ -276,10 +284,14 @@ def run_discovery(
                 "reverse=True if this tag is exculpatory."
             )
         pos_list = [target, *positives] if target is not None else positives
+        deduped_positives = list(dict.fromkeys(pos_list))
+        deduped_negatives = [
+            n for n in dict.fromkeys(negatives) if n not in set(deduped_positives)
+        ]
         query = RecommendQuery(
             recommend=RecommendInput(
-                positive=list(dict.fromkeys(pos_list)),
-                negative=None,
+                positive=deduped_positives,
+                negative=deduped_negatives or None,
                 strategy=_DEFAULT_RECOMMEND_STRATEGY,
             )
         )
@@ -298,12 +310,18 @@ def run_discovery(
     hits: list[DiscoveryHit] = []
     for r in result.points:
         triplet: int | None = int(round(r.score)) if is_discover else None
+        raw_score = float(r.score)
+        # Cosine-threshold filter applies to Recommend mode only — Discovery
+        # mode scores are integer triplet counts on a different scale and the
+        # caller already controls cap via the triplet threshold.
+        if not is_discover and cosine_threshold is not None and raw_score < cosine_threshold:
+            continue
         hits.append(
             DiscoveryHit(
                 point_id=r.id,
                 vector_name=vector_name,
                 triplet_score=triplet,
-                raw_score=float(r.score),
+                raw_score=raw_score,
                 payload=r.payload or {},
             )
         )
@@ -386,6 +404,7 @@ def run_triage(
     reverse: bool = False,
     reference_collection: str | None = None,
     exclude_references: bool = True,
+    cosine_threshold: float | None = None,
 ) -> list[DiscoveryHit]:
     """Run a tag triage query using DINOv2 semantic embeddings only."""
     return run_discovery(
@@ -398,4 +417,5 @@ def run_triage(
         reverse=reverse,
         reference_collection=reference_collection,
         exclude_references=exclude_references,
+        cosine_threshold=cosine_threshold,
     )

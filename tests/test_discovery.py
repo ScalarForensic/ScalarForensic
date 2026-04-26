@@ -255,3 +255,83 @@ def test_run_triage_returns_discovery_hits_via_dino():
     assert hits[0].vector_name == "dino"
     _, kwargs = client.query_points.call_args
     assert kwargs["using"] == "dino"
+
+
+# ---------------------------------------------------------------------------
+# cosine_threshold filtering (Recommend mode only)
+# ---------------------------------------------------------------------------
+
+
+def test_cosine_threshold_filters_recommend_hits_below_floor():
+    """Recommend-mode hits with raw_score < cosine_threshold are dropped."""
+    client = _client_returning([_pt("a", 0.9), _pt("b", 0.6), _pt("c", 0.3)])
+    tag = _tag(positives=["p1"])  # no negatives → Recommend mode
+    hits = run_discovery(
+        client, "sfn", tag, vector_name="dino", limit=5, cosine_threshold=0.55
+    )
+    assert [h.point_id for h in hits] == ["a", "b"]
+    # Hits below threshold are filtered out before the response is built.
+    assert all(h.raw_score >= 0.55 for h in hits)
+
+
+def test_cosine_threshold_none_disables_filter():
+    """cosine_threshold=None must include every hit Qdrant returns."""
+    client = _client_returning([_pt("a", 0.9), _pt("b", 0.1)])
+    tag = _tag(positives=["p1"])
+    hits = run_discovery(client, "sfn", tag, vector_name="dino", limit=5, cosine_threshold=None)
+    assert [h.point_id for h in hits] == ["a", "b"]
+
+
+def test_cosine_threshold_ignored_in_discovery_mode():
+    """Discovery scores are integer triplet counts on a different scale —
+    cosine_threshold must not filter them even when it is set high enough
+    that every triplet score would fall below it."""
+    client = _client_returning([_pt("a", 3.0), _pt("b", 1.0)])
+    tag = _tag(positives=["p1"], negatives=["n1"])  # → Discovery mode
+    hits = run_discovery(client, "sfn", tag, vector_name="dino", limit=5, cosine_threshold=0.99)
+    assert [h.point_id for h in hits] == ["a", "b"]
+    assert all(isinstance(h.triplet_score, int) for h in hits)
+
+
+# ---------------------------------------------------------------------------
+# Recommend fallback: negatives passed through when present
+# ---------------------------------------------------------------------------
+
+
+def test_recommend_with_target_and_negatives_passes_negatives_through():
+    """target + negatives + no positives → Recommend with negatives applied,
+    not silently discarded as it was before."""
+    client = _client_returning([])
+    tag = _tag(positives=[], negatives=["n1", "n2"], target="t1")
+    run_discovery(client, "sfn", tag, vector_name="dino", limit=5)
+    _, kwargs = client.query_points.call_args
+    assert isinstance(kwargs["query"], RecommendQuery)
+    assert list(kwargs["query"].recommend.positive) == ["t1"]
+    assert list(kwargs["query"].recommend.negative or []) == ["n1", "n2"]
+
+
+def test_recommend_negatives_excluded_when_overlapping_positives():
+    """A point listed in both positives and negatives must not appear on
+    both sides of the RecommendInput — positives win."""
+    client = _client_returning([])
+    # Positives empty so we hit the Recommend branch; target + negatives,
+    # one negative ("t1") shadows the target.
+    tag = _tag(positives=[], negatives=["t1", "n1"], target="t1")
+    run_discovery(client, "sfn", tag, vector_name="dino", limit=5)
+    _, kwargs = client.query_points.call_args
+    assert isinstance(kwargs["query"], RecommendQuery)
+    pos = list(kwargs["query"].recommend.positive)
+    neg = list(kwargs["query"].recommend.negative or [])
+    assert "t1" in pos
+    assert "t1" not in neg
+    assert "n1" in neg
+
+
+def test_recommend_with_only_positives_passes_no_negatives():
+    """Standard Recommend (only positives, no negatives) — negative=None."""
+    client = _client_returning([])
+    tag = _tag(positives=["p1", "p2"])
+    run_discovery(client, "sfn", tag, vector_name="dino", limit=5)
+    _, kwargs = client.query_points.call_args
+    assert isinstance(kwargs["query"], RecommendQuery)
+    assert kwargs["query"].recommend.negative is None

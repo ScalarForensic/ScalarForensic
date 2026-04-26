@@ -16,6 +16,7 @@ from scalar_forensic.discovery import MAX_CONTEXT_PAIRS, pair_indices
 __all__ = [
     "MAX_CONTEXT_PAIRS",
     "QueryEvalHit",
+    "pair_indices",
     "score_query_entries",
     "score_query_vector",
 ]
@@ -45,12 +46,6 @@ def _cosine_sims(query: list[float], refs: list[list[float]]) -> np.ndarray:
         return np.zeros(len(refs), dtype=np.float32)
     rn = np.linalg.norm(r, axis=1)
     return (r @ q) / (rn * qn + 1e-12)
-
-
-# Re-exported for backward compatibility — the canonical implementation
-# lives in :mod:`scalar_forensic.discovery` so the Qdrant and NumPy paths
-# cannot drift in pair ordering.
-_pair_indices = pair_indices
 
 
 def score_query_vector(

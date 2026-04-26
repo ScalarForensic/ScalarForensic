@@ -14,7 +14,7 @@ from scalar_forensic.discovery import _build_context_pairs
 from scalar_forensic.query_eval import (
     MAX_CONTEXT_PAIRS,
     _cosine_sims,
-    _pair_indices,
+    pair_indices,
     score_query_entries,
     score_query_vector,
 )
@@ -49,30 +49,30 @@ def test_cosine_sims_zero_query_returns_zeros():
     assert sims[0] == 0.0
 
 
-# ── _pair_indices ─────────────────────────────────────────────────────────────
+# ── pair_indices ─────────────────────────────────────────────────────────────
 
 
-def test_pair_indices_covers_all_pairs_under_cap():
-    pairs = _pair_indices(3, 2)
+def testpair_indices_covers_all_pairs_under_cap():
+    pairs = pair_indices(3, 2)
     assert len(pairs) == 6  # 3 × 2 = 6, below cap
     assert set(pairs) == {(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)}
 
 
-def test_pair_indices_caps_at_max():
-    pairs = _pair_indices(10, 10)
+def testpair_indices_caps_at_max():
+    pairs = pair_indices(10, 10)
     assert len(pairs) == MAX_CONTEXT_PAIRS
 
 
-def test_pair_indices_diagonal_first():
+def testpair_indices_diagonal_first():
     # First min(n_pos, n_neg) pairs should be (i, i) for i in range(short)
-    pairs = _pair_indices(3, 3)
+    pairs = pair_indices(3, 3)
     assert pairs[0] == (0, 0)
     assert pairs[1] == (1, 1)
     assert pairs[2] == (2, 2)
 
 
 # ── cross-module parity ──────────────────────────────────────────────────────
-# The NumPy path (_pair_indices) and the Qdrant path (_build_context_pairs)
+# The NumPy path (pair_indices) and the Qdrant path (_build_context_pairs)
 # MUST emit pairs in the same order: the Qdrant server scores the Nth pair
 # using the Nth (positive, negative) reference on its side, and our NumPy
 # mirror uses the same indices to score uploaded-but-unindexed images.  Any
@@ -91,11 +91,11 @@ def test_pair_ordering_matches_discovery_builder(n_pos, n_neg):
     discovery_pairs = [(p.positive, p.negative) for p in _build_context_pairs(positives, negatives)]
 
     # NumPy emits index tuples; map via positives/negatives to the same string pairs.
-    numpy_pairs = [(positives[pi], negatives[ni]) for pi, ni in _pair_indices(n_pos, n_neg)]
+    numpy_pairs = [(positives[pi], negatives[ni]) for pi, ni in pair_indices(n_pos, n_neg)]
 
     assert numpy_pairs == discovery_pairs, (
         "pair ordering drift: _build_context_pairs (discovery.py) and "
-        "_pair_indices (query_eval.py) must emit pairs in the same order"
+        "pair_indices (query_eval.py) must emit pairs in the same order"
     )
 
 

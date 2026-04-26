@@ -8,7 +8,7 @@ All Qdrant I/O is stubbed so no real server is required.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -287,18 +287,38 @@ class TestTriage:
         # 2 positives × 1 negative = 2 pairs
         assert body["pair_count"] == 2
 
-    def test_cosine_threshold_param_accepted(self, client):
-        """A non-default cosine_threshold must be accepted without error."""
-        tag = _tag(pos=["p1"])  # no negatives → Recommend mode, cosine threshold applies
+    def test_cosine_threshold_is_forwarded_to_run_discovery(self, client):
+        """The cosine_threshold form param must reach run_discovery so the
+        Recommend-mode hit filter actually applies — the slider would be
+        a no-op otherwise."""
+        tag = _tag(pos=["p1"])  # no negatives → Recommend mode
         with (
             patch("scalar_forensic.web.app.Settings"),
             patch("scalar_forensic.web.app.QdrantClient"),
             patch("scalar_forensic.web.app.TagStore") as mock_ts,
-            patch("scalar_forensic.web.app.run_discovery", return_value=[]),
+            patch("scalar_forensic.web.app.run_discovery", return_value=[]) as mock_rd,
         ):
             mock_ts.return_value.get.return_value = tag
-            r = client.post("/api/triage", data={"tag_id": "tag-1", "cosine_threshold": "0.8"})
+            r = client.post(
+                "/api/triage", data={"tag_id": "tag-1", "cosine_threshold": "0.8"}
+            )
         assert r.status_code == 200
+        assert mock_rd.call_args.kwargs["cosine_threshold"] == 0.8
+
+    def test_cosine_threshold_default_is_forwarded(self, client):
+        """When the caller omits cosine_threshold, the documented default
+        (0.5) must reach run_discovery rather than being dropped."""
+        tag = _tag(pos=["p1"])
+        with (
+            patch("scalar_forensic.web.app.Settings"),
+            patch("scalar_forensic.web.app.QdrantClient"),
+            patch("scalar_forensic.web.app.TagStore") as mock_ts,
+            patch("scalar_forensic.web.app.run_discovery", return_value=[]) as mock_rd,
+        ):
+            mock_ts.return_value.get.return_value = tag
+            r = client.post("/api/triage", data={"tag_id": "tag-1"})
+        assert r.status_code == 200
+        assert mock_rd.call_args.kwargs["cosine_threshold"] == 0.5
 
     def test_discovery_failure_surfaces_as_503_not_empty_hits(self, client):
         """A failing Qdrant query must not be masked as an empty result set."""
@@ -362,3 +382,182 @@ class TestExplore:
         body = r.json()
         assert body["strategy"] == "context"
         assert body["hits"][0]["point_id"] == "pt-2"
+
+
+# ---------------------------------------------------------------------------
+# GET /api/point-id and /api/point-payload — reference-collection fallback
+# ---------------------------------------------------------------------------
+
+
+def _settings_with(case: str = "sfn", reference: str | None = None):
+    """Patch scalar_forensic.web.app.Settings so the endpoint sees these names."""
+    s = MagicMock()
+    s.qdrant_url = "http://qdrant"
+    s.qdrant_api_key = None
+    s.collection = case
+    s.reference_collection = reference
+    return s
+
+
+class TestPointIdLookup:
+    def test_resolves_from_case_collection_when_present(self, client):
+        rec = MagicMock()
+        rec.id = "pt-case"
+        case_records = [rec]
+        ref_records: list = []
+
+        def _scroll(collection_name, **kw):
+            return (
+                case_records if collection_name == "sfn" else ref_records,
+                None,
+            )
+
+        qdrant = MagicMock()
+        qdrant.scroll.side_effect = _scroll
+
+        with (
+            patch(
+                "scalar_forensic.web.app.Settings",
+                return_value=_settings_with(case="sfn", reference="sfn_ref"),
+            ),
+            patch("scalar_forensic.web.app.QdrantClient", return_value=qdrant),
+        ):
+            r = client.get("/api/point-id", params={"image_hash": "abc"})
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["point_id"] == "pt-case"
+        assert body["collection"] == "sfn"
+        assert body["is_reference"] is False
+        # Should not have queried the reference collection — the case hit was first.
+        called_collections = [c.kwargs["collection_name"] for c in qdrant.scroll.call_args_list]
+        assert called_collections == ["sfn"]
+
+    def test_falls_back_to_reference_collection(self, client):
+        """When the hash is not in the case collection, the endpoint must
+        retry against the reference collection so reference hits are markable."""
+        rec = MagicMock()
+        rec.id = "pt-ref"
+
+        def _scroll(collection_name, **kw):
+            return ([rec] if collection_name == "sfn_ref" else [], None)
+
+        qdrant = MagicMock()
+        qdrant.scroll.side_effect = _scroll
+
+        with (
+            patch(
+                "scalar_forensic.web.app.Settings",
+                return_value=_settings_with(case="sfn", reference="sfn_ref"),
+            ),
+            patch("scalar_forensic.web.app.QdrantClient", return_value=qdrant),
+        ):
+            r = client.get("/api/point-id", params={"image_hash": "abc"})
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["point_id"] == "pt-ref"
+        assert body["collection"] == "sfn_ref"
+        assert body["is_reference"] is True
+
+    def test_404_when_neither_collection_has_it(self, client):
+        qdrant = MagicMock()
+        qdrant.scroll.return_value = ([], None)
+
+        with (
+            patch(
+                "scalar_forensic.web.app.Settings",
+                return_value=_settings_with(case="sfn", reference="sfn_ref"),
+            ),
+            patch("scalar_forensic.web.app.QdrantClient", return_value=qdrant),
+        ):
+            r = client.get("/api/point-id", params={"image_hash": "missing"})
+        assert r.status_code == 404
+
+    def test_no_reference_lookup_when_unconfigured(self, client):
+        qdrant = MagicMock()
+        qdrant.scroll.return_value = ([], None)
+
+        with (
+            patch(
+                "scalar_forensic.web.app.Settings",
+                return_value=_settings_with(case="sfn", reference=None),
+            ),
+            patch("scalar_forensic.web.app.QdrantClient", return_value=qdrant),
+        ):
+            r = client.get("/api/point-id", params={"image_hash": "missing"})
+        assert r.status_code == 404
+        # Only the case collection is consulted when no reference is set.
+        called_collections = [c.kwargs["collection_name"] for c in qdrant.scroll.call_args_list]
+        assert called_collections == ["sfn"]
+
+
+class TestPointPayload:
+    def test_resolves_from_case_collection_when_present(self, client):
+        rec = MagicMock()
+        rec.id = "pt-1"
+        rec.payload = {"image_hash": "abc", "image_path": "/case/x.jpg"}
+
+        def _retrieve(collection_name, **kw):
+            return [rec] if collection_name == "sfn" else []
+
+        qdrant = MagicMock()
+        qdrant.retrieve.side_effect = _retrieve
+
+        with (
+            patch(
+                "scalar_forensic.web.app.Settings",
+                return_value=_settings_with(case="sfn", reference="sfn_ref"),
+            ),
+            patch("scalar_forensic.web.app.QdrantClient", return_value=qdrant),
+        ):
+            r = client.get("/api/point-payload", params={"point_id": "pt-1"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["image_hash"] == "abc"
+        assert body["image_path"] == "/case/x.jpg"
+        assert body["is_reference"] is False
+        # No reference lookup needed.
+        called = [c.kwargs["collection_name"] for c in qdrant.retrieve.call_args_list]
+        assert called == ["sfn"]
+
+    def test_falls_back_to_reference_collection(self, client):
+        """Tag examples whose IDs come from the reference collection must
+        still resolve to a payload — the editor renders thumbnails from this."""
+        rec = MagicMock()
+        rec.id = "pt-1"
+        rec.payload = {"image_hash": "ref-hash", "image_path": "/ref/y.jpg"}
+
+        def _retrieve(collection_name, **kw):
+            return [rec] if collection_name == "sfn_ref" else []
+
+        qdrant = MagicMock()
+        qdrant.retrieve.side_effect = _retrieve
+
+        with (
+            patch(
+                "scalar_forensic.web.app.Settings",
+                return_value=_settings_with(case="sfn", reference="sfn_ref"),
+            ),
+            patch("scalar_forensic.web.app.QdrantClient", return_value=qdrant),
+        ):
+            r = client.get("/api/point-payload", params={"point_id": "pt-1"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["image_hash"] == "ref-hash"
+        assert body["image_path"] == "/ref/y.jpg"
+        assert body["is_reference"] is True
+
+    def test_404_when_neither_collection_has_it(self, client):
+        qdrant = MagicMock()
+        qdrant.retrieve.return_value = []
+
+        with (
+            patch(
+                "scalar_forensic.web.app.Settings",
+                return_value=_settings_with(case="sfn", reference="sfn_ref"),
+            ),
+            patch("scalar_forensic.web.app.QdrantClient", return_value=qdrant),
+        ):
+            r = client.get("/api/point-payload", params={"point_id": "missing"})
+        assert r.status_code == 404
