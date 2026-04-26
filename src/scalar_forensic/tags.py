@@ -272,12 +272,17 @@ class TagStore:
         return True
 
     def _upsert(self, tag: Tag) -> None:
+        # Tags are payload-only.  The collection is created with a single
+        # named dummy vector (``_DUMMY_VECTOR_NAME``) because Qdrant
+        # collections cannot have zero vector configs.  Write a constant
+        # all-zero vector for that name on every upsert so the point is
+        # unambiguously valid in a multi-vector collection.
         self.client.upsert(
             collection_name=self.collection,
             points=[
                 PointStruct(
                     id=tag.tag_id,
-                    vector={},
+                    vector={_DUMMY_VECTOR_NAME: [0.0] * _DUMMY_VECTOR_DIM},
                     payload=tag.to_payload(),
                 )
             ],

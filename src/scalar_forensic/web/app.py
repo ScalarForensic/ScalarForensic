@@ -1129,13 +1129,18 @@ def _fetch_tag_ref_records(
     return records
 
 
-# In-process cache of (tag_id, updated_at, vector_name, collection) →
-# {point_id: vector}.  Keyed on updated_at so any tag edit invalidates the
-# entry automatically.  Caches the raw per-ID vector map rather than a
-# positive/negative split so callers keep their own positive-set policy
-# (different endpoints treat the optional target anchor differently).
-# FIFO-evicted at a size cap to keep worst-case memory bounded.
-_TAG_REF_VECS_CACHE: dict[tuple[str, str, str, str], dict[str, list[float]]] = {}
+# In-process cache of
+# (tag_id, updated_at, vector_name, case_collection, reference_collection)
+# → {point_id: vector}.  Keyed on updated_at so any tag edit invalidates
+# the entry automatically.  Both collection names participate in the key
+# because :func:`_fetch_tag_ref_records` falls back to the reference
+# collection when an ID isn't in the case collection — changing either
+# at runtime must invalidate the cache.  Caches the raw per-ID vector
+# map rather than a positive/negative split so callers keep their own
+# positive-set policy (different endpoints treat the optional target
+# anchor differently).  FIFO-evicted at a size cap to keep worst-case
+# memory bounded.
+_TAG_REF_VECS_CACHE: dict[tuple[str, str, str, str, str], dict[str, list[float]]] = {}
 _TAG_REF_VECS_CACHE_MAX = 256
 
 
@@ -1153,7 +1158,13 @@ def _get_cached_tag_ref_vecs(
     repeated classification passes reuse a single Qdrant retrieval — typical
     badge refreshes see near-zero Qdrant traffic once the cache is warm.
     """
-    cache_key = (str(tag.tag_id), tag.updated_at, vector_name, settings.collection)
+    cache_key = (
+        str(tag.tag_id),
+        tag.updated_at,
+        vector_name,
+        settings.collection,
+        settings.reference_collection or "",
+    )
     cached = _TAG_REF_VECS_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -1182,19 +1193,27 @@ def _get_cached_tag_ref_vecs(
 def _split_cached_vecs(
     vecs_by_id: dict[str, list[float]],
     pos_ids: list[str],
+    neg_ids: list[str] | None = None,
 ) -> tuple[list[list[float]], list[list[float]]]:
     """Return ``(pos_vecs, neg_vecs)`` from a cached id→vec map.
 
-    IDs listed in *pos_ids* that are present in *vecs_by_id* go to the positive
-    bucket; every other entry in *vecs_by_id* goes to the negative bucket.
+    IDs listed in *pos_ids* present in *vecs_by_id* go to the positive
+    bucket; IDs listed in *neg_ids* go to the negative bucket.  Entries
+    that match neither are silently ignored — guarding against phantom
+    negatives if the cache ever contained an ID the tag no longer
+    references (e.g. anchor stripped before splitting).
+
+    For backward compatibility, when *neg_ids* is None every non-positive
+    entry in *vecs_by_id* is treated as a negative.
     """
     pos_set = set(pos_ids)
+    neg_set = set(neg_ids) if neg_ids is not None else None
     pos_vecs: list[list[float]] = []
     neg_vecs: list[list[float]] = []
     for pid, v in vecs_by_id.items():
         if pid in pos_set:
             pos_vecs.append(v)
-        else:
+        elif neg_set is None or pid in neg_set:
             neg_vecs.append(v)
     return pos_vecs, neg_vecs
 
@@ -1402,7 +1421,14 @@ async def triage(
                 detail="SFN_REFERENCE_COLLECTION is not configured",
             )
         triage_collection = settings.reference_collection
-        ref_coll_for_lookup = None
+        # Tag IDs may live in the case collection (the typical workflow:
+        # mark hits found via search → those IDs come from SFN_COLLECTION).
+        # Pass the case collection as lookup_from so Qdrant can resolve
+        # the reference vectors regardless of which collection the tag
+        # was built from.  When the tag's IDs already live in the reference
+        # collection, lookup_from is harmless (Qdrant prefers in-collection
+        # IDs).
+        ref_coll_for_lookup = settings.collection
     else:
         triage_collection = settings.collection
         ref_coll_for_lookup = settings.reference_collection
@@ -1551,7 +1577,8 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
         tags = store.list()
 
         # Resolve all hashes → point_ids in one scroll using a should-filter.
-        unique_hashes = list(dict.fromkeys(image_hashes))
+        # ``image_hashes`` is already deduplicated by the request handler.
+        hash_set = set(image_hashes)
         hash_to_pid: dict[str, str] = {}
         for record in qdrant_scroll_all(
             client,
@@ -1559,7 +1586,7 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
             scroll_filter=Filter(
                 should=[
                     FieldCondition(key="image_hash", match=MatchValue(value=h))
-                    for h in unique_hashes
+                    for h in image_hashes
                 ]
             ),
             limit=256,
@@ -1567,9 +1594,9 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
             with_vectors=False,
         ):
             h = (record.payload or {}).get("image_hash")
-            if isinstance(h, str) and h in unique_hashes and h not in hash_to_pid:
+            if isinstance(h, str) and h in hash_set and h not in hash_to_pid:
                 hash_to_pid[h] = str(record.id)
-            if len(hash_to_pid) == len(unique_hashes):
+            if len(hash_to_pid) == len(image_hashes):
                 break
 
         if not hash_to_pid:
@@ -1610,7 +1637,11 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
             except Exception:  # noqa: BLE001
                 skipped_tags.append(tag.name)
                 continue
-            pos_dino, neg_dino = _split_cached_vecs(vecs_by_id, effective_pos)
+            pos_dino, neg_dino = _split_cached_vecs(
+                vecs_by_id,
+                effective_pos,
+                [str(i) for i in tag.negative_ids],
+            )
 
             # Fail safe: the tag declares negatives but none could be retrieved
             # (stale point IDs, re-indexed collection, wrong collection).
@@ -1707,12 +1738,9 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
             # classify_tags_for_session intentionally ignores target: only the
             # explicit positive/negative lists contribute to scoring here.
             pos_dino, neg_dino = _split_cached_vecs(
-                {
-                    pid: v
-                    for pid, v in vecs_by_id.items()
-                    if tag.target_id is None or pid != str(tag.target_id)
-                },
+                vecs_by_id,
                 [str(i) for i in tag.positive_ids],
+                [str(i) for i in tag.negative_ids],
             )
 
             if tag.negative_ids and not neg_dino:
@@ -1780,7 +1808,11 @@ async def triage_query_images(
         effective_pos = [str(i) for i in tag.positive_ids]
         if tag.target_id is not None and str(tag.target_id) not in set(effective_pos):
             effective_pos.append(str(tag.target_id))
-        pos_dino, neg_dino = _split_cached_vecs(vecs_by_id, effective_pos)
+        pos_dino, neg_dino = _split_cached_vecs(
+            vecs_by_id,
+            effective_pos,
+            [str(i) for i in tag.negative_ids],
+        )
 
         if tag.negative_ids and not neg_dino:
             _log.warning(

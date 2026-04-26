@@ -74,7 +74,9 @@ def test_create_writes_payload_only_point_with_expected_shape():
     assert point.payload["negative_ids"] == ["n1"]
     # Polarity must NOT appear in payload.
     assert "polarity" not in point.payload
-    assert point.vector == {}
+    # Tags are payload-only; the dummy vector exists solely to satisfy
+    # Qdrant's "collection must have ≥1 vector config" requirement.
+    assert point.vector == {"_tag": [0.0]}
 
 
 def test_create_has_no_polarity_field():

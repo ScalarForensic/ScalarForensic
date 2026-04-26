@@ -1602,7 +1602,7 @@
                 </div>
               </div>
             </template>
-            <template x-if="selectedTriageHit.triplet_score === null">
+            <template x-if="selectedTriageHit.triplet_score === null && exploreStrategy !== 'random'">
               <div>
                 <div class="triage-detail-score-row">
                   <span class="triage-detail-triplet"
@@ -1611,6 +1611,17 @@
                 </div>
                 <div class="triage-detail-margin" style="font-style:italic">
                   recommendation mode — add negatives to enable triplet scoring
+                </div>
+              </div>
+            </template>
+            <template x-if="selectedTriageHit.triplet_score === null && exploreStrategy === 'random'">
+              <div>
+                <div class="triage-detail-score-row">
+                  <span class="triage-detail-triplet" style="color:var(--muted)">—</span>
+                  <span style="font-size:11px;color:var(--text2)">random sample (no score)</span>
+                </div>
+                <div class="triage-detail-margin" style="font-style:italic">
+                  cold-start mode — mark +/− to enable boundary-seeking explore
                 </div>
               </div>
             </template>
@@ -1723,11 +1734,17 @@
             <div class="triage-hit-body">
               <div class="triage-hit-scores">
                 <span x-show="hit.is_reference" class="badge badge-reference badge-sm" style="margin-bottom:2px">REF</span>
-                <span class="triage-score-num"
-                      :class="{zero: hit.triplet_score !== null ? !hit.triplet_score : false}"
-                      x-text="hit.triplet_score !== null ? hit.triplet_score : (hit.raw_score ?? 0).toFixed(2)"></span>
+                <!-- Random-mode explore hits carry no real score (sentinel raw_score=0.0); show "—" instead of misleading "0.00 cos" -->
+                <template x-if="exploreStrategy === 'random' && hit.triplet_score === null">
+                  <span class="triage-score-num" style="color:var(--muted)">—</span>
+                </template>
+                <template x-if="!(exploreStrategy === 'random' && hit.triplet_score === null)">
+                  <span class="triage-score-num"
+                        :class="{zero: hit.triplet_score !== null ? !hit.triplet_score : false}"
+                        x-text="hit.triplet_score !== null ? hit.triplet_score : (hit.raw_score ?? 0).toFixed(2)"></span>
+                </template>
                 <span style="font-size:9px;color:var(--muted);font-family:var(--mono)"
-                      x-text="hit.triplet_score !== null ? 'disc' : 'cos'"></span>
+                      x-text="exploreStrategy === 'random' && hit.triplet_score === null ? 'rand' : (hit.triplet_score !== null ? 'disc' : 'cos')"></span>
               </div>
               <div class="triage-hit-path"
                    x-text="hit.is_video_frame && hit.video_path
@@ -2899,6 +2916,9 @@ function sfn() {
       this.selectedTriageHitId = null;
       this.triageMatchSrc = null;
       this.triageMatchMeta = null;
+      // Clear stale explore strategy so a prior random sample does not
+      // suppress real triage scores in the rendering templates.
+      this.exploreStrategy = null;
       const fd = new FormData();
       fd.append('tag_id', this.selectedConceptId);
       fd.append('limit', this.triageLimit);

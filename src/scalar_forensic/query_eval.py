@@ -11,7 +11,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from scalar_forensic.discovery import MAX_CONTEXT_PAIRS
+from scalar_forensic.discovery import MAX_CONTEXT_PAIRS, pair_indices
+
+__all__ = [
+    "MAX_CONTEXT_PAIRS",
+    "QueryEvalHit",
+    "score_query_entries",
+    "score_query_vector",
+]
 
 
 @dataclass
@@ -40,25 +47,10 @@ def _cosine_sims(query: list[float], refs: list[list[float]]) -> np.ndarray:
     return (r @ q) / (rn * qn + 1e-12)
 
 
-def _pair_indices(n_pos: int, n_neg: int) -> list[tuple[int, int]]:
-    """Return pair indices in the same diagonal-first order as _build_context_pairs."""
-    limit = min(n_pos * n_neg, MAX_CONTEXT_PAIRS)
-    seen: set[tuple[int, int]] = set()
-    result: list[tuple[int, int]] = []
-    short = min(n_pos, n_neg)
-    for i in range(short):
-        seen.add((i, i))
-        result.append((i, i))
-        if len(result) >= limit:
-            return result
-    for p in range(n_pos):
-        for n in range(n_neg):
-            if (p, n) in seen:
-                continue
-            result.append((p, n))
-            if len(result) >= limit:
-                return result
-    return result
+# Re-exported for backward compatibility — the canonical implementation
+# lives in :mod:`scalar_forensic.discovery` so the Qdrant and NumPy paths
+# cannot drift in pair ordering.
+_pair_indices = pair_indices
 
 
 def score_query_vector(
@@ -78,7 +70,7 @@ def score_query_vector(
     if not neg_vecs:
         return None, raw_score
     neg_sims = _cosine_sims(query_vec, neg_vecs)
-    pairs = _pair_indices(len(pos_vecs), len(neg_vecs))
+    pairs = pair_indices(len(pos_vecs), len(neg_vecs))
     score = int(sum(1 for pi, ni in pairs if pos_sims[pi] > neg_sims[ni]))
     return score, raw_score
 

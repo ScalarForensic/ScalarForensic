@@ -98,6 +98,40 @@ class DiscoveryHit:
     payload: dict = field(default_factory=dict)
 
 
+def pair_indices(n_pos: int, n_neg: int) -> list[tuple[int, int]]:
+    """Return (positive_index, negative_index) pairs in canonical order.
+
+    Diagonal-first: ``(i, i)`` for ``i < min(n_pos, n_neg)`` come first so
+    every positive and every negative appears in at least one pair even
+    when ``MAX_CONTEXT_PAIRS`` truncates before the full cartesian product.
+    Remaining off-diagonal pairs follow in row-major order.
+
+    This is the single source of truth for pair ordering.  Both
+    :func:`_build_context_pairs` (Qdrant Discovery path) and the NumPy
+    triplet-scoring path in :mod:`scalar_forensic.query_eval` consume it
+    so the two scoring paths cannot drift.
+    """
+    limit = min(n_pos * n_neg, MAX_CONTEXT_PAIRS)
+    if limit == 0:
+        return []
+    seen: set[tuple[int, int]] = set()
+    out: list[tuple[int, int]] = []
+    short = min(n_pos, n_neg)
+    for i in range(short):
+        seen.add((i, i))
+        out.append((i, i))
+        if len(out) >= limit:
+            return out
+    for p in range(n_pos):
+        for n in range(n_neg):
+            if (p, n) in seen:
+                continue
+            out.append((p, n))
+            if len(out) >= limit:
+                return out
+    return out
+
+
 def _build_context_pairs(
     positives: list[str | int], negatives: list[str | int]
 ) -> list[ContextPair]:
@@ -105,32 +139,14 @@ def _build_context_pairs(
 
     The cap is applied by round-robin sampling rather than truncation so
     every positive and every negative is represented at least once when
-    the cap kicks in.
+    the cap kicks in.  Ordering is delegated to :func:`pair_indices`.
     """
-    pairs: list[ContextPair] = []
     if not positives or not negatives:
-        return pairs
-    limit = min(len(positives) * len(negatives), MAX_CONTEXT_PAIRS)
-    seen: set[tuple[str | int, str | int]] = set()
-    # Diagonal-first: guarantees every positive and every negative appears
-    # at least once even when the cap is hit before the full product.
-    short = min(len(positives), len(negatives))
-    for i in range(short):
-        pair = (positives[i], negatives[i])
-        seen.add(pair)
-        pairs.append(ContextPair(positive=pair[0], negative=pair[1]))
-        if len(pairs) >= limit:
-            return pairs
-    for pos in positives:
-        for neg in negatives:
-            pair = (pos, neg)
-            if pair in seen:
-                continue
-            seen.add(pair)
-            pairs.append(ContextPair(positive=pos, negative=neg))
-            if len(pairs) >= limit:
-                return pairs
-    return pairs
+        return []
+    return [
+        ContextPair(positive=positives[pi], negative=negatives[ni])
+        for pi, ni in pair_indices(len(positives), len(negatives))
+    ]
 
 
 def _exclude_filter(point_ids: list[str | int]) -> Filter | None:
@@ -163,6 +179,14 @@ def _resolve_polarity(tag: Tag, reverse: bool) -> tuple[list[str | int], list[st
     into "more like negatives, less like positives" — used to surface
     provably-benign material that can be excluded from review.  Callers
     opt in via the *reverse* flag.
+
+    Note: only the constraint pairs are swapped here.  The explicit
+    ``tag.target_id`` (if set) is *preserved* by :func:`run_discovery`
+    across reverse — it represents the user's chosen search anchor, not
+    a polarity assignment.  Auto-anchor falls back to the first entry of
+    the post-swap positives list (i.e. the first original negative when
+    ``reverse=True``), which is the correct anchor for "find more
+    benign material in the neighborhood of the labelled negatives."
     """
     if reverse:
         return list(tag.negative_ids), list(tag.positive_ids)
@@ -192,6 +216,11 @@ def run_discovery(
     When at least one positive is present and no explicit target is set,
     the first positive is used as an implicit anchor so DiscoverQuery fires
     immediately without the user needing to call "Set from hit".
+
+    With *reverse* True, the constraint polarity is swapped (see
+    :func:`_resolve_polarity`).  An explicit ``tag.target_id`` is
+    preserved as the anchor; only the auto-anchor follows the swap and
+    falls back to the first original negative.
 
     When *exclude_references* is True (the default), the tag's own
     reference points are filtered out of the result set so the top hits
