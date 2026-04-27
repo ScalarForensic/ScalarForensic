@@ -71,7 +71,7 @@
               <template x-for="(count, i) in semanticStats.histogram" :key="i">
                 <div class="stats-hist-bar"
                      :style="`height: ${Math.max(2, Math.round(count / Math.max(...semanticStats.histogram) * 60))}px`"
-                     :class="{'stats-hist-bar-threshold': i === Math.min(19, Math.floor(Math.max(0, Math.min(1, thresholdSemantic)) * 20))}">
+                     :class="{'stats-hist-bar-threshold': i === Math.min(19, Math.floor(Math.max(0, Math.min(1, (thresholdSemantic + 1) / 2)) * 20))}">
                 </div>
               </template>
             </div>
@@ -770,7 +770,9 @@
 
       <template x-if="selectedFileId">
         <div class="image-panel-inner">
-          <div class="image-box">
+          <div class="image-box"
+               @wheel="if ($event.ctrlKey || $event.metaKey) return; $event.preventDefault(); queryZoom = Math.min(4, Math.max(0.2, queryZoom - Math.sign($event.deltaY) * 0.1))"
+               @dblclick.self="queryZoom = 1">
             <img x-show="querySrc"
                  :src="querySrc"
                  :style="`transform: scale(${queryZoom})`"
@@ -912,7 +914,9 @@
 
       <template x-if="selectedHit">
         <div class="image-panel-inner">
-          <div class="image-box">
+          <div class="image-box"
+               @wheel="if ($event.ctrlKey || $event.metaKey) return; $event.preventDefault(); matchZoom = Math.min(4, Math.max(0.2, matchZoom - Math.sign($event.deltaY) * 0.1))"
+               @dblclick.self="matchZoom = 1">
             <img x-show="matchSrc"
                  :src="matchSrc"
                  :style="`transform: scale(${matchZoom})`"
@@ -2493,10 +2497,12 @@ function sfn() {
       this.selectedMatchedFrameKey = `${hit.path}:${mf.timecode_ms}`;
       this.matchZoom = 1.0;
       this.matchMeta = null; this.matchMetaError = null;
-      // Construct virtual path for this specific dataset frame
-      const virtualPath = `${hit.video_path}::frame_000000_t=${mf.timecode_ms}ms`;
-      this.matchSrc = `/api/hit-image?path=${encodeURIComponent(virtualPath)}`;
-      await this._loadMatchMetaFor(virtualPath);
+      this.matchSrc = mf.frame_hash
+        ? `/api/thumbnail/${mf.frame_hash}`
+        : '/static/vector-fallback.svg';
+      if (hit.video_hash) {
+        await this._loadFrameMeta(hit.video_hash, mf.timecode_ms);
+      }
     },
 
     async selectHit(hit) {
@@ -2506,13 +2512,16 @@ function sfn() {
       this.matchZoom = 1.0;
       this.matchMeta = null; this.matchMetaError = null;
       this.videoTimeline = null;
-      this.matchSrc = `/api/hit-image?path=${encodeURIComponent(hit.path)}`;
-      const metaPath = hit.is_video_frame && hit.video_path
-        ? `${hit.video_path}::frame_000000_t=${hit.frame_timecode_ms ?? 0}ms`
-        : hit.path;
-      await this._loadMatchMetaFor(metaPath);
+      if (hit.is_video_frame && hit.image_hash) {
+        this.matchSrc = `/api/thumbnail/${hit.image_hash}`;
+      } else {
+        this.matchSrc = `/api/hit-image?path=${encodeURIComponent(hit.path)}`;
+      }
       if (hit.is_video_frame && hit.video_hash) {
+        await this._loadFrameMeta(hit.video_hash, hit.frame_timecode_ms ?? 0);
         this._loadVideoTimeline(hit.video_hash);
+      } else {
+        await this._loadMatchMetaFor(hit.path);
       }
     },
 
@@ -2530,10 +2539,11 @@ function sfn() {
     async _loadMatchMeta() {
       const hit = this.selectedHit;
       if (hit) {
-        const metaPath = hit.is_video_frame && hit.video_path
-          ? `${hit.video_path}::frame_000000_t=${hit.frame_timecode_ms ?? 0}ms`
-          : hit.path;
-        await this._loadMatchMetaFor(metaPath);
+        if (hit.is_video_frame && hit.video_hash) {
+          await this._loadFrameMeta(hit.video_hash, hit.frame_timecode_ms ?? 0);
+        } else {
+          await this._loadMatchMetaFor(hit.path);
+        }
       } else {
         this.matchMeta = null; this.matchMetaError = null;
       }
@@ -2543,6 +2553,23 @@ function sfn() {
       this.matchMetaError = null;
       try {
         const r = await fetch(`/api/metadata?path=${encodeURIComponent(path)}`);
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          this.matchMetaError = body.detail ?? `HTTP ${r.status}`;
+          this.matchMeta = null;
+        } else {
+          this.matchMeta = await r.json();
+        }
+      } catch (e) {
+        this.matchMeta = null;
+        this.matchMetaError = e?.message || 'Metadata request failed';
+      }
+    },
+
+    async _loadFrameMeta(videoHash, timecodeMs) {
+      this.matchMetaError = null;
+      try {
+        const r = await fetch(`/api/frame-metadata?video_hash=${encodeURIComponent(videoHash)}&timecode_ms=${timecodeMs}`);
         if (!r.ok) {
           const body = await r.json().catch(() => ({}));
           this.matchMetaError = body.detail ?? `HTTP ${r.status}`;

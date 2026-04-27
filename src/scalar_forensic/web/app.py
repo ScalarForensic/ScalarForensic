@@ -44,6 +44,7 @@ from scalar_forensic.tags import Tag, TagStore
 from scalar_forensic.video import (
     VIDEO_EXTENSIONS,
     extract_frame_at,
+    frame_disk_path,
     get_video_info,
     parse_frame_path,
 )
@@ -850,6 +851,71 @@ async def hit_metadata(path: str) -> JSONResponse:
     meta["path"] = str(p)
     meta["hash_sha256"] = hashlib.sha256(data).hexdigest()
     meta["hash_md5"] = hashlib.md5(data).hexdigest()  # noqa: S324
+    return JSONResponse(meta)
+
+
+@app.get("/api/frame-metadata")
+async def frame_metadata(video_hash: str, timecode_ms: int) -> JSONResponse:
+    """Metadata for an indexed video frame identified by video_hash + timecode_ms.
+
+    Constructs the canonical on-disk frame path and delegates to the same logic
+    used by /api/metadata for frame files.  Returns 404 when frame_store_dir is
+    not configured or the frame file does not exist on disk.
+    """
+    settings = Settings()
+    if settings.frame_store_dir is None:
+        raise HTTPException(status_code=404, detail="Frame store not configured")
+    p = frame_disk_path(settings.frame_store_dir, video_hash, timecode_ms).resolve()
+    _check_allowed_path(p)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail="Frame file not found")
+
+    # parse_frame_path will succeed because p is under frame_store_dir
+    frame_parsed = parse_frame_path(p, settings.frame_store_dir)
+    if frame_parsed is None:
+        raise HTTPException(status_code=500, detail="Could not parse frame path")
+    parsed_video_hash, parsed_timecode_ms = frame_parsed
+
+    frame_sha256: str | None = None
+    video_path_str: str | None = None
+    try:
+        _client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+        _records, _ = _client.scroll(
+            collection_name=settings.collection,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key="video_hash", match=MatchValue(value=parsed_video_hash)),
+                    FieldCondition(
+                        key="frame_timecode_ms", match=MatchValue(value=parsed_timecode_ms)
+                    ),
+                    FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
+                ]
+            ),
+            limit=1,
+            with_payload=["image_hash", "video_path"],
+            with_vectors=False,
+        )
+        if _records:
+            frame_sha256 = _records[0].payload.get("image_hash")
+            video_path_str = _records[0].payload.get("video_path")
+    except Exception:  # noqa: BLE001
+        pass
+
+    meta: dict = {
+        "filename": p.name,
+        "path": str(p),
+        "is_video_frame": True,
+        "frame_timecode_ms": parsed_timecode_ms,
+        "video_hash": parsed_video_hash,
+    }
+    if frame_sha256:
+        meta["hash_sha256"] = frame_sha256
+    if video_path_str:
+        meta["video_path"] = video_path_str
+        _vp = Path(video_path_str)
+        if _vp.is_file():
+            _info = get_video_info(_vp)
+            meta.update({f"video_{k}": v for k, v in _info.items()})
     return JSONResponse(meta)
 
 
