@@ -1495,17 +1495,8 @@ async def triage(
                 detail="SFN_REFERENCE_COLLECTION is not configured",
             )
         triage_collection = settings.reference_collection
-        # Tag IDs may live in the case collection (the typical workflow:
-        # mark hits found via search → those IDs come from SFN_COLLECTION).
-        # Pass the case collection as lookup_from so Qdrant can resolve
-        # the reference vectors regardless of which collection the tag
-        # was built from.  When the tag's IDs already live in the reference
-        # collection, lookup_from is harmless (Qdrant prefers in-collection
-        # IDs).
-        ref_coll_for_lookup = settings.collection
     else:
         triage_collection = settings.collection
-        ref_coll_for_lookup = settings.reference_collection
     try:
         client, store = _tag_client_and_store()
 
@@ -1523,7 +1514,7 @@ async def triage(
             vector_name="dino",
             limit=limit,
             reverse=reverse,
-            reference_collection=ref_coll_for_lookup,
+            reference_collection=None,
             cosine_threshold=cosine_threshold,
         )
     except HTTPException:
@@ -1586,12 +1577,31 @@ async def explore(
         pos_ids = list(tag.positive_ids)
         if tag.target_id is not None and tag.target_id not in {str(i) for i in pos_ids}:
             pos_ids = pos_ids + [tag.target_id]
+        neg_ids = list(tag.negative_ids)
+        all_ids = pos_ids + neg_ids
+        if all_ids:
+            def _filter_to_collection() -> tuple[list, list]:
+                try:
+                    found = client.retrieve(
+                        explore_collection,
+                        ids=all_ids,
+                        with_payload=False,
+                        with_vectors=False,
+                    )
+                    found_set = {str(p.id) for p in found}
+                    return (
+                        [i for i in pos_ids if str(i) in found_set],
+                        [i for i in neg_ids if str(i) in found_set],
+                    )
+                except Exception:
+                    return [], []
+            pos_ids, neg_ids = await asyncio.to_thread(_filter_to_collection)
         hits, strategy = await asyncio.to_thread(
             run_explore,
             client,
             explore_collection,
             pos_ids,
-            list(tag.negative_ids),
+            neg_ids,
             vector_name="dino",
             limit=limit,
         )

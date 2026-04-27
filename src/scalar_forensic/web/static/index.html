@@ -1356,31 +1356,20 @@
 
       <!-- Run controls (when a tag is selected) -->
       <div class="triage-run-controls" x-show="selectedConceptId">
-        <!-- Source buttons -->
-        <div class="slider-label" style="margin-bottom:4px"><span>Source</span></div>
+        <!-- Target selection: what collection to search/explore -->
+        <div class="slider-label" style="margin-bottom:4px"><span>Search in</span></div>
         <div class="triage-mode-btns" style="margin-bottom:6px">
-          <button class="triage-mode-btn" :class="{active: triageSource === 'indexed'}"
-                  @click="triageSource = 'indexed'">Indexed</button>
-          <button class="triage-mode-btn" :class="{active: triageSource === 'query'}"
-                  @click="triageSource = 'query'; triageCollection = 'dataset'">Uploaded</button>
-          <button class="triage-mode-btn" :class="{active: triageSource === 'explore'}"
-                  @click="triageSource = 'explore'">Explore</button>
+          <button class="triage-mode-btn" :class="{active: triageTarget === 'dataset'}"
+                  @click="triageTarget = 'dataset'">Dataset</button>
+          <template x-if="hasReferenceCollection">
+            <button class="triage-mode-btn" :class="{active: triageTarget === 'reference'}"
+                    @click="triageTarget = 'reference'">Reference</button>
+          </template>
+          <button class="triage-mode-btn" :class="{active: triageTarget === 'uploaded'}"
+                  @click="triageTarget = 'uploaded'">Uploaded</button>
         </div>
 
-        <!-- Corpus toggle (hidden in Uploaded mode and when no reference collection) -->
-        <template x-if="hasReferenceCollection && triageSource !== 'query'">
-          <div style="margin-bottom:6px">
-            <div class="slider-label" style="margin-bottom:4px"><span>Corpus</span></div>
-            <div class="triage-mode-btns">
-              <button class="triage-mode-btn" :class="{active: triageCollection === 'dataset'}"
-                      @click="triageCollection = 'dataset'">Dataset</button>
-              <button class="triage-mode-btn" :class="{active: triageCollection === 'reference'}"
-                      @click="triageCollection = 'reference'">Reference</button>
-            </div>
-          </div>
-        </template>
-
-        <template x-if="triageSource === 'explore'">
+        <template x-if="exploreStrategy !== null">
           <div class="triage-explore-hint" x-text="exploreStrategyHint"></div>
         </template>
 
@@ -1392,7 +1381,7 @@
           <input type="range" min="10" max="200" step="10" x-model.number="triageLimit">
         </div>
         <div class="slider-row"
-             x-show="triageSource !== 'explore' && selectedConcept && selectedConcept.negative_ids.length === 0">
+             x-show="selectedConcept && selectedConcept.negative_ids.length === 0">
           <div class="slider-label">
             <span title="Minimum cosine similarity when the tag has no negatives (Recommend mode)">Cosine threshold</span>
             <span class="slider-value" x-text="triageCosineThreshold.toFixed(2)"></span>
@@ -1400,14 +1389,21 @@
           <input type="range" min="0" max="1" step="0.01"
                  x-model.number="triageCosineThreshold" class="range-semantic">
         </div>
-        <label class="triage-reverse-row" x-show="triageSource === 'indexed'">
+        <label class="triage-reverse-row" x-show="triageTarget !== 'uploaded'">
           <input type="checkbox" x-model="triageReverse">
           <span>Reverse (surface benign)</span>
         </label>
-        <button class="btn-primary" style="width:100%"
-                :disabled="triageRunning"
-                @click="triageSource === 'explore' ? runExplore() : runTriage()"
-                x-text="triageRunning ? 'Running…' : (triageSource === 'explore' ? '▶ Explore' : '▶ Run Triage')"></button>
+        <div style="display:flex;gap:6px;margin-top:2px">
+          <button class="btn-primary" style="flex:1"
+                  :disabled="triageRunning"
+                  @click="runTriage()"
+                  x-text="triageRunning ? 'Running…' : '▶ Run Triage'"></button>
+          <button class="btn-secondary" style="flex:1"
+                  :disabled="triageRunning || triageTarget === 'uploaded'"
+                  x-show="triageTarget !== 'uploaded'"
+                  @click="runExplore()"
+                  x-text="triageRunning ? 'Running…' : '▶ Explore'"></button>
+        </div>
         <div class="triage-error-msg" x-show="triageError" x-text="triageError"></div>
       </div>
     </div><!-- /panel 1 -->
@@ -1718,7 +1714,7 @@
            class="triage-running-msg">← Select a tag</div>
       <div x-show="!triageRunning && selectedConceptId && triageResults.length === 0 && !triageError"
            class="triage-running-msg"
-           x-text="triageSource === 'explore' ? 'Click ▶ Explore to find candidates' : 'Click ▶ Run Triage to find candidates'"></div>
+           x-text="'Click ▶ Run Triage or ▶ Explore to find candidates'"></div>
 
       <!-- Results list -->
       <div class="hits-list" x-show="triageResults.length > 0 && !triageRunning">
@@ -1896,8 +1892,7 @@ function sfn() {
     triageError: null,
     triageLimit: 50,
     triageReverse: false,
-    triageSource: 'indexed',        // 'indexed' | 'query' | 'explore'
-    triageCollection: 'dataset',   // 'dataset' | 'reference' — applies to Triage and Explore
+    triageTarget: 'dataset',       // 'dataset' | 'reference' | 'uploaded'
     triageCosineThreshold: 0.5,    // cosine floor used in Recommend mode (tag has no negatives)
     exploreStrategy: null,         // 'random' | 'context' — returned by last /api/explore call
 
@@ -2898,10 +2893,6 @@ function sfn() {
       this.triageMatchSrc = null;
       this.triageMatchMeta = null;
       const c = this.selectedConcept;
-      // Auto-select Explore for empty tags so the investigator can bootstrap
-      if (c && c.positive_ids.length === 0 && c.negative_ids.length === 0) {
-        this.triageSource = 'explore';
-      }
       if (c) this.loadConceptExamples(c);
     },
 
@@ -2949,7 +2940,7 @@ function sfn() {
 
     async runTriage() {
       if (!this.selectedConceptId) return;
-      if (this.triageSource === 'query' && !this.sessionId) {
+      if (this.triageTarget === 'uploaded' && !this.sessionId) {
         this.triageError = 'No query session active. Upload a query image first.';
         return;
       }
@@ -2959,8 +2950,6 @@ function sfn() {
       this.selectedTriageHitId = null;
       this.triageMatchSrc = null;
       this.triageMatchMeta = null;
-      // Clear stale explore strategy so a prior random sample does not
-      // suppress real triage scores in the rendering templates.
       this.exploreStrategy = null;
       const fd = new FormData();
       fd.append('tag_id', this.selectedConceptId);
@@ -2968,12 +2957,12 @@ function sfn() {
       try {
         let resp;
         fd.append('cosine_threshold', this.triageCosineThreshold);
-        if (this.triageSource === 'query' && this.sessionId) {
+        if (this.triageTarget === 'uploaded') {
           fd.append('session_id', this.sessionId);
           resp = await fetch('/api/triage/query-images', { method: 'POST', body: fd });
         } else {
           fd.append('reverse', this.triageReverse ? 'true' : 'false');
-          fd.append('source', this.triageCollection === 'reference' ? 'reference' : 'indexed');
+          fd.append('source', this.triageTarget === 'reference' ? 'reference' : 'indexed');
           resp = await fetch('/api/triage', { method: 'POST', body: fd });
         }
         if (!resp.ok) {
@@ -2983,13 +2972,11 @@ function sfn() {
         }
         const d = await resp.json();
         this.triageResults = d.hits ?? [];
-        // Update tag in list (server may have refreshed it)
         if (d.tag) {
           const idx = this.concepts.findIndex(c => c.tag_id === d.tag.tag_id);
           if (idx >= 0) this.concepts[idx] = d.tag; else this.concepts.unshift(d.tag);
         }
-        // Populate hit cache for indexed-dataset results
-        if (this.triageSource !== 'query') {
+        if (this.triageTarget !== 'uploaded') {
           for (const h of this.triageResults) {
             const sid = String(h.point_id);
             if (!this.triageHitCache[sid]) {
@@ -3016,7 +3003,7 @@ function sfn() {
       const fd = new FormData();
       fd.append('tag_id', this.selectedConceptId);
       fd.append('limit', this.triageLimit);
-      if (this.triageCollection === 'reference') fd.append('collection', 'reference');
+      if (this.triageTarget === 'reference') fd.append('collection', 'reference');
       try {
         const resp = await fetch('/api/explore', { method: 'POST', body: fd });
         if (!resp.ok) {
@@ -3444,8 +3431,7 @@ function sfn() {
       this.triageMatchZoom = 1.0;
       this.triageRunning = false;
       this.triageError = null;
-      this.triageSource = 'indexed';
-      this.triageCollection = 'dataset';
+      this.triageTarget = 'dataset';
       this.triageCosineThreshold = 0.5;
       this.markedOverrides = {};
       this.hitTags = {};
