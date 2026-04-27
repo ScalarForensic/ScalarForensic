@@ -687,6 +687,10 @@ def _query_exact(
                 "dino_model_hash",
                 "sscd_model_name",
                 "sscd_model_hash",
+                "is_video_frame",
+                "video_path",
+                "video_hash",
+                "frame_timecode_ms",
             ],
             with_vectors=False,
         )
@@ -703,6 +707,10 @@ def _query_exact(
                         exif_geo_data=r.payload.get("exif_geo_data"),
                         image_hash=r.payload.get("image_hash"),
                         model_provenance=mp,
+                        is_video_frame=bool(r.payload.get("is_video_frame")),
+                        video_path=r.payload.get("video_path"),
+                        video_hash=r.payload.get("video_hash"),
+                        frame_timecode_ms=r.payload.get("frame_timecode_ms"),
                     )
                 )
             else:
