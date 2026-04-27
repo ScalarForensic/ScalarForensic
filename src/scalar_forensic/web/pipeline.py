@@ -443,6 +443,11 @@ def _group_video_hits(hits: list[Hit]) -> list[Hit]:
         # query_timecodes: all hits in this group come from the same query
         # entity so they share the same single timecode (or None for images).
         qtc = representative.query_timecodes
+        # Propagate is_reference from the group: every hit in a group comes
+        # from the same source video, so all entries share the same value.
+        # Using any() instead of representative.is_reference is a defensive
+        # safeguard against future callers that mix sources before grouping.
+        is_reference = any(h.is_reference for h in group)
         grouped_video.append(
             Hit(
                 path=representative.path,
@@ -457,6 +462,7 @@ def _group_video_hits(hits: list[Hit]) -> list[Hit]:
                 frame_timecode_ms=representative.frame_timecode_ms,
                 matched_frames=matched,
                 query_timecodes=qtc,
+                is_reference=is_reference,
             )
         )
 
