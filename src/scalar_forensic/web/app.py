@@ -2069,49 +2069,51 @@ def _check_collection_compat(settings: Settings) -> None:
     """
     from qdrant_client.models import Filter, HasVectorCondition
 
+    errors: list[str] = []
     try:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
         collections = [c.name for c in client.get_collections().collections]
-    except Exception:
-        return  # Qdrant unreachable — let requests fail naturally
+        if settings.collection not in collections:
+            return  # fresh install
 
-    if settings.collection not in collections:
-        return  # fresh install
+        info = client.get_collection(settings.collection)
+        vectors_cfg = info.config.params.vectors
+        if not isinstance(vectors_cfg, dict):
+            return
 
-    info = client.get_collection(settings.collection)
-    vectors_cfg = info.config.params.vectors
-    if not isinstance(vectors_cfg, dict):
-        return
-
-    errors: list[str] = []
-    for vn in ("sscd", "dino"):
-        if vn not in vectors_cfg:
-            continue
-        points, _ = client.scroll(
-            collection_name=settings.collection,
-            scroll_filter=Filter(must=[HasVectorCondition(has_vector=vn)]),
-            with_payload=[f"{vn}_normalize_size", "sscd_n_crops"],
-            with_vectors=False,
-            limit=1,
-        )
-        if not points:
-            continue
-        payload = points[0].payload
-
-        stored_norm = payload.get(f"{vn}_normalize_size")
-        if stored_norm is not None and stored_norm != settings.normalize_size:
-            errors.append(
-                f"[{vn}] normalize_size: collection has {stored_norm}, "
-                f"SFN_NORMALIZE_SIZE={settings.normalize_size}"
+        for vn in ("sscd", "dino"):
+            if vn not in vectors_cfg:
+                continue
+            points, _ = client.scroll(
+                collection_name=settings.collection,
+                scroll_filter=Filter(must=[HasVectorCondition(has_vector=vn)]),
+                with_payload=[f"{vn}_normalize_size", "sscd_n_crops"],
+                with_vectors=False,
+                limit=1,
             )
+            if not points:
+                continue
+            payload = points[0].payload
 
-        if vn == "sscd":
-            stored_crops = payload.get("sscd_n_crops")
-            if stored_crops is not None and stored_crops != settings.sscd_n_crops:
-                errors.append(
-                    f"[sscd] sscd_n_crops: collection has {stored_crops}, "
-                    f"SFN_SSCD_N_CROPS={settings.sscd_n_crops}"
-                )
+            # SSCD normalize_size is fixed at 288 regardless of SFN_NORMALIZE_SIZE;
+            # only DINO's is user-controlled, so only check it for dino.
+            if vn == "dino":
+                stored_norm = payload.get(f"{vn}_normalize_size")
+                if stored_norm is not None and stored_norm != settings.normalize_size:
+                    errors.append(
+                        f"[{vn}] normalize_size: collection has {stored_norm}, "
+                        f"SFN_NORMALIZE_SIZE={settings.normalize_size}"
+                    )
+
+            if vn == "sscd":
+                stored_crops = payload.get("sscd_n_crops")
+                if stored_crops is not None and stored_crops != settings.sscd_n_crops:
+                    errors.append(
+                        f"[sscd] sscd_n_crops: collection has {stored_crops}, "
+                        f"SFN_SSCD_N_CROPS={settings.sscd_n_crops}"
+                    )
+    except Exception:
+        return  # Qdrant unreachable or collection vanished — let requests fail naturally
 
     if errors:
         detail = "\n  ".join(errors)

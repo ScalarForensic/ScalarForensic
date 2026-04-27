@@ -331,7 +331,7 @@ def _check_collection_compat_cli(
     for embedder, indexer, model_hash in specs:
         vn = indexer.vector_name
         points, _ = indexer.client.scroll(
-            collection_name=settings.collection,
+            collection_name=indexer.collection,
             scroll_filter=Filter(must=[HasVectorCondition(has_vector=vn)]),
             with_payload=[f"{vn}_model_hash", f"{vn}_normalize_size", "sscd_n_crops"],
             with_vectors=False,
@@ -348,16 +348,18 @@ def _check_collection_compat_cli(
             )
 
         stored_norm = payload.get(f"{vn}_normalize_size")
-        if stored_norm is not None and stored_norm != settings.normalize_size:
+        if stored_norm is not None and stored_norm != embedder.normalize_size:
             errors.append(
-                f"[{vn}] normalize_size: stored={stored_norm}  current={settings.normalize_size}"
+                f"[{vn}] normalize_size: stored={stored_norm}"
+                f"  current={embedder.normalize_size}"
             )
 
         if vn == "sscd":
             stored_crops = payload.get("sscd_n_crops")
             if stored_crops is not None and stored_crops != settings.sscd_n_crops:
                 errors.append(
-                    f"[sscd] sscd_n_crops: stored={stored_crops}  current={settings.sscd_n_crops}"
+                    f"[sscd] sscd_n_crops: stored={stored_crops}"
+                    f"  current={settings.sscd_n_crops}"
                 )
 
     return errors
@@ -382,12 +384,22 @@ def index(
             "model downloads). Offline by default — see SFN_ALLOW_ONLINE in .env."
         ),
     ),
+    reference: bool = typer.Option(
+        False,
+        "--reference",
+        help=(
+            "Index into the reference collection instead of the case collection. "
+            "Requires SFN_REFERENCE_COLLECTION to be set in .env. "
+            "Points are tagged with is_reference=true in their payload."
+        ),
+    ),
     ignore_config_mismatch: bool = typer.Option(
         False,
         "--ignore-config-mismatch",
         help=(
-            "Skip embedding-configuration compatibility checks against existing collection points. "
-            "Mixing incompatible embeddings in one collection will corrupt similarity results."
+            "Skip embedding-configuration compatibility checks against existing"
+            " collection points. Mixing incompatible embeddings in one collection"
+            " will corrupt similarity results."
         ),
     ),
 ) -> None:
@@ -425,6 +437,23 @@ def index(
     if not dino and not sscd:
         typer.echo("[ERROR] Specify at least one of --dino or --sscd.", err=True)
         raise typer.Exit(1)
+
+    if reference:
+        if not settings.reference_collection:
+            typer.echo(
+                "[ERROR] --reference requires SFN_REFERENCE_COLLECTION to be set in .env",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if settings.reference_collection == settings.collection:
+            typer.echo(
+                "[ERROR] SFN_REFERENCE_COLLECTION must differ from SFN_COLLECTION",
+                err=True,
+            )
+            raise typer.Exit(1)
+        target_collection = settings.reference_collection
+    else:
+        target_collection = settings.collection
 
     # Pre-flight: fail fast if a HuggingFace Hub model ID is configured while offline.
     err = settings.offline_model_error(need_dino=dino)
@@ -497,16 +526,18 @@ def index(
     specs: list[tuple[AnyEmbedder, Indexer, str]] = []
     for embedder, vector_name in _loaded:
         typer.echo(
-            f"Connecting to Qdrant  collection={settings.collection!r}  vector={vector_name!r} ..."
+            f"Connecting to Qdrant  collection={target_collection!r}"
+            f"  vector={vector_name!r} ..."
         )
         try:
             indexer = Indexer(
                 url=settings.qdrant_url,
-                collection=settings.collection,
+                collection=target_collection,
                 vector_name=vector_name,
                 embedding_dim=embedder.embedding_dim,
                 api_key=settings.qdrant_api_key,
                 initial_vectors_config=_initial_vectors_config,
+                is_reference=reference,
             )
         except ValueError as exc:
             typer.echo(f"[ERROR] {exc}", err=True)
@@ -523,7 +554,8 @@ def index(
         detail = "\n  ".join(mismatches)
         if ignore_config_mismatch:
             typer.echo(
-                f"[WARN] Embedding configuration mismatch (--ignore-config-mismatch set):\n  {detail}",
+                "[WARN] Embedding configuration mismatch"
+                f" (--ignore-config-mismatch set):\n  {detail}",
                 err=True,
             )
         else:
@@ -531,7 +563,8 @@ def index(
             typer.echo(f"  {detail}", err=True)
             typer.echo("", err=True)
             typer.echo(
-                "Mixing incompatible embeddings in the same collection corrupts similarity results.",
+                "Mixing incompatible embeddings in the same collection"
+                " corrupts similarity results.",
                 err=True,
             )
             typer.echo("Options:", err=True)
