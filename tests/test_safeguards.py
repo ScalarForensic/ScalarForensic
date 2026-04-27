@@ -62,10 +62,14 @@ def _make_client(
     *,
     collections: list[str],
     vectors_cfg: dict[str, VectorParams] | None,
-    payload_by_vector: dict[str, dict | None],
+    payload_by_vector: dict[str, dict | list[dict] | None],
     fail_on: str | None = None,
 ) -> MagicMock:
     """Build a MagicMock QdrantClient covering the surface used by the safeguard.
+
+    *payload_by_vector* may map a vector name to a single payload dict (returned
+    as one point), a list of payload dicts (returned as that many points across
+    one scroll page), or ``None`` (no points).
 
     *fail_on* makes one of (``get_collections``, ``get_collection``, ``scroll``)
     raise ``ResponseHandlingException`` so we can exercise the error path.
@@ -82,16 +86,28 @@ def _make_client(
             raise ResponseHandlingException("connection refused")
         return SimpleNamespace(config=SimpleNamespace(params=SimpleNamespace(vectors=vectors_cfg)))
 
-    def _scroll(*, collection_name, scroll_filter, with_payload, with_vectors, limit):  # noqa: ARG001
+    def _scroll(
+        *,
+        collection_name,  # noqa: ARG001
+        scroll_filter,
+        with_payload,  # noqa: ARG001
+        with_vectors,  # noqa: ARG001
+        limit,  # noqa: ARG001
+        offset=None,
+    ):
         if fail_on == "scroll":
             raise ResponseHandlingException("connection refused")
-        # Identify which vector type was requested via the HasVectorCondition payload.
-        vn = scroll_filter.must[0].has_vector
-        payload = payload_by_vector.get(vn)
-        if payload is None:
+        # Once we've returned the configured points, signal end-of-scroll so
+        # the safeguard's pagination loop terminates.
+        if offset == "DONE":
             return ([], None)
-        point = SimpleNamespace(payload=payload)
-        return ([point], None)
+        vn = scroll_filter.must[0].has_vector
+        entry = payload_by_vector.get(vn)
+        if entry is None:
+            return ([], None)
+        payloads = entry if isinstance(entry, list) else [entry]
+        points = [SimpleNamespace(payload=p) for p in payloads]
+        return (points, "DONE")
 
     client.get_collections.side_effect = _get_collections
     client.get_collection.side_effect = _get_collection
@@ -337,6 +353,116 @@ def test_check_aggregates_multiple_mismatches():
     )
     # Two hashes + normalize_size + sscd_n_crops = 4 lines.
     assert len(errors) == 4
+
+
+# ---------------------------------------------------------------------------
+# check_collection_compat — collection-internal inconsistency
+# ---------------------------------------------------------------------------
+
+
+def test_check_detects_two_distinct_dino_hashes_in_collection():
+    """A collection that mixes two model_hashes (e.g. from a previous
+    sfn index --ignore-config-mismatch run) must be flagged regardless of
+    what the current settings happen to match."""
+    client = _make_client(
+        collections=["sfn"],
+        vectors_cfg={"dino": _vp()},
+        payload_by_vector={
+            "dino": [
+                {"dino_model_hash": "a" * 64, "dino_normalize_size": 224},
+                {"dino_model_hash": "b" * 64, "dino_normalize_size": 224},
+            ],
+        },
+    )
+    # Current settings happen to match the FIRST stored hash exactly — under
+    # the old single-point check this would have returned no errors, masking
+    # the mixed corpus.  Now it must flag the inconsistency.
+    errors = check_collection_compat(
+        client, "sfn", _settings(normalize_size=224), expected_dino_hash="a" * 64
+    )
+    assert len(errors) == 1
+    assert "multiple embedding configurations" in errors[0]
+    assert "a" * 64 in errors[0]
+    assert "b" * 64 in errors[0]
+
+
+def test_check_detects_mixed_normalize_size_in_collection():
+    client = _make_client(
+        collections=["sfn"],
+        vectors_cfg={"dino": _vp()},
+        payload_by_vector={
+            "dino": [
+                {"dino_normalize_size": 224},
+                {"dino_normalize_size": 512},
+            ],
+        },
+    )
+    errors = check_collection_compat(client, "sfn", _settings(normalize_size=224))
+    assert len(errors) == 1
+    assert "multiple embedding configurations" in errors[0]
+    assert "normalize_size=224" in errors[0]
+    assert "normalize_size=512" in errors[0]
+
+
+def test_check_detects_mixed_sscd_n_crops_in_collection():
+    client = _make_client(
+        collections=["sfn"],
+        vectors_cfg={"sscd": _vp()},
+        payload_by_vector={
+            "sscd": [
+                {"sscd_n_crops": 1},
+                {"sscd_n_crops": 5},
+            ],
+        },
+    )
+    errors = check_collection_compat(client, "sfn", _settings(sscd_n_crops=1))
+    assert len(errors) == 1
+    assert "multiple embedding configurations" in errors[0]
+    assert "sscd_n_crops=1" in errors[0]
+    assert "sscd_n_crops=5" in errors[0]
+
+
+def test_check_internal_inconsistency_skips_current_vs_stored_comparison():
+    """When the collection itself is inconsistent there is no single 'stored'
+    tuple to compare against; the safeguard must NOT also emit a
+    current-vs-stored line that would confuse the user about which value
+    is the real reference."""
+    client = _make_client(
+        collections=["sfn"],
+        vectors_cfg={"dino": _vp()},
+        payload_by_vector={
+            "dino": [
+                {"dino_model_hash": "a" * 64, "dino_normalize_size": 224},
+                {"dino_model_hash": "b" * 64, "dino_normalize_size": 512},
+            ],
+        },
+    )
+    errors = check_collection_compat(
+        client, "sfn", _settings(normalize_size=999), expected_dino_hash="c" * 64
+    )
+    assert len(errors) == 1
+    assert "multiple embedding configurations" in errors[0]
+
+
+def test_check_ignores_pre_provenance_points_in_inconsistency_scan():
+    """An older index whose points lack the provenance fields entirely must
+    not register as a phantom (None, None, None) tuple alongside a newer
+    point with real provenance — that would falsely flag inconsistency."""
+    client = _make_client(
+        collections=["sfn"],
+        vectors_cfg={"dino": _vp()},
+        payload_by_vector={
+            "dino": [
+                {},  # pre-provenance point
+                {"dino_model_hash": "a" * 64, "dino_normalize_size": 224},
+            ],
+        },
+    )
+    # Current settings match the one real tuple — should be clean.
+    errors = check_collection_compat(
+        client, "sfn", _settings(normalize_size=224), expected_dino_hash="a" * 64
+    )
+    assert errors == []
 
 
 def test_check_normalize_size_flag_suppresses_dino_resolution_check_only():

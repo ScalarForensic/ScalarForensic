@@ -82,23 +82,72 @@ def compute_remote_model_hash(endpoint: str, model_name: str, embedding_dim: int
     return h.hexdigest()
 
 
-def _fetch_one_point_payload(
+# Maximum points to inspect per vector type when looking for collection-internal
+# provenance inconsistency.  Large enough to almost certainly catch a mixed
+# corpus (any reasonable mix has the second config show up well before 1024
+# points), small enough that the scan runs in tens of milliseconds at startup.
+_INCONSISTENCY_SAMPLE_LIMIT = 1024
+_SCROLL_PAGE = 256
+
+
+def _sample_provenance_tuples(
     client: QdrantClient,
     collection: str,
     vector_name: str,
     fields: list[str],
-) -> dict | None:
-    """Return the payload of one point that has *vector_name* set, or ``None``."""
-    points, _ = client.scroll(
-        collection_name=collection,
-        scroll_filter=Filter(must=[HasVectorCondition(has_vector=vector_name)]),
-        with_payload=fields,
-        with_vectors=False,
-        limit=1,
-    )
-    if not points:
-        return None
-    return points[0].payload or {}
+) -> set[tuple]:
+    """Return the set of distinct provenance tuples observed in a sample.
+
+    Tuples are ``(model_hash, normalize_size, sscd_n_crops_or_None)``.  Stops
+    early as soon as a *second* distinct tuple appears — we only need to
+    distinguish "collection is internally consistent" from "collection has
+    multiple configs".  Points whose provenance fields are entirely absent
+    (older indexes that pre-date the payload schema) are skipped so they do
+    not register as a phantom "(None, None, None)" tuple.
+    """
+    seen: set[tuple] = set()
+    next_offset = None
+    sampled = 0
+    while sampled < _INCONSISTENCY_SAMPLE_LIMIT:
+        page_limit = min(_SCROLL_PAGE, _INCONSISTENCY_SAMPLE_LIMIT - sampled)
+        points, next_offset = client.scroll(
+            collection_name=collection,
+            scroll_filter=Filter(must=[HasVectorCondition(has_vector=vector_name)]),
+            with_payload=fields,
+            with_vectors=False,
+            limit=page_limit,
+            offset=next_offset,
+        )
+        if not points:
+            break
+        for p in points:
+            payload = p.payload or {}
+            tup = (
+                payload.get(f"{vector_name}_model_hash"),
+                payload.get(f"{vector_name}_normalize_size"),
+                payload.get("sscd_n_crops") if vector_name == "sscd" else None,
+            )
+            if tup == (None, None, None):
+                # Pre-provenance index — skip rather than treat as a real tuple.
+                continue
+            seen.add(tup)
+            if len(seen) > 1:
+                return seen
+        sampled += len(points)
+        if next_offset is None:
+            break
+    return seen
+
+
+def _format_provenance_tuple(vn: str, tup: tuple) -> str:
+    """Human-readable line for one observed provenance tuple."""
+    h, norm, crops = tup
+    parts = [f"model_hash={h}" if h else "model_hash=<absent>"]
+    if vn == "dino":
+        parts.append(f"normalize_size={norm}" if norm is not None else "normalize_size=<absent>")
+    if vn == "sscd":
+        parts.append(f"sscd_n_crops={crops}" if crops is not None else "sscd_n_crops=<absent>")
+    return "    " + ", ".join(parts)
 
 
 def check_collection_compat(
@@ -122,6 +171,17 @@ def check_collection_compat(
     weights, normalize_size → different ViT input resolution, sscd_n_crops →
     different multi-crop average), and cosine similarity across two embedding
     spaces is mathematically undefined.
+
+    Two distinct failure modes are detected:
+
+    1. **Current-vs-stored mismatch** — current settings differ from the
+       (uniform) provenance tuple recorded in the collection.
+    2. **Collection-internal inconsistency** — a sample of up to
+       ``_INCONSISTENCY_SAMPLE_LIMIT`` points reveals two or more distinct
+       provenance tuples for the same vector type.  This means a previous
+       run (probably with ``--ignore-config-mismatch``) merged two embedding
+       configurations into one collection; nothing the caller does to .env
+       will fix it — the collection itself must be re-indexed.
 
     The ``check_normalize_size`` flag exists for tests that want to assert
     individual checks in isolation, not as a phase-discrimination knob.
@@ -163,7 +223,7 @@ def check_collection_compat(
             fields.append("sscd_n_crops")
 
         try:
-            payload = _fetch_one_point_payload(client, collection, vn, fields)
+            seen = _sample_provenance_tuples(client, collection, vn, fields)
         except (
             ResponseHandlingException,
             UnexpectedResponse,
@@ -172,19 +232,33 @@ def check_collection_compat(
         ) as exc:
             raise QdrantUnavailable(str(exc)) from exc
 
-        if payload is None:
+        if not seen:
+            # Either no points of this vector type, or all sampled points
+            # pre-date the provenance schema.  Nothing to compare.
             continue
 
-        # model_hash — only checked when the caller supplied an expected value.
+        if len(seen) > 1:
+            tuple_lines = "\n".join(_format_provenance_tuple(vn, t) for t in sorted(seen))
+            errors.append(
+                f"[{vn}] collection contains multiple embedding configurations "
+                f"(found {len(seen)} distinct provenance tuples in a sample of "
+                f"≤{_INCONSISTENCY_SAMPLE_LIMIT} points):\n{tuple_lines}\n"
+                "    The collection itself is internally inconsistent — no .env "
+                "change can make queries meaningful.  Re-index from scratch."
+            )
+            # Skip current-vs-stored comparison: with multiple stored configs
+            # there is no single "stored" tuple to compare against.
+            continue
+
+        (stored_hash, stored_norm, stored_crops) = next(iter(seen))
+
         expected_hash = expected_hash_by_vector[vn]
-        stored_hash = payload.get(f"{vn}_model_hash")
         if expected_hash is not None and stored_hash and stored_hash != expected_hash:
             errors.append(f"[{vn}] model_hash: stored={stored_hash}  current={expected_hash}")
 
         # normalize_size — SSCD's is fixed (288 px) regardless of SFN_NORMALIZE_SIZE,
         # so only DINOv2's is user-controlled and worth comparing here.
         if check_normalize_size and vn == "dino":
-            stored_norm = payload.get(f"{vn}_normalize_size")
             if stored_norm is not None and stored_norm != settings.normalize_size:
                 errors.append(
                     f"[{vn}] normalize_size: stored={stored_norm}"
@@ -192,7 +266,6 @@ def check_collection_compat(
                 )
 
         if vn == "sscd":
-            stored_crops = payload.get("sscd_n_crops")
             if stored_crops is not None and stored_crops != settings.sscd_n_crops:
                 errors.append(
                     f"[sscd] sscd_n_crops: stored={stored_crops}  current={settings.sscd_n_crops}"
