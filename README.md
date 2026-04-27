@@ -65,7 +65,7 @@ Modes are automatically disabled in the UI if the corresponding collection has n
 
 **EXIF metadata extraction** (`SFN_EXTRACT_EXIF=true`): stores two boolean fields on every indexed point — `exif` (any EXIF data present) and `exif_geo_data` (GPS coordinates present).
 
-**Reference collection** (`SFN_REFERENCE_COLLECTION`): index external reference material into a separate Qdrant collection via `sfn --reference`, keeping it isolated from the case collection. See [INSTALL.md § Reference collection](INSTALL.md#reference-collection).
+**Configuration stability after indexing:** `SFN_SSCD_N_CROPS`, `SFN_NORMALIZE_SIZE`, and the model paths (`SFN_MODEL_DINO`, `SFN_MODEL_SSCD`) are baked into every embedding and must not change after a collection has been indexed. `sfn-web` will refuse to start if these settings differ from what was used during indexing; `sfn` will refuse to index unless `--ignore-config-mismatch` is passed. To change any of these, re-create the Qdrant collection and re-index from scratch.
 
 **Offline / airgapped by default:** the HuggingFace SDK is blocked from making any network requests at runtime. Connections to Qdrant and any configured remote embedder endpoint are the only outward traffic. Pass `--allow-online` (or set `SFN_ALLOW_ONLINE=true`) for first-time model downloads; omit it for all subsequent runs. Models and Python wheels can also be pre-bundled for fully airgapped deployment. See [INSTALL.md § Network policy](INSTALL.md#network-policy) and [INSTALL.md § Offline deployment](INSTALL.md#offline--airgapped-deployment).
 

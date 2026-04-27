@@ -273,6 +273,7 @@ def _print_summary(
 ) -> None:
     counts = Counter(r.status for r in records.values())
     total = len(records)
+    n_image = n_images
 
     # Per-model breakdown
     typer.echo("\nDone.")
@@ -288,7 +289,7 @@ def _print_summary(
     typer.echo(sep)
     rows: list[tuple[str, int | None]] = [
         ("Total files found", total),
-        ("  image files", n_images),
+        ("  image files", n_image),
         ("  video files", n_videos),
         ("  non-image files (unsupported)", counts[_S_UNSUPPORTED]),
         ("", None),
@@ -314,6 +315,54 @@ def _print_summary(
     typer.echo(f"  CSV report → {csv_path}")
 
 
+def _check_collection_compat_cli(
+    specs: "list[tuple[AnyEmbedder, Indexer, str]]",
+    settings: "Settings",
+) -> list[str]:
+    """Return mismatch descriptions between current config and existing indexed points.
+
+    Checks model hash, normalize_size, and sscd_n_crops against the payload of one
+    existing point per vector type.  Returns an empty list when everything matches or
+    the collection has no points yet.
+    """
+    from qdrant_client.models import Filter, HasVectorCondition
+
+    errors: list[str] = []
+    for embedder, indexer, model_hash in specs:
+        vn = indexer.vector_name
+        points, _ = indexer.client.scroll(
+            collection_name=settings.collection,
+            scroll_filter=Filter(must=[HasVectorCondition(has_vector=vn)]),
+            with_payload=[f"{vn}_model_hash", f"{vn}_normalize_size", "sscd_n_crops"],
+            with_vectors=False,
+            limit=1,
+        )
+        if not points:
+            continue
+        payload = points[0].payload
+
+        stored_hash = payload.get(f"{vn}_model_hash")
+        if stored_hash and stored_hash != model_hash:
+            errors.append(
+                f"[{vn}] model_hash: stored={stored_hash[:16]}…  current={model_hash[:16]}…"
+            )
+
+        stored_norm = payload.get(f"{vn}_normalize_size")
+        if stored_norm is not None and stored_norm != settings.normalize_size:
+            errors.append(
+                f"[{vn}] normalize_size: stored={stored_norm}  current={settings.normalize_size}"
+            )
+
+        if vn == "sscd":
+            stored_crops = payload.get("sscd_n_crops")
+            if stored_crops is not None and stored_crops != settings.sscd_n_crops:
+                errors.append(
+                    f"[sscd] sscd_n_crops: stored={stored_crops}  current={settings.sscd_n_crops}"
+                )
+
+    return errors
+
+
 def index(
     input_dir: Path | None = typer.Argument(
         default=None, help="Root directory of images (overrides SFN_INPUT_DIR)"
@@ -333,13 +382,12 @@ def index(
             "model downloads). Offline by default — see SFN_ALLOW_ONLINE in .env."
         ),
     ),
-    reference: bool = typer.Option(
+    ignore_config_mismatch: bool = typer.Option(
         False,
-        "--reference",
+        "--ignore-config-mismatch",
         help=(
-            "Index into the reference collection instead of the case collection. "
-            "Requires SFN_REFERENCE_COLLECTION to be set in .env. "
-            "Points are tagged with is_reference=true in their payload."
+            "Skip embedding-configuration compatibility checks against existing collection points. "
+            "Mixing incompatible embeddings in one collection will corrupt similarity results."
         ),
     ),
 ) -> None:
@@ -350,25 +398,6 @@ def index(
         os.environ[ENV_ALLOW_ONLINE] = "true"
 
     settings = Settings()
-
-    if reference:
-        if not settings.reference_collection:
-            typer.echo(
-                "[ERROR] --reference requires SFN_REFERENCE_COLLECTION to be set in .env",
-                err=True,
-            )
-            raise typer.Exit(1)
-        if settings.reference_collection == settings.collection:
-            typer.echo(
-                "[ERROR] SFN_REFERENCE_COLLECTION must differ from SFN_COLLECTION — "
-                "indexing with --reference into the case collection would stamp "
-                "is_reference=true onto existing case points.",
-                err=True,
-            )
-            raise typer.Exit(1)
-        target_collection = settings.reference_collection
-    else:
-        target_collection = settings.collection
 
     # Apply HuggingFace offline guard before any model loading occurs.
     settings.apply_network_policy()
@@ -468,17 +497,16 @@ def index(
     specs: list[tuple[AnyEmbedder, Indexer, str]] = []
     for embedder, vector_name in _loaded:
         typer.echo(
-            f"Connecting to Qdrant  collection={target_collection!r}  vector={vector_name!r} ..."
+            f"Connecting to Qdrant  collection={settings.collection!r}  vector={vector_name!r} ..."
         )
         try:
             indexer = Indexer(
                 url=settings.qdrant_url,
-                collection=target_collection,
+                collection=settings.collection,
                 vector_name=vector_name,
                 embedding_dim=embedder.embedding_dim,
                 api_key=settings.qdrant_api_key,
                 initial_vectors_config=_initial_vectors_config,
-                is_reference=reference,
             )
         except ValueError as exc:
             typer.echo(f"[ERROR] {exc}", err=True)
@@ -489,6 +517,30 @@ def index(
         typer.echo(f"  model_hash={model_hash[:16]}...")
 
         specs.append((embedder, indexer, model_hash))
+
+    mismatches = _check_collection_compat_cli(specs, settings)
+    if mismatches:
+        detail = "\n  ".join(mismatches)
+        if ignore_config_mismatch:
+            typer.echo(
+                f"[WARN] Embedding configuration mismatch (--ignore-config-mismatch set):\n  {detail}",
+                err=True,
+            )
+        else:
+            typer.echo("[ERROR] Embedding configuration mismatch — indexing aborted.", err=True)
+            typer.echo(f"  {detail}", err=True)
+            typer.echo("", err=True)
+            typer.echo(
+                "Mixing incompatible embeddings in the same collection corrupts similarity results.",
+                err=True,
+            )
+            typer.echo("Options:", err=True)
+            typer.echo("  • Restore the original settings in .env, OR", err=True)
+            typer.echo("  • Re-create the collection from scratch and re-index, OR", err=True)
+            typer.echo(
+                "  • Pass --ignore-config-mismatch to proceed anyway (not recommended)", err=True
+            )
+            raise typer.Exit(1)
 
     # Effective short-side cap for preprocessing: must satisfy both SSCD (≥331 px)
     # and DINOv2 (≥normalize_size px).  Computed here so it is available to
@@ -646,6 +698,11 @@ def index(
         if not unique_pairs:
             return
 
+        # Recompute duplicate-skip count after failure reclassification.
+        duplicate_skips_in_batch = sum(
+            1 for p, _ in ctx.path_hash_pairs if records[p].status == _S_SKIP_DUP
+        )
+
         # ── Per-model loop: normalize + embed, collect upsert jobs ────────────
         n_frames_in_batch = sum(1 for p, _ in ctx.path_hash_pairs if p in vmeta_by_path)
         n_plain_in_batch = len(ctx.path_hash_pairs) - n_frames_in_batch
@@ -654,7 +711,7 @@ def index(
 
         for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
             to_embed = [(p, h) for p, h in ctx.to_embed_per_spec[spec_idx] if p not in pre_failures]
-            n_skipped = len(unique_pairs) - len(to_embed)
+            n_skipped = duplicate_skips_in_batch + (len(unique_pairs) - len(to_embed))
             skipped_counts[spec_idx] += n_skipped
 
             to_embed_set = {p for p, _ in to_embed}

@@ -1983,6 +1983,74 @@ async def get_point_payload(point_id: str) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
+def _check_collection_compat(settings: Settings) -> None:
+    """Hard-fail if embedding-affecting settings differ from indexed collection points.
+
+    Checks sscd_n_crops and normalize_size against one existing point per vector type.
+    Skips silently when Qdrant is unreachable, the collection does not exist, or the
+    collection has no points yet (fresh install).  Payload fields absent in older indexes
+    are also skipped so as not to break existing deployments retroactively.
+    """
+    from qdrant_client.models import Filter, HasVectorCondition
+
+    try:
+        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+        collections = [c.name for c in client.get_collections().collections]
+    except Exception:
+        return  # Qdrant unreachable — let requests fail naturally
+
+    if settings.collection not in collections:
+        return  # fresh install
+
+    info = client.get_collection(settings.collection)
+    vectors_cfg = info.config.params.vectors
+    if not isinstance(vectors_cfg, dict):
+        return
+
+    errors: list[str] = []
+    for vn in ("sscd", "dino"):
+        if vn not in vectors_cfg:
+            continue
+        points, _ = client.scroll(
+            collection_name=settings.collection,
+            scroll_filter=Filter(must=[HasVectorCondition(has_vector=vn)]),
+            with_payload=[f"{vn}_normalize_size", "sscd_n_crops"],
+            with_vectors=False,
+            limit=1,
+        )
+        if not points:
+            continue
+        payload = points[0].payload
+
+        stored_norm = payload.get(f"{vn}_normalize_size")
+        if stored_norm is not None and stored_norm != settings.normalize_size:
+            errors.append(
+                f"[{vn}] normalize_size: collection has {stored_norm}, "
+                f"SFN_NORMALIZE_SIZE={settings.normalize_size}"
+            )
+
+        if vn == "sscd":
+            stored_crops = payload.get("sscd_n_crops")
+            if stored_crops is not None and stored_crops != settings.sscd_n_crops:
+                errors.append(
+                    f"[sscd] sscd_n_crops: collection has {stored_crops}, "
+                    f"SFN_SSCD_N_CROPS={settings.sscd_n_crops}"
+                )
+
+    if errors:
+        detail = "\n  ".join(errors)
+        print(
+            f"\n[ERROR] Embedding configuration mismatch — server cannot start safely.\n"
+            f"\n  {detail}\n"
+            f"\nAnalysis results would be silently wrong if the server started.\n"
+            f"Options:\n"
+            f"  • Restore the original settings in .env to match the indexed collection, OR\n"
+            f"  • Re-index the collection: sfn <input_dir> --sscd / --dino\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def start() -> None:
     parser = argparse.ArgumentParser(
         prog="sfn-web",
@@ -2017,5 +2085,8 @@ def start() -> None:
     if err:
         print(f"[ERROR] {err}", file=sys.stderr)
         sys.exit(1)
+
+    # Pre-flight: reject mismatched embedding config before accepting any requests.
+    _check_collection_compat(settings)
 
     uvicorn.run("scalar_forensic.web.app:app", host="0.0.0.0", port=8080, reload=False)
