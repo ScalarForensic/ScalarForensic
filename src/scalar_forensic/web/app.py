@@ -57,7 +57,13 @@ from scalar_forensic.web.pipeline import (
     query_semantic_stats,
     query_session,
 )
-from scalar_forensic.web.session import FileEntry, create_session, get_session
+from scalar_forensic.web.session import (
+    FileEntry,
+    create_session,
+    delete_session,
+    get_session,
+    reap_idle_sessions,
+)
 
 _DEFAULT_COSINE_THRESHOLD = 0.5
 
@@ -172,7 +178,19 @@ async def lifespan(_app: FastAPI):
         _points3d_cache = {"sscd": [], "dino": []}
     if settings.viz_export_path and _points3d_cache:
         _write_viz_export(settings.viz_export_path, _points3d_cache)
-    yield
+
+    async def _reaper() -> None:
+        while True:
+            await asyncio.sleep(60)
+            await reap_idle_sessions(settings.session_ttl_seconds)
+
+    reaper_task = asyncio.create_task(_reaper())
+    try:
+        yield
+    finally:
+        reaper_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reaper_task
 
 
 app = FastAPI(title="ScalarForensic", docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -217,24 +235,42 @@ async def analyze(
     settings = Settings()
     mode_list = [m.strip() for m in modes.split(",") if m.strip()]
 
-    session = await create_session()
+    try:
+        session = await create_session(max_active=settings.max_active_sessions)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     tmp_dir = Path(tempfile.mkdtemp(prefix="sfn_"))
     session.temp_dir = tmp_dir
 
-    for upload in files:
-        file_id = str(uuid.uuid4())
-        filename = upload.filename or "unknown"
-        # Preserve the original extension so container-detection libraries
-        # (PyAV, Pillow) can identify the format from the filename.
-        suffix = Path(filename).suffix
-        dest = tmp_dir / (file_id + suffix)
-        with dest.open("wb") as fout:
-            while True:
-                chunk = await upload.read(1024 * 1024)  # 1 MB chunks
-                if not chunk:
-                    break
-                fout.write(chunk)
-        session.files.append(FileEntry(file_id=file_id, filename=filename, temp_path=dest))
+    total_bytes = 0
+    try:
+        for upload in files:
+            file_id = str(uuid.uuid4())
+            filename = upload.filename or "unknown"
+            # Preserve the original extension so container-detection libraries
+            # (PyAV, Pillow) can identify the format from the filename.
+            suffix = Path(filename).suffix
+            dest = tmp_dir / (file_id + suffix)
+            with dest.open("wb") as fout:
+                while True:
+                    chunk = await upload.read(1024 * 1024)  # 1 MB chunks
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if settings.max_upload_bytes > 0 and total_bytes > settings.max_upload_bytes:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=(
+                                f"Upload exceeds the configured limit "
+                                f"({settings.max_upload_bytes} bytes). "
+                                "Set SFN_MAX_UPLOAD_BYTES to change."
+                            ),
+                        )
+                    fout.write(chunk)
+            session.files.append(FileEntry(file_id=file_id, filename=filename, temp_path=dest))
+    except HTTPException:
+        await delete_session(session.session_id)
+        raise
 
     async def event_stream():
         # Run the analysis (CPU-intensive) in a thread pool so the event loop
@@ -2231,4 +2267,9 @@ def start() -> None:
     # Pre-flight: reject mismatched embedding config before accepting any requests.
     _check_collection_compat(settings, ignore_mismatch=args.ignore_config_mismatch)
 
-    uvicorn.run("scalar_forensic.web.app:app", host="0.0.0.0", port=8080, reload=False)
+    uvicorn.run(
+        "scalar_forensic.web.app:app",
+        host=settings.web_host,
+        port=settings.web_port,
+        reload=False,
+    )
