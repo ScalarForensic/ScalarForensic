@@ -44,6 +44,7 @@ from scalar_forensic.tags import Tag, TagStore
 from scalar_forensic.video import (
     VIDEO_EXTENSIONS,
     extract_frame_at,
+    frame_disk_path,
     get_video_info,
     parse_frame_path,
 )
@@ -853,6 +854,71 @@ async def hit_metadata(path: str) -> JSONResponse:
     return JSONResponse(meta)
 
 
+@app.get("/api/frame-metadata")
+async def frame_metadata(video_hash: str, timecode_ms: int) -> JSONResponse:
+    """Metadata for an indexed video frame identified by video_hash + timecode_ms.
+
+    Constructs the canonical on-disk frame path and delegates to the same logic
+    used by /api/metadata for frame files.  Returns 404 when frame_store_dir is
+    not configured or the frame file does not exist on disk.
+    """
+    settings = Settings()
+    if settings.frame_store_dir is None:
+        raise HTTPException(status_code=404, detail="Frame store not configured")
+    p = frame_disk_path(settings.frame_store_dir, video_hash, timecode_ms).resolve()
+    _check_allowed_path(p)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail="Frame file not found")
+
+    # parse_frame_path will succeed because p is under frame_store_dir
+    frame_parsed = parse_frame_path(p, settings.frame_store_dir)
+    if frame_parsed is None:
+        raise HTTPException(status_code=500, detail="Could not parse frame path")
+    parsed_video_hash, parsed_timecode_ms = frame_parsed
+
+    frame_sha256: str | None = None
+    video_path_str: str | None = None
+    try:
+        _client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+        _records, _ = _client.scroll(
+            collection_name=settings.collection,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key="video_hash", match=MatchValue(value=parsed_video_hash)),
+                    FieldCondition(
+                        key="frame_timecode_ms", match=MatchValue(value=parsed_timecode_ms)
+                    ),
+                    FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
+                ]
+            ),
+            limit=1,
+            with_payload=["image_hash", "video_path"],
+            with_vectors=False,
+        )
+        if _records:
+            frame_sha256 = _records[0].payload.get("image_hash")
+            video_path_str = _records[0].payload.get("video_path")
+    except Exception:  # noqa: BLE001
+        pass
+
+    meta: dict = {
+        "filename": p.name,
+        "path": str(p),
+        "is_video_frame": True,
+        "frame_timecode_ms": parsed_timecode_ms,
+        "video_hash": parsed_video_hash,
+    }
+    if frame_sha256:
+        meta["hash_sha256"] = frame_sha256
+    if video_path_str:
+        meta["video_path"] = video_path_str
+        _vp = Path(video_path_str)
+        if _vp.is_file():
+            _info = get_video_info(_vp)
+            meta.update({f"video_{k}": v for k, v in _info.items()})
+    return JSONResponse(meta)
+
+
 # ---------------------------------------------------------------------------
 # Video frame serving
 # ---------------------------------------------------------------------------
@@ -1406,40 +1472,21 @@ async def triage(
     tag_id: str = Form(...),
     limit: int = Form(default=50, ge=1, le=500),
     reverse: bool = Form(default=False),
-    source: str = Form(default="indexed"),
     cosine_threshold: float = Form(default=_DEFAULT_COSINE_THRESHOLD, ge=0.0, le=1.0),
 ) -> JSONResponse:
     """Run a Tag-Triage query against the indexed dataset using DINOv2.
 
-    source='indexed' (default): search the case collection; tag IDs may reference
-    the reference collection via lookup_from when SFN_REFERENCE_COLLECTION is set.
-    source='reference': search the reference collection directly for high-quality
-    tagging using known material.
+    Always searches the case collection; tag IDs may reference the reference
+    collection via lookup_from when SFN_REFERENCE_COLLECTION is set. Triage
+    against the reference collection itself is unsupported because tag point
+    IDs live in the case collection and would not resolve there — use
+    /api/explore with collection='reference' for reference-side browsing.
 
     cosine_threshold filters Recommend-mode hits (tag has no negatives).
     Discovery-mode triage ignores it because the score is an integer triplet count.
     """
     settings = Settings()
-    if source not in {"indexed", "reference"}:
-        raise HTTPException(status_code=400, detail="source must be 'indexed' or 'reference'")
-    if source == "reference":
-        if not settings.reference_collection:
-            raise HTTPException(
-                status_code=400,
-                detail="SFN_REFERENCE_COLLECTION is not configured",
-            )
-        triage_collection = settings.reference_collection
-        # Tag IDs may live in the case collection (the typical workflow:
-        # mark hits found via search → those IDs come from SFN_COLLECTION).
-        # Pass the case collection as lookup_from so Qdrant can resolve
-        # the reference vectors regardless of which collection the tag
-        # was built from.  When the tag's IDs already live in the reference
-        # collection, lookup_from is harmless (Qdrant prefers in-collection
-        # IDs).
-        ref_coll_for_lookup = settings.collection
-    else:
-        triage_collection = settings.collection
-        ref_coll_for_lookup = settings.reference_collection
+    triage_collection = settings.collection
     try:
         client, store = _tag_client_and_store()
 
@@ -1457,7 +1504,7 @@ async def triage(
             vector_name="dino",
             limit=limit,
             reverse=reverse,
-            reference_collection=ref_coll_for_lookup,
+            reference_collection=None,
             cosine_threshold=cosine_threshold,
         )
     except HTTPException:
@@ -1520,12 +1567,33 @@ async def explore(
         pos_ids = list(tag.positive_ids)
         if tag.target_id is not None and tag.target_id not in {str(i) for i in pos_ids}:
             pos_ids = pos_ids + [tag.target_id]
+        neg_ids = list(tag.negative_ids)
+        all_ids = pos_ids + neg_ids
+        if all_ids:
+
+            def _filter_to_collection() -> tuple[list, list]:
+                try:
+                    found = client.retrieve(
+                        explore_collection,
+                        ids=all_ids,
+                        with_payload=False,
+                        with_vectors=False,
+                    )
+                    found_set = {str(p.id) for p in found}
+                    return (
+                        [i for i in pos_ids if str(i) in found_set],
+                        [i for i in neg_ids if str(i) in found_set],
+                    )
+                except Exception:
+                    return [], []
+
+            pos_ids, neg_ids = await asyncio.to_thread(_filter_to_collection)
         hits, strategy = await asyncio.to_thread(
             run_explore,
             client,
             explore_collection,
             pos_ids,
-            list(tag.negative_ids),
+            neg_ids,
             vector_name="dino",
             limit=limit,
         )
@@ -1983,6 +2051,136 @@ async def get_point_payload(point_id: str) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
+def _check_collection_compat(settings: Settings, *, ignore_mismatch: bool = False) -> None:
+    """Hard-fail if Phase-2 (query) would produce silently wrong results.
+
+    Every Phase-2 query re-embeds the user input with the *current*
+    ``SFN_MODEL_*``, ``SFN_NORMALIZE_SIZE`` and ``SFN_SSCD_N_CROPS`` and
+    cosine-compares it against vectors in the collection that were produced
+    under the *previous* values.  A drift in any of the three changes the
+    embedding function — query and corpus vectors no longer share an
+    embedding space, and similarity scores become silently meaningless
+    (results still rank, calibrated thresholds are no longer calibrated).
+
+    Skips silently when the collection does not exist or has no points (fresh
+    install).  Payload fields absent in older indexes are skipped so as not to
+    break existing deployments retroactively.
+
+    Qdrant connectivity errors are reported as warnings — request handling will
+    fail naturally if the database stays down — but never silently treated as
+    "fresh install", which would mask real configuration drift.
+
+    With ``ignore_mismatch=True`` the check still runs and logs a warning, but
+    does not block startup.  This is the ``--ignore-config-mismatch`` escape
+    hatch for read-only inspection of a known-incompatible collection; it
+    must be opted into per invocation, never via the environment.
+    """
+    from scalar_forensic.safeguards import (
+        QdrantUnavailable,
+        check_collection_compat,
+        expected_model_hashes_from_settings,
+    )
+
+    try:
+        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+    except (ConnectionError, OSError, ValueError) as exc:
+        print(
+            f"[WARN] Qdrant client construction failed during compatibility check: {exc}\n"
+            "       Server will start; per-request errors will surface the issue.",
+            file=sys.stderr,
+        )
+        return
+
+    # Only hash the model files that correspond to vectors actually present
+    # in the collection — avoids loading a DINOv2 snapshot when the collection
+    # is SSCD-only, and vice versa.
+    try:
+        existing_collections = {c.name for c in client.get_collections().collections}
+    except (ConnectionError, OSError) as exc:
+        print(
+            f"[WARN] Qdrant unreachable during compatibility check: {exc}\n"
+            "       Server will start; request handlers will surface the issue.",
+            file=sys.stderr,
+        )
+        return
+    except Exception as exc:  # noqa: BLE001 — explicitly logged, not swallowed
+        print(
+            f"[WARN] Unexpected error contacting Qdrant during compatibility check: {exc}\n"
+            "       Server will start; request handlers will surface the issue.",
+            file=sys.stderr,
+        )
+        return
+
+    if settings.collection not in existing_collections:
+        return
+
+    try:
+        info = client.get_collection(settings.collection)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[WARN] Could not inspect collection {settings.collection!r}: {exc}\n"
+            "       Server will start; request handlers will surface the issue.",
+            file=sys.stderr,
+        )
+        return
+
+    vectors_cfg = info.config.params.vectors
+    needed_vectors: set[str] = set()
+    if isinstance(vectors_cfg, dict):
+        for vn in ("dino", "sscd"):
+            if vn in vectors_cfg:
+                needed_vectors.add(vn)
+
+    expected = expected_model_hashes_from_settings(settings, needed_vectors=needed_vectors)
+
+    try:
+        errors = check_collection_compat(
+            client,
+            settings.collection,
+            settings,
+            expected_dino_hash=expected.get("dino"),
+            expected_sscd_hash=expected.get("sscd"),
+        )
+    except QdrantUnavailable as exc:
+        print(
+            f"[WARN] Qdrant unreachable during compatibility check: {exc}\n"
+            "       Server will start; request handlers will surface the issue.",
+            file=sys.stderr,
+        )
+        return
+
+    if not errors:
+        return
+
+    detail = "\n  ".join(errors)
+    if ignore_mismatch:
+        print(
+            f"\n[WARN] Embedding configuration mismatch (--ignore-config-mismatch set):\n"
+            f"\n  {detail}\n"
+            f"\nQuery-time embeddings are produced with the current settings and\n"
+            f"compared against vectors stored under the previous values.  Similarity\n"
+            f"scores will be silently meaningless against this collection.  Use only\n"
+            f"for read-only inspection of a known-incompatible index.\n",
+            file=sys.stderr,
+        )
+        return
+
+    print(
+        f"\n[ERROR] Embedding configuration mismatch — server cannot start safely.\n"
+        f"\n  {detail}\n"
+        f"\nQuery-time embeddings are produced with the current settings and\n"
+        f"compared against vectors stored under the previous values.  Cosine\n"
+        f"scores would be silently meaningless if the server started.\n"
+        f"Options:\n"
+        f"  • Restore the original settings in .env to match the indexed collection, OR\n"
+        f"  • Re-index the collection: sfn <input_dir> --sscd / --dino, OR\n"
+        f"  • Pass --ignore-config-mismatch to start anyway (read-only; results will be\n"
+        f"    silently wrong — never use for forensic conclusions)\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def start() -> None:
     parser = argparse.ArgumentParser(
         prog="sfn-web",
@@ -1995,6 +2193,18 @@ def start() -> None:
         help=(
             "Allow outward internet connections (e.g. to HuggingFace Hub for first-time "
             "model downloads). Offline by default — see SFN_ALLOW_ONLINE in .env."
+        ),
+    )
+    parser.add_argument(
+        "--ignore-config-mismatch",
+        action="store_true",
+        default=False,
+        help=(
+            "Start the server even when the current SFN_MODEL_*, SFN_NORMALIZE_SIZE "
+            "or SFN_SSCD_N_CROPS differ from the values used to populate the indexed "
+            "collection.  Cosine similarity scores will be silently meaningless under "
+            "drift; use only for read-only inspection of a known-incompatible index, "
+            "never for forensic conclusions."
         ),
     )
     args = parser.parse_args()
@@ -2017,5 +2227,8 @@ def start() -> None:
     if err:
         print(f"[ERROR] {err}", file=sys.stderr)
         sys.exit(1)
+
+    # Pre-flight: reject mismatched embedding config before accepting any requests.
+    _check_collection_compat(settings, ignore_mismatch=args.ignore_config_mismatch)
 
     uvicorn.run("scalar_forensic.web.app:app", host="0.0.0.0", port=8080, reload=False)

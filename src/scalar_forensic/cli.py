@@ -273,6 +273,7 @@ def _print_summary(
 ) -> None:
     counts = Counter(r.status for r in records.values())
     total = len(records)
+    n_image = n_images
 
     # Per-model breakdown
     typer.echo("\nDone.")
@@ -288,7 +289,7 @@ def _print_summary(
     typer.echo(sep)
     rows: list[tuple[str, int | None]] = [
         ("Total files found", total),
-        ("  image files", n_images),
+        ("  image files", n_image),
         ("  video files", n_videos),
         ("  non-image files (unsupported)", counts[_S_UNSUPPORTED]),
         ("", None),
@@ -312,6 +313,47 @@ def _print_summary(
             typer.echo(f"  {label:<36} {value:>6,}")
     typer.echo(sep)
     typer.echo(f"  CSV report → {csv_path}")
+
+
+def _check_collection_compat_cli(
+    specs: "list[tuple[AnyEmbedder, Indexer, str]]",
+    settings: "Settings",
+) -> list[str]:
+    """Return mismatch descriptions between current config and existing indexed points.
+
+    Thin adapter over :func:`scalar_forensic.safeguards.check_collection_compat`
+    that pulls expected hashes from the loaded embedders (already computed for
+    the upsert payload) and uses each spec's own Indexer client.
+    """
+    from scalar_forensic.safeguards import QdrantUnavailable, check_collection_compat
+
+    if not specs:
+        return []
+
+    expected_dino_hash: str | None = None
+    expected_sscd_hash: str | None = None
+    for _embedder, indexer, model_hash in specs:
+        if indexer.vector_name == "dino":
+            expected_dino_hash = model_hash
+        elif indexer.vector_name == "sscd":
+            expected_sscd_hash = model_hash
+
+    client = specs[0][1].client
+    collection = specs[0][1].collection
+    try:
+        return check_collection_compat(
+            client,
+            collection,
+            settings,
+            expected_dino_hash=expected_dino_hash,
+            expected_sscd_hash=expected_sscd_hash,
+        )
+    except QdrantUnavailable as exc:
+        # During `sfn index` Qdrant is *required* — surface the failure rather
+        # than swallow it.  The Indexer constructor would have failed earlier
+        # if Qdrant were truly down, so reaching this branch implies a transient
+        # error worth reporting.
+        return [f"Qdrant unreachable while validating compatibility: {exc}"]
 
 
 def index(
@@ -342,6 +384,15 @@ def index(
             "Points are tagged with is_reference=true in their payload."
         ),
     ),
+    ignore_config_mismatch: bool = typer.Option(
+        False,
+        "--ignore-config-mismatch",
+        help=(
+            "Skip embedding-configuration compatibility checks against existing"
+            " collection points. Mixing incompatible embeddings in one collection"
+            " will corrupt similarity results."
+        ),
+    ),
 ) -> None:
     """Embed all images under INPUT_DIR and store vectors in Qdrant."""
     # Write back to os.environ so Settings() reads the correct value,
@@ -350,25 +401,6 @@ def index(
         os.environ[ENV_ALLOW_ONLINE] = "true"
 
     settings = Settings()
-
-    if reference:
-        if not settings.reference_collection:
-            typer.echo(
-                "[ERROR] --reference requires SFN_REFERENCE_COLLECTION to be set in .env",
-                err=True,
-            )
-            raise typer.Exit(1)
-        if settings.reference_collection == settings.collection:
-            typer.echo(
-                "[ERROR] SFN_REFERENCE_COLLECTION must differ from SFN_COLLECTION — "
-                "indexing with --reference into the case collection would stamp "
-                "is_reference=true onto existing case points.",
-                err=True,
-            )
-            raise typer.Exit(1)
-        target_collection = settings.reference_collection
-    else:
-        target_collection = settings.collection
 
     # Apply HuggingFace offline guard before any model loading occurs.
     settings.apply_network_policy()
@@ -396,6 +428,23 @@ def index(
     if not dino and not sscd:
         typer.echo("[ERROR] Specify at least one of --dino or --sscd.", err=True)
         raise typer.Exit(1)
+
+    if reference:
+        if not settings.reference_collection:
+            typer.echo(
+                "[ERROR] --reference requires SFN_REFERENCE_COLLECTION to be set in .env",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if settings.reference_collection == settings.collection:
+            typer.echo(
+                "[ERROR] SFN_REFERENCE_COLLECTION must differ from SFN_COLLECTION",
+                err=True,
+            )
+            raise typer.Exit(1)
+        target_collection = settings.reference_collection
+    else:
+        target_collection = settings.collection
 
     # Pre-flight: fail fast if a HuggingFace Hub model ID is configured while offline.
     err = settings.offline_model_error(need_dino=dino)
@@ -486,9 +535,35 @@ def index(
 
         typer.echo("Computing model hash (may take a moment) ...")
         model_hash = embedder.model_hash
-        typer.echo(f"  model_hash={model_hash[:16]}...")
+        typer.echo(f"  model_hash={model_hash}")
 
         specs.append((embedder, indexer, model_hash))
+
+    mismatches = _check_collection_compat_cli(specs, settings)
+    if mismatches:
+        detail = "\n  ".join(mismatches)
+        if ignore_config_mismatch:
+            typer.echo(
+                "[WARN] Embedding configuration mismatch"
+                f" (--ignore-config-mismatch set):\n  {detail}",
+                err=True,
+            )
+        else:
+            typer.echo("[ERROR] Embedding configuration mismatch — indexing aborted.", err=True)
+            typer.echo(f"  {detail}", err=True)
+            typer.echo("", err=True)
+            typer.echo(
+                "Mixing incompatible embeddings in the same collection"
+                " corrupts similarity results.",
+                err=True,
+            )
+            typer.echo("Options:", err=True)
+            typer.echo("  • Restore the original settings in .env, OR", err=True)
+            typer.echo("  • Re-create the collection from scratch and re-index, OR", err=True)
+            typer.echo(
+                "  • Pass --ignore-config-mismatch to proceed anyway (not recommended)", err=True
+            )
+            raise typer.Exit(1)
 
     # Effective short-side cap for preprocessing: must satisfy both SSCD (≥331 px)
     # and DINOv2 (≥normalize_size px).  Computed here so it is available to
@@ -646,6 +721,11 @@ def index(
         if not unique_pairs:
             return
 
+        # Recompute duplicate-skip count after failure reclassification.
+        duplicate_skips_in_batch = sum(
+            1 for p, _ in ctx.path_hash_pairs if records[p].status == _S_SKIP_DUP
+        )
+
         # ── Per-model loop: normalize + embed, collect upsert jobs ────────────
         n_frames_in_batch = sum(1 for p, _ in ctx.path_hash_pairs if p in vmeta_by_path)
         n_plain_in_batch = len(ctx.path_hash_pairs) - n_frames_in_batch
@@ -654,7 +734,7 @@ def index(
 
         for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
             to_embed = [(p, h) for p, h in ctx.to_embed_per_spec[spec_idx] if p not in pre_failures]
-            n_skipped = len(unique_pairs) - len(to_embed)
+            n_skipped = duplicate_skips_in_batch + (len(unique_pairs) - len(to_embed))
             skipped_counts[spec_idx] += n_skipped
 
             to_embed_set = {p for p, _ in to_embed}

@@ -370,3 +370,45 @@ def test_query_exact_video_multiple_frames_sorted_by_timecode():
     assert len(hits) == 1
     timecodes = [mf.timecode_ms for mf in hits[0].matched_frames]
     assert timecodes == [1000, 2000, 3000]
+
+
+# ---------------------------------------------------------------------------
+# is_reference propagation through grouping
+# ---------------------------------------------------------------------------
+
+
+def test_grouping_propagates_is_reference_true():
+    """Frames from a reference-collection video must keep is_reference=True
+    after grouping.  Without this, the final case/ref dedup key collapses
+    reference and case results that share a video_path."""
+    f1 = _frame_hit(timecode_ms=1000, scores={"semantic": 0.8})
+    f2 = _frame_hit(timecode_ms=2000, scores={"semantic": 0.9})
+    f1.is_reference = True
+    f2.is_reference = True
+
+    result = _group_video_hits([f1, f2])
+    assert len(result) == 1
+    assert result[0].is_reference is True
+
+
+def test_grouping_keeps_is_reference_false_for_case_hits():
+    f1 = _frame_hit(timecode_ms=1000, scores={"semantic": 0.8})
+    f2 = _frame_hit(timecode_ms=2000, scores={"semantic": 0.9})
+
+    result = _group_video_hits([f1, f2])
+    assert len(result) == 1
+    assert result[0].is_reference is False
+
+
+def test_grouping_marks_reference_when_any_frame_in_group_is_reference():
+    """Defensive: if a future caller mixes sources, the grouped hit should
+    err on the side of is_reference=True so the final dedup key doesn't
+    silently collapse reference and case results."""
+    f1 = _frame_hit(timecode_ms=1000, scores={"semantic": 0.8})
+    f2 = _frame_hit(timecode_ms=2000, scores={"semantic": 0.9})
+    f1.is_reference = False
+    f2.is_reference = True
+
+    result = _group_video_hits([f1, f2])
+    assert len(result) == 1
+    assert result[0].is_reference is True
