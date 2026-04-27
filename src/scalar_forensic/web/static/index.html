@@ -1395,7 +1395,8 @@
         </label>
         <div style="display:flex;gap:6px;margin-top:2px">
           <button class="btn-primary" style="flex:1"
-                  :disabled="triageRunning"
+                  :disabled="triageRunning || triageTarget === 'reference'"
+                  x-show="triageTarget !== 'reference'"
                   @click="runTriage()"
                   x-text="triageRunning ? 'Running…' : '▶ Run Triage'"></button>
           <button class="btn-secondary" style="flex:1"
@@ -1403,6 +1404,12 @@
                   x-show="triageTarget !== 'uploaded'"
                   @click="runExplore()"
                   x-text="triageRunning ? 'Running…' : '▶ Explore'"></button>
+        </div>
+        <div class="triage-explore-hint" x-show="triageTarget === 'reference'"
+             style="margin-top:4px">
+          Triage searches with the tag's marked point IDs, which live in the
+          case collection — they do not exist in the reference collection.
+          Use Explore for reference material.
         </div>
         <div class="triage-error-msg" x-show="triageError" x-text="triageError"></div>
       </div>
@@ -2961,8 +2968,10 @@ function sfn() {
           fd.append('session_id', this.sessionId);
           resp = await fetch('/api/triage/query-images', { method: 'POST', body: fd });
         } else {
+          // Triage against the reference collection is intentionally unsupported
+          // (tag IDs reference case-collection points and do not resolve in the
+          // reference collection); the Run Triage button is hidden for that target.
           fd.append('reverse', this.triageReverse ? 'true' : 'false');
-          fd.append('source', this.triageTarget === 'reference' ? 'reference' : 'indexed');
           resp = await fetch('/api/triage', { method: 'POST', body: fd });
         }
         if (!resp.ok) {

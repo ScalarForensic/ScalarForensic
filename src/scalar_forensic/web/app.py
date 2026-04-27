@@ -1472,31 +1472,21 @@ async def triage(
     tag_id: str = Form(...),
     limit: int = Form(default=50, ge=1, le=500),
     reverse: bool = Form(default=False),
-    source: str = Form(default="indexed"),
     cosine_threshold: float = Form(default=_DEFAULT_COSINE_THRESHOLD, ge=0.0, le=1.0),
 ) -> JSONResponse:
     """Run a Tag-Triage query against the indexed dataset using DINOv2.
 
-    source='indexed' (default): search the case collection; tag IDs may reference
-    the reference collection via lookup_from when SFN_REFERENCE_COLLECTION is set.
-    source='reference': search the reference collection directly for high-quality
-    tagging using known material.
+    Always searches the case collection; tag IDs may reference the reference
+    collection via lookup_from when SFN_REFERENCE_COLLECTION is set. Triage
+    against the reference collection itself is unsupported because tag point
+    IDs live in the case collection and would not resolve there — use
+    /api/explore with collection='reference' for reference-side browsing.
 
     cosine_threshold filters Recommend-mode hits (tag has no negatives).
     Discovery-mode triage ignores it because the score is an integer triplet count.
     """
     settings = Settings()
-    if source not in {"indexed", "reference"}:
-        raise HTTPException(status_code=400, detail="source must be 'indexed' or 'reference'")
-    if source == "reference":
-        if not settings.reference_collection:
-            raise HTTPException(
-                status_code=400,
-                detail="SFN_REFERENCE_COLLECTION is not configured",
-            )
-        triage_collection = settings.reference_collection
-    else:
-        triage_collection = settings.collection
+    triage_collection = settings.collection
     try:
         client, store = _tag_client_and_store()
 
