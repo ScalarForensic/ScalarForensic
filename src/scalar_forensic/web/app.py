@@ -1580,6 +1580,7 @@ async def explore(
         neg_ids = list(tag.negative_ids)
         all_ids = pos_ids + neg_ids
         if all_ids:
+
             def _filter_to_collection() -> tuple[list, list]:
                 try:
                     found = client.retrieve(
@@ -1595,6 +1596,7 @@ async def explore(
                     )
                 except Exception:
                     return [], []
+
             pos_ids, neg_ids = await asyncio.to_thread(_filter_to_collection)
         hits, strategy = await asyncio.to_thread(
             run_explore,
@@ -2062,58 +2064,88 @@ async def get_point_payload(point_id: str) -> JSONResponse:
 def _check_collection_compat(settings: Settings) -> None:
     """Hard-fail if embedding-affecting settings differ from indexed collection points.
 
-    Checks sscd_n_crops and normalize_size against one existing point per vector type.
-    Skips silently when Qdrant is unreachable, the collection does not exist, or the
-    collection has no points yet (fresh install).  Payload fields absent in older indexes
-    are also skipped so as not to break existing deployments retroactively.
-    """
-    from qdrant_client.models import Filter, HasVectorCondition
+    Checks model_hash, normalize_size, and sscd_n_crops against the payload of one
+    existing point per vector type.  Skips silently when the collection does not
+    exist or has no points (fresh install).  Payload fields absent in older indexes
+    are skipped so as not to break existing deployments retroactively.
 
-    errors: list[str] = []
+    Qdrant connectivity errors are reported as warnings — request handling will
+    fail naturally if the database stays down — but never silently treated as
+    "fresh install", which would mask real configuration drift.
+    """
+    from scalar_forensic.safeguards import (
+        QdrantUnavailable,
+        check_collection_compat,
+        expected_model_hashes_from_settings,
+    )
+
     try:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-        collections = [c.name for c in client.get_collections().collections]
-        if settings.collection not in collections:
-            return  # fresh install
+    except (ConnectionError, OSError, ValueError) as exc:
+        print(
+            f"[WARN] Qdrant client construction failed during compatibility check: {exc}\n"
+            "       Server will start; per-request errors will surface the issue.",
+            file=sys.stderr,
+        )
+        return
 
+    # Determine which vector types the existing collection actually contains so
+    # we only hash the model files we need.  A fresh collection or unreachable
+    # Qdrant short-circuits before any model hashing.
+    try:
+        existing_collections = {c.name for c in client.get_collections().collections}
+    except (ConnectionError, OSError) as exc:
+        print(
+            f"[WARN] Qdrant unreachable during compatibility check: {exc}\n"
+            "       Server will start; request handlers will surface the issue.",
+            file=sys.stderr,
+        )
+        return
+    except Exception as exc:  # noqa: BLE001 — explicitly logged, not swallowed
+        print(
+            f"[WARN] Unexpected error contacting Qdrant during compatibility check: {exc}\n"
+            "       Server will start; request handlers will surface the issue.",
+            file=sys.stderr,
+        )
+        return
+
+    if settings.collection not in existing_collections:
+        return  # fresh install — nothing to validate against
+
+    try:
         info = client.get_collection(settings.collection)
-        vectors_cfg = info.config.params.vectors
-        if not isinstance(vectors_cfg, dict):
-            return
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[WARN] Could not inspect collection {settings.collection!r}: {exc}\n"
+            "       Server will start; request handlers will surface the issue.",
+            file=sys.stderr,
+        )
+        return
 
-        for vn in ("sscd", "dino"):
-            if vn not in vectors_cfg:
-                continue
-            points, _ = client.scroll(
-                collection_name=settings.collection,
-                scroll_filter=Filter(must=[HasVectorCondition(has_vector=vn)]),
-                with_payload=[f"{vn}_normalize_size", "sscd_n_crops"],
-                with_vectors=False,
-                limit=1,
-            )
-            if not points:
-                continue
-            payload = points[0].payload
+    vectors_cfg = info.config.params.vectors
+    needed_vectors: set[str] = set()
+    if isinstance(vectors_cfg, dict):
+        for vn in ("dino", "sscd"):
+            if vn in vectors_cfg:
+                needed_vectors.add(vn)
 
-            # SSCD normalize_size is fixed at 288 regardless of SFN_NORMALIZE_SIZE;
-            # only DINO's is user-controlled, so only check it for dino.
-            if vn == "dino":
-                stored_norm = payload.get(f"{vn}_normalize_size")
-                if stored_norm is not None and stored_norm != settings.normalize_size:
-                    errors.append(
-                        f"[{vn}] normalize_size: collection has {stored_norm}, "
-                        f"SFN_NORMALIZE_SIZE={settings.normalize_size}"
-                    )
+    expected = expected_model_hashes_from_settings(settings, needed_vectors=needed_vectors)
 
-            if vn == "sscd":
-                stored_crops = payload.get("sscd_n_crops")
-                if stored_crops is not None and stored_crops != settings.sscd_n_crops:
-                    errors.append(
-                        f"[sscd] sscd_n_crops: collection has {stored_crops}, "
-                        f"SFN_SSCD_N_CROPS={settings.sscd_n_crops}"
-                    )
-    except Exception:
-        return  # Qdrant unreachable or collection vanished — let requests fail naturally
+    try:
+        errors = check_collection_compat(
+            client,
+            settings.collection,
+            settings,
+            expected_dino_hash=expected.get("dino"),
+            expected_sscd_hash=expected.get("sscd"),
+        )
+    except QdrantUnavailable as exc:
+        print(
+            f"[WARN] Qdrant unreachable during compatibility check: {exc}\n"
+            "       Server will start; request handlers will surface the issue.",
+            file=sys.stderr,
+        )
+        return
 
     if errors:
         detail = "\n  ".join(errors)

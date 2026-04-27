@@ -321,48 +321,39 @@ def _check_collection_compat_cli(
 ) -> list[str]:
     """Return mismatch descriptions between current config and existing indexed points.
 
-    Checks model hash, normalize_size, and sscd_n_crops against the payload of one
-    existing point per vector type.  Returns an empty list when everything matches or
-    the collection has no points yet.
+    Thin adapter over :func:`scalar_forensic.safeguards.check_collection_compat`
+    that pulls expected hashes from the loaded embedders (already computed for
+    the upsert payload) and uses each spec's own Indexer client.
     """
-    from qdrant_client.models import Filter, HasVectorCondition
+    from scalar_forensic.safeguards import QdrantUnavailable, check_collection_compat
 
-    errors: list[str] = []
-    for embedder, indexer, model_hash in specs:
-        vn = indexer.vector_name
-        points, _ = indexer.client.scroll(
-            collection_name=indexer.collection,
-            scroll_filter=Filter(must=[HasVectorCondition(has_vector=vn)]),
-            with_payload=[f"{vn}_model_hash", f"{vn}_normalize_size", "sscd_n_crops"],
-            with_vectors=False,
-            limit=1,
+    if not specs:
+        return []
+
+    expected_dino_hash: str | None = None
+    expected_sscd_hash: str | None = None
+    for _embedder, indexer, model_hash in specs:
+        if indexer.vector_name == "dino":
+            expected_dino_hash = model_hash
+        elif indexer.vector_name == "sscd":
+            expected_sscd_hash = model_hash
+
+    client = specs[0][1].client
+    collection = specs[0][1].collection
+    try:
+        return check_collection_compat(
+            client,
+            collection,
+            settings,
+            expected_dino_hash=expected_dino_hash,
+            expected_sscd_hash=expected_sscd_hash,
         )
-        if not points:
-            continue
-        payload = points[0].payload
-
-        stored_hash = payload.get(f"{vn}_model_hash")
-        if stored_hash and stored_hash != model_hash:
-            errors.append(
-                f"[{vn}] model_hash: stored={stored_hash[:16]}…  current={model_hash[:16]}…"
-            )
-
-        stored_norm = payload.get(f"{vn}_normalize_size")
-        if stored_norm is not None and stored_norm != embedder.normalize_size:
-            errors.append(
-                f"[{vn}] normalize_size: stored={stored_norm}"
-                f"  current={embedder.normalize_size}"
-            )
-
-        if vn == "sscd":
-            stored_crops = payload.get("sscd_n_crops")
-            if stored_crops is not None and stored_crops != settings.sscd_n_crops:
-                errors.append(
-                    f"[sscd] sscd_n_crops: stored={stored_crops}"
-                    f"  current={settings.sscd_n_crops}"
-                )
-
-    return errors
+    except QdrantUnavailable as exc:
+        # During `sfn index` Qdrant is *required* — surface the failure rather
+        # than swallow it.  The Indexer constructor would have failed earlier
+        # if Qdrant were truly down, so reaching this branch implies a transient
+        # error worth reporting.
+        return [f"Qdrant unreachable while validating compatibility: {exc}"]
 
 
 def index(
@@ -526,8 +517,7 @@ def index(
     specs: list[tuple[AnyEmbedder, Indexer, str]] = []
     for embedder, vector_name in _loaded:
         typer.echo(
-            f"Connecting to Qdrant  collection={target_collection!r}"
-            f"  vector={vector_name!r} ..."
+            f"Connecting to Qdrant  collection={target_collection!r}  vector={vector_name!r} ..."
         )
         try:
             indexer = Indexer(
@@ -545,7 +535,7 @@ def index(
 
         typer.echo("Computing model hash (may take a moment) ...")
         model_hash = embedder.model_hash
-        typer.echo(f"  model_hash={model_hash[:16]}...")
+        typer.echo(f"  model_hash={model_hash}")
 
         specs.append((embedder, indexer, model_hash))
 
