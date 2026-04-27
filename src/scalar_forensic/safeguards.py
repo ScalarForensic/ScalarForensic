@@ -108,6 +108,7 @@ def check_collection_compat(
     *,
     expected_dino_hash: str | None = None,
     expected_sscd_hash: str | None = None,
+    check_normalize_size: bool = True,
 ) -> list[str]:
     """Return a list of human-readable mismatch descriptions.
 
@@ -115,6 +116,18 @@ def check_collection_compat(
     matches, the collection does not exist yet, the collection has no points
     of that vector type, or the existing points pre-date the provenance
     payload fields.
+
+    Phase-specific scope (caller-controlled):
+
+    * **Indexing (``sfn index``)** must verify all three fields — mixing two
+      embedding configurations in one collection corrupts the index
+      irreversibly.  Pass the model hashes and leave ``check_normalize_size=True``.
+    * **Web (``sfn-web``)** only verifies ``sscd_n_crops`` because that is the
+      single setting whose mismatch causes Phase-2 (query) to silently produce
+      wrong vectors at request time.  ``normalize_size`` and ``model_hash``
+      drift are caught at the next index run, not at server startup, so the
+      web caller passes ``expected_*_hash=None`` and
+      ``check_normalize_size=False``.
 
     :raises QdrantUnavailable: when Qdrant is unreachable or returns an
         unexpected response.  Callers decide whether that is fatal.
@@ -173,7 +186,7 @@ def check_collection_compat(
 
         # normalize_size — SSCD's is fixed (288 px) regardless of SFN_NORMALIZE_SIZE,
         # so only DINOv2's is user-controlled and worth comparing here.
-        if vn == "dino":
+        if check_normalize_size and vn == "dino":
             stored_norm = payload.get(f"{vn}_normalize_size")
             if stored_norm is not None and stored_norm != settings.normalize_size:
                 errors.append(
