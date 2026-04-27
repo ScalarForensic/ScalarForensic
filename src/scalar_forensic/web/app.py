@@ -1044,7 +1044,14 @@ async def points3d() -> JSONResponse:
 
 
 def _tag_client_and_store() -> tuple[QdrantClient, TagStore]:
-    """Construct a fresh QdrantClient and TagStore for this request."""
+    """Construct a fresh QdrantClient and TagStore for this request.
+
+    This is intentionally per-request rather than a shared singleton.  TagStore
+    construction calls ``_ensure_collection`` which issues one ``get_collections``
+    call to Qdrant.  For a single-investigator deployment the overhead is
+    acceptable; a long-running multi-user service would want a startup-time check
+    and a cached client instead.
+    """
     settings = Settings()
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
     return client, TagStore(client, settings.tags_collection)
@@ -1459,10 +1466,10 @@ async def triage(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
-    eff_pos = list(tag.positive_ids)
-    if tag.target_id is not None and tag.target_id not in set(str(i) for i in eff_pos):
-        eff_pos.append(tag.target_id)
-    pair_count = min(len(eff_pos) * len(tag.negative_ids), MAX_CONTEXT_PAIRS)
+    # pair_count reflects exactly what run_discovery sends to Qdrant: the
+    # cartesian product of positive_ids × negative_ids (capped).  target_id
+    # is the Discovery anchor, not a pair member, so it is excluded here.
+    pair_count = min(len(tag.positive_ids) * len(tag.negative_ids), MAX_CONTEXT_PAIRS)
     return JSONResponse(
         {
             "tag": _tag_to_json(tag),

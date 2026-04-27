@@ -559,6 +559,10 @@ def query_session(
         # same dataset path across different query frames (video queries); when
         # that happens the reported score is the max across those comparisons
         # and query_timecodes accumulates all contributing query timecodes.
+        # NOTE: the per-mode structure below (altered / semantic branches, unify
+        # merge/append, _group_video_hits) is mirrored by the reference overlay
+        # loop that follows it.  If you add or change a mode branch here, apply
+        # the same change to the reference overlay loop and vice versa.
         for qtc in all_qtcs:
             frame_merged: dict[str, Hit] = {}  # used when unify=True
             frame_unmerged: list[Hit] = []  # used when unify=False
@@ -628,6 +632,7 @@ def query_session(
         # the case-collection loop above so reference hits honour unify=True
         # (mode-merge per path), unify=False (per-mode rows), and propagate
         # query_timecodes from video-query frames.
+        # NOTE: keep in sync with the case-collection loop above.
         if include_reference and settings.reference_collection:
             for qtc in all_qtcs:
                 ref_frame_merged: dict[str, Hit] = {}  # used when unify=True
