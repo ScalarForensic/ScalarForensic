@@ -2061,16 +2061,16 @@ async def get_point_payload(point_id: str) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
-def _check_collection_compat(settings: Settings) -> None:
+def _check_collection_compat(settings: Settings, *, ignore_mismatch: bool = False) -> None:
     """Hard-fail if Phase-2 (query) would produce silently wrong results.
 
-    Phase 2 only re-embeds *queries* — never the indexed corpus.  The single
-    query-time setting that, if drifted, silently corrupts results is
-    ``SFN_SSCD_N_CROPS``: a 1-crop query vector compared against 5-crop indexed
-    vectors yields meaningless cosine similarities.  ``SFN_NORMALIZE_SIZE`` and
-    the DINOv2/SSCD model files affect *future* indexing only, not Phase-2
-    queries — they are validated at ``sfn index`` time and intentionally
-    *not* enforced here.
+    Every Phase-2 query re-embeds the user input with the *current*
+    ``SFN_MODEL_*``, ``SFN_NORMALIZE_SIZE`` and ``SFN_SSCD_N_CROPS`` and
+    cosine-compares it against vectors in the collection that were produced
+    under the *previous* values.  A drift in any of the three changes the
+    embedding function — query and corpus vectors no longer share an
+    embedding space, and similarity scores become silently meaningless
+    (results still rank, calibrated thresholds are no longer calibrated).
 
     Skips silently when the collection does not exist or has no points (fresh
     install).  Payload fields absent in older indexes are skipped so as not to
@@ -2079,8 +2079,17 @@ def _check_collection_compat(settings: Settings) -> None:
     Qdrant connectivity errors are reported as warnings — request handling will
     fail naturally if the database stays down — but never silently treated as
     "fresh install", which would mask real configuration drift.
+
+    With ``ignore_mismatch=True`` the check still runs and logs a warning, but
+    does not block startup.  This is the ``--ignore-config-mismatch`` escape
+    hatch for read-only inspection of a known-incompatible collection; it
+    must be opted into per invocation, never via the environment.
     """
-    from scalar_forensic.safeguards import QdrantUnavailable, check_collection_compat
+    from scalar_forensic.safeguards import (
+        QdrantUnavailable,
+        check_collection_compat,
+        expected_model_hashes_from_settings,
+    )
 
     try:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
@@ -2092,14 +2101,55 @@ def _check_collection_compat(settings: Settings) -> None:
         )
         return
 
+    # Only hash the model files that correspond to vectors actually present
+    # in the collection — avoids loading a DINOv2 snapshot when the collection
+    # is SSCD-only, and vice versa.
+    try:
+        existing_collections = {c.name for c in client.get_collections().collections}
+    except (ConnectionError, OSError) as exc:
+        print(
+            f"[WARN] Qdrant unreachable during compatibility check: {exc}\n"
+            "       Server will start; request handlers will surface the issue.",
+            file=sys.stderr,
+        )
+        return
+    except Exception as exc:  # noqa: BLE001 — explicitly logged, not swallowed
+        print(
+            f"[WARN] Unexpected error contacting Qdrant during compatibility check: {exc}\n"
+            "       Server will start; request handlers will surface the issue.",
+            file=sys.stderr,
+        )
+        return
+
+    if settings.collection not in existing_collections:
+        return
+
+    try:
+        info = client.get_collection(settings.collection)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[WARN] Could not inspect collection {settings.collection!r}: {exc}\n"
+            "       Server will start; request handlers will surface the issue.",
+            file=sys.stderr,
+        )
+        return
+
+    vectors_cfg = info.config.params.vectors
+    needed_vectors: set[str] = set()
+    if isinstance(vectors_cfg, dict):
+        for vn in ("dino", "sscd"):
+            if vn in vectors_cfg:
+                needed_vectors.add(vn)
+
+    expected = expected_model_hashes_from_settings(settings, needed_vectors=needed_vectors)
+
     try:
         errors = check_collection_compat(
             client,
             settings.collection,
             settings,
-            expected_dino_hash=None,
-            expected_sscd_hash=None,
-            check_normalize_size=False,
+            expected_dino_hash=expected.get("dino"),
+            expected_sscd_hash=expected.get("sscd"),
         )
     except QdrantUnavailable as exc:
         print(
@@ -2109,18 +2159,36 @@ def _check_collection_compat(settings: Settings) -> None:
         )
         return
 
-    if errors:
-        detail = "\n  ".join(errors)
+    if not errors:
+        return
+
+    detail = "\n  ".join(errors)
+    if ignore_mismatch:
         print(
-            f"\n[ERROR] Embedding configuration mismatch — server cannot start safely.\n"
+            f"\n[WARN] Embedding configuration mismatch (--ignore-config-mismatch set):\n"
             f"\n  {detail}\n"
-            f"\nAnalysis results would be silently wrong if the server started.\n"
-            f"Options:\n"
-            f"  • Restore SFN_SSCD_N_CROPS in .env to match the indexed collection, OR\n"
-            f"  • Re-index the collection: sfn <input_dir> --sscd / --dino\n",
+            f"\nQuery-time embeddings are produced with the current settings and\n"
+            f"compared against vectors stored under the previous values.  Similarity\n"
+            f"scores will be silently meaningless against this collection.  Use only\n"
+            f"for read-only inspection of a known-incompatible index.\n",
             file=sys.stderr,
         )
-        sys.exit(1)
+        return
+
+    print(
+        f"\n[ERROR] Embedding configuration mismatch — server cannot start safely.\n"
+        f"\n  {detail}\n"
+        f"\nQuery-time embeddings are produced with the current settings and\n"
+        f"compared against vectors stored under the previous values.  Cosine\n"
+        f"scores would be silently meaningless if the server started.\n"
+        f"Options:\n"
+        f"  • Restore the original settings in .env to match the indexed collection, OR\n"
+        f"  • Re-index the collection: sfn <input_dir> --sscd / --dino, OR\n"
+        f"  • Pass --ignore-config-mismatch to start anyway (read-only; results will be\n"
+        f"    silently wrong — never use for forensic conclusions)\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def start() -> None:
@@ -2135,6 +2203,18 @@ def start() -> None:
         help=(
             "Allow outward internet connections (e.g. to HuggingFace Hub for first-time "
             "model downloads). Offline by default — see SFN_ALLOW_ONLINE in .env."
+        ),
+    )
+    parser.add_argument(
+        "--ignore-config-mismatch",
+        action="store_true",
+        default=False,
+        help=(
+            "Start the server even when the current SFN_MODEL_*, SFN_NORMALIZE_SIZE "
+            "or SFN_SSCD_N_CROPS differ from the values used to populate the indexed "
+            "collection.  Cosine similarity scores will be silently meaningless under "
+            "drift; use only for read-only inspection of a known-incompatible index, "
+            "never for forensic conclusions."
         ),
     )
     args = parser.parse_args()
@@ -2159,6 +2239,6 @@ def start() -> None:
         sys.exit(1)
 
     # Pre-flight: reject mismatched embedding config before accepting any requests.
-    _check_collection_compat(settings)
+    _check_collection_compat(settings, ignore_mismatch=args.ignore_config_mismatch)
 
     uvicorn.run("scalar_forensic.web.app:app", host="0.0.0.0", port=8080, reload=False)

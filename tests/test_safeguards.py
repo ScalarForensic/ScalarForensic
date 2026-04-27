@@ -339,15 +339,16 @@ def test_check_aggregates_multiple_mismatches():
     assert len(errors) == 4
 
 
-def test_check_normalize_size_false_skips_dino_resolution_check():
-    """sfn-web mode: normalize_size drift is intentionally tolerated because
-    Phase 2 only re-embeds queries; a drift is caught at the next index run."""
+def test_check_normalize_size_flag_suppresses_dino_resolution_check_only():
+    """The check_normalize_size knob exists for unit-testing isolation, not as
+    a phase-discrimination flag — n_crops and hash checks must still run when
+    it is False."""
     client = _make_client(
         collections=["sfn"],
         vectors_cfg={"dino": _vp(), "sscd": _vp()},
         payload_by_vector={
             "dino": {"dino_normalize_size": 224},
-            "sscd": {"sscd_n_crops": 1},
+            "sscd": {"sscd_n_crops": 5},
         },
     )
     errors = check_collection_compat(
@@ -356,48 +357,9 @@ def test_check_normalize_size_false_skips_dino_resolution_check():
         _settings(normalize_size=512, sscd_n_crops=1),
         check_normalize_size=False,
     )
-    # normalize_size mismatch present in payload but ignored; n_crops matches.
-    assert errors == []
-
-
-def test_check_normalize_size_false_still_flags_n_crops_mismatch():
-    """sfn-web mode: n_crops is the one Phase-2 setting that DOES block."""
-    client = _make_client(
-        collections=["sfn"],
-        vectors_cfg={"sscd": _vp()},
-        payload_by_vector={"sscd": {"sscd_n_crops": 5}},
-    )
-    errors = check_collection_compat(
-        client,
-        "sfn",
-        _settings(sscd_n_crops=1),
-        check_normalize_size=False,
-    )
+    # normalize_size mismatch suppressed; n_crops mismatch still flagged.
     assert len(errors) == 1
     assert "sscd_n_crops" in errors[0]
-
-
-def test_check_normalize_size_false_skips_model_hash_when_no_expected():
-    """sfn-web mode also passes expected_*_hash=None, so the model_hash check
-    is implicitly disabled even though the payload carries a hash."""
-    client = _make_client(
-        collections=["sfn"],
-        vectors_cfg={"dino": _vp(), "sscd": _vp()},
-        payload_by_vector={
-            "dino": {"dino_model_hash": "x" * 64, "dino_normalize_size": 224},
-            "sscd": {"sscd_model_hash": "y" * 64, "sscd_n_crops": 1},
-        },
-    )
-    errors = check_collection_compat(
-        client,
-        "sfn",
-        _settings(normalize_size=512, sscd_n_crops=1),
-        expected_dino_hash=None,
-        expected_sscd_hash=None,
-        check_normalize_size=False,
-    )
-    # Despite stored hashes and a normalize_size drift, web mode passes clean.
-    assert errors == []
 
 
 def test_check_ignores_stored_normalize_size_for_sscd():

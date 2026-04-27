@@ -117,17 +117,14 @@ def check_collection_compat(
     of that vector type, or the existing points pre-date the provenance
     payload fields.
 
-    Phase-specific scope (caller-controlled):
+    Both ``sfn index`` and ``sfn-web`` enforce all three fields by default —
+    drift in any of them changes the embedding function (model_hash → different
+    weights, normalize_size → different ViT input resolution, sscd_n_crops →
+    different multi-crop average), and cosine similarity across two embedding
+    spaces is mathematically undefined.
 
-    * **Indexing (``sfn index``)** must verify all three fields — mixing two
-      embedding configurations in one collection corrupts the index
-      irreversibly.  Pass the model hashes and leave ``check_normalize_size=True``.
-    * **Web (``sfn-web``)** only verifies ``sscd_n_crops`` because that is the
-      single setting whose mismatch causes Phase-2 (query) to silently produce
-      wrong vectors at request time.  ``normalize_size`` and ``model_hash``
-      drift are caught at the next index run, not at server startup, so the
-      web caller passes ``expected_*_hash=None`` and
-      ``check_normalize_size=False``.
+    The ``check_normalize_size`` flag exists for tests that want to assert
+    individual checks in isolation, not as a phase-discrimination knob.
 
     :raises QdrantUnavailable: when Qdrant is unreachable or returns an
         unexpected response.  Callers decide whether that is fatal.
