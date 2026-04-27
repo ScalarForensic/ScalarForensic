@@ -42,6 +42,7 @@ from scalar_forensic.tags import Tag, TagStore
 # Qdrant helpers
 # ---------------------------------------------------------------------------
 
+
 def _retrieve_payloads(
     client: QdrantClient,
     case_collection: str,
@@ -82,21 +83,21 @@ def _retrieve_payloads(
 # Display helpers
 # ---------------------------------------------------------------------------
 
+
 def print_tag_table(tags: list[Tag]) -> None:
     if not tags:
         print("  (no tags found)")
         return
     print(f"\n  {'Tag name':<40}  {'positive':>8}  {'negative':>8}")
-    print(f"  {'-'*40}  {'-'*8}  {'-'*8}")
+    print(f"  {'-' * 40}  {'-' * 8}  {'-' * 8}")
     for tag in tags:
-        print(
-            f"  {tag.name:<40}  {len(tag.positive_ids):>8}  {len(tag.negative_ids):>8}"
-        )
+        print(f"  {tag.name:<40}  {len(tag.positive_ids):>8}  {len(tag.negative_ids):>8}")
 
 
 # ---------------------------------------------------------------------------
 # Export logic
 # ---------------------------------------------------------------------------
+
 
 def _safe_filename(src: Path, dest_dir: Path, reserved: set[Path]) -> Path:
     """Return a collision-free destination path under dest_dir.
@@ -105,6 +106,7 @@ def _safe_filename(src: Path, dest_dir: Path, reserved: set[Path]) -> Path:
     same run — the plan is built before any files are written, so we cannot
     rely on filesystem existence alone to detect collisions.
     """
+
     def _taken(p: Path) -> bool:
         return p in reserved or p.exists()
 
@@ -144,8 +146,10 @@ def do_export(
     reserved_dests: set[Path] = set()
     warnings: list[str] = []
 
-    print(f"\n  Resolving {sum(len(t.positive_ids) + len(t.negative_ids) for t in selected):,}"
-          f" point ID(s) across {len(selected)} tag(s) …")
+    print(
+        f"\n  Resolving {sum(len(t.positive_ids) + len(t.negative_ids) for t in selected):,}"
+        f" point ID(s) across {len(selected)} tag(s) …"
+    )
 
     for tag in selected:
         all_ids = [str(i) for i in tag.positive_ids + tag.negative_ids]
@@ -166,15 +170,11 @@ def do_export(
                     continue
                 image_path_str = payload.get("image_path", "")
                 if not image_path_str:
-                    warnings.append(
-                        f"  [warn] {tag.name}/{role}: ID {pid} has no image_path"
-                    )
+                    warnings.append(f"  [warn] {tag.name}/{role}: ID {pid} has no image_path")
                     continue
                 src = Path(image_path_str)
                 if not src.exists():
-                    warnings.append(
-                        f"  [warn] {tag.name}/{role}: file not found: {src}"
-                    )
+                    warnings.append(f"  [warn] {tag.name}/{role}: file not found: {src}")
                     continue
                 dest = _safe_filename(src, dest_dir, reserved_dests)
                 reserved_dests.add(dest)
@@ -189,10 +189,7 @@ def do_export(
     print()
     print(f"  Output: {output_dir}\n")
     for tag_name, counts in sorted(by_tag.items()):
-        print(
-            f"  {tag_name}:  "
-            f"{counts['positive']} positive, {counts['negative']} negative"
-        )
+        print(f"  {tag_name}:  {counts['positive']} positive, {counts['negative']} negative")
 
     if warnings:
         print()
@@ -227,6 +224,7 @@ def do_export(
 # ---------------------------------------------------------------------------
 # Interactive loop
 # ---------------------------------------------------------------------------
+
 
 def run_interactive(
     client: QdrantClient,
@@ -325,6 +323,7 @@ def run_interactive(
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(

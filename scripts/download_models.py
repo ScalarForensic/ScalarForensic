@@ -90,10 +90,14 @@ def download_dino() -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--sscd", action="store_true", help="Download SSCD checkpoint only")
     parser.add_argument("--dino", action="store_true", help="Download DINOv2 snapshot only")
-    parser.add_argument("--all", dest="all_models", action="store_true", help="Download both (default)")
+    parser.add_argument(
+        "--all", dest="all_models", action="store_true", help="Download both (default)"
+    )
     parser.add_argument(
         "--force",
         action="store_true",

@@ -285,9 +285,7 @@ def run_discovery(
             )
         pos_list = [target, *positives] if target is not None else positives
         deduped_positives = list(dict.fromkeys(pos_list))
-        deduped_negatives = [
-            n for n in dict.fromkeys(negatives) if n not in set(deduped_positives)
-        ]
+        deduped_negatives = [n for n in dict.fromkeys(negatives) if n not in set(deduped_positives)]
         query = RecommendQuery(
             recommend=RecommendInput(
                 positive=deduped_positives,

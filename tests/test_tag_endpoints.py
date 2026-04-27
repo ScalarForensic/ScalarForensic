@@ -299,9 +299,7 @@ class TestTriage:
             patch("scalar_forensic.web.app.run_discovery", return_value=[]) as mock_rd,
         ):
             mock_ts.return_value.get.return_value = tag
-            r = client.post(
-                "/api/triage", data={"tag_id": "tag-1", "cosine_threshold": "0.8"}
-            )
+            r = client.post("/api/triage", data={"tag_id": "tag-1", "cosine_threshold": "0.8"})
         assert r.status_code == 200
         assert mock_rd.call_args.kwargs["cosine_threshold"] == 0.8
 

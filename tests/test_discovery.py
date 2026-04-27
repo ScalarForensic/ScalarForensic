@@ -266,9 +266,7 @@ def test_cosine_threshold_filters_recommend_hits_below_floor():
     """Recommend-mode hits with raw_score < cosine_threshold are dropped."""
     client = _client_returning([_pt("a", 0.9), _pt("b", 0.6), _pt("c", 0.3)])
     tag = _tag(positives=["p1"])  # no negatives → Recommend mode
-    hits = run_discovery(
-        client, "sfn", tag, vector_name="dino", limit=5, cosine_threshold=0.55
-    )
+    hits = run_discovery(client, "sfn", tag, vector_name="dino", limit=5, cosine_threshold=0.55)
     assert [h.point_id for h in hits] == ["a", "b"]
     # Hits below threshold are filtered out before the response is built.
     assert all(h.raw_score >= 0.55 for h in hits)
