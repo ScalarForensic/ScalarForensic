@@ -273,7 +273,6 @@ def _print_summary(
 ) -> None:
     counts = Counter(r.status for r in records.values())
     total = len(records)
-    n_image = n_images
 
     # Per-model breakdown
     typer.echo("\nDone.")
@@ -289,7 +288,7 @@ def _print_summary(
     typer.echo(sep)
     rows: list[tuple[str, int | None]] = [
         ("Total files found", total),
-        ("  image files", n_image),
+        ("  image files", n_images),
         ("  video files", n_videos),
         ("  non-image files (unsupported)", counts[_S_UNSUPPORTED]),
         ("", None),
@@ -334,6 +333,15 @@ def index(
             "model downloads). Offline by default — see SFN_ALLOW_ONLINE in .env."
         ),
     ),
+    reference: bool = typer.Option(
+        False,
+        "--reference",
+        help=(
+            "Index into the reference collection instead of the case collection. "
+            "Requires SFN_REFERENCE_COLLECTION to be set in .env. "
+            "Points are tagged with is_reference=true in their payload."
+        ),
+    ),
 ) -> None:
     """Embed all images under INPUT_DIR and store vectors in Qdrant."""
     # Write back to os.environ so Settings() reads the correct value,
@@ -342,6 +350,25 @@ def index(
         os.environ[ENV_ALLOW_ONLINE] = "true"
 
     settings = Settings()
+
+    if reference:
+        if not settings.reference_collection:
+            typer.echo(
+                "[ERROR] --reference requires SFN_REFERENCE_COLLECTION to be set in .env",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if settings.reference_collection == settings.collection:
+            typer.echo(
+                "[ERROR] SFN_REFERENCE_COLLECTION must differ from SFN_COLLECTION — "
+                "indexing with --reference into the case collection would stamp "
+                "is_reference=true onto existing case points.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        target_collection = settings.reference_collection
+    else:
+        target_collection = settings.collection
 
     # Apply HuggingFace offline guard before any model loading occurs.
     settings.apply_network_policy()
@@ -441,16 +468,17 @@ def index(
     specs: list[tuple[AnyEmbedder, Indexer, str]] = []
     for embedder, vector_name in _loaded:
         typer.echo(
-            f"Connecting to Qdrant  collection={settings.collection!r}  vector={vector_name!r} ..."
+            f"Connecting to Qdrant  collection={target_collection!r}  vector={vector_name!r} ..."
         )
         try:
             indexer = Indexer(
                 url=settings.qdrant_url,
-                collection=settings.collection,
+                collection=target_collection,
                 vector_name=vector_name,
                 embedding_dim=embedder.embedding_dim,
                 api_key=settings.qdrant_api_key,
                 initial_vectors_config=_initial_vectors_config,
+                is_reference=reference,
             )
         except ValueError as exc:
             typer.echo(f"[ERROR] {exc}", err=True)
@@ -618,11 +646,6 @@ def index(
         if not unique_pairs:
             return
 
-        # Recompute duplicate-skip count after failure reclassification.
-        duplicate_skips_in_batch = sum(
-            1 for p, _ in ctx.path_hash_pairs if records[p].status == _S_SKIP_DUP
-        )
-
         # ── Per-model loop: normalize + embed, collect upsert jobs ────────────
         n_frames_in_batch = sum(1 for p, _ in ctx.path_hash_pairs if p in vmeta_by_path)
         n_plain_in_batch = len(ctx.path_hash_pairs) - n_frames_in_batch
@@ -631,7 +654,7 @@ def index(
 
         for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
             to_embed = [(p, h) for p, h in ctx.to_embed_per_spec[spec_idx] if p not in pre_failures]
-            n_skipped = duplicate_skips_in_batch + (len(unique_pairs) - len(to_embed))
+            n_skipped = len(unique_pairs) - len(to_embed)
             skipped_counts[spec_idx] += n_skipped
 
             to_embed_set = {p for p, _ in to_embed}

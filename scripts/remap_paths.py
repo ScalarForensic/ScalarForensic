@@ -42,6 +42,7 @@ _FRAME_SEP = "::"
 # Enumeration
 # ---------------------------------------------------------------------------
 
+
 def _scroll_all(client: QdrantClient, collection: str) -> list[dict]:
     """Return the payload of every point in *collection* (no vectors)."""
     points: list[dict] = []
@@ -63,9 +64,7 @@ def _scroll_all(client: QdrantClient, collection: str) -> list[dict]:
     return points
 
 
-def enumerate_paths(
-    client: QdrantClient, collections: list[str]
-) -> dict[str, dict[str, dict]]:
+def enumerate_paths(client: QdrantClient, collections: list[str]) -> dict[str, dict[str, dict]]:
     """Return path statistics grouped by field name and collection.
 
     Returns::
@@ -117,6 +116,7 @@ def enumerate_paths(
 # Display
 # ---------------------------------------------------------------------------
 
+
 def _merge_counts(by_collection: dict[str, dict[str, int]]) -> dict[str, int]:
     merged: dict[str, int] = {}
     for counts in by_collection.values():
@@ -156,7 +156,9 @@ def print_path_table_by_dir(stats: dict[str, dict[str, dict]], field: str, label
         parent = str(Path(real_path).parent)
         dir_counts[parent] = dir_counts.get(parent, 0) + n
 
-    print(f"\n  {label} paths by directory ({len(dir_counts):,} unique dirs, {sum(dir_counts.values()):,} points):")
+    print(
+        f"\n  {label} paths by directory ({len(dir_counts):,} unique dirs, {sum(dir_counts.values()):,} points):"
+    )
     for d in sorted(dir_counts):
         print(f"    [{dir_counts[d]:>6}]  {d}/")
 
@@ -165,9 +167,8 @@ def print_path_table_by_dir(stats: dict[str, dict[str, dict]], field: str, label
 # Remap
 # ---------------------------------------------------------------------------
 
-def _paths_matching_prefix(
-    by_coll: dict[str, dict[str, int]], prefix: str
-) -> dict[str, list[str]]:
+
+def _paths_matching_prefix(by_coll: dict[str, dict[str, int]], prefix: str) -> dict[str, list[str]]:
     """Return {collection: [matching_paths]} for paths starting with *prefix*."""
     result: dict[str, list[str]] = {}
     for coll, counts in by_coll.items():
@@ -187,13 +188,11 @@ def _update_image_paths(
     """Replace ``old_prefix`` with ``new_prefix`` in ``image_path`` for each old path."""
     updated = 0
     for old in old_paths:
-        new = new_prefix + old[len(old_prefix):]
+        new = new_prefix + old[len(old_prefix) :]
         client.set_payload(
             collection_name=collection,
             payload={"image_path": new},
-            points=Filter(
-                must=[FieldCondition(key="image_path", match=MatchValue(value=old))]
-            ),
+            points=Filter(must=[FieldCondition(key="image_path", match=MatchValue(value=old))]),
         )
         updated += 1
     return updated
@@ -213,15 +212,13 @@ def _update_video_paths(
     """
     updated = 0
     for old_vid in old_paths:
-        new_vid = new_prefix + old_vid[len(old_prefix):]
+        new_vid = new_prefix + old_vid[len(old_prefix) :]
         # Update video_path and — for frames that share this video — image_path too.
         # We filter by video_path so we catch all frames at once.
         client.set_payload(
             collection_name=collection,
             payload={"video_path": new_vid},
-            points=Filter(
-                must=[FieldCondition(key="video_path", match=MatchValue(value=old_vid))]
-            ),
+            points=Filter(must=[FieldCondition(key="video_path", match=MatchValue(value=old_vid))]),
         )
         # image_path for video frames looks like:  /old/video.mp4::frame_...
         # We replace only the part before ::.
@@ -240,7 +237,7 @@ def _update_video_paths(
         for fp in frame_points:
             old_ip = (fp.payload or {}).get("image_path", "")
             if old_ip.startswith(old_img_prefix):
-                new_ip = new_img_prefix + old_ip[len(old_img_prefix):]
+                new_ip = new_img_prefix + old_ip[len(old_img_prefix) :]
                 client.set_payload(
                     collection_name=collection,
                     payload={"image_path": new_ip},
@@ -290,15 +287,11 @@ def do_remap(
             all_old_img[coll] = pure
 
     total_img_points = sum(
-        stats["image_path"][c].get(p, 0)
-        for c, paths in all_old_img.items()
-        for p in paths
+        stats["image_path"][c].get(p, 0) for c, paths in all_old_img.items() for p in paths
     )
     total_vid_files = sum(len(v) for v in vid_matches.values())
     total_vid_frames = sum(
-        stats["video_path"][c].get(p, 0)
-        for c, paths in vid_matches.items()
-        for p in paths
+        stats["video_path"][c].get(p, 0) for c, paths in vid_matches.items() for p in paths
     )
 
     if not all_old_img and not vid_matches:
@@ -312,7 +305,7 @@ def do_remap(
         print(f"  Standalone image paths affected: {total_img_points:,} points")
         for coll, paths in sorted(all_old_img.items()):
             for p in sorted(paths)[:10]:
-                new_p = new_prefix + p[len(old_prefix):]
+                new_p = new_prefix + p[len(old_prefix) :]
                 print(f"    {p}")
                 print(f"      → {new_p}")
             if len(paths) > 10:
@@ -322,7 +315,7 @@ def do_remap(
         print(f"\n  Video files affected: {total_vid_files:,} ({total_vid_frames:,} frames)")
         for coll, paths in sorted(vid_matches.items()):
             for p in sorted(paths)[:10]:
-                new_p = new_prefix + p[len(old_prefix):]
+                new_p = new_prefix + p[len(old_prefix) :]
                 print(f"    {p}")
                 print(f"      → {new_p}")
             if len(paths) > 10:
@@ -338,9 +331,7 @@ def do_remap(
         print("  Aborted.")
         return
 
-    affected_collections = sorted(
-        {c for c in list(all_old_img) + list(vid_matches)}
-    )
+    affected_collections = sorted({c for c in list(all_old_img) + list(vid_matches)})
     _snapshot_collections(client, affected_collections)
 
     total_updated = 0
@@ -361,6 +352,7 @@ def do_remap(
 # ---------------------------------------------------------------------------
 # Interactive loop
 # ---------------------------------------------------------------------------
+
 
 def run_interactive(client: QdrantClient, collections: list[str]) -> None:
     print("\nLoading path index …")
@@ -411,6 +403,7 @@ def run_interactive(client: QdrantClient, collections: list[str]) -> None:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(

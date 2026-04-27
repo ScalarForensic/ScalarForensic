@@ -76,6 +76,20 @@ class Settings:
         # --- Qdrant auth (optional) ---
         self.qdrant_api_key: str | None = os.environ.get("SFN_QDRANT_API_KEY") or None
 
+        # --- Tag Triage (Qdrant Discovery API) ---
+        # Sidecar collection storing payload-only points — one per "tag".
+        # A tag is a named set of positive and negative reference point IDs
+        # (and optionally a target anchor) used as input to Qdrant's Discovery
+        # and Recommendation APIs.  Kept in a separate collection from the case
+        # vectors so tags can outlive any single case and be reused.
+        self.tags_collection: str = os.environ.get("SFN_TAGS_COLLECTION", "sfn_tags")
+
+        # Optional read-only reference collection holding vectors of externally
+        # labelled reference material.  When set, tag triage queries may pass
+        # lookup_from=LookupLocation(collection=<this>, vector=<name>) so the
+        # case collection never has to ingest those vectors.  Unset by default.
+        self.reference_collection: str | None = os.environ.get("SFN_REFERENCE_COLLECTION") or None
+
         # --- Vector visualization ---
         # Maximum number of points fetched per collection for the 3-D background viz.
         self.viz_max_points: int = self._parse_int("SFN_VIZ_MAX_POINTS", 5000)
@@ -173,7 +187,7 @@ class Settings:
         raw = os.environ.get(key)
         if raw is not None:
             return Path(raw) if raw else None
-        if not default:
+        if default is None:
             return None
         p = Path(default)
         if not p.is_absolute():

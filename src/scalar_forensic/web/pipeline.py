@@ -68,7 +68,7 @@ def _get_embedder(key: str, settings: Settings) -> AnyEmbedder:
 class ProgressEvent:
     type: str  # "progress" | "file_done" | "error" | "done"
     current: int = 0
-    total: int = 0
+    total: int | None = None
     filename: str = ""
     file_id: str = ""
     message: str = ""
@@ -226,13 +226,13 @@ def _analyze_video_file(
             yield ProgressEvent(
                 type="video_progress",
                 current=len(frame_entries),
-                total=settings.video_max_frames,
+                total=settings.video_max_frames or None,
                 filename=entry.filename,
                 file_id=entry.file_id,
             )
 
     except Exception as exc:
-        raise RuntimeError(f"Video frame extraction failed: {exc}") from exc
+        raise RuntimeError(f"Video frame extraction failed for {entry.filename}: {exc}") from exc
 
     if not frame_entries:
         raise RuntimeError("No frames could be extracted from the video")
@@ -285,6 +285,7 @@ class Hit:
     # membership tests during the merge pass.  Excluded from repr and compare
     # so it is invisible to callers that iterate over Hit fields.
     _query_timecodes_seen: set[int] = field(default_factory=set, repr=False, compare=False)
+    is_reference: bool = False
 
     def best_score(self) -> float:
         return max(self.scores.values(), default=0.0)
@@ -471,6 +472,7 @@ def query_session(
     limit: int,
     settings: Settings,
     unify: bool = True,
+    include_reference: bool = False,
 ) -> tuple[list[FileResult], dict[str, dict]]:
     """Query Qdrant for every file in the session using stored embeddings.
 
@@ -557,6 +559,10 @@ def query_session(
         # same dataset path across different query frames (video queries); when
         # that happens the reported score is the max across those comparisons
         # and query_timecodes accumulates all contributing query timecodes.
+        # NOTE: the per-mode structure below (altered / semantic branches, unify
+        # merge/append, _group_video_hits) is mirrored by the reference overlay
+        # loop that follows it.  If you add or change a mode branch here, apply
+        # the same change to the reference overlay loop and vice versa.
         for qtc in all_qtcs:
             frame_merged: dict[str, Hit] = {}  # used when unify=True
             frame_unmerged: list[Hit] = []  # used when unify=False
@@ -620,6 +626,70 @@ def query_session(
                     if mode_hits:
                         all_flat_hits.extend(_group_video_hits(mode_hits))
 
+        # Reference collection overlay: query the reference collection with the
+        # same per-mode embeddings used for the main case search and append hits
+        # as is_reference=True.  Mirrors the per-qtc + merge/group structure of
+        # the case-collection loop above so reference hits honour unify=True
+        # (mode-merge per path), unify=False (per-mode rows), and propagate
+        # query_timecodes from video-query frames.
+        # NOTE: keep in sync with the case-collection loop above.
+        if include_reference and settings.reference_collection:
+            for qtc in all_qtcs:
+                ref_frame_merged: dict[str, Hit] = {}  # used when unify=True
+                ref_frame_unmerged: list[Hit] = []  # used when unify=False
+
+                if "altered" in modes:
+                    for vec in sscd_by_qtc.get(qtc, []):
+                        ref_hits, ref_errs = _query_vector(
+                            client,
+                            collection=settings.reference_collection,
+                            vector=vec,
+                            mode="altered",
+                            threshold=threshold_altered,
+                            limit=limit,
+                            vector_name="sscd",
+                            is_reference_result=True,
+                        )
+                        for h in ref_hits:
+                            if qtc is not None:
+                                h.query_timecodes = [qtc]
+                            if unify:
+                                _merge_hit(h, ref_frame_merged)
+                            else:
+                                ref_frame_unmerged.append(h)
+                        file_result.errors.extend(ref_errs)
+
+                if "semantic" in modes:
+                    for vec in dino_by_qtc.get(qtc, []):
+                        ref_hits, ref_errs = _query_vector(
+                            client,
+                            collection=settings.reference_collection,
+                            vector=vec,
+                            mode="semantic",
+                            threshold=threshold_semantic,
+                            limit=limit,
+                            vector_name="dino",
+                            is_reference_result=True,
+                        )
+                        for h in ref_hits:
+                            if qtc is not None:
+                                h.query_timecodes = [qtc]
+                            if unify:
+                                _merge_hit(h, ref_frame_merged)
+                            else:
+                                ref_frame_unmerged.append(h)
+                        file_result.errors.extend(ref_errs)
+
+                if unify:
+                    all_flat_hits.extend(_group_video_hits(list(ref_frame_merged.values())))
+                else:
+                    for mode_hits in (
+                        [h for h in ref_frame_unmerged if "altered" in h.scores],
+                        [h for h in ref_frame_unmerged if "semantic" in h.scores],
+                    ):
+                        if mode_hits:
+                            all_flat_hits.extend(_group_video_hits(mode_hits))
+
         # Final merge pass (unify only): exact hits and vector hits for the
         # same dataset path must end up on one row.  Exact hits were added to
         # all_flat_hits before the per-qtc loop; vector hits were appended
@@ -631,7 +701,11 @@ def query_session(
                 # Video hits: key by video_path so all query-frame × dataset-video
                 # pairs collapse into one card regardless of which frame was chosen
                 # as the representative.  Image hits: key by path as before.
-                key = h.video_path if h.is_video_frame and h.video_path else None
+                # Prefix with is_reference so an accidental path overlap between
+                # the case and reference collections cannot collapse the two
+                # onto one row — the overlay is always kept distinct.
+                base = h.video_path if h.is_video_frame and h.video_path else h.path
+                key = f"{'ref' if h.is_reference else 'case'}:{base}"
                 _merge_hit(h, final_merged, key=key)
             # Sort matched_frames once after all merges (deferred from _merge_hit).
             for h in final_merged.values():
@@ -865,6 +939,7 @@ def _query_vector(
     threshold: float,
     limit: int,
     vector_name: str = "dino",
+    is_reference_result: bool = False,
 ) -> tuple[list[Hit], list[str]]:
     try:
         result = client.query_points(
@@ -884,11 +959,16 @@ def _query_vector(
                 "video_path",
                 "video_hash",
                 "frame_timecode_ms",
+                "is_reference",
             ],
         )
         hits = []
         for r in result.points:
             mp = _payload_model_provenance(r.payload)
+            # Source of truth for is_reference is the point's payload.  Fall back
+            # to the caller-supplied flag when the payload does not carry the
+            # field (case-collection points indexed before --reference existed).
+            payload_is_ref = bool(r.payload.get("is_reference"))
             hits.append(
                 Hit(
                     path=r.payload.get("image_path", ""),
@@ -901,6 +981,7 @@ def _query_vector(
                     video_path=r.payload.get("video_path"),
                     video_hash=r.payload.get("video_hash"),
                     frame_timecode_ms=r.payload.get("frame_timecode_ms"),
+                    is_reference=payload_is_ref or is_reference_result,
                 )
             )
         return hits, []
@@ -1090,12 +1171,13 @@ def get_hit_qdrant_provenance(image_hash: str, settings: Settings) -> dict[str, 
 # ---------------------------------------------------------------------------
 
 
-async def get_available_modes(settings: Settings) -> tuple[list[str], str | None]:
+async def get_available_modes(settings: Settings) -> tuple[list[str], bool, str | None]:
     """Return which query modes are usable based on existing Qdrant collections.
 
     Retries up to 4 times (initial + 3 retries) with exponential backoff (1s/2s/4s)
     so transient startup delays don't immediately surface as errors.
-    Returns a tuple of (modes, error_message); error_message is None on success.
+    Returns a tuple of (modes, has_reference, error_message); error_message is None on success.
+    has_reference is True only when SFN_REFERENCE_COLLECTION is set AND that collection exists.
     """
     _delays = [1, 2, 4]
     last_exc: Exception | None = None
@@ -1116,10 +1198,14 @@ async def get_available_modes(settings: Settings) -> tuple[list[str], str | None
                 exc,
             )
     else:
-        return [], str(last_exc)
+        return [], False, str(last_exc)
 
     if settings.collection not in existing:
-        return [], None
+        return [], False, None
+
+    has_reference = (
+        bool(settings.reference_collection) and settings.reference_collection in existing
+    )
 
     modes: list[str] = ["exact"]  # exact works as long as the collection exists
     try:
@@ -1133,5 +1219,5 @@ async def get_available_modes(settings: Settings) -> tuple[list[str], str | None
     except Exception as exc:  # noqa: BLE001
         err = f"Could not inspect vector config for {settings.collection}: {exc}"
         logger.warning(err)
-        return modes, err
-    return modes, None
+        return modes, has_reference, err
+    return modes, has_reference, None

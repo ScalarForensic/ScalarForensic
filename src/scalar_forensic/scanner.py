@@ -39,14 +39,6 @@ def _maybe_register_heif() -> None:
 _maybe_register_heif()
 
 
-def scan_images(root: Path) -> Iterator[Path]:
-    """Recursively yield image file paths under root."""
-    extensions = IMAGE_EXTENSIONS | (_HEIF_EXTENSIONS if _HEIF_AVAILABLE else frozenset())
-    for path in root.rglob("*"):
-        if path.is_file() and path.suffix.lower() in extensions:
-            yield path
-
-
 def scan_all_files(root: Path) -> Iterator[tuple[Path, str]]:
     """Recursively yield *(path, file_type)* for every regular file under *root*.
 

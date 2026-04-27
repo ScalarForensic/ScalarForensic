@@ -295,7 +295,7 @@ def calibrate(
         max_tp = max(t for _, t in measurements)
         bar_fill = round(_BAR_WIDTH * tp / max_tp)
         bar = "█" * bar_fill + "░" * (_BAR_WIDTH - bar_fill)
-        if prev_tp:
+        if prev_tp is not None:
             gain_pct = (tp / prev_tp - 1) * 100
             gain_str = f"  Δ{gain_pct:+6.1f}%"
         else:
@@ -303,7 +303,7 @@ def calibrate(
 
         # ── Stopping conditions ───────────────────────────────────────────
         # 1. Saturation: small *positive* gain — throughput has plateaued.
-        if prev_tp and 0.0 <= (tp - prev_tp) / prev_tp < _MIN_GAIN:
+        if prev_tp is not None and 0.0 <= (tp - prev_tp) / prev_tp < _MIN_GAIN:
             typer.echo(
                 f"  batch={probe_b:>4}  {bar}  {tp:7.1f} img/s{gain_str}"
                 f"  ← Δ < {_MIN_GAIN * 100:.0f}%, converged"

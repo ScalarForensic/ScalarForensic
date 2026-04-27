@@ -1,0 +1,419 @@
+"""Tag Triage: Qdrant Discovery and Recommendation query engine.
+
+Builds :class:`~qdrant_client.models.DiscoverInput` or
+:class:`~qdrant_client.models.RecommendInput` queries from a
+:class:`~scalar_forensic.tags.Tag` and runs them through the
+unified ``client.query_points`` endpoint against the DINOv2 (``dino``)
+named vector.  Only DINOv2 is used for semantic triage — SSCD is a
+copy-detector and is not appropriate for category-based tagging.
+
+Scoring semantics
+-----------------
+
+* When the tag has at least one ``(positive, negative)`` pair,
+  Qdrant Discovery is used and the returned ``score`` is an *integer*
+  triplet-satisfaction count — for each pair the candidate is closer
+  to the positive than the negative, the score increments by one.
+* When the tag has only positive examples (or only a target, no
+  negatives), Qdrant Recommendation is used instead and the returned
+  ``score`` is a cosine similarity.  The ``triplet_score`` field on
+  the returned :class:`DiscoveryHit` is left as ``None`` in that case
+  and the ``raw_score`` field carries the cosine score.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    ContextPair,
+    ContextQuery,
+    DiscoverInput,
+    DiscoverQuery,
+    Filter,
+    HasIdCondition,
+    LookupLocation,
+    RecommendInput,
+    RecommendQuery,
+    RecommendStrategy,
+    Sample,
+    SampleQuery,
+)
+
+from scalar_forensic.tags import Tag
+
+# The "with_payload" field list that every triage hit needs — a superset
+# of what the existing vector-search results carry, so the web response
+# envelope for /api/triage can reuse the /api/query hit-card renderer.
+_TRIAGE_PAYLOAD_FIELDS: list[str] = [
+    "image_path",
+    "image_hash",
+    "exif",
+    "exif_geo_data",
+    "is_video_frame",
+    "video_path",
+    "video_hash",
+    "frame_timecode_ms",
+    "dino_model_name",
+    "dino_model_hash",
+    "sscd_model_name",
+    "sscd_model_hash",
+]
+
+# Hard cap on the number of context pairs built from a tag's
+# positive × negative cartesian product.  More pairs tighten the
+# decision boundary but also slow the server-side triplet evaluation.
+# 64 is well below any Qdrant operational limit while still giving
+# the investigator a lot of expressive headroom (e.g. 8 positives ×
+# 8 negatives = 64 pairs).
+MAX_CONTEXT_PAIRS = 64
+
+# Recommendation strategy used when the concept has no negatives.
+# BEST_SCORE matches the intent "most similar to any of my positives"
+# better than AVERAGE_VECTOR when the positive set is visually diverse.
+_DEFAULT_RECOMMEND_STRATEGY = RecommendStrategy.BEST_SCORE
+
+# Sentinel raw_score for random-mode explore results that carry no vector scoring.
+# NaN would be structurally unambiguous but breaks JSON serialisation, so 0.0 is
+# used instead.  Callers must not treat this as a genuine cosine score; the
+# canonical discriminant is ``vector_name == "random"`` or ``triplet_score is None``.
+_RANDOM_RAW_SCORE = 0.0
+
+
+@dataclass
+class DiscoveryHit:
+    """One ranked result from a concept query against a single named vector."""
+
+    point_id: str | int
+    vector_name: str  # "dino" or "sscd"
+    # None when the concept has no negatives (Recommend fallback path).
+    triplet_score: int | None
+    # Raw Qdrant score.  For Discovery queries this is the same integer
+    # value reported as triplet_score cast to float; for Recommend queries
+    # it is the cosine similarity to the best positive example.  Use
+    # ``triplet_score`` for Discovery-mode comparisons and ``raw_score``
+    # only for Recommend-mode (cosine) thresholding.
+    raw_score: float
+    payload: dict = field(default_factory=dict)
+
+
+def pair_indices(n_pos: int, n_neg: int) -> list[tuple[int, int]]:
+    """Return (positive_index, negative_index) pairs in canonical order.
+
+    Diagonal-first: ``(i, i)`` for ``i < min(n_pos, n_neg)`` come first so
+    every positive and every negative appears in at least one pair even
+    when ``MAX_CONTEXT_PAIRS`` truncates before the full cartesian product.
+    Remaining off-diagonal pairs follow in row-major order.
+
+    This is the single source of truth for pair ordering.  Both
+    :func:`_build_context_pairs` (Qdrant Discovery path) and the NumPy
+    triplet-scoring path in :mod:`scalar_forensic.query_eval` consume it
+    so the two scoring paths cannot drift.
+    """
+    limit = min(n_pos * n_neg, MAX_CONTEXT_PAIRS)
+    if limit == 0:
+        return []
+    seen: set[tuple[int, int]] = set()
+    out: list[tuple[int, int]] = []
+    short = min(n_pos, n_neg)
+    for i in range(short):
+        seen.add((i, i))
+        out.append((i, i))
+        if len(out) >= limit:
+            return out
+    for p in range(n_pos):
+        for n in range(n_neg):
+            if (p, n) in seen:
+                continue
+            out.append((p, n))
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _build_context_pairs(
+    positives: list[str | int], negatives: list[str | int]
+) -> list[ContextPair]:
+    """Return the cartesian product of (positive, negative) pairs, capped.
+
+    The cap is applied by round-robin sampling rather than truncation so
+    every positive and every negative is represented at least once when
+    the cap kicks in.  Ordering is delegated to :func:`pair_indices`.
+    """
+    if not positives or not negatives:
+        return []
+    return [
+        ContextPair(positive=positives[pi], negative=negatives[ni])
+        for pi, ni in pair_indices(len(positives), len(negatives))
+    ]
+
+
+def _exclude_filter(point_ids: list[str | int]) -> Filter | None:
+    """Return a Qdrant ``Filter`` that excludes the given point IDs, or None."""
+    if not point_ids:
+        return None
+    return Filter(must_not=[HasIdCondition(has_id=point_ids)])
+
+
+def _merge_filter(user_filter: Filter | None, exclude: Filter | None) -> Filter | None:
+    """Conjoin a caller-supplied filter with the must_not-exclude filter."""
+    if exclude is None:
+        return user_filter
+    if user_filter is None:
+        return exclude
+    # Qdrant Filter is dataclass-like; build a fresh one combining both.
+    combined_must_not = list(user_filter.must_not or []) + list(exclude.must_not or [])
+    return Filter(
+        must=user_filter.must,
+        should=user_filter.should,
+        min_should=user_filter.min_should,
+        must_not=combined_must_not,
+    )
+
+
+def _resolve_polarity(tag: Tag, reverse: bool) -> tuple[list[str | int], list[str | int]]:
+    """Apply reverse-polarity by swapping positive and negative lists.
+
+    Reverse triage turns "more like positives, less like negatives"
+    into "more like negatives, less like positives" — used to surface
+    provably-benign material that can be excluded from review.  Callers
+    opt in via the *reverse* flag.
+
+    Note: only the constraint pairs are swapped here.  The explicit
+    ``tag.target_id`` (if set) is *preserved* by :func:`run_discovery`
+    across reverse — it represents the user's chosen search anchor, not
+    a polarity assignment.  Auto-anchor falls back to the first entry of
+    the post-swap positives list (i.e. the first original negative when
+    ``reverse=True``), which is the correct anchor for "find more
+    benign material in the neighborhood of the labelled negatives."
+    """
+    if reverse:
+        return list(tag.negative_ids), list(tag.positive_ids)
+    return list(tag.positive_ids), list(tag.negative_ids)
+
+
+def run_discovery(
+    client: QdrantClient,
+    collection: str,
+    tag: Tag,
+    *,
+    vector_name: str,
+    limit: int = 50,
+    filter_: Filter | None = None,
+    reverse: bool = False,
+    reference_collection: str | None = None,
+    exclude_references: bool = True,
+    cosine_threshold: float | None = None,
+) -> list[DiscoveryHit]:
+    """Run a tag query against a single named vector.
+
+    Chooses the query kind automatically:
+
+    * Tag has positives + negatives → Discovery (target+context).
+    * Tag has only positives (and optionally a target) → Recommend.
+    * Tag has only target + negatives → Recommend with negatives applied.
+    * Tag has only negatives, no target → raises :class:`ValueError`.
+    * Tag has nothing → raises :class:`ValueError`.
+
+    When at least one positive is present and no explicit target is set,
+    the first positive is used as an implicit anchor so DiscoverQuery fires
+    immediately without the user needing to call "Set from hit".
+
+    With *reverse* True, the constraint polarity is swapped (see
+    :func:`_resolve_polarity`).  An explicit ``tag.target_id`` is
+    preserved as the anchor; only the auto-anchor follows the swap and
+    falls back to the first original negative.
+
+    When *exclude_references* is True (the default), the tag's own
+    reference points are filtered out of the result set so the top hits
+    are discovered material rather than the examples the investigator
+    already labelled.
+
+    *cosine_threshold* — when set (Recommend mode only), hits whose raw
+    cosine score is below the threshold are dropped.  Ignored in Discovery
+    mode where scoring is integer triplet counts, not cosine.  Pass
+    ``None`` (the default) to disable filtering.
+    """
+    positives, negatives = _resolve_polarity(tag, reverse)
+    target = tag.target_id
+    # Auto-anchor: use the first positive as implicit target when no
+    # explicit target is set — always fires DiscoverQuery when possible.
+    if target is None and positives:
+        target = positives[0]
+
+    if not positives and not negatives and target is None:
+        raise ValueError(
+            f"Tag {tag.tag_id!r} has no positive, negative, or target "
+            "references; cannot build a Discovery or Recommend query."
+        )
+
+    ref_ids: list[str | int] = []
+    if exclude_references:
+        ref_ids.extend(positives)
+        ref_ids.extend(negatives)
+        if target is not None and target not in ref_ids:
+            ref_ids.append(target)
+    query_filter = _merge_filter(filter_, _exclude_filter(ref_ids))
+
+    lookup_from = (
+        LookupLocation(collection=reference_collection, vector=vector_name)
+        if reference_collection
+        else None
+    )
+
+    pairs = _build_context_pairs(positives, negatives)
+
+    if pairs:
+        # _build_context_pairs returns non-empty only when both positives and negatives
+        # are present; the auto-anchor above always sets target when positives exist,
+        # so target is guaranteed non-None here.  Raise explicitly so the invariant
+        # is enforced even when Python is run with -O (which silences assert).
+        if target is None:
+            raise RuntimeError(
+                "Internal invariant violated: non-empty context pairs require a "
+                "target anchor.  This should be unreachable — please file a bug."
+            )
+        query = DiscoverQuery(discover=DiscoverInput(target=target, context=pairs))
+    else:
+        if not positives and target is None:
+            raise ValueError(
+                f"Tag {tag.tag_id!r} has only negative references; "
+                "cannot build a Recommend query (Qdrant requires ≥1 positive "
+                "or a target).  Add a positive example or a target_id, or use "
+                "reverse=True if this tag is exculpatory."
+            )
+        pos_list = [target, *positives] if target is not None else positives
+        deduped_positives = list(dict.fromkeys(pos_list))
+        deduped_negatives = [n for n in dict.fromkeys(negatives) if n not in set(deduped_positives)]
+        query = RecommendQuery(
+            recommend=RecommendInput(
+                positive=deduped_positives,
+                negative=deduped_negatives or None,
+                strategy=_DEFAULT_RECOMMEND_STRATEGY,
+            )
+        )
+
+    result = client.query_points(
+        collection_name=collection,
+        query=query,
+        using=vector_name,
+        limit=limit,
+        query_filter=query_filter,
+        with_payload=_TRIAGE_PAYLOAD_FIELDS,
+        lookup_from=lookup_from,
+    )
+
+    is_discover = bool(pairs)
+    hits: list[DiscoveryHit] = []
+    for r in result.points:
+        triplet: int | None = int(round(r.score)) if is_discover else None
+        raw_score = float(r.score)
+        # Cosine-threshold filter applies to Recommend mode only — Discovery
+        # mode scores are integer triplet counts on a different scale and the
+        # caller already controls cap via the triplet threshold.
+        if not is_discover and cosine_threshold is not None and raw_score < cosine_threshold:
+            continue
+        hits.append(
+            DiscoveryHit(
+                point_id=r.id,
+                vector_name=vector_name,
+                triplet_score=triplet,
+                raw_score=raw_score,
+                payload=r.payload or {},
+            )
+        )
+    return hits
+
+
+def run_explore(
+    client: QdrantClient,
+    collection: str,
+    positive_ids: list[str | int],
+    negative_ids: list[str | int],
+    *,
+    vector_name: str = "dino",
+    limit: int = 50,
+    filter_: Filter | None = None,
+) -> tuple[list[DiscoveryHit], str]:
+    """Surface candidates for tag bootstrapping and iterative diversity injection.
+
+    Two strategies, chosen automatically:
+
+    * **context** — both *positive_ids* and *negative_ids* non-empty:
+      ``ContextQuery`` ranks points by how many (positive, negative) triplet
+      pairs they satisfy.  Points near the decision boundary score at roughly
+      half the pair count, making them the most informative for labelling.
+    * **random** — one or both lists empty:
+      ``SampleQuery(sample=Sample.RANDOM)`` returns uniformly random points with no
+      vector scoring, giving unbiased cold-start coverage.
+
+    Already-labelled points (both lists combined) are excluded so successive
+    explore runs surface fresh candidates.
+
+    Returns ``(hits, strategy)`` where *strategy* is ``"context"`` or
+    ``"random"``.
+    """
+    exclude_ids: list[str | int] = list(positive_ids) + list(negative_ids)
+    query_filter = _merge_filter(filter_, _exclude_filter(exclude_ids))
+
+    use_context = bool(positive_ids) and bool(negative_ids)
+
+    if use_context:
+        pairs = _build_context_pairs(positive_ids, negative_ids)
+        query: ContextQuery | SampleQuery = ContextQuery(context=pairs)
+        using: str | None = vector_name
+    else:
+        query = SampleQuery(sample=Sample.RANDOM)
+        using = None  # random sampling is vector-agnostic
+
+    result = client.query_points(
+        collection_name=collection,
+        query=query,
+        using=using,
+        limit=limit,
+        query_filter=query_filter,
+        with_payload=_TRIAGE_PAYLOAD_FIELDS,
+    )
+
+    strategy = "context" if use_context else "random"
+    hits: list[DiscoveryHit] = []
+    for r in result.points:
+        triplet = int(round(r.score)) if use_context else None
+        hits.append(
+            DiscoveryHit(
+                point_id=r.id,
+                vector_name=vector_name if use_context else "random",
+                triplet_score=triplet,
+                raw_score=float(r.score) if use_context else _RANDOM_RAW_SCORE,
+                payload=r.payload or {},
+            )
+        )
+    return hits, strategy
+
+
+def run_triage(
+    client: QdrantClient,
+    collection: str,
+    tag: Tag,
+    *,
+    limit: int = 50,
+    filter_: Filter | None = None,
+    reverse: bool = False,
+    reference_collection: str | None = None,
+    exclude_references: bool = True,
+    cosine_threshold: float | None = None,
+) -> list[DiscoveryHit]:
+    """Run a tag triage query using DINOv2 semantic embeddings only."""
+    return run_discovery(
+        client,
+        collection,
+        tag,
+        vector_name="dino",
+        limit=limit,
+        filter_=filter_,
+        reverse=reverse,
+        reference_collection=reference_collection,
+        exclude_references=exclude_references,
+        cosine_threshold=cosine_threshold,
+    )

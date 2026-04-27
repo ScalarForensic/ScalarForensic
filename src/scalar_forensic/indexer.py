@@ -59,10 +59,12 @@ class Indexer:
         embedding_dim: int,
         api_key: str | None = None,
         initial_vectors_config: dict[str, VectorParams] | None = None,
+        is_reference: bool = False,
     ) -> None:
         self.client = QdrantClient(url=url, api_key=api_key)
         self.collection = collection
         self.vector_name = vector_name
+        self._is_reference = is_reference
         self._ensure_collection(vector_name, embedding_dim, initial_vectors_config)
 
     def _ensure_collection(
@@ -156,6 +158,17 @@ class Indexer:
             self.client.create_payload_index(
                 collection_name=self.collection,
                 field_name="is_video",
+                field_schema=PayloadSchemaType.BOOL,
+            )
+        # Index is created unconditionally (not gated on self._is_reference) so
+        # that case collections can filter out reference material even when the
+        # current Indexer was not instantiated with --reference.  This is always
+        # a case/image collection; the tags sidecar is managed by TagStore, not
+        # Indexer, so this index is never applied to sfn_tags in normal usage.
+        if "is_reference" not in schema:
+            self.client.create_payload_index(
+                collection_name=self.collection,
+                field_name="is_reference",
                 field_schema=PayloadSchemaType.BOOL,
             )
 
@@ -328,6 +341,7 @@ class Indexer:
             )
         vn = self.vector_name
         indexed_at = datetime.now(UTC).isoformat()
+        ref_tag: dict = {"is_reference": True} if self._is_reference else {}
 
         # Model-specific provenance — prefixed with the vector name so a single
         # point can hold provenance for multiple models side by side.
@@ -371,6 +385,7 @@ class Indexer:
                 "image_path": str(Path(image_path).resolve()),
                 # EXIF flags (only present when extraction is enabled)
                 **(exif_payloads.get(image_path, {}) if exif_payloads else {}),
+                **ref_tag,
             }
 
             # Video-frame provenance fields
@@ -424,6 +439,6 @@ class Indexer:
             # model_provenance is identical for every point in the batch — one call suffices.
             self.client.set_payload(
                 collection_name=self.collection,
-                payload=model_provenance,
+                payload={**model_provenance, **ref_tag},
                 points=existing_point_ids,
             )
