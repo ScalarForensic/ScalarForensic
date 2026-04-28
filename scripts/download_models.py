@@ -47,11 +47,22 @@ DINO_DEST = Path("models/dinov2-large")
 # When --hash resolves to an entry here, the matching revision is fetched automatically
 # so the downloaded snapshot is guaranteed to produce the expected content hash.
 #
-# To populate: run the script after a fresh download and copy the printed
+# Content hashes are computed by _compute_dino_hash: SHA-256 over (name, content) of
+# every file whose extension is in _DINO_CONTENT_EXTENSIONS, in lexicographic order.
+# README.md, .gitattributes, *.metadata, CACHEDIR.TAG and other library-generated
+# files are excluded so the hash is stable across huggingface_hub versions.
+#
+# To add a new entry: run the script after a fresh download and copy the printed
 # "content hash: …" value; find the corresponding HuggingFace commit at
 # https://huggingface.co/facebook/dinov2-large/commits/main and add it here.
 KNOWN_DINO_REVISIONS: dict[str, str] = {
-    # "<64-char SHA-256 content hash>": "<HuggingFace git commit SHA>",
+    # facebook/dinov2-large — commits that include both model.safetensors and
+    # pytorch_model.bin (added in "Upload safetensors version (#3)", 2023-09-04).
+    # All commits from that point onward share the same content hash because only
+    # README.md and .gitattributes changed — neither is included in the digest.
+    "602e75d2777be75f53c2ef9c8561ff40a4f1462b68bbda9af05472e67f2f141e": (
+        "47b73eefe95e8d44ec3623f8890bd894b6ea2d6c"  # "Update license", 2023-09-06 (HEAD)
+    ),
 }
 
 
@@ -60,11 +71,17 @@ KNOWN_DINO_REVISIONS: dict[str, str] = {
 #               safeguards.compute_sscd_model_hash without importing the package)
 # ---------------------------------------------------------------------------
 
+# Mirror of scalar_forensic._model_hash.DINO_CONTENT_EXTENSIONS.
+# This script intentionally avoids importing the package so it can run with
+# only huggingface_hub installed (no torch / transformers needed for downloads).
+# Keep this value in sync with _model_hash.py; see that module for the rationale.
+_DINO_CONTENT_EXTENSIONS: frozenset[str] = frozenset({".safetensors", ".bin", ".json"})
+
 
 def _compute_dino_hash(local_dir: Path) -> str:
     h = hashlib.sha256()
     for file in sorted(local_dir.rglob("*")):
-        if not file.is_file():
+        if not file.is_file() or file.suffix not in _DINO_CONTENT_EXTENSIONS:
             continue
         h.update(file.name.encode())
         with file.open("rb") as f:

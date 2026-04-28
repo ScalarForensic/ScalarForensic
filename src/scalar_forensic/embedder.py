@@ -21,6 +21,8 @@ from PIL import Image, ImageOps
 from torchvision import transforms
 from transformers import AutoImageProcessor, AutoModel
 
+from scalar_forensic._model_hash import hash_dino_snapshot as _hash_dino_snapshot
+
 _SSCD_INPUT_SIZE = 288
 # SSCD requires short-side ≥ 331 px before the 288×288 center-crop.
 _SSCD_SCALE = 331
@@ -495,15 +497,7 @@ class DINOv2Embedder:
                 from huggingface_hub import snapshot_download
 
                 snapshot_path = Path(snapshot_download(self.model_name, local_files_only=True))
-            h = hashlib.sha256()
-            for file in sorted(snapshot_path.rglob("*")):
-                if not file.is_file():
-                    continue
-                h.update(file.name.encode())
-                with file.open("rb") as f:
-                    for chunk in iter(lambda: f.read(65536), b""):
-                        h.update(chunk)
-            self._model_hash = h.hexdigest()
+            self._model_hash = _hash_dino_snapshot(snapshot_path)
         return self._model_hash
 
     def normalize_batch_bytes(self, images: list[Image.Image]) -> list[Image.Image]:

@@ -23,6 +23,8 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 from qdrant_client.models import Filter, HasVectorCondition
 
+from scalar_forensic._model_hash import hash_dino_snapshot
+
 if TYPE_CHECKING:
     from scalar_forensic.config import Settings
 
@@ -32,12 +34,15 @@ class QdrantUnavailable(Exception):
 
 
 def compute_dino_model_hash(model_name: str) -> str:
-    """Hash a DINOv2 snapshot directory or local model directory.
+    """Hash the content files of a DINOv2 snapshot directory or local model directory.
 
-    Mirrors :pyattr:`scalar_forensic.embedder.DinoV2Embedder.model_hash`
+    Mirrors :pyattr:`scalar_forensic.embedder.DINOv2Embedder.model_hash`
     *without* loading the model into memory, so it is cheap enough for
-    web-server startup.  Each file's basename and content contribute to
-    the digest, so renaming or replacing any snapshot file changes the hash.
+    web-server startup.
+
+    Delegates to :func:`scalar_forensic._model_hash.hash_dino_snapshot` for
+    the actual digest computation; see that module for the extension allowlist
+    and the rationale for excluding huggingface_hub auxiliary files.
     """
     local = Path(model_name)
     if local.is_dir():
@@ -47,15 +52,7 @@ def compute_dino_model_hash(model_name: str) -> str:
 
         snapshot_path = Path(snapshot_download(model_name, local_files_only=True))
 
-    h = hashlib.sha256()
-    for file in sorted(snapshot_path.rglob("*")):
-        if not file.is_file():
-            continue
-        h.update(file.name.encode())
-        with file.open("rb") as f:
-            for chunk in iter(lambda: f.read(65536), b""):
-                h.update(chunk)
-    return h.hexdigest()
+    return hash_dino_snapshot(snapshot_path)
 
 
 def compute_sscd_model_hash(model_path: str | Path) -> str:

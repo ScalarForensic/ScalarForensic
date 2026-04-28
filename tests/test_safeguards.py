@@ -19,6 +19,7 @@ from qdrant_client.models import VectorParams
 from scalar_forensic.safeguards import (
     QdrantUnavailable,
     check_collection_compat,
+    compute_dino_model_hash,
     compute_remote_model_hash,
     compute_sscd_model_hash,
     expected_model_hashes_from_settings,
@@ -134,6 +135,61 @@ def test_compute_sscd_model_hash_matches_sha256(tmp_path: Path):
 
     expected = hashlib.sha256(payload).hexdigest()
     assert compute_sscd_model_hash(f) == expected
+
+
+def test_compute_dino_model_hash_excludes_noise_files(tmp_path: Path):
+    """Library-generated auxiliary files must not affect the model hash."""
+    model_dir = tmp_path / "dinov2-large"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_bytes(b'{"model_type": "dinov2"}')
+    (model_dir / "preprocessor_config.json").write_bytes(b"{}")
+    (model_dir / "model.safetensors").write_bytes(b"fake safetensors weights")
+
+    h1 = compute_dino_model_hash(str(model_dir))
+
+    # Inject the full set of noise files that huggingface_hub ≥ 0.20 creates
+    # when downloading to a local_dir, plus git-related files from the HF repo.
+    (model_dir / "CACHEDIR.TAG").write_bytes(b"Signature: 8a477f597d28d172789f06886806bc55\n")
+    (model_dir / ".gitignore").write_bytes(b"*.lock\n")
+    (model_dir / ".gitattributes").write_bytes(b"*.safetensors filter=lfs\n")
+    (model_dir / "README.md").write_bytes(b"# DINOv2\n")
+    (model_dir / "config.json.metadata").write_bytes(b'{"timestamp": 12345}')
+    (model_dir / "model.safetensors.metadata").write_bytes(b'{"etag": "abc123"}')
+    (model_dir / "preprocessor_config.json.metadata").write_bytes(b'{"etag": "def456"}')
+
+    h2 = compute_dino_model_hash(str(model_dir))
+
+    assert h1 == h2, "noise files must not affect the model hash"
+
+
+def test_compute_dino_model_hash_changes_with_content(tmp_path: Path):
+    """Changing a weight or config file must change the hash."""
+    model_dir = tmp_path / "dinov2-large"
+    model_dir.mkdir()
+    config = model_dir / "config.json"
+    weights = model_dir / "model.safetensors"
+    config.write_bytes(b'{"hidden_size": 1024}')
+    weights.write_bytes(b"original weights")
+
+    h1 = compute_dino_model_hash(str(model_dir))
+
+    weights.write_bytes(b"modified weights")
+    h2 = compute_dino_model_hash(str(model_dir))
+    assert h1 != h2, "changing weights must change the hash"
+
+    weights.write_bytes(b"original weights")
+    config.write_bytes(b'{"hidden_size": 768}')
+    h3 = compute_dino_model_hash(str(model_dir))
+    assert h1 != h3, "changing config must change the hash"
+
+
+def test_compute_dino_model_hash_is_a_valid_sha256_hex(tmp_path: Path):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_bytes(b"{}")
+    h = compute_dino_model_hash(str(model_dir))
+    assert len(h) == 64
+    assert all(c in "0123456789abcdef" for c in h)
 
 
 def test_compute_remote_model_hash_is_deterministic_and_strips_trailing_slash():
