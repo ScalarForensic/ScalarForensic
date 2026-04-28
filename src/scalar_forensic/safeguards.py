@@ -74,12 +74,16 @@ def compute_remote_model_hash(endpoint: str, model_name: str, embedding_dim: int
     """Hash a remote (OpenAI-compatible) embedder configuration.
 
     Mirrors :pyattr:`scalar_forensic.embedder.RemoteEmbedder.model_hash`.
+
+    The returned string is prefixed with ``config:`` to make it unambiguous,
+    both in stored Qdrant payloads and in the UI, that this hash identifies
+    the remote endpoint configuration rather than actual model weights.
     """
     h = hashlib.sha256()
     h.update(endpoint.rstrip("/").encode())
     h.update(model_name.encode())
     h.update(str(embedding_dim).encode())
-    return h.hexdigest()
+    return "config:" + h.hexdigest()
 
 
 # Maximum points to inspect per vector type when looking for collection-internal

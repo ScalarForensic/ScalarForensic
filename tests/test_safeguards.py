@@ -151,6 +151,14 @@ def test_compute_remote_model_hash_changes_with_dim():
     assert h1 != h2
 
 
+def test_compute_remote_model_hash_has_config_prefix():
+    h = compute_remote_model_hash("https://api.example.com", "model-x", 1024)
+    assert h.startswith("config:"), f"expected 'config:' prefix, got: {h!r}"
+    # Remainder must be a valid SHA-256 hex digest (64 hex chars).
+    assert len(h) == len("config:") + 64
+    assert all(c in "0123456789abcdef" for c in h[len("config:") :])
+
+
 # ---------------------------------------------------------------------------
 # expected_model_hashes_from_settings
 # ---------------------------------------------------------------------------

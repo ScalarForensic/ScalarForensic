@@ -894,6 +894,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .emb-row.emb-mismatch .emb-name,
 .emb-row.emb-mismatch .emb-hash { color: var(--accent); }
 
+
 /* ── Badges ── */
 .badge {
   padding: 1px 6px;

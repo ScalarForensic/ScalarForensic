@@ -707,7 +707,9 @@ class RemoteEmbedder:
             h.update(self.endpoint.encode())
             h.update(self.model_name.encode())
             h.update(str(self._embedding_dim).encode())
-            self._model_hash = h.hexdigest()
+            # Prefix signals that this is a config-derived hash, not a weights
+            # hash, so consumers (UI, audit logs) can surface the distinction.
+            self._model_hash = "config:" + h.hexdigest()
         return self._model_hash
 
     def normalize_batch_bytes(self, images: list[Image.Image]) -> list[Image.Image]:
