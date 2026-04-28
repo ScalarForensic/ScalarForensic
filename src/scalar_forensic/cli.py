@@ -573,9 +573,7 @@ def index(
                 "      uv run python scripts/download_models.py --sscd --hash <stored_hash>",
                 err=True,
             )
-            typer.echo(
-                "    (use the stored= value from the mismatch detail above), OR", err=True
-            )
+            typer.echo("    (use the stored= value from the mismatch detail above), OR", err=True)
             typer.echo(
                 "  • Pass --ignore-config-mismatch to proceed anyway (not recommended)", err=True
             )
