@@ -156,7 +156,7 @@ def test_compute_remote_model_hash_has_config_prefix():
     assert h.startswith("config:"), f"expected 'config:' prefix, got: {h!r}"
     # Remainder must be a valid SHA-256 hex digest (64 hex chars).
     assert len(h) == len("config:") + 64
-    assert all(c in "0123456789abcdef" for c in h[len("config:"):])
+    assert all(c in "0123456789abcdef" for c in h[len("config:") :])
 
 
 # ---------------------------------------------------------------------------
