@@ -23,28 +23,14 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 from qdrant_client.models import Filter, HasVectorCondition
 
+from scalar_forensic._model_hash import hash_dino_snapshot
+
 if TYPE_CHECKING:
     from scalar_forensic.config import Settings
 
 
 class QdrantUnavailable(Exception):
     """Raised when Qdrant cannot be reached at startup-check time."""
-
-
-# File extensions that carry model weights or configuration determining embedding
-# output.  huggingface_hub ≥ 0.20 populates the model directory with auxiliary
-# files (*.metadata, CACHEDIR.TAG, .gitignore) whose presence varies by library
-# version; the HuggingFace repository also includes .gitattributes and README.md
-# that are irrelevant to inference.  Including any of these in the hash would
-# make it impossible to reproduce the same value across deployment environments
-# even when the actual model weights are byte-for-byte identical — which is
-# exactly the property forensic integrity requires.
-#
-# This constant is intentionally duplicated in:
-#   • src/scalar_forensic/embedder.py  (DINOv2Embedder.model_hash)
-#   • scripts/download_models.py       (_compute_dino_hash)
-# All three copies must remain identical.  When updating this set, update all three.
-_DINO_CONTENT_EXTENSIONS: frozenset[str] = frozenset({".safetensors", ".bin", ".json"})
 
 
 def compute_dino_model_hash(model_name: str) -> str:
@@ -54,11 +40,9 @@ def compute_dino_model_hash(model_name: str) -> str:
     *without* loading the model into memory, so it is cheap enough for
     web-server startup.
 
-    Only files whose extension is in ``_DINO_CONTENT_EXTENSIONS`` (.safetensors,
-    .bin, .json) contribute to the digest.  huggingface_hub auxiliary files
-    (*.metadata, CACHEDIR.TAG, .gitignore) and repository metadata
-    (.gitattributes, README.md) are excluded so the hash is stable across
-    library versions and download methods.
+    Delegates to :func:`scalar_forensic._model_hash.hash_dino_snapshot` for
+    the actual digest computation; see that module for the extension allowlist
+    and the rationale for excluding huggingface_hub auxiliary files.
     """
     local = Path(model_name)
     if local.is_dir():
@@ -68,15 +52,7 @@ def compute_dino_model_hash(model_name: str) -> str:
 
         snapshot_path = Path(snapshot_download(model_name, local_files_only=True))
 
-    h = hashlib.sha256()
-    for file in sorted(snapshot_path.rglob("*")):
-        if not file.is_file() or file.suffix not in _DINO_CONTENT_EXTENSIONS:
-            continue
-        h.update(file.name.encode())
-        with file.open("rb") as f:
-            for chunk in iter(lambda: f.read(65536), b""):
-                h.update(chunk)
-    return h.hexdigest()
+    return hash_dino_snapshot(snapshot_path)
 
 
 def compute_sscd_model_hash(model_path: str | Path) -> str:

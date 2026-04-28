@@ -71,9 +71,10 @@ KNOWN_DINO_REVISIONS: dict[str, str] = {
 #               safeguards.compute_sscd_model_hash without importing the package)
 # ---------------------------------------------------------------------------
 
-# Mirror of safeguards._DINO_CONTENT_EXTENSIONS — see that module for the full
-# rationale.  All three copies (safeguards, embedder, this script) must remain
-# identical; when updating one, update all three.
+# Mirror of scalar_forensic._model_hash.DINO_CONTENT_EXTENSIONS.
+# This script intentionally avoids importing the package so it can run with
+# only huggingface_hub installed (no torch / transformers needed for downloads).
+# Keep this value in sync with _model_hash.py; see that module for the rationale.
 _DINO_CONTENT_EXTENSIONS: frozenset[str] = frozenset({".safetensors", ".bin", ".json"})
 
 
