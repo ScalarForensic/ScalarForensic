@@ -38,7 +38,7 @@ heif = [
 ]
 web = [
     "fastapi>=0.136.0",
-    "uvicorn>=0.29",
+    "uvicorn>=0.46.0",
     "python-multipart>=0.0.26",
 ]
 
