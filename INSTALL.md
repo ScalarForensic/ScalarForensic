@@ -106,6 +106,36 @@ there. Environment variables already set in the shell take precedence over the f
 | `SFN_VIDEO_FPS` | `1.0` | Frames to extract per second of video |
 | `SFN_VIDEO_MAX_FRAMES` | `500` | Hard cap on frames extracted per video file (0 = no cap) |
 
+## Remote deployment
+
+ScalarForensic's web server binds to `0.0.0.0` by default, so it is reachable from any network interface without additional configuration. All data (indexed collections, reference images, thumbnails) lives on the server; only query images are uploaded from the remote client over HTTP and are held in a server-side temporary directory for the duration of the session.
+
+**New env vars for remote deployments:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SFN_WEB_HOST` | `0.0.0.0` | Address the web server binds to |
+| `SFN_WEB_PORT` | `8080` | Port the web server listens on |
+| `SFN_MAX_UPLOAD_BYTES` | `2147483648` (2 GiB) | Maximum total upload size per analyze request. Set to `0` to disable. |
+| `SFN_SESSION_TTL_SECONDS` | `3600` | Seconds of inactivity after which a session and its temp files are automatically deleted |
+| `SFN_MAX_ACTIVE_SESSIONS` | `32` | Maximum number of concurrent sessions. New sessions beyond this limit receive HTTP 503. Set to `0` to disable. |
+
+**TLS and authentication:** these are not provided by `sfn-web` and should be handled at the network layer. Use a reverse proxy (e.g. nginx, Caddy) for TLS termination and access control before exposing the service to untrusted networks.
+
+**Qdrant:** when using Docker Compose, Qdrant is only reachable on the internal compose network — it is not published to the host. This prevents unintended vector-database exposure. To allow direct host access for debugging, add a local override file:
+
+```yaml
+# docker-compose.debug.yml
+services:
+  qdrant:
+    ports:
+      - "127.0.0.1:6333:6333"
+```
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d
+```
+
 ## Reference collection
 
 The reference collection is an optional, separate Qdrant collection that holds vectors for externally labelled reference material. Keeping it separate from the case collection means your case vectors are never co-mingled with third-party reference material, and the reference collection can be reused across cases.

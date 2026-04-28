@@ -139,6 +139,28 @@ class Settings:
                 "Allowed values: 1 (center crop only) or 5 (center + 4 corners)."
             )
 
+        # --- Web server ---
+        self.web_host: str = os.environ.get("SFN_WEB_HOST", "0.0.0.0")
+        self.web_port: int = self._parse_int("SFN_WEB_PORT", 8080)
+        if not (1 <= self.web_port <= 65535):
+            raise ValueError(f"SFN_WEB_PORT={self.web_port!r} must be between 1 and 65535")
+        # Maximum total upload body per /api/analyze request (bytes).
+        # Default: 2 GiB — sufficient for large video files.
+        # Set SFN_MAX_UPLOAD_BYTES=0 to disable the cap.
+        self.max_upload_bytes: int = self._parse_int("SFN_MAX_UPLOAD_BYTES", 2 * 1024 * 1024 * 1024)
+        if self.max_upload_bytes < 0:
+            raise ValueError("SFN_MAX_UPLOAD_BYTES must be >= 0 (0 disables the cap)")
+        # Session idle timeout (seconds). The background reaper runs every 60 s
+        # and deletes sessions idle for longer than this value.
+        self.session_ttl_seconds: int = self._parse_int("SFN_SESSION_TTL_SECONDS", 3600)
+        if self.session_ttl_seconds < 1:
+            raise ValueError("SFN_SESSION_TTL_SECONDS must be >= 1")
+        # Maximum number of concurrent active sessions. Requests that would
+        # exceed this limit receive HTTP 503. Use 0 to disable the cap.
+        self.max_active_sessions: int = self._parse_int("SFN_MAX_ACTIVE_SESSIONS", 32)
+        if self.max_active_sessions < 0:
+            raise ValueError("SFN_MAX_ACTIVE_SESSIONS must be >= 0 (0 disables the cap)")
+
     def _parse_float(self, key: str, default: float) -> float:
         raw = os.environ.get(key)
         if raw is None:

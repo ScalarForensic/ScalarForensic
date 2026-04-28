@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import shutil
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,35 +41,45 @@ class Session:
     session_id: str
     files: list[FileEntry] = field(default_factory=list)
     temp_dir: Path | None = None
+    last_access: float = field(default_factory=time.monotonic)
 
 
 _store: dict[str, Session] = {}
-_current_session_id: str | None = None
 _session_lock: asyncio.Lock = asyncio.Lock()
 
 
-async def create_session() -> Session:
-    """Create a new session, replacing the previous one.
+async def create_session(max_active: int = 0) -> Session:
+    """Create and store a new independent session.
 
-    Thread-safe: uses an asyncio lock so concurrent /api/analyze requests
-    cannot observe a partially-cleaned-up session or clobber each other's IDs.
+    When *max_active* is > 0 and the store is already at capacity, raises
+    RuntimeError — callers should translate this to HTTP 503.
     """
-    global _current_session_id
+    async with _session_lock:
+        if max_active > 0 and len(_store) >= max_active:
+            raise RuntimeError(f"Session limit reached ({max_active} active sessions)")
+        session = Session(session_id=str(uuid.uuid4()))
+        _store[session.session_id] = session
 
+    return session
+
+
+def get_session(session_id: str) -> Session | None:
+    session = _store.get(session_id)
+    if session is not None:
+        session.last_access = time.monotonic()
+    return session
+
+
+async def delete_session(session_id: str) -> None:
+    """Remove a session from the store and clean up its temp files."""
     stale_paths: list[Path] = []
     stale_temp_dir: Path | None = None
 
     async with _session_lock:
-        # Collect paths while holding the lock, then delete after releasing it
-        # so filesystem I/O doesn't block other requests waiting on the lock.
-        if _current_session_id and _current_session_id in _store:
-            old = _store.pop(_current_session_id)
-            stale_paths = [e.temp_path for e in old.files]
-            stale_temp_dir = old.temp_dir
-
-        session = Session(session_id=str(uuid.uuid4()))
-        _store[session.session_id] = session
-        _current_session_id = session.session_id
+        session = _store.pop(session_id, None)
+        if session is not None:
+            stale_paths = [e.temp_path for e in session.files]
+            stale_temp_dir = session.temp_dir
 
     for path in stale_paths:
         try:
@@ -79,8 +90,27 @@ async def create_session() -> Session:
     if stale_temp_dir is not None:
         shutil.rmtree(stale_temp_dir, ignore_errors=True)
 
-    return session
 
+async def reap_idle_sessions(max_idle_seconds: int) -> None:
+    """Delete sessions that have been idle for longer than *max_idle_seconds*."""
+    now = time.monotonic()
+    victims: list[str] = []
+    stale_data: list[tuple[list[Path], Path | None]] = []
 
-def get_session(session_id: str) -> Session | None:
-    return _store.get(session_id)
+    async with _session_lock:
+        for sid, session in list(_store.items()):
+            if now - session.last_access > max_idle_seconds:
+                victims.append(sid)
+                stale_data.append(([e.temp_path for e in session.files], session.temp_dir))
+        for sid in victims:
+            del _store[sid]
+
+    for sid, (paths, temp_dir) in zip(victims, stale_data):
+        logger.info("Reaping idle session %s", sid)
+        for path in paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Failed to delete temp file %s", path)
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
