@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -268,9 +269,13 @@ async def analyze(
                         )
                     fout.write(chunk)
             session.files.append(FileEntry(file_id=file_id, filename=filename, temp_path=dest))
-    except HTTPException:
+    except Exception:
         await delete_session(session.session_id)
         raise
+
+    # Touch last_access so the reaper cannot evict an in-flight session that
+    # has not yet received a get_session() call (e.g. long-running analysis).
+    session.last_access = time.monotonic()
 
     async def event_stream():
         # Run the analysis (CPU-intensive) in a thread pool so the event loop
@@ -283,6 +288,7 @@ async def analyze(
         def _run_analysis() -> None:
             try:
                 for event in analyze_session(session, mode_list, settings):
+                    session.last_access = time.monotonic()
                     loop.call_soon_threadsafe(queue.put_nowait, event)
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel

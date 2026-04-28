@@ -55,7 +55,7 @@ services:
     depends_on:
       - qdrant
     ports:
-      - "8080:8080"
+      - "${SFN_WEB_PORT:-8080}:${SFN_WEB_PORT:-8080}"
     volumes:
       # Application config — copy .env.example → .env and edit before first run.
       - ./.env:/app/.env:ro
