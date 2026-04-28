@@ -433,6 +433,10 @@ def preprocess_pil_batch(images: list[Image.Image], cap: int = _SHARED_CAP) -> l
 # DINOv2
 # ---------------------------------------------------------------------------
 
+# Mirror of safeguards._DINO_CONTENT_EXTENSIONS — see that module for the full
+# rationale.  Both copies must remain identical; when updating one, update both.
+_DINO_CONTENT_EXTENSIONS: frozenset[str] = frozenset({".safetensors", ".bin", ".json"})
+
 
 class DINOv2Embedder:
     def __init__(
@@ -497,7 +501,7 @@ class DINOv2Embedder:
                 snapshot_path = Path(snapshot_download(self.model_name, local_files_only=True))
             h = hashlib.sha256()
             for file in sorted(snapshot_path.rglob("*")):
-                if not file.is_file():
+                if not file.is_file() or file.suffix not in _DINO_CONTENT_EXTENSIONS:
                     continue
                 h.update(file.name.encode())
                 with file.open("rb") as f:
