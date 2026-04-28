@@ -893,6 +893,20 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 /* Mismatch: query embedder hash ≠ database point hash for the same mode */
 .emb-row.emb-mismatch .emb-name,
 .emb-row.emb-mismatch .emb-hash { color: var(--accent); }
+/* Config-only hash: remote model whose weights are unavailable for hashing */
+.config-hash-chip {
+  font-size: 9px;
+  font-family: var(--display);
+  font-weight: 700;
+  color: #b45309;
+  background: rgba(180, 83, 9, 0.08);
+  border: 1px solid rgba(180, 83, 9, 0.25);
+  border-radius: 3px;
+  padding: 0 3px;
+  flex-shrink: 0;
+  cursor: help;
+  white-space: nowrap;
+}
 
 /* ── Badges ── */
 .badge {
