@@ -561,6 +561,22 @@ def index(
             typer.echo("  • Restore the original settings in .env, OR", err=True)
             typer.echo("  • Re-create the collection from scratch and re-index, OR", err=True)
             typer.echo(
+                "  • Download the exact model version recorded in this collection"
+                " (local DINOv2/SSCD only):",
+                err=True,
+            )
+            typer.echo(
+                "      uv run python scripts/download_models.py --dino --hash <stored_hash>",
+                err=True,
+            )
+            typer.echo(
+                "      uv run python scripts/download_models.py --sscd --hash <stored_hash>",
+                err=True,
+            )
+            typer.echo(
+                "    (use the stored= value from the mismatch detail above), OR", err=True
+            )
+            typer.echo(
                 "  • Pass --ignore-config-mismatch to proceed anyway (not recommended)", err=True
             )
             raise typer.Exit(1)

@@ -2174,6 +2174,11 @@ def _check_collection_compat(settings: Settings, *, ignore_mismatch: bool = Fals
         f"Options:\n"
         f"  • Restore the original settings in .env to match the indexed collection, OR\n"
         f"  • Re-index the collection: sfn <input_dir> --sscd / --dino, OR\n"
+        f"  • Download the exact model version recorded in this collection"
+        f" (local DINOv2/SSCD only):\n"
+        f"      uv run python scripts/download_models.py --dino --hash <stored_hash>\n"
+        f"      uv run python scripts/download_models.py --sscd --hash <stored_hash>\n"
+        f"    (use the stored= value from the mismatch detail above), OR\n"
         f"  • Pass --ignore-config-mismatch to start anyway (read-only; results will be\n"
         f"    silently wrong — never use for forensic conclusions)\n",
         file=sys.stderr,
