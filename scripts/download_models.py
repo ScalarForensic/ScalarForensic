@@ -32,6 +32,7 @@ system and install with:
 
 import argparse
 import hashlib
+import shutil
 import sys
 import urllib.request
 from pathlib import Path
@@ -59,6 +60,7 @@ KNOWN_DINO_REVISIONS: dict[str, str] = {
 #               safeguards.compute_sscd_model_hash without importing the package)
 # ---------------------------------------------------------------------------
 
+
 def _compute_dino_hash(local_dir: Path) -> str:
     h = hashlib.sha256()
     for file in sorted(local_dir.rglob("*")):
@@ -82,6 +84,7 @@ def _compute_sscd_hash(path: Path) -> str:
 # ---------------------------------------------------------------------------
 # Download functions
 # ---------------------------------------------------------------------------
+
 
 def _progress(block_num: int, block_size: int, total_size: int) -> None:
     downloaded = min(block_num * block_size, total_size)
@@ -169,6 +172,8 @@ def download_dino(
         print("ERROR: huggingface_hub not found. Run: uv sync", file=sys.stderr)
         sys.exit(1)
 
+    if force and DINO_DEST.exists():
+        shutil.rmtree(DINO_DEST)
     DINO_DEST.mkdir(parents=True, exist_ok=True)
     rev_label = f" @ {resolved_revision}" if resolved_revision else ""
     print(f"Downloading DINOv2 snapshot ({DINO_MODEL_ID}{rev_label}) → {DINO_DEST} ...")
@@ -200,6 +205,7 @@ def download_dino(
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -212,7 +218,10 @@ def main() -> None:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Re-download even if the file already exists (use when a prior run was interrupted or the file is corrupted)",
+        help=(
+            "Re-download even if the file already exists "
+            "(use when a prior run was interrupted or the file is corrupted)"
+        ),
     )
     parser.add_argument(
         "--hash",
@@ -245,8 +254,25 @@ def main() -> None:
         )
         sys.exit(1)
 
+    if args.hash:
+        args.hash = args.hash.lower()
+        if len(args.hash) != 64 or not all(c in "0123456789abcdef" for c in args.hash):
+            print(
+                "[ERROR] --hash must be a 64-character hex string (SHA-256 digest).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     do_sscd = args.sscd or args.all_models or not (args.sscd or args.dino)
     do_dino = args.dino or args.all_models or not (args.sscd or args.dino)
+
+    if args.hash and do_sscd and do_dino:
+        print(
+            "[ERROR] --hash requires exactly one of --sscd or --dino "
+            "(the two models have different hashes).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if do_sscd:
         download_sscd(force=args.force, expected_hash=args.hash)
