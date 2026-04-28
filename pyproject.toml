@@ -37,7 +37,7 @@ heif = [
     "pillow-heif>=0.13",
 ]
 web = [
-    "fastapi>=0.136.0",
+    "fastapi>=0.136.1",
     "uvicorn>=0.46.0",
     "python-multipart>=0.0.27",
 ]
