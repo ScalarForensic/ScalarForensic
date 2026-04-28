@@ -280,9 +280,6 @@
                             :title="embeddingModels[mode].hash"
                             x-text="embeddingModels[mode].hash.slice(0,24)+'…'"></span>
                       <span x-show="_modelMismatch(mode)" class="audit-warn-chip">⚠ hash differs</span>
-                      <span x-show="_isConfigOnlyHash(embeddingModels[mode]?.hash)"
-                            class="config-hash-chip"
-                            title="Weights unavailable — hash encodes the remote endpoint configuration, not the model weights">cfg-only</span>
                     </div>
                   </template>
                 </template>
@@ -406,9 +403,6 @@
                             x-text="auditHitProvenance[mode].model_hash || '—'"></span>
                       <span x-show="_modelMismatch(mode)"
                             class="audit-warn-chip">⚠ differs from query</span>
-                      <span x-show="_isConfigOnlyHash(auditHitProvenance[mode]?.model_hash)"
-                            class="config-hash-chip"
-                            title="Weights unavailable — hash encodes the remote endpoint configuration, not the model weights">cfg-only</span>
                     </div>
                     <div class="audit-row">
                       <span class="audit-k">Indexed</span>
@@ -870,9 +864,6 @@
                   <span class="emb-hash"
                         :title="embeddingModels.altered.hash"
                         x-text="embeddingModels.altered.hash.slice(0,16) + '…'"></span>
-                  <span x-show="_isConfigOnlyHash(embeddingModels.altered.hash)"
-                        class="config-hash-chip"
-                        title="Weights unavailable — hash encodes the remote endpoint configuration, not the model weights">cfg-only</span>
                 </div>
               </template>
               <template x-if="embeddingModels.semantic">
@@ -882,9 +873,6 @@
                   <span class="emb-hash"
                         :title="embeddingModels.semantic.hash"
                         x-text="embeddingModels.semantic.hash.slice(0,16) + '…'"></span>
-                  <span x-show="_isConfigOnlyHash(embeddingModels.semantic.hash)"
-                        class="config-hash-chip"
-                        title="Weights unavailable — hash encodes the remote endpoint configuration, not the model weights">cfg-only</span>
                 </div>
               </template>
             </div>
@@ -1012,9 +1000,6 @@
                   <span class="emb-hash"
                         :title="selectedHit.model_provenance.altered.hash"
                         x-text="selectedHit.model_provenance.altered.hash.slice(0,16) + '…'"></span>
-                  <span x-show="_isConfigOnlyHash(selectedHit.model_provenance.altered.hash)"
-                        class="config-hash-chip"
-                        title="Weights unavailable — hash encodes the remote endpoint configuration, not the model weights">cfg-only</span>
                 </div>
               </template>
               <template x-if="selectedHit?.model_provenance?.semantic">
@@ -1025,9 +1010,6 @@
                   <span class="emb-hash"
                         :title="selectedHit.model_provenance.semantic.hash"
                         x-text="selectedHit.model_provenance.semantic.hash.slice(0,16) + '…'"></span>
-                  <span x-show="_isConfigOnlyHash(selectedHit.model_provenance.semantic.hash)"
-                        class="config-hash-chip"
-                        title="Weights unavailable — hash encodes the remote endpoint configuration, not the model weights">cfg-only</span>
                 </div>
               </template>
             </div>
@@ -2753,10 +2735,6 @@ function sfn() {
       const qHash = this.embeddingModels[mode]?.hash;
       const dbHash = this.selectedHit?.model_provenance?.[mode]?.hash;
       return !!(qHash && dbHash && qHash !== dbHash);
-    },
-
-    _isConfigOnlyHash(h) {
-      return typeof h === 'string' && h.startsWith('config:');
     },
 
     _firstIndexedAt() {
