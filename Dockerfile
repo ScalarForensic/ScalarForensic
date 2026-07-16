@@ -15,7 +15,7 @@
 # is needed for NVIDIA. For ROCm, the host ROCm driver must match the version
 # of the torch+rocm wheel bundled at build time.
 
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 # libgomp1: OpenMP runtime required by PyTorch CPU and GPU operations.
 # gcc: required by torch.compile / Triton to JIT-compile GPU kernels.
