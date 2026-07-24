@@ -30,11 +30,11 @@ dev = [
     { include-group = "web" },
     "pytest>=8.0",
     "pytest-cov>=6.0",
-    "ruff>=0.15.12",
-    "httpx2>=2.7.0",
+    "ruff>=0.16.0",
+    "httpx2>=2.9.1",
 ]
 heif = [
-    "pillow-heif>=0.13",
+    "pillow-heif>=1.5.0",
 ]
 web = [
     "fastapi>=0.136.0",
