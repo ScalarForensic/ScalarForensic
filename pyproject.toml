@@ -97,6 +97,11 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
 
+[tool.ruff.lint.per-file-ignores]
+# Scripts insert src/ into sys.path before importing the package, so their
+# project imports legitimately sit below module-level code.
+"scripts/*" = ["E402"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=scalar_forensic --cov-report=term-missing"

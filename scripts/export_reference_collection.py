@@ -37,7 +37,6 @@ from qdrant_client import QdrantClient
 from scalar_forensic.config import Settings
 from scalar_forensic.tags import Tag, TagStore
 
-
 # ---------------------------------------------------------------------------
 # Qdrant helpers
 # ---------------------------------------------------------------------------
@@ -345,7 +344,10 @@ def main() -> None:
     parser.add_argument(
         "--reference-collection",
         metavar="NAME",
-        help="Reference collection for fallback ID lookup (overrides SFN_REFERENCE_COLLECTION / .env)",
+        help=(
+            "Reference collection for fallback ID lookup "
+            "(overrides SFN_REFERENCE_COLLECTION / .env)"
+        ),
     )
     args = parser.parse_args()
 

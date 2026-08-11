@@ -218,3 +218,4 @@ analysis_test/
 test/searchfiles/
 sfn_ingestion_*.csv
 .claude/worktrees/
+.playwright-mcp/

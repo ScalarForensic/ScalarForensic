@@ -157,7 +157,8 @@ def print_path_table_by_dir(stats: dict[str, dict[str, dict]], field: str, label
         dir_counts[parent] = dir_counts.get(parent, 0) + n
 
     print(
-        f"\n  {label} paths by directory ({len(dir_counts):,} unique dirs, {sum(dir_counts.values()):,} points):"
+        f"\n  {label} paths by directory "
+        f"({len(dir_counts):,} unique dirs, {sum(dir_counts.values()):,} points):"
     )
     for d in sorted(dir_counts):
         print(f"    [{dir_counts[d]:>6}]  {d}/")
