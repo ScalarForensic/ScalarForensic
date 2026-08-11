@@ -45,7 +45,7 @@ def test_get_available_modes_both_vectors():
     collections_response = MagicMock()
     collections_response.collections = [_make_collection("sfn")]
 
-    with patch("scalar_forensic.web.pipeline.QdrantClient") as MockClient:
+    with patch("scalar_forensic.web.pipeline.modes.QdrantClient") as MockClient:
         MockClient.return_value.get_collections.return_value = collections_response
         MockClient.return_value.get_collection.return_value = _make_collection_info(
             ["dino", "sscd"]
@@ -65,7 +65,7 @@ def test_get_available_modes_with_reference_collection():
         _make_collection("sfn_ref"),
     ]
 
-    with patch("scalar_forensic.web.pipeline.QdrantClient") as MockClient:
+    with patch("scalar_forensic.web.pipeline.modes.QdrantClient") as MockClient:
         MockClient.return_value.get_collections.return_value = collections_response
         MockClient.return_value.get_collection.return_value = _make_collection_info(
             ["dino", "sscd"]
@@ -82,7 +82,7 @@ def test_get_available_modes_only_sscd():
     collections_response = MagicMock()
     collections_response.collections = [_make_collection("sfn")]
 
-    with patch("scalar_forensic.web.pipeline.QdrantClient") as MockClient:
+    with patch("scalar_forensic.web.pipeline.modes.QdrantClient") as MockClient:
         MockClient.return_value.get_collections.return_value = collections_response
         MockClient.return_value.get_collection.return_value = _make_collection_info(["sscd"])
         modes, _has_ref, error = asyncio.run(get_available_modes(settings))
@@ -98,7 +98,7 @@ def test_get_available_modes_only_dino():
     collections_response = MagicMock()
     collections_response.collections = [_make_collection("sfn")]
 
-    with patch("scalar_forensic.web.pipeline.QdrantClient") as MockClient:
+    with patch("scalar_forensic.web.pipeline.modes.QdrantClient") as MockClient:
         MockClient.return_value.get_collections.return_value = collections_response
         MockClient.return_value.get_collection.return_value = _make_collection_info(["dino"])
         modes, _has_ref, error = asyncio.run(get_available_modes(settings))
@@ -114,7 +114,7 @@ def test_get_available_modes_collection_absent():
     collections_response = MagicMock()
     collections_response.collections = []
 
-    with patch("scalar_forensic.web.pipeline.QdrantClient") as MockClient:
+    with patch("scalar_forensic.web.pipeline.modes.QdrantClient") as MockClient:
         MockClient.return_value.get_collections.return_value = collections_response
         modes, _has_ref, error = asyncio.run(get_available_modes(settings))
 
@@ -143,8 +143,8 @@ def test_get_available_modes_all_retries_exhausted():
         pass  # skip real delays
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient", side_effect=_raising_client),
-        patch("scalar_forensic.web.pipeline.asyncio.sleep", side_effect=_noop_sleep),
+        patch("scalar_forensic.web.pipeline.modes.QdrantClient", side_effect=_raising_client),
+        patch("scalar_forensic.web.pipeline.modes.asyncio.sleep", side_effect=_noop_sleep),
     ):
         modes, _has_ref, error = asyncio.run(get_available_modes(settings))
 
@@ -176,8 +176,8 @@ def test_get_available_modes_succeeds_on_second_attempt():
         pass
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient", side_effect=_flaky_client),
-        patch("scalar_forensic.web.pipeline.asyncio.sleep", side_effect=_noop_sleep),
+        patch("scalar_forensic.web.pipeline.modes.QdrantClient", side_effect=_flaky_client),
+        patch("scalar_forensic.web.pipeline.modes.asyncio.sleep", side_effect=_noop_sleep),
     ):
         modes, _has_ref, error = asyncio.run(get_available_modes(settings))
 
@@ -197,10 +197,10 @@ def test_get_available_modes_retry_delays_are_exponential():
 
     with (
         patch(
-            "scalar_forensic.web.pipeline.QdrantClient",
+            "scalar_forensic.web.pipeline.modes.QdrantClient",
             side_effect=lambda *a, **kw: (_ for _ in ()).throw(boom),
         ),
-        patch("scalar_forensic.web.pipeline.asyncio.sleep", side_effect=_record_sleep),
+        patch("scalar_forensic.web.pipeline.modes.asyncio.sleep", side_effect=_record_sleep),
     ):
         asyncio.run(get_available_modes(settings))
 
