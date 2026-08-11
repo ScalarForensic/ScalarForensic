@@ -16,11 +16,6 @@ from scalar_forensic.web.session import FileEntry
 _PREPROC_PAYLOAD = {"sscd": {}, "dino": {}}
 
 
-@pytest.fixture(autouse=True)
-def _no_qdrant_lifespan(monkeypatch):
-    monkeypatch.setenv("SFN_VIZ_MAX_POINTS", "0")
-
-
 @pytest.fixture()
 def client():
     return TestClient(app, raise_server_exceptions=True)

@@ -365,7 +365,7 @@ def index(
     report: Path | None = typer.Option(
         None,
         "--report",
-        help="CSV report output path (default: sfn_ingestion_<timestamp>.csv in cwd)",
+        help="CSV report output path (default: data/reports/sfn_ingestion_<timestamp>.csv)",
     ),
     allow_online: bool = typer.Option(
         False,
@@ -453,7 +453,7 @@ def index(
         raise typer.Exit(1)
 
     # Resolve the CSV report path early so the user knows where it will land.
-    csv_path = report or Path(f"sfn_ingestion_{datetime.now():%Y%m%d_%H%M%S}.csv")
+    csv_path = report or Path("data/reports") / f"sfn_ingestion_{datetime.now():%Y%m%d_%H%M%S}.csv"
 
     # Build list of (use_sscd, model_name, vector_name) for each requested backend.
     models_to_run: list[tuple[bool, str, str]] = []

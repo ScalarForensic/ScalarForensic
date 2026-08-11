@@ -20,10 +20,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
-import torch
 import uvicorn
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageDraw, UnidentifiedImageError
 from qdrant_client import QdrantClient
@@ -72,32 +71,8 @@ _MAX_TAG_NAME_LEN = 200
 _MAX_TAG_NOTES_LEN = 4000
 
 _STATIC_DIR = Path(__file__).parent / "static"
-_VIZ_JS_SRC = (_STATIC_DIR / "viz.js").read_text(encoding="utf-8")
 
-
-def _render_viz_html(data: dict) -> str:
-    """Return a self-contained HTML page with the point-cloud data and viz
-    code inlined.  No server connection is needed to display the result."""
-    viz_js = _VIZ_JS_SRC
-    data_json = json.dumps(data, separators=(",", ":"))
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>ScalarForensic — vector visualization</title>
-  <style>
-    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-    html, body {{ width: 100%; height: 100%; overflow: hidden; background: #000; }}
-    #vec-canvas {{ position: fixed; inset: 0; width: 100%; height: 100%; }}
-  </style>
-</head>
-<body>
-  <canvas id="vec-canvas"></canvas>
-  <script>{viz_js}</script>
-  <script>initVectorViz({data_json});</script>
-</body>
-</html>"""
+_log = logging.getLogger(__name__)
 
 
 _IMAGE_EXTENSIONS = frozenset(
@@ -134,13 +109,8 @@ def _check_allowed_path(p: Path) -> None:
     raise HTTPException(status_code=403, detail="Path is outside the allowed directories")
 
 
-# Cached PCA-projected point cloud, computed once at startup.
-_points3d_cache: dict | None = None
-
-
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _points3d_cache
     settings = Settings()
 
     # Log effective batch size so operators know which value is in use.
@@ -156,29 +126,6 @@ async def lifespan(_app: FastAPI):
             logging.getLogger(__name__).info(
                 "Batch size: 32 (default — run `sfn` once to auto-calibrate)"
             )
-
-    if settings.viz_max_points > 0:
-        sscd_pts, dino_pts = await asyncio.gather(
-            asyncio.to_thread(
-                _fetch_and_project,
-                settings.collection,
-                "sscd",
-                settings.viz_max_points,
-                settings,
-            ),
-            asyncio.to_thread(
-                _fetch_and_project,
-                settings.collection,
-                "dino",
-                settings.viz_max_points,
-                settings,
-            ),
-        )
-        _points3d_cache = {"sscd": sscd_pts, "dino": dino_pts}
-    else:
-        _points3d_cache = {"sscd": [], "dino": []}
-    if settings.viz_export_path and _points3d_cache:
-        _write_viz_export(settings.viz_export_path, _points3d_cache)
 
     async def _reaper() -> None:
         while True:
@@ -1047,103 +994,6 @@ async def video_timeline(video_hash: str) -> JSONResponse:
             "frames": sorted(frames.values(), key=lambda f: f["timecode_ms"]),
         }
     )
-
-
-# ---------------------------------------------------------------------------
-# 3-D vector visualization
-# ---------------------------------------------------------------------------
-
-_log = logging.getLogger(__name__)
-
-
-def _pca3(vectors: list[list[float]]) -> list[list[float]]:
-    """Project high-dimensional vectors down to 3 principal components.
-
-    Returns coordinates normalised to [-1, 1].  Falls back to zero-vectors
-    when fewer than 3 points are supplied (degenerate case).
-    """
-    if len(vectors) < 3:
-        return [[0.0, 0.0, 0.0]] * len(vectors)
-    X = torch.tensor(vectors, dtype=torch.float32)
-    X -= X.mean(dim=0)
-    _, _, V = torch.pca_lowrank(X, q=3)
-    proj = X @ V
-    mx = proj.abs().max()
-    if mx > 0:
-        proj = proj / mx
-    return proj.tolist()
-
-
-def _fetch_and_project(
-    collection: str,
-    vector_name: str,
-    max_points: int,
-    settings: Settings,
-) -> list[list[float]]:
-    """Scroll *collection* for up to *max_points* named vectors, then PCA-project to 3-D.
-
-    Only points that carry *vector_name* are considered; the scroll filter uses
-    ``HasVectorCondition`` so points indexed by only the other model are skipped.
-    """
-    from qdrant_client.models import HasVectorCondition
-
-    client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-    vectors: list[list[float]] = []
-    offset = None
-    try:
-        while len(vectors) < max_points:
-            batch_size = min(256, max_points - len(vectors))
-            records, offset = client.scroll(
-                collection_name=collection,
-                scroll_filter=Filter(must=[HasVectorCondition(has_vector=vector_name)]),
-                limit=batch_size,
-                with_vectors=[vector_name],
-                offset=offset,
-            )
-            for r in records:
-                v = r.vector
-                if isinstance(v, dict):
-                    v = v.get(vector_name)
-                if v is not None:
-                    vectors.append(v)
-            if offset is None:
-                break
-    except Exception as exc:  # collection missing or Qdrant unreachable
-        _log.warning("points3d: could not scroll %r/%r: %s", collection, vector_name, exc)
-        return []
-    return _pca3(vectors)
-
-
-def _write_viz_export(path: Path, data: dict) -> None:
-    """Write the standalone viz HTML to *path*, creating parent dirs as needed."""
-    try:
-        path = path.expanduser().resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_render_viz_html(data), encoding="utf-8")
-        _log.info("viz export written to %s", path)
-    except Exception as exc:
-        _log.warning("could not write viz export to %s: %s", path, exc)
-
-
-@app.get("/viz")
-async def viz_standalone() -> HTMLResponse:
-    """Self-contained visualization page — no server calls after load.
-
-    Point-cloud data is embedded as JSON; ``viz.js`` is inlined.
-    Suitable for use as a KDE web-page wallpaper or browser-based screensaver
-    by pointing the client at ``http://localhost:8080/viz``.
-    """
-    return HTMLResponse(_render_viz_html(_points3d_cache or {"sscd": [], "dino": []}))
-
-
-@app.get("/api/points3d")
-async def points3d() -> JSONResponse:
-    """Return cached PCA-projected 3-D coordinates for both vector collections.
-
-    The point cloud is computed once at startup and served from memory.
-    Set ``SFN_VIZ_MAX_POINTS=0`` to disable the visualization entirely.
-    """
-    return JSONResponse(_points3d_cache or {"sscd": [], "dino": []})
 
 
 # ---------------------------------------------------------------------------
