@@ -100,7 +100,7 @@ Ingestion summary  (/mnt/bulk_storage/sample_images/unsplash_vectors_test_batch)
   Failed  — preprocessing                   1
   Failed  — embedding                       0
 ────────────────────────────────────────────────────
-  CSV report → sfn_ingestion_20260412_165320.csv
+  CSV report → data/reports/sfn_ingestion_20260412_165320.csv
 
 ________________________________________________________
 Executed in   36.52 mins    fish           external
