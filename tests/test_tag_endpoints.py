@@ -42,7 +42,7 @@ def _tag(name: str = "weapons", *, pos=(), neg=()) -> Tag:
 class TestListTags:
     def test_success_returns_tag_list(self, client):
         tag = _tag()
-        with patch("scalar_forensic.web.app._tag_store") as mock_store_fn:
+        with patch("scalar_forensic.web.routes.tags._tag_store") as mock_store_fn:
             mock_store_fn.return_value.list.return_value = [tag]
             r = client.get("/api/tags")
         assert r.status_code == 200
@@ -51,7 +51,7 @@ class TestListTags:
         assert data["tags"][0]["name"] == "weapons"
 
     def test_qdrant_error_returns_503(self, client):
-        with patch("scalar_forensic.web.app._tag_store") as mock_store_fn:
+        with patch("scalar_forensic.web.routes.tags._tag_store") as mock_store_fn:
             mock_store_fn.return_value.list.side_effect = RuntimeError("connection refused")
             r = client.get("/api/tags")
         assert r.status_code == 503
@@ -65,14 +65,14 @@ class TestListTags:
 class TestCreateTag:
     def test_success_returns_tag_json(self, client):
         tag = _tag()
-        with patch("scalar_forensic.web.app._tag_store") as mock_store_fn:
+        with patch("scalar_forensic.web.routes.tags._tag_store") as mock_store_fn:
             mock_store_fn.return_value.create.return_value = tag
             r = client.post("/api/tag", data={"name": "weapons"})
         assert r.status_code == 200
         assert r.json()["name"] == "weapons"
 
     def test_qdrant_error_returns_503(self, client):
-        with patch("scalar_forensic.web.app._tag_store") as mock_store_fn:
+        with patch("scalar_forensic.web.routes.tags._tag_store") as mock_store_fn:
             mock_store_fn.return_value.create.side_effect = RuntimeError("down")
             r = client.post("/api/tag", data={"name": "weapons"})
         assert r.status_code == 503
@@ -90,7 +90,7 @@ class TestCreateTag:
 
     def test_name_is_stripped_before_persistence(self, client):
         tag = _tag(name="weapons")
-        with patch("scalar_forensic.web.app._tag_store") as mock_store_fn:
+        with patch("scalar_forensic.web.routes.tags._tag_store") as mock_store_fn:
             mock_store_fn.return_value.create.return_value = tag
             r = client.post("/api/tag", data={"name": "  weapons  "})
         assert r.status_code == 200
@@ -143,10 +143,10 @@ class TestClassifyTags:
     def test_exactly_256_hashes_is_accepted(self, client):
         hashes = [f"sha256-{i}" for i in range(256)]
         with (
-            patch("scalar_forensic.web.app.Settings"),
-            patch("scalar_forensic.web.app.QdrantClient"),
-            patch("scalar_forensic.web.app.TagStore") as mock_ts,
-            patch("scalar_forensic.web.app.qdrant_scroll_all", return_value=iter([])),
+            patch("scalar_forensic.web.routes.tags.Settings"),
+            patch("scalar_forensic.web.routes.tags.QdrantClient"),
+            patch("scalar_forensic.web.routes.tags.TagStore") as mock_ts,
+            patch("scalar_forensic.web.routes.tags.qdrant_scroll_all", return_value=iter([])),
         ):
             mock_ts.return_value.list.return_value = []
             r = client.post("/api/tags/classify", json={"image_hashes": hashes})
@@ -186,10 +186,10 @@ class TestClassifyTags:
     def test_no_matching_records_returns_empty_per_hash(self, client):
         """Scroll returns nothing → every requested hash maps to an empty tag list."""
         with (
-            patch("scalar_forensic.web.app.Settings"),
-            patch("scalar_forensic.web.app.QdrantClient"),
-            patch("scalar_forensic.web.app.TagStore") as mock_ts,
-            patch("scalar_forensic.web.app.qdrant_scroll_all", return_value=iter([])),
+            patch("scalar_forensic.web.routes.tags.Settings"),
+            patch("scalar_forensic.web.routes.tags.QdrantClient"),
+            patch("scalar_forensic.web.routes.tags.TagStore") as mock_ts,
+            patch("scalar_forensic.web.routes.tags.qdrant_scroll_all", return_value=iter([])),
         ):
             mock_ts.return_value.list.return_value = []
             r = client.post(
@@ -205,10 +205,10 @@ class TestClassifyTags:
     def test_duplicate_input_hashes_are_deduplicated(self, client):
         """Callers may pass duplicates; the response keys should be unique."""
         with (
-            patch("scalar_forensic.web.app.Settings"),
-            patch("scalar_forensic.web.app.QdrantClient"),
-            patch("scalar_forensic.web.app.TagStore") as mock_ts,
-            patch("scalar_forensic.web.app.qdrant_scroll_all", return_value=iter([])),
+            patch("scalar_forensic.web.routes.tags.Settings"),
+            patch("scalar_forensic.web.routes.tags.QdrantClient"),
+            patch("scalar_forensic.web.routes.tags.TagStore") as mock_ts,
+            patch("scalar_forensic.web.routes.tags.qdrant_scroll_all", return_value=iter([])),
         ):
             mock_ts.return_value.list.return_value = []
             r = client.post(
@@ -228,9 +228,9 @@ class TestClassifyTags:
 class TestTriage:
     def test_tag_not_found_returns_404(self, client):
         with (
-            patch("scalar_forensic.web.app.Settings"),
-            patch("scalar_forensic.web.app.QdrantClient"),
-            patch("scalar_forensic.web.app.TagStore") as mock_ts,
+            patch("scalar_forensic.web.routes.tags.Settings"),
+            patch("scalar_forensic.web.routes.tags.QdrantClient"),
+            patch("scalar_forensic.web.routes.tags.TagStore") as mock_ts,
         ):
             mock_ts.return_value.get.return_value = None
             r = client.post("/api/triage", data={"tag_id": "missing"})
@@ -238,9 +238,9 @@ class TestTriage:
 
     def test_qdrant_error_returns_503(self, client):
         with (
-            patch("scalar_forensic.web.app.Settings"),
-            patch("scalar_forensic.web.app.QdrantClient"),
-            patch("scalar_forensic.web.app.TagStore") as mock_ts,
+            patch("scalar_forensic.web.routes.tags.Settings"),
+            patch("scalar_forensic.web.routes.tags.QdrantClient"),
+            patch("scalar_forensic.web.routes.tags.TagStore") as mock_ts,
         ):
             mock_ts.return_value.get.side_effect = RuntimeError("down")
             r = client.post("/api/triage", data={"tag_id": "tag-1"})
@@ -254,10 +254,10 @@ class TestTriage:
             point_id="pt-1", triplet_score=3, raw_score=0.9, payload={}, vector_name="dino"
         )
         with (
-            patch("scalar_forensic.web.app.Settings"),
-            patch("scalar_forensic.web.app.QdrantClient"),
-            patch("scalar_forensic.web.app.TagStore") as mock_ts,
-            patch("scalar_forensic.web.app.run_discovery", return_value=[hit]),
+            patch("scalar_forensic.web.routes.tags.Settings"),
+            patch("scalar_forensic.web.routes.tags.QdrantClient"),
+            patch("scalar_forensic.web.routes.tags.TagStore") as mock_ts,
+            patch("scalar_forensic.web.routes.tags.run_discovery", return_value=[hit]),
         ):
             mock_ts.return_value.get.return_value = tag
             r = client.post("/api/triage", data={"tag_id": "tag-1"})
@@ -270,10 +270,10 @@ class TestTriage:
     def test_response_includes_pair_count(self, client):
         tag = _tag(pos=["p1", "p2"], neg=["n1"])
         with (
-            patch("scalar_forensic.web.app.Settings"),
-            patch("scalar_forensic.web.app.QdrantClient"),
-            patch("scalar_forensic.web.app.TagStore") as mock_ts,
-            patch("scalar_forensic.web.app.run_discovery", return_value=[]),
+            patch("scalar_forensic.web.routes.tags.Settings"),
+            patch("scalar_forensic.web.routes.tags.QdrantClient"),
+            patch("scalar_forensic.web.routes.tags.TagStore") as mock_ts,
+            patch("scalar_forensic.web.routes.tags.run_discovery", return_value=[]),
         ):
             mock_ts.return_value.get.return_value = tag
             r = client.post("/api/triage", data={"tag_id": "tag-1"})
@@ -288,10 +288,10 @@ class TestTriage:
         a no-op otherwise."""
         tag = _tag(pos=["p1"])  # no negatives → Recommend mode
         with (
-            patch("scalar_forensic.web.app.Settings"),
-            patch("scalar_forensic.web.app.QdrantClient"),
-            patch("scalar_forensic.web.app.TagStore") as mock_ts,
-            patch("scalar_forensic.web.app.run_discovery", return_value=[]) as mock_rd,
+            patch("scalar_forensic.web.routes.tags.Settings"),
+            patch("scalar_forensic.web.routes.tags.QdrantClient"),
+            patch("scalar_forensic.web.routes.tags.TagStore") as mock_ts,
+            patch("scalar_forensic.web.routes.tags.run_discovery", return_value=[]) as mock_rd,
         ):
             mock_ts.return_value.get.return_value = tag
             r = client.post("/api/triage", data={"tag_id": "tag-1", "cosine_threshold": "0.8"})
@@ -303,10 +303,10 @@ class TestTriage:
         (0.5) must reach run_discovery rather than being dropped."""
         tag = _tag(pos=["p1"])
         with (
-            patch("scalar_forensic.web.app.Settings"),
-            patch("scalar_forensic.web.app.QdrantClient"),
-            patch("scalar_forensic.web.app.TagStore") as mock_ts,
-            patch("scalar_forensic.web.app.run_discovery", return_value=[]) as mock_rd,
+            patch("scalar_forensic.web.routes.tags.Settings"),
+            patch("scalar_forensic.web.routes.tags.QdrantClient"),
+            patch("scalar_forensic.web.routes.tags.TagStore") as mock_ts,
+            patch("scalar_forensic.web.routes.tags.run_discovery", return_value=[]) as mock_rd,
         ):
             mock_ts.return_value.get.return_value = tag
             r = client.post("/api/triage", data={"tag_id": "tag-1"})
@@ -317,11 +317,11 @@ class TestTriage:
         """A failing Qdrant query must not be masked as an empty result set."""
         tag = _tag(pos=["p1"], neg=["n1"])
         with (
-            patch("scalar_forensic.web.app.Settings"),
-            patch("scalar_forensic.web.app.QdrantClient"),
-            patch("scalar_forensic.web.app.TagStore") as mock_ts,
+            patch("scalar_forensic.web.routes.tags.Settings"),
+            patch("scalar_forensic.web.routes.tags.QdrantClient"),
+            patch("scalar_forensic.web.routes.tags.TagStore") as mock_ts,
             patch(
-                "scalar_forensic.web.app.run_discovery",
+                "scalar_forensic.web.routes.tags.run_discovery",
                 side_effect=RuntimeError("qdrant down"),
             ),
         ):
@@ -338,9 +338,9 @@ class TestTriage:
 class TestExplore:
     def test_tag_not_found_returns_404(self, client):
         with (
-            patch("scalar_forensic.web.app.Settings"),
-            patch("scalar_forensic.web.app.QdrantClient"),
-            patch("scalar_forensic.web.app.TagStore") as mock_ts,
+            patch("scalar_forensic.web.routes.tags.Settings"),
+            patch("scalar_forensic.web.routes.tags.QdrantClient"),
+            patch("scalar_forensic.web.routes.tags.TagStore") as mock_ts,
         ):
             mock_ts.return_value.get.return_value = None
             r = client.post("/api/explore", data={"tag_id": "missing"})
@@ -348,9 +348,9 @@ class TestExplore:
 
     def test_qdrant_error_returns_503(self, client):
         with (
-            patch("scalar_forensic.web.app.Settings"),
-            patch("scalar_forensic.web.app.QdrantClient"),
-            patch("scalar_forensic.web.app.TagStore") as mock_ts,
+            patch("scalar_forensic.web.routes.tags.Settings"),
+            patch("scalar_forensic.web.routes.tags.QdrantClient"),
+            patch("scalar_forensic.web.routes.tags.TagStore") as mock_ts,
         ):
             mock_ts.return_value.get.side_effect = RuntimeError("down")
             r = client.post("/api/explore", data={"tag_id": "tag-1"})
@@ -364,10 +364,10 @@ class TestExplore:
             point_id="pt-2", triplet_score=None, raw_score=0.5, payload={}, vector_name="dino"
         )
         with (
-            patch("scalar_forensic.web.app.Settings"),
-            patch("scalar_forensic.web.app.QdrantClient"),
-            patch("scalar_forensic.web.app.TagStore") as mock_ts,
-            patch("scalar_forensic.web.app.run_explore", return_value=([hit], "context")),
+            patch("scalar_forensic.web.routes.tags.Settings"),
+            patch("scalar_forensic.web.routes.tags.QdrantClient"),
+            patch("scalar_forensic.web.routes.tags.TagStore") as mock_ts,
+            patch("scalar_forensic.web.routes.tags.run_explore", return_value=([hit], "context")),
         ):
             mock_ts.return_value.get.return_value = tag
             r = client.post("/api/explore", data={"tag_id": "tag-1"})
@@ -383,7 +383,7 @@ class TestExplore:
 
 
 def _settings_with(case: str = "sfn", reference: str | None = None):
-    """Patch scalar_forensic.web.app.Settings so the endpoint sees these names."""
+    """Patch scalar_forensic.web.routes.tags.Settings so the endpoint sees these names."""
     s = MagicMock()
     s.qdrant_url = "http://qdrant"
     s.qdrant_api_key = None
@@ -410,10 +410,10 @@ class TestPointIdLookup:
 
         with (
             patch(
-                "scalar_forensic.web.app.Settings",
+                "scalar_forensic.web.routes.tags.Settings",
                 return_value=_settings_with(case="sfn", reference="sfn_ref"),
             ),
-            patch("scalar_forensic.web.app.QdrantClient", return_value=qdrant),
+            patch("scalar_forensic.web.routes.tags.QdrantClient", return_value=qdrant),
         ):
             r = client.get("/api/point-id", params={"image_hash": "abc"})
 
@@ -440,10 +440,10 @@ class TestPointIdLookup:
 
         with (
             patch(
-                "scalar_forensic.web.app.Settings",
+                "scalar_forensic.web.routes.tags.Settings",
                 return_value=_settings_with(case="sfn", reference="sfn_ref"),
             ),
-            patch("scalar_forensic.web.app.QdrantClient", return_value=qdrant),
+            patch("scalar_forensic.web.routes.tags.QdrantClient", return_value=qdrant),
         ):
             r = client.get("/api/point-id", params={"image_hash": "abc"})
 
@@ -459,10 +459,10 @@ class TestPointIdLookup:
 
         with (
             patch(
-                "scalar_forensic.web.app.Settings",
+                "scalar_forensic.web.routes.tags.Settings",
                 return_value=_settings_with(case="sfn", reference="sfn_ref"),
             ),
-            patch("scalar_forensic.web.app.QdrantClient", return_value=qdrant),
+            patch("scalar_forensic.web.routes.tags.QdrantClient", return_value=qdrant),
         ):
             r = client.get("/api/point-id", params={"image_hash": "missing"})
         assert r.status_code == 404
@@ -473,10 +473,10 @@ class TestPointIdLookup:
 
         with (
             patch(
-                "scalar_forensic.web.app.Settings",
+                "scalar_forensic.web.routes.tags.Settings",
                 return_value=_settings_with(case="sfn", reference=None),
             ),
-            patch("scalar_forensic.web.app.QdrantClient", return_value=qdrant),
+            patch("scalar_forensic.web.routes.tags.QdrantClient", return_value=qdrant),
         ):
             r = client.get("/api/point-id", params={"image_hash": "missing"})
         assert r.status_code == 404
@@ -499,10 +499,10 @@ class TestPointPayload:
 
         with (
             patch(
-                "scalar_forensic.web.app.Settings",
+                "scalar_forensic.web.routes.tags.Settings",
                 return_value=_settings_with(case="sfn", reference="sfn_ref"),
             ),
-            patch("scalar_forensic.web.app.QdrantClient", return_value=qdrant),
+            patch("scalar_forensic.web.routes.tags.QdrantClient", return_value=qdrant),
         ):
             r = client.get("/api/point-payload", params={"point_id": "pt-1"})
         assert r.status_code == 200
@@ -529,10 +529,10 @@ class TestPointPayload:
 
         with (
             patch(
-                "scalar_forensic.web.app.Settings",
+                "scalar_forensic.web.routes.tags.Settings",
                 return_value=_settings_with(case="sfn", reference="sfn_ref"),
             ),
-            patch("scalar_forensic.web.app.QdrantClient", return_value=qdrant),
+            patch("scalar_forensic.web.routes.tags.QdrantClient", return_value=qdrant),
         ):
             r = client.get("/api/point-payload", params={"point_id": "pt-1"})
         assert r.status_code == 200
@@ -547,10 +547,10 @@ class TestPointPayload:
 
         with (
             patch(
-                "scalar_forensic.web.app.Settings",
+                "scalar_forensic.web.routes.tags.Settings",
                 return_value=_settings_with(case="sfn", reference="sfn_ref"),
             ),
-            patch("scalar_forensic.web.app.QdrantClient", return_value=qdrant),
+            patch("scalar_forensic.web.routes.tags.QdrantClient", return_value=qdrant),
         ):
             r = client.get("/api/point-payload", params={"point_id": "missing"})
         assert r.status_code == 404
