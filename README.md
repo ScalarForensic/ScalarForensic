@@ -13,6 +13,8 @@ Large-scale image vector indexer for forensic use. Embeds images into a Qdrant v
 
 **→ [Performance assessment](docs/performance.md)**
 
+**→ [Deployment topologies (single machine / distributed LAN)](docs/deployment.md)**
+
 ---
 
 ## What it does
