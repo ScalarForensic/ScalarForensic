@@ -24,12 +24,6 @@ from scalar_forensic.web.session import FileEntry, VideoFrameEntry
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _no_qdrant_lifespan(monkeypatch):
-    """Skip the lifespan Qdrant prefetch so tests are hermetic."""
-    monkeypatch.setenv("SFN_VIZ_MAX_POINTS", "0")
-
-
 @pytest.fixture()
 def client():
     return TestClient(app, raise_server_exceptions=True)

@@ -512,7 +512,6 @@
 
   <!-- ── Upload ── -->
   <div class="upload-section" x-show="phase === 'upload' || phase === 'analyzing'">
-    <canvas id="vec-canvas" aria-hidden="true"></canvas>
     <div class="drop-zone" :class="{'drag-over': dragOver, 'idle': dropZoneIdle, 'analyzing': phase === 'analyzing'}"
          @dragover.prevent="dragOver = true"
          @dragleave.prevent="dragOver = false"
@@ -2173,18 +2172,6 @@ function sfn() {
       this.loadConcepts().catch(() => {});
       // Screensaver: fade drop-zone out after 5 s of no pointer/keyboard/drag activity
       this._startIdleScreensaver();
-
-      // Fire-and-forget: populate 3-D background visualization (decorative, non-blocking)
-      this.points3dAbortController = new AbortController();
-      const _ctrl = this.points3dAbortController;
-      fetch('/api/points3d', { signal: _ctrl.signal })
-        .then(r => r.json())
-        .then(data => {
-          if (_ctrl.signal.aborted || this.phase !== 'upload') return;
-          this._points3dData = data;
-          initVectorViz(data);
-        })
-        .catch(err => { if (err && err.name === 'AbortError') return; });
     },
 
     toggleMode(mode) {
@@ -2253,10 +2240,6 @@ function sfn() {
       if (!this.pendingFiles.length || !this.selectedModes.length) return;
       // Tear down idle screensaver — stop timer and remove all listeners
       this._stopIdleScreensaver();
-      // Abort any in-flight points3d fetch and stop the background viz
-      if (this.points3dAbortController) this.points3dAbortController.abort();
-      const _vc = document.getElementById('vec-canvas');
-      if (_vc && _vc._stopViz) _vc._stopViz();
       this.analysisRunModes = [...this.selectedModes];
       this.phase = 'analyzing';
       this.progress = { current: 0, total: this.pendingFiles.length, filename: '', frameCount: 0 };
@@ -3445,10 +3428,6 @@ function sfn() {
       this.markedOverrides = {};
       this.hitTags = {};
       this.activeTagId = '';
-      // Restart background viz with client-cached point cloud
-      this.$nextTick(() => {
-        if (this._points3dData) initVectorViz(this._points3dData);
-      });
       // Re-initialize idle screensaver for this upload session
       this._startIdleScreensaver();
     },
@@ -3456,6 +3435,5 @@ function sfn() {
 }
 
 </script>
-<script src="/static/viz.js"></script>
 </body>
 </html>
