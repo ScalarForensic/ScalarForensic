@@ -14,6 +14,7 @@ from scalar_forensic.web.app import app
 from scalar_forensic.web.session import FileEntry
 
 _PREPROC_PAYLOAD = {"sscd": {}, "dino": {}}
+_BUILD_PREPROC = "scalar_forensic.web.routes.files._build_preproc_payload"
 
 
 @pytest.fixture()
@@ -52,20 +53,20 @@ def _mock_session(entries):
 
 class TestQueryPreprocessed:
     def test_missing_session_returns_404(self, client):
-        with patch("scalar_forensic.web.app.get_session", return_value=None):
+        with patch("scalar_forensic.web.routes.files.get_session", return_value=None):
             r = client.get("/api/query-preprocessed/no-session/img1")
         assert r.status_code == 404
 
     def test_missing_file_returns_404(self, client, tmp_path):
         sess = _mock_session([_image_entry(tmp_path=tmp_path)])
-        with patch("scalar_forensic.web.app.get_session", return_value=sess):
+        with patch("scalar_forensic.web.routes.files.get_session", return_value=sess):
             r = client.get("/api/query-preprocessed/s1/no-such-file")
         assert r.status_code == 404
 
     def test_video_without_timecode_returns_400(self, client, tmp_path):
         entry = _video_entry(tmp_path=tmp_path)
         sess = _mock_session([entry])
-        with patch("scalar_forensic.web.app.get_session", return_value=sess):
+        with patch("scalar_forensic.web.routes.files.get_session", return_value=sess):
             r = client.get(f"/api/query-preprocessed/s1/{entry.file_id}")
         assert r.status_code == 400
 
@@ -74,10 +75,10 @@ class TestQueryPreprocessed:
         sess = _mock_session([entry])
         frame = Image.new("RGB", (32, 32))
         with (
-            patch("scalar_forensic.web.app.get_session", return_value=sess),
-            patch("scalar_forensic.web.app.extract_frame_at", return_value=frame),
-            patch("scalar_forensic.web.app._build_preproc_payload", return_value=_PREPROC_PAYLOAD),
-            patch("scalar_forensic.web.app.Settings"),
+            patch("scalar_forensic.web.routes.files.get_session", return_value=sess),
+            patch("scalar_forensic.web.routes.files.extract_frame_at", return_value=frame),
+            patch(_BUILD_PREPROC, return_value=_PREPROC_PAYLOAD),
+            patch("scalar_forensic.web.routes.files.Settings"),
         ):
             r = client.get(f"/api/query-preprocessed/s1/{entry.file_id}?timecode_ms=0")
         assert r.status_code == 200
@@ -86,9 +87,9 @@ class TestQueryPreprocessed:
         entry = _video_entry(tmp_path=tmp_path)
         sess = _mock_session([entry])
         with (
-            patch("scalar_forensic.web.app.get_session", return_value=sess),
-            patch("scalar_forensic.web.app.extract_frame_at", return_value=None),
-            patch("scalar_forensic.web.app.Settings"),
+            patch("scalar_forensic.web.routes.files.get_session", return_value=sess),
+            patch("scalar_forensic.web.routes.files.extract_frame_at", return_value=None),
+            patch("scalar_forensic.web.routes.files.Settings"),
         ):
             r = client.get(f"/api/query-preprocessed/s1/{entry.file_id}?timecode_ms=99999")
         assert r.status_code == 404
@@ -97,9 +98,9 @@ class TestQueryPreprocessed:
         entry = _image_entry(tmp_path=tmp_path)
         sess = _mock_session([entry])
         with (
-            patch("scalar_forensic.web.app.get_session", return_value=sess),
-            patch("scalar_forensic.web.app._build_preproc_payload", return_value=_PREPROC_PAYLOAD),
-            patch("scalar_forensic.web.app.Settings"),
+            patch("scalar_forensic.web.routes.files.get_session", return_value=sess),
+            patch(_BUILD_PREPROC, return_value=_PREPROC_PAYLOAD),
+            patch("scalar_forensic.web.routes.files.Settings"),
         ):
             r = client.get(f"/api/query-preprocessed/s1/{entry.file_id}")
         assert r.status_code == 200
@@ -111,8 +112,8 @@ class TestQueryPreprocessed:
         entry = FileEntry(file_id="img1", filename="photo.jpg", temp_path=p, is_video=False)
         sess = _mock_session([entry])
         with (
-            patch("scalar_forensic.web.app.get_session", return_value=sess),
-            patch("scalar_forensic.web.app.Settings"),
+            patch("scalar_forensic.web.routes.files.get_session", return_value=sess),
+            patch("scalar_forensic.web.routes.files.Settings"),
         ):
             r = client.get("/api/query-preprocessed/s1/img1")
         assert r.status_code == 400
@@ -157,7 +158,7 @@ class TestHitPreprocessed:
         settings_mock = MagicMock()
         settings_mock.input_dir = allowed
         settings_mock.frame_store_dir = None
-        with patch("scalar_forensic.web.app.Settings", return_value=settings_mock):
+        with patch("scalar_forensic.web.routes._shared.Settings", return_value=settings_mock):
             r = client.get(f"/api/hit-preprocessed?path={other}")
         assert r.status_code == 403
 
@@ -178,7 +179,7 @@ class TestHitPreprocessed:
         monkeypatch.setenv("SFN_INPUT_DIR", str(tmp_path))
         p = tmp_path / "img.jpg"
         p.write_bytes(_tiny_jpeg())
-        with patch("scalar_forensic.web.app._build_preproc_payload", return_value=_PREPROC_PAYLOAD):
+        with patch(_BUILD_PREPROC, return_value=_PREPROC_PAYLOAD):
             r = client.get(f"/api/hit-preprocessed?path={p}&sscd_n_crops=1&dino_normalize_size=224")
         assert r.status_code == 200
         assert r.json() == _PREPROC_PAYLOAD
@@ -187,9 +188,7 @@ class TestHitPreprocessed:
         monkeypatch.setenv("SFN_INPUT_DIR", str(tmp_path))
         p = tmp_path / "img.jpg"
         p.write_bytes(_tiny_jpeg())
-        with patch(
-            "scalar_forensic.web.app._build_preproc_payload", return_value={"sscd": {}}
-        ) as mock_build:
+        with patch(_BUILD_PREPROC, return_value={"sscd": {}}) as mock_build:
             r = client.get(f"/api/hit-preprocessed?path={p}&sscd_n_crops=1&dino_normalize_size=0")
         assert r.status_code == 200
         mock_build.assert_called_once()
