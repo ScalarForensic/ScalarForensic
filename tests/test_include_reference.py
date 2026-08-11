@@ -97,9 +97,9 @@ def test_reference_collection_queried_when_include_reference_true():
     settings = _mock_settings()
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
         patch(
-            "scalar_forensic.web.pipeline._query_vector",
+            "scalar_forensic.web.pipeline.query._query_vector",
             side_effect=_dispatch_query_vector,
         ) as mock_qv,
     ):
@@ -117,9 +117,9 @@ def test_reference_collection_not_queried_when_include_reference_false():
     settings = _mock_settings()
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
         patch(
-            "scalar_forensic.web.pipeline._query_vector",
+            "scalar_forensic.web.pipeline.query._query_vector",
             side_effect=_dispatch_query_vector,
         ) as mock_qv,
     ):
@@ -137,9 +137,9 @@ def test_reference_collection_not_queried_when_not_configured():
     settings = _mock_settings(reference_collection=None)
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
         patch(
-            "scalar_forensic.web.pipeline._query_vector",
+            "scalar_forensic.web.pipeline.query._query_vector",
             return_value=([_case_hit()], []),
         ) as mock_qv,
     ):
@@ -161,9 +161,9 @@ def test_reference_hits_have_is_reference_true():
     settings = _mock_settings()
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
         patch(
-            "scalar_forensic.web.pipeline._query_vector",
+            "scalar_forensic.web.pipeline.query._query_vector",
             side_effect=_dispatch_query_vector,
         ),
     ):
@@ -182,9 +182,9 @@ def test_case_hits_have_is_reference_false():
     settings = _mock_settings()
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
         patch(
-            "scalar_forensic.web.pipeline._query_vector",
+            "scalar_forensic.web.pipeline.query._query_vector",
             side_effect=_dispatch_query_vector,
         ),
     ):
@@ -212,9 +212,9 @@ def test_reference_hits_not_merged_with_case_hits_unify_true():
     settings = _mock_settings()
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
         patch(
-            "scalar_forensic.web.pipeline._query_vector",
+            "scalar_forensic.web.pipeline.query._query_vector",
             side_effect=_dispatch_query_vector,
         ),
     ):
@@ -275,8 +275,8 @@ def test_both_modes_query_reference_collection():
         )
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
-        patch("scalar_forensic.web.pipeline._query_vector", side_effect=_tracking_dispatch),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query._query_vector", side_effect=_tracking_dispatch),
     ):
         query_session(
             session,
@@ -304,9 +304,9 @@ def test_reference_hits_separate_from_case_hits_unify_false():
     settings = _mock_settings()
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
         patch(
-            "scalar_forensic.web.pipeline._query_vector",
+            "scalar_forensic.web.pipeline.query._query_vector",
             side_effect=_dispatch_query_vector,
         ),
     ):
@@ -362,8 +362,8 @@ def test_reference_modes_merged_on_same_path_unify_true():
         return ([Hit(path=PATH_CASE, scores={mode: 0.90})], [])
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
-        patch("scalar_forensic.web.pipeline._query_vector", side_effect=_dispatch),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query._query_vector", side_effect=_dispatch),
     ):
         results, _ = query_session(
             session,
@@ -429,8 +429,8 @@ def test_reference_hits_carry_query_timecodes_for_video_query():
         return ([Hit(path=PATH_CASE, scores={mode: 0.90})], [])
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
-        patch("scalar_forensic.web.pipeline._query_vector", side_effect=_dispatch),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query._query_vector", side_effect=_dispatch),
     ):
         results, _ = query_session(
             session,
@@ -485,8 +485,8 @@ def test_reference_and_case_hits_isolated_on_path_overlap():
         return ([Hit(path=shared_path, scores={mode: 0.90})], [])
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
-        patch("scalar_forensic.web.pipeline._query_vector", side_effect=_dispatch),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query._query_vector", side_effect=_dispatch),
     ):
         results, _ = query_session(
             session,

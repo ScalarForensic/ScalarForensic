@@ -100,13 +100,13 @@ def test_same_image_both_modes_yields_one_merged_row():
     settings = _mock_settings()
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
         patch(
-            "scalar_forensic.web.pipeline._query_exact",
+            "scalar_forensic.web.pipeline.query._query_exact",
             return_value=([_exact_hit(PATH_A)], []),
         ),
         patch(
-            "scalar_forensic.web.pipeline._query_vector",
+            "scalar_forensic.web.pipeline.query._query_vector",
             return_value=([_semantic_hit(PATH_A, score=1.0)], []),
         ),
     ):
@@ -135,9 +135,9 @@ def test_semantic_only_includes_self_match():
     settings = _mock_settings()
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
         patch(
-            "scalar_forensic.web.pipeline._query_vector",
+            "scalar_forensic.web.pipeline.query._query_vector",
             return_value=([_semantic_hit(PATH_A, score=1.0)], []),
         ),
     ):
@@ -154,9 +154,9 @@ def test_exact_deselected_does_not_drop_semantic_hit():
     settings = _mock_settings()
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
         patch(
-            "scalar_forensic.web.pipeline._query_vector",
+            "scalar_forensic.web.pipeline.query._query_vector",
             return_value=([_semantic_hit(PATH_A, score=0.95)], []),
         ),
     ):
@@ -187,12 +187,12 @@ def test_per_mode_limit_respected():
         return (many_altered[:limit], [])
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
         patch(
-            "scalar_forensic.web.pipeline._query_exact",
+            "scalar_forensic.web.pipeline.query._query_exact",
             return_value=([_exact_hit("/img/exact.jpg")], []),
         ),
-        patch("scalar_forensic.web.pipeline._query_vector", side_effect=_fake_query_vector),
+        patch("scalar_forensic.web.pipeline.query._query_vector", side_effect=_fake_query_vector),
     ):
         results, _ = query_session(
             session, ["exact", "altered", "semantic"], 0.75, 0.55, limit, settings
@@ -225,8 +225,8 @@ def test_altered_and_semantic_same_path_yields_one_merged_row():
         return ([Hit(path=PATH_A, scores={mode: 0.92})], [])
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
-        patch("scalar_forensic.web.pipeline._query_vector", side_effect=_fake_query_vector),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query._query_vector", side_effect=_fake_query_vector),
     ):
         results, _ = query_session(session, ["altered", "semantic"], 0.75, 0.55, 10, settings)
 
@@ -257,8 +257,8 @@ def test_per_mode_dedup_keeps_highest_score():
     ]
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
-        patch("scalar_forensic.web.pipeline._query_vector", return_value=(dup_hits, [])),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query._query_vector", return_value=(dup_hits, [])),
     ):
         results, _ = query_session(session, ["semantic"], 0.75, 0.55, 10, settings)
 
@@ -278,13 +278,13 @@ def test_exact_hits_rank_first_in_combined_sort():
     settings = _mock_settings()
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
         patch(
-            "scalar_forensic.web.pipeline._query_exact",
+            "scalar_forensic.web.pipeline.query._query_exact",
             return_value=([_exact_hit(PATH_A)], []),
         ),
         patch(
-            "scalar_forensic.web.pipeline._query_vector",
+            "scalar_forensic.web.pipeline.query._query_vector",
             return_value=([_semantic_hit(PATH_B, score=0.80)], []),
         ),
     ):
@@ -308,8 +308,8 @@ def test_unify_false_same_path_yields_separate_rows():
         return ([Hit(path=PATH_A, scores={mode: 0.92})], [])
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
-        patch("scalar_forensic.web.pipeline._query_vector", side_effect=_fake_qv),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query._query_vector", side_effect=_fake_qv),
     ):
         results, _ = query_session(
             session, ["altered", "semantic"], 0.75, 0.55, 10, settings, unify=False
@@ -330,12 +330,12 @@ def test_unify_false_sort_order_exact_altered_semantic():
         return ([Hit(path=PATH_A, scores={mode: 0.92})], [])
 
     with (
-        patch("scalar_forensic.web.pipeline.QdrantClient"),
+        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
         patch(
-            "scalar_forensic.web.pipeline._query_exact",
+            "scalar_forensic.web.pipeline.query._query_exact",
             return_value=([_exact_hit(PATH_B)], []),
         ),
-        patch("scalar_forensic.web.pipeline._query_vector", side_effect=_fake_qv),
+        patch("scalar_forensic.web.pipeline.query._query_vector", side_effect=_fake_qv),
     ):
         results, _ = query_session(
             session, ["exact", "altered", "semantic"], 0.75, 0.55, 10, settings, unify=False

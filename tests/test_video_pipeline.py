@@ -316,7 +316,9 @@ def test_query_exact_video_skips_missing_timecode():
     bad = _make_record({"video_path": "/evidence/clip.mp4", "video_hash": "videohash1"})
     good = _good_record(timecode_ms=2000)
 
-    with patch("scalar_forensic.web.pipeline.qdrant_scroll_all", return_value=iter([bad, good])):
+    with patch(
+        "scalar_forensic.web.pipeline.query.qdrant_scroll_all", return_value=iter([bad, good])
+    ):
         hits, errors = _query_exact_video(MagicMock(), "videohash1", _make_query_settings())
 
     assert errors == []
@@ -336,7 +338,9 @@ def test_query_exact_video_skips_unparseable_timecode():
     )
     good = _good_record(timecode_ms=500)
 
-    with patch("scalar_forensic.web.pipeline.qdrant_scroll_all", return_value=iter([bad, good])):
+    with patch(
+        "scalar_forensic.web.pipeline.query.qdrant_scroll_all", return_value=iter([bad, good])
+    ):
         hits, errors = _query_exact_video(MagicMock(), "videohash1", _make_query_settings())
 
     assert len(hits) == 1
@@ -354,7 +358,7 @@ def test_query_exact_video_all_malformed_produces_no_hit():
         ),
     ]
 
-    with patch("scalar_forensic.web.pipeline.qdrant_scroll_all", return_value=iter(records)):
+    with patch("scalar_forensic.web.pipeline.query.qdrant_scroll_all", return_value=iter(records)):
         hits, errors = _query_exact_video(MagicMock(), "vh", _make_query_settings())
 
     assert hits == []
@@ -364,7 +368,7 @@ def test_query_exact_video_multiple_frames_sorted_by_timecode():
     """matched_frames must be sorted by timecode regardless of scroll order."""
     records = [_good_record(tc) for tc in [3000, 1000, 2000]]
 
-    with patch("scalar_forensic.web.pipeline.qdrant_scroll_all", return_value=iter(records)):
+    with patch("scalar_forensic.web.pipeline.query.qdrant_scroll_all", return_value=iter(records)):
         hits, errors = _query_exact_video(MagicMock(), "videohash1", _make_query_settings())
 
     assert len(hits) == 1
