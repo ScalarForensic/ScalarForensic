@@ -258,6 +258,25 @@ class FaceStore:
             if rec.payload and rec.payload.get("image_hash")
         }
 
+    def get_face(self, point_id: str) -> dict | None:
+        """Return one stored observation's payload, or None if absent."""
+        records = self.client.retrieve(
+            collection_name=self.collection, ids=[point_id], with_payload=True
+        )
+        if not records:
+            return None
+        return {"id": records[0].id, **(records[0].payload or {})}
+
+    def get_marker(self, image_hash: str) -> dict | None:
+        """Return the processed marker for one medium, or None if absent."""
+        marker_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"face-marker:{image_hash}"))
+        records = self.client.retrieve(
+            collection_name=self.collection, ids=[marker_id], with_payload=True
+        )
+        if not records:
+            return None
+        return records[0].payload or {}
+
     def list_faces(self, image_hash: str) -> list[dict]:
         flt = Filter(
             must=[

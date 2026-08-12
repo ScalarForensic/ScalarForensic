@@ -37,6 +37,25 @@
     faceReviewUrl(chipHash) { return `/api/faces/chip/${chipHash}/review`; },
     faceThumbUrl(chipHash) { return `/api/faces/chip/${chipHash}/thumb`; },
 
+    // ── Pipeline explainer ────────────────────────────────────────────────
+    // "How was this face processed?" — assembled server-side from persisted
+    // data only, so it describes what happened at index time.
+    async explainFace(pointId) {
+      this.faceExplain = null;
+      this.faceExplainOpen = true;
+      try {
+        this.faceExplain = await fetch(`/api/faces/explain/${pointId}`).then(r => r.json());
+      } catch {
+        this.faceExplainError = 'Could not load the processing details for this face.';
+      }
+    },
+
+    closeFaceExplain() {
+      this.faceExplainOpen = false;
+      this.faceExplain = null;
+      this.faceExplainError = '';
+    },
+
     faceQualityLabel(face) {
       const q = face?.quality;
       return typeof q === 'number' ? q.toFixed(2) : '—';

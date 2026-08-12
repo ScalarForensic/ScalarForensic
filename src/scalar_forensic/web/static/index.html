@@ -950,6 +950,43 @@
               <p class="faces-caveat">
                 Machine-detected face observations — an investigative lead, not an identification.
               </p>
+              <!-- Pipeline explainer (spec §6.6): how this face was processed -->
+              <div class="faces-explain-list" x-show="facesForHit.length">
+                <template x-for="face in facesForHit" :key="`ex-${face.id}`">
+                  <button class="faces-explain-btn" @click="explainFace(face.id)">
+                    How was this face processed?
+                  </button>
+                </template>
+              </div>
+              <div class="faces-explain" x-show="faceExplainOpen" x-cloak>
+                <div class="faces-explain-head">
+                  <span class="sub-label">Processing steps</span>
+                  <button class="zoom-btn" @click="closeFaceExplain()" title="Close">×</button>
+                </div>
+                <p class="faces-caveat" x-show="faceExplainError" x-text="faceExplainError"></p>
+                <template x-if="faceExplain">
+                  <div>
+                    <template x-for="step in faceExplain.steps" :key="step.step">
+                      <div class="faces-explain-step">
+                        <div class="faces-explain-name" x-text="step.step.replace(/_/g, ' ')"></div>
+                        <p class="faces-explain-sentence" x-text="step.sentence"></p>
+                        <div class="faces-explain-nums">
+                          <template x-for="[k, v] in Object.entries(step.scores || {})" :key="k">
+                            <span x-text="`${k}: ${v}`"></span>
+                          </template>
+                          <template x-for="[k, v] in Object.entries(step.thresholds_in_force || {})" :key="`t-${k}`">
+                            <span class="faces-explain-thr" x-text="`${k} = ${v}`"></span>
+                          </template>
+                        </div>
+                      </div>
+                    </template>
+                    <p class="faces-explain-totals"
+                       x-show="faceExplain.file_totals?.n_detected != null"
+                       x-text="`this file: ${faceExplain.file_totals.n_detected} detections, ${faceExplain.file_totals.n_kept} kept`"></p>
+                    <p class="faces-caveat" x-text="faceExplain.caveat"></p>
+                  </div>
+                </template>
+              </div>
             </div>
           </template>
 
