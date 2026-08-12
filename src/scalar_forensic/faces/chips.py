@@ -31,8 +31,14 @@ _REVIEW_DOMAIN = b"review-source-rgb-v1\0"
 
 
 def _domain_hash(domain: bytes, arr: np.ndarray) -> str:
-    h, w = arr.shape[:2]
-    hasher = hashlib.sha256(domain + f"{h}x{w}:".encode())
+    # dtype and the *full* shape enter the prefix, not just height x width:
+    # (6,6) uint8 and (6,6,1) uint8 have byte-identical buffers, as do
+    # (2,2,4) uint8 and (2,2,1) uint32.  Every array reaching here today is
+    # HxWx3 uint8, so neither collision is live -- but these digests become
+    # payload fields and filenames, so widening the prefix afterwards would
+    # be a schema-and-filesystem migration.
+    shape = "x".join(str(n) for n in arr.shape)
+    hasher = hashlib.sha256(domain + f"{arr.dtype.str}:{shape}:".encode())
     hasher.update(np.ascontiguousarray(arr).tobytes())
     return hasher.hexdigest()
 

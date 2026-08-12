@@ -27,7 +27,27 @@ def test_hash_domains_are_separated():
 def test_hashes_are_dimension_sensitive():
     a = np.zeros((112, 112, 3), dtype=np.uint8)
     b = np.zeros((56, 224, 3), dtype=np.uint8)
+    assert a.tobytes() == b.tobytes()  # only the prefix can separate these
     assert review_chip_hash(a) != review_chip_hash(b)
+
+
+def test_hashes_separate_channel_count_and_dtype():
+    # Byte-identical buffers that differ only in trailing shape or dtype.
+    # Not reachable today (everything is HxWx3 uint8) but these digests
+    # become filenames, so the prefix must pin them.
+    assert review_chip_hash(np.zeros((6, 6), np.uint8)) != review_chip_hash(
+        np.zeros((6, 6, 1), np.uint8)
+    )
+    assert review_chip_hash(np.zeros((2, 2, 4), np.uint8)) != review_chip_hash(
+        np.zeros((2, 2, 1), np.uint32)
+    )
+
+
+def test_hash_is_insensitive_to_array_contiguity():
+    # A crop is a non-contiguous view; it must hash as its own bytes.
+    src = np.random.default_rng(7).integers(0, 255, (40, 40, 3), np.uint8)
+    view = src[10:20, 5:15]
+    assert review_chip_hash(view) == review_chip_hash(np.ascontiguousarray(view))
 
 
 def test_paths_are_sharded(tmp_path):
@@ -90,9 +110,14 @@ def test_embedded_and_review_only_share_one_review_jpeg(tmp_path):
     src = rng.integers(0, 255, (400, 400, 3), np.uint8)
     bbox = (100.0, 100.0, 80.0, 80.0)
     _, rhash = write_aligned_chips(tmp_path, aligned, src, bbox=bbox, dilation=0.15, thumb_size=256)
+    review, _ = review_chip_paths(tmp_path, rhash)
+    before = review.read_bytes(), review.stat().st_mtime_ns
     only = write_review_chips(tmp_path, src, bbox=bbox, dilation=0.15, thumb_size=256)
     assert only == rhash
     assert len(list(tmp_path.rglob("*.review.jpg"))) == 1
+    # Untouched, not just single: a rewrite would briefly truncate a file the
+    # *other* surviving observation depends on.
+    assert (review.read_bytes(), review.stat().st_mtime_ns) == before
 
 
 def test_write_review_chips_writes_two_files_and_no_png(tmp_path):

@@ -350,7 +350,9 @@ class FaceStore:
                 value = payload.get(key)
                 if value in wanted:
                     still_referenced.add(value)
-        return [h for h in hashes if h not in still_referenced]
+        # Order-preserving dedup: a shared hash appears once per referencing
+        # observation, and the caller's unlink count is audit-facing.
+        return [h for h in dict.fromkeys(hashes) if h not in still_referenced]
 
     def _purge_by_filter(self, flt: Filter) -> PurgeResult:
         ids: list = []
@@ -367,7 +369,10 @@ class FaceStore:
         self.client.delete(
             collection_name=self.collection, points_selector=PointIdsList(points=ids)
         )
-        return PurgeResult(n_points=len(ids), chip_hashes=chip_hashes)
+        # Deduplicated: one review JPEG is shared by every observation whose
+        # source crop is byte-identical, so the raw list repeats hashes and the
+        # caller's unlinked-file count goes into the audit record.
+        return PurgeResult(n_points=len(ids), chip_hashes=list(dict.fromkeys(chip_hashes)))
 
     def purge_media(self, image_hash: str) -> PurgeResult:
         """Delete every face point for one medium; caller unlinks the chips."""

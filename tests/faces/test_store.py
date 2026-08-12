@@ -252,20 +252,60 @@ def test_clear_face_vector_noop_on_empty(store):
     client.delete_vectors.assert_not_called()
 
 
+def _scroll_spy(recs):
+    """Patch qdrant_scroll_all, recording the kwargs it was called with.
+
+    Asserting on the yielded records alone would mock past the payload
+    projection: if the projection omitted a hash field, real Qdrant would
+    return payloads without that key, every such chip would look
+    unreferenced, and purge would unlink files surviving observations still
+    need.  A mock that supplies the key regardless cannot catch that.
+    """
+    calls: list[dict] = []
+
+    def fake(client, collection, **kwargs):
+        calls.append({"collection": collection, **kwargs})
+        return iter(recs)
+
+    return fake, calls
+
+
 def test_unreferenced_chip_hashes_keeps_shared_chips(store):
     # A chip still referenced by a surviving observation must not be unlinked.
     s, _ = store
-    recs = [_face_rec("p1", {"is_face": True, "review_chip_hash": "shared"})]
-    with patch("scalar_forensic.faces.store.qdrant_scroll_all", return_value=iter(recs)):
+    fake, calls = _scroll_spy([_face_rec("p1", {"is_face": True, "review_chip_hash": "shared"})])
+    with patch("scalar_forensic.faces.store.qdrant_scroll_all", fake):
         assert s.unreferenced_chip_hashes(["shared", "orphan"]) == ["orphan"]
+    assert calls[0]["collection"] == "case1_faces"
 
 
 def test_unreferenced_chip_hashes_checks_both_domains(store):
     # An embedded observation's aligned PNG counts as a reference too.
     s, _ = store
-    recs = [_face_rec("p1", {"is_face": True, "aligned_chip_hash": "a1"})]
-    with patch("scalar_forensic.faces.store.qdrant_scroll_all", return_value=iter(recs)):
+    fake, calls = _scroll_spy([_face_rec("p1", {"is_face": True, "aligned_chip_hash": "a1"})])
+    with patch("scalar_forensic.faces.store.qdrant_scroll_all", fake):
         assert s.unreferenced_chip_hashes(["a1", "a2"]) == ["a2"]
+    # Both fields must be fetched, or the unfetched one always looks orphaned.
+    assert calls[0]["with_payload"] == ["aligned_chip_hash", "review_chip_hash"]
+
+
+def test_unreferenced_chip_hashes_scrolls_faces_not_markers(store):
+    # Marker and rollup points carry no chip hashes; the filter must key on
+    # is_face so a payload-index change cannot silently widen the scan.
+    s, _ = store
+    fake, calls = _scroll_spy([])
+    with patch("scalar_forensic.faces.store.qdrant_scroll_all", fake):
+        s.unreferenced_chip_hashes(["x"])
+    conditions = calls[0]["scroll_filter"].must
+    assert [c.key for c in conditions] == ["is_face"]
+    assert conditions[0].match.value is True
+
+
+def test_unreferenced_chip_hashes_deduplicates(store):
+    s, _ = store
+    fake, _ = _scroll_spy([])
+    with patch("scalar_forensic.faces.store.qdrant_scroll_all", fake):
+        assert s.unreferenced_chip_hashes(["a", "a", "b"]) == ["a", "b"]
 
 
 def test_unreferenced_chip_hashes_noop_on_empty(store):

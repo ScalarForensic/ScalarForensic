@@ -441,7 +441,7 @@ git commit -m "feat(faces): record review thresholds in provenance and soft comp
 - Produces:
   - `aligned_chip_hash(aligned_rgb: np.ndarray) -> str` (replaces `chip_hash`)
   - `review_chip_hash(crop_rgb: np.ndarray) -> str`
-  - `chip_paths(store_dir: Path, chash: str) -> tuple[Path, Path, Path]` (unchanged: png, review, thumb)
+  - `chip_paths(store_dir: Path, chash: str) -> tuple[Path, Path, Path]` (unchanged: png, review, thumb). Kept as-is deliberately, but note the wart: its 3-tuple now spans both hash domains, so `chip_paths(dir, aligned_hash)[1]` names a review JPEG that can never exist. Task 9 resolves the ambiguity where it matters, by choosing the path builder from `embedding_status` rather than letting an endpoint index blindly into the tuple.
   - `review_chip_paths(store_dir: Path, chash: str) -> tuple[Path, Path]` (review, thumb)
   - `write_aligned_chips(store_dir, aligned_rgb, source_rgb, bbox, dilation, thumb_size) -> tuple[str, str | None]` (renamed `write_chips`) returning `(aligned_hash, review_hash)`. The aligned PNG is stored under the aligned hash; **the review JPEG and thumbnail are stored under the review hash**, exactly as `write_review_chips` does. Both observation kinds therefore resolve review artefacts identically, and an embedded face's review chip is byte-shared with a review-only face that produced the same crop.
   - `write_review_chips(store_dir, source_rgb, bbox, dilation, thumb_size) -> str | None` — returns `None` when the dilated bbox clamps to zero area, so a caller never records a hash for files that were not written
@@ -787,9 +787,11 @@ git commit -m "feat(faces): explicit vector demotion and chip reference safety"
 
 **Interfaces:**
 - Consumes: Tasks 2, 4, 5
-- Produces: `FaceIndexResult` gains `n_review_only: int`, `review_only_reasons: dict[str, int]`, `demoted_point_ids: list[str]`, `orphaned_chip_hashes: list[str]`
+- Produces: `FaceIndexResult` gains `n_review_only: int`, `review_only_reasons: dict[str, int]`, `review_only_point_ids: list[str]`
 
 This is the highest-risk task in the plan. Embeddings are index-aligned with the embeddable list (`indexing.py:171-215`); pairing them against any combined list misassigns vectors — attaching one person's vector to another's observation, silently. The sentinel test below exists specifically to catch that.
+
+**Do not run `./run.sh sfn <dir> --faces` or `uv run sfn-faces purge` between Tasks 4 and 8.** Task 4 moved review artefacts to the review-domain hash and Task 5 made `_purge_by_filter` read `aligned_chip_hash`/`review_chip_hash`, but until this task rewrites the payload the pipeline still writes a bare `chip_hash`. In that window purge deletes the points, finds no hashes, unlinks nothing, and records `n_chip_files=0` — it would report having removed biometric crops that are still on disk. Chips written in the window are also unreachable in the UI, which still derives its URLs from `chip_hash`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -868,8 +870,7 @@ class FaceIndexResult:
     rejected: dict[str, int] = field(default_factory=dict)
     review_only_reasons: dict[str, int] = field(default_factory=dict)
     points: list[PointStruct] = field(default_factory=list)
-    demoted_point_ids: list[str] = field(default_factory=list)
-    orphaned_chip_hashes: list[str] = field(default_factory=list)
+    review_only_point_ids: list[str] = field(default_factory=list)
 ```
 
 - [ ] **Step 4: Rewrite the partition loop**
@@ -972,7 +973,7 @@ Then append the review-only loop:
                     bbox=det.bbox, dilation=self.crop_dilation, thumb_size=self.thumb_size,
                 )
             point_id = self.store.face_point_id(image_hash, frame_timecode_ms, det.bbox)
-            result.demoted_point_ids.append(point_id)
+            result.review_only_point_ids.append(point_id)
             result.points.append(
                 PointStruct(
                     id=point_id,
@@ -1026,7 +1027,14 @@ In `cli.py`, where `upsert_faces` is called, clear vectors on demoted points imm
 
 ```python
                 face_pipeline.store.upsert_faces(_res.points)
-                face_pipeline.store.clear_face_vector(_res.demoted_point_ids)
+                # Every review-only point, not only genuinely demoted ones:
+                # delete_vectors is idempotent and ignores absent vectors, so
+                # first-time review-only observations cost nothing.  The list
+                # is named for what it holds, because Task 8 reports it --
+                # calling first sightings "demoted" would misdescribe them.
+                # Only ever pass review-only ids: clearing an embedded point's
+                # vector destroys data recoverable only by a full re-index.
+                face_pipeline.store.clear_face_vector(_res.review_only_point_ids)
 ```
 
 - [ ] **Step 8: Full suite and lint**
@@ -1180,11 +1188,20 @@ Add `n_review_only=_face_review_only, review_only_reasons=_face_review_reasons` 
 
 At `cli.py:1741`, filter through the store before unlinking:
 
+Three limits of this check must be stated in the audit record and the docs rather than engineered away, because each is a deployment property, not a code defect:
+
+1. **Collection-scoped, chip store global.** `face_collection` is per case but `face_store_dir` defaults to one `data/faces` for every case, and content-addressing does not stop at a collection boundary — two cases holding the same image yield the same review hash and one file. `unreferenced_chip_hashes` scrolls only its own collection, so purging case A can unlink a chip case B still references. Task 12 must document that `SFN_FACE_STORE_DIR` is set per case, matching the cross-case rule `check_compat` already enforces for vectors.
+2. **Check-then-unlink race.** A concurrent index run can write a referencing point between the check and the `unlink()`; because the file then already exists, `write_review_chips` will not recreate it, leaving a dangling reference. Purge assumes a single writer.
+3. Both are mitigated but not cured by chips being re-derivable from the source media.
+
 ```python
     n_chip_files = 0
     if settings.face_store_dir is not None:
         unreferenced = store.unreferenced_chip_hashes(result.chip_hashes)
         for chash in unreferenced:
+            # Both builders, deliberately: a hash may be an aligned hash (PNG)
+            # or a review hash (JPEG + thumb), and the caller cannot tell which.
+            # The two overlap on the review pair; `exists()` keeps the count honest.
             for path in (
                 *chip_paths(Path(settings.face_store_dir), chash),
                 *review_chip_paths(Path(settings.face_store_dir), chash),
@@ -1487,12 +1504,47 @@ def test_demoted_point_is_not_returned_by_vector_search():
         assert got[0].payload["embedding_status"] == "review_only", "payload must survive"
     finally:
         client.delete_collection(collection_name=name)
+
+
+def test_clear_face_vector_on_absent_points_is_a_noop():
+    """The call site passes every review-only id, not only demoted ones.
+
+    Most of those points have never held a vector, and some may not exist at
+    all when the clear runs.  The whole demotion design assumes the server
+    treats both as no-ops rather than erroring -- verify it against a real
+    server instead of inferring it from the client signature.
+    """
+    client = QdrantClient(url=_URL)
+    name = f"sfn_test_faces_{uuid.uuid4().hex[:8]}"
+    client.create_collection(
+        collection_name=name,
+        vectors_config={FACE_VECTOR_NAME: VectorParams(size=4, distance=Distance.COSINE)},
+    )
+    try:
+        vectorless = str(uuid.uuid4())
+        client.upsert(
+            collection_name=name,
+            points=[PointStruct(id=vectorless, vector={}, payload={"is_face": True})],
+            wait=True,
+        )
+        # A point that exists but never held a vector, plus one that does not
+        # exist at all -- the two cases the call site actually produces.
+        client.delete_vectors(
+            collection_name=name,
+            vectors=[FACE_VECTOR_NAME],
+            points=[vectorless, str(uuid.uuid4())],
+            wait=True,
+        )
+        got = client.retrieve(collection_name=name, ids=[vectorless], with_payload=True)
+        assert got[0].payload["is_face"] is True, "payload must survive a no-op clear"
+    finally:
+        client.delete_collection(collection_name=name)
 ```
 
 - [ ] **Step 2: Verify it skips by default**
 
 Run: `uv run pytest tests/faces/test_store_integration.py -v`
-Expected: 1 skipped.
+Expected: 2 skipped.
 
 - [ ] **Step 3: Verify it passes against live Qdrant**
 
@@ -1542,6 +1594,8 @@ Add to the settings table:
 ```
 
 Add a short paragraph: faces clearing the review bar but not the embedding bar are kept as review-only observations — croppable and examinable, never compared. Both thresholds are bootstrap values pending calibration.
+
+Also document the chip-store scoping rule, which the code cannot enforce: `SFN_FACE_COLLECTION` is per case but `SFN_FACE_STORE_DIR` defaults to a single `data/faces`, and chips are content-addressed, so two cases holding the same image share one chip file. Purge's reference check (Task 8) scrolls only its own collection and would unlink a chip another case still references. **Set `SFN_FACE_STORE_DIR` per case**, for the same reason `check_compat` refuses to mix biometric data across cases. Note also that purge assumes a single writer: it checks for references and then unlinks, so a concurrent index run can leave a dangling chip reference. Both are recoverable — chips are re-derivable from the source media — but neither should be discovered during an examination.
 
 - [ ] **Step 3: Update CLAUDE.md**
 
