@@ -29,6 +29,18 @@ def test_face_grid_labels_review_only_observations():
     assert "faceStatusLabel(face)" in html
 
 
+def test_faces_panel_loads_for_the_already_selected_hit():
+    # $watch fires only on *change*.  selectedHit is already set when the panel
+    # mounts, so a watcher alone never issues the by-image request and the panel
+    # reads "0 in this image" for every hit — with a single hit, the face
+    # browser is unreachable.  The panel must also load once at init.
+    html = (STATIC / "index.html").read_text()
+    panel = html[html.index('<div class="faces-panel"') :].split(">")[0]
+    assert "$watch('selectedHit'" in panel
+    watch_at = panel.index("$watch('selectedHit'")
+    assert "loadFacesForHit(selectedHit?.image_hash)" in panel[:watch_at]
+
+
 def test_review_only_chips_are_not_upscaled_or_cropped():
     # The blanket .face-chip img rule upscales and centre-crops; on a 40 px
     # crop that fabricates display pixels and hides part of the evidence,

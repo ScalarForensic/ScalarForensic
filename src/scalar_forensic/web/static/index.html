@@ -930,7 +930,9 @@
           </div>
           <!-- Face observations (optional modality; browse only, never an identification) -->
           <template x-if="facesAvailable">
-            <div class="faces-panel" x-init="$watch('selectedHit', h => loadFacesForHit(h?.image_hash))">
+            <!-- Load once for the hit already selected when this panel mounts, then on
+                 every later change: $watch alone never fires for the initial selection. -->
+            <div class="faces-panel" x-init="loadFacesForHit(selectedHit?.image_hash); $watch('selectedHit', h => loadFacesForHit(h?.image_hash))">
               <div class="faces-head">
                 <span class="sub-label">Face observations</span>
                 <span class="sub-val" x-text="facesLoading ? 'loading…' : `${facesForHit.length} in this image`"></span>
