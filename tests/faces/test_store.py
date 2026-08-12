@@ -434,3 +434,38 @@ def test_rollup_records_review_only_counts(store):
     )
     assert p.payload["n_review_only"] == 1
     assert p.payload["review_only_reasons"] == {"size": 1}
+
+
+def test_search_faces_uses_the_named_face_vector_and_exact_mode(store):
+    st, client = store
+    client.query_points.return_value.points = []
+    st.search_faces([1.0, 0.0], limit=7, threshold=0.3, exact=True)
+    kwargs = client.query_points.call_args.kwargs
+    assert kwargs["collection_name"] == "case1_faces"
+    assert kwargs["using"] == FACE_VECTOR_NAME
+    assert kwargs["limit"] == 7
+    assert kwargs["score_threshold"] == 0.3
+    assert kwargs["search_params"].exact is True
+
+
+def test_search_faces_applies_no_payload_filter(store):
+    """The exclusion guarantee is vectorlessness, never a filter.
+
+    A filter would be a second, forgettable mechanism standing where a
+    structural one already holds: review-only points carry no `face` vector,
+    so a kNN over that vector cannot reach them.  Adding `must=[...]` here
+    would make the guarantee depend on this call site remembering it.
+    """
+    st, client = store
+    client.query_points.return_value.points = []
+    st.search_faces([1.0, 0.0], limit=5, threshold=0.0, exact=True)
+    kwargs = client.query_points.call_args.kwargs
+    assert "query_filter" not in kwargs or kwargs["query_filter"] is None
+
+
+def test_search_faces_returns_point_id_score_and_payload(store):
+    st, client = store
+    point = MagicMock(id="pid-1", score=0.61, payload={"image_hash": "aaa"})
+    client.query_points.return_value.points = [point]
+    rows = st.search_faces([1.0, 0.0], limit=5, threshold=0.0, exact=True)
+    assert rows == [{"point_id": "pid-1", "score": 0.61, "image_hash": "aaa"}]

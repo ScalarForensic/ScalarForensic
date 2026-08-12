@@ -60,6 +60,10 @@ class FileEntry:
     video_frames: list[VideoFrameEntry] | None = None
     # Populated by POST /api/faces/query-faces; in-process only.
     query_faces: list[QueryFace] | None = None
+    # The PipelineConfig those faces were produced under.  Kept so the search
+    # endpoint gates comparability against the config that actually made the
+    # probe vectors, rather than re-deriving one from the current environment.
+    query_faces_cfg: object | None = None
 
 
 @dataclass

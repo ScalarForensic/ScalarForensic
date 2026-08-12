@@ -19,6 +19,7 @@ from qdrant_client.models import (
     ScalarQuantization,
     ScalarQuantizationConfig,
     ScalarType,
+    SearchParams,
     VectorParams,
 )
 
@@ -318,6 +319,32 @@ class FaceStore:
                 limit=_SCROLL_LIMIT,
                 with_payload=True,
             )
+        ]
+
+    def search_faces(
+        self, vector: list[float], *, limit: int, threshold: float, exact: bool
+    ) -> list[dict]:
+        """kNN over the named ``face`` vector.
+
+        Review-only observations carry no vector at all (see ``indexing.py`` and
+        ``clear_face_vector``), so they are structurally unreachable here.  That
+        is the guarantee — do **not** add a payload filter to "make sure": a
+        filter that a later query forgets is exactly the failure mode the
+        vectorless design avoids, and its presence would invite someone to
+        delete the vectorlessness as redundant.
+        """
+        res = self.client.query_points(
+            collection_name=self.collection,
+            query=vector,
+            using=FACE_VECTOR_NAME,
+            limit=limit,
+            score_threshold=threshold,
+            search_params=SearchParams(exact=exact),
+            with_payload=True,
+        )
+        return [
+            {"point_id": str(p.id), "score": float(p.score), **(p.payload or {})}
+            for p in res.points
         ]
 
     # --- purge ----------------------------------------------------------

@@ -19,10 +19,16 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from qdrant_client import QdrantClient
 
 from scalar_forensic.config import Settings
+from scalar_forensic.faces.audit import AuditLog
 from scalar_forensic.faces.chips import chip_paths, write_thumbnail
-from scalar_forensic.faces.store import FaceStore
+from scalar_forensic.faces.store import _HARD_FIELDS, FaceStore
 from scalar_forensic.video import extract_frame_at
-from scalar_forensic.web.pipeline import detect_query_faces, query_embedder_block
+from scalar_forensic.web.pipeline import (
+    calibration_block,
+    detect_query_faces,
+    query_embedder_block,
+    search_query_faces,
+)
 from scalar_forensic.web.session import get_session
 
 _log = logging.getLogger(__name__)
@@ -485,6 +491,7 @@ def query_faces(
         raise HTTPException(status_code=400, detail=f"not an image: {exc}") from exc
 
     entry.query_faces = result.faces
+    entry.query_faces_cfg = result.cfg
     return JSONResponse(
         {
             "faces": [_face_json(f, session_id, file_id) for f in result.faces],
@@ -517,4 +524,146 @@ def query_chip(session_id: str, file_id: str, face_index: int) -> Response:
         content=jpeg,
         media_type="image/jpeg",
         headers={"Cache-Control": "no-store"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cross-file face search (Phase 1b).  Uncalibrated by the maintainer's ruling of
+# 2026-08-12: the raw cosine is returned and labelled, the score floor defaults
+# to 0.0, and 0.363 travels only as the model authors' reference figure.
+# ---------------------------------------------------------------------------
+
+
+def _audit_log(settings: Settings) -> AuditLog:
+    """The face audit log (spec §11).
+
+    Mirrors faces/indexing.py and cli.py: the log sits beside the chip store,
+    not inside it.  This is the first *web* route that writes it — every face
+    query is a logged act.
+    """
+    audit_dir = Path(settings.face_store_dir).parent if settings.face_store_dir else Path("data")
+    return AuditLog(audit_dir / "face_audit.log")
+
+
+def _parse_face_indices(raw: str, faces: list) -> list[int]:
+    """Indices into the query-faces response, validated against the session.
+
+    A review-only face is refused here rather than filtered out silently: it has
+    no vector, so there is nothing to search with, and quietly dropping it would
+    leave the examiner believing that face was searched and found nothing.
+    """
+    idxs: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            idxs.append(int(part))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"unknown face index {part}") from None
+    if not idxs:
+        raise HTTPException(status_code=400, detail="no face indices given")
+    for i in idxs:
+        if i < 0 or i >= len(faces):
+            raise HTTPException(status_code=400, detail=f"unknown face index {i}")
+        if faces[i].vector is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"face {i} is review-only and has no vector; it cannot be searched",
+            )
+    return idxs
+
+
+def _compat_block(store: FaceStore, cfg) -> dict:
+    """Hard mismatch → 409; soft mismatches ride along as warnings (spec §7.2).
+
+    FaceStore.check_compat *raises* on a hard mismatch, so the ValueError is the
+    normal path.  The returned list is still scanned for hard field names: a
+    store that reports rather than raises must not slip an incomparable search
+    through on the strength of that difference alone.
+    """
+    try:
+        msgs = store.check_compat(cfg)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    hard = [m for m in msgs if any(f in m for f in _HARD_FIELDS)]
+    if hard:
+        raise HTTPException(status_code=409, detail="; ".join(hard))
+    return {"ok": True, "warnings": list(msgs)}
+
+
+@router.post("/api/faces/search")
+def face_search(
+    session_id: str = Form(...),
+    file_id: str = Form(...),
+    face_indices: str = Form(...),
+    limit: int = Form(10, ge=1, le=50),
+    threshold: float = Form(0.0, ge=0.0, le=1.0),
+    exact: bool = Form(True),
+    collapse: bool = Form(True),
+) -> JSONResponse:
+    """Search the face collection with faces selected in the uploaded image.
+
+    Sync ``def``: the kNN is a blocking client call.
+
+    ``threshold`` is a *display floor* on the raw cosine and defaults to 0.0.
+    It is never seeded from the model authors' 0.363 — this deployment has no
+    calibrated threshold, and putting one in the default would manufacture it.
+    """
+    entry = _resolve_entry(session_id, file_id)
+    settings = Settings()
+    _require_faces(settings)
+
+    faces = entry.query_faces or []
+    idxs = _parse_face_indices(face_indices, faces)
+    probes = [(i, faces[i].vector) for i in idxs]
+
+    store = _store(settings)
+    cfg = entry.query_faces_cfg
+    compat = _compat_block(store, cfg)
+
+    try:
+        hits = search_query_faces(
+            store,
+            probes,
+            limit=limit,
+            threshold=threshold,
+            exact=exact,
+            collapse=collapse,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.warning("face search failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Face collection unreachable: {exc}") from exc
+
+    search_mode = "exact" if exact else "ann"
+    _audit_log(settings).append(
+        "query",
+        settings.examiner_id,
+        probe_hash=entry.file_hash,
+        face_indices=idxs,
+        collection=settings.face_collection,
+        pipeline_config_hash=getattr(cfg, "config_hash", None),
+        # No calibration record exists (spec §10); recorded as null rather than
+        # omitted, so the log states that the search ran uncalibrated.
+        face_calibration_id=None,
+        search_mode=search_mode,
+        threshold=threshold,
+        limit=limit,
+        n_results=len(hits),
+        top_scores=[h["score"] for h in hits[:5]],
+    )
+
+    return JSONResponse(
+        {
+            "hits": hits,
+            "n_probes": len(probes),
+            "search_mode": search_mode,
+            "threshold": threshold,
+            "limit": limit,
+            "calibration": calibration_block(),
+            "embedder": query_embedder_block(cfg),
+            "compat": compat,
+        }
     )
