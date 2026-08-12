@@ -119,10 +119,30 @@ def test_merged_hits_getter_is_in_computed_not_elsewhere():
 
 def test_face_query_controls_sit_with_the_other_sliders():
     html = (STATIC / "index.html").read_text()
+    # The whole .sliders block, up to the section that follows it.  Slicing to
+    # the first </div> after "faceThreshold" instead would make the assertions
+    # depend on the order of the rows, which is a layout decision, not a
+    # requirement — and it traps whoever adds the next slider.
     start = html.index('<div class="sliders">')
-    block = html[start : html.index("</div>", html.index("faceThreshold")) + 6]
+    block = html[start : html.index('<div class="panel-header section-header">', start)]
     assert "faceLimit" in block
     assert "faceThreshold" in block
     assert "faceExactSearch" in block
     assert "0.363" not in block  # never a default in the UI controls
     assert "uncalibrated" in block.lower()
+
+
+def test_query_image_buttons_name_their_model():
+    html = (STATIC / "index.html").read_text()
+    assert "DINO Dist Stats" in html
+    assert "DINO Audit" in html
+    assert "FACE Dist Stats" in html
+    assert "FACE Audit" in html
+
+
+def test_face_dist_stats_modal_scopes_the_reference_threshold():
+    html = (STATIC / "index.html").read_text()
+    start = html.index('<div class="face-stats-modal-backdrop"')
+    block = html[start : start + 4000]
+    assert "model_reference_note" in block
+    assert "review-only" in block  # the population statement

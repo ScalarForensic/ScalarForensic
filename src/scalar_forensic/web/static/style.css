@@ -1538,6 +1538,57 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   font-style: italic;
 }
 
+/* ── Face explainer modals ──
+   Same shells as the DINO pair, so the two modalities read alike. */
+.face-stats-modal-backdrop,
+.face-audit-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+/* The model authors' reference bucket. Deliberately NOT the accent used by
+   .stats-hist-bar-threshold: that one marks a threshold this deployment
+   applies, and this marks a figure it does not. */
+.stats-hist-bar-reference {
+  background: repeating-linear-gradient(
+    45deg, rgba(154,163,178,0.75) 0 2px, transparent 2px 4px
+  );
+  outline: 1px dashed var(--muted);
+}
+.stats-reference-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.stats-reference-val {
+  font-family: var(--mono);
+  color: var(--muted);
+  border-bottom: 1px dashed var(--muted);
+}
+.stats-reference-note,
+.stats-population {
+  font-size: 10px;
+  color: var(--muted);
+  font-style: italic;
+}
+.stats-population { margin: 8px 0 0; }
+.audit-modal-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 /* ── Forensic Audit modal ── */
 .audit-modal-backdrop {
   position: fixed;

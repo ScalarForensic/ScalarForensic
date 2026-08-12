@@ -48,6 +48,16 @@
     faceExactSearch: true,
     _faceQueryTimer: null,
 
+    // Per-model explainer surfaces (face pair; the DINO pair is above)
+    faceStats: null,
+    faceStatsLoading: false,
+    faceStatsError: '',
+    showFaceStats: false,
+    faceAudit: null,
+    faceAuditLoading: false,
+    faceAuditError: '',
+    showFaceAudit: false,
+
     thresholdAltered: 0.75,
     thresholdSemantic: 0.55,
     limit: 10,

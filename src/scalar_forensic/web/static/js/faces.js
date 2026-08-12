@@ -179,6 +179,72 @@
       }
     },
 
+    // ── Per-model explainer surfaces (face pair) ──────────────────────────
+    // The distribution is drawn by *one* probe: a mean over several faces would
+    // describe no face in particular.  The first selected face is the probe,
+    // and it is always a searchable one — the selection cannot hold any other.
+    async openFaceStats() {
+      const index = this.selectedQueryFaceIndices[0];
+      this.showFaceStats = true;
+      this.faceStatsError = '';
+      if (index === undefined) {
+        this.faceStats = null;
+        this.faceStatsError = 'Select a query face first.';
+        return;
+      }
+      this.faceStatsLoading = true;
+      this.faceStats = null;
+      try {
+        const fd = new FormData();
+        fd.append('session_id', this.sessionId);
+        fd.append('file_id', this.selectedFileId);
+        fd.append('face_index', index);
+        const resp = await fetch('/api/faces/dist-stats', { method: 'POST', body: fd });
+        const body = await resp.json();
+        if (!resp.ok) { this.faceStatsError = body.detail || 'distribution query failed'; return; }
+        this.faceStats = body;
+      } catch (e) {
+        this.faceStatsError = String(e);
+      } finally {
+        this.faceStatsLoading = false;
+      }
+    },
+
+    closeFaceStats() {
+      this.showFaceStats = false;
+      this.faceStats = null;
+      this.faceStatsError = '';
+    },
+
+    async openFaceAudit() {
+      const hash = this.selectedHit?.image_hash;
+      this.showFaceAudit = true;
+      this.faceAuditError = '';
+      if (!hash) {
+        this.faceAudit = null;
+        this.faceAuditError = 'Select a hit first.';
+        return;
+      }
+      this.faceAuditLoading = true;
+      this.faceAudit = null;
+      try {
+        const resp = await fetch(`/api/faces/audit?image_hash=${encodeURIComponent(hash)}`);
+        const body = await resp.json();
+        if (!resp.ok) { this.faceAuditError = body.detail || 'audit lookup failed'; return; }
+        this.faceAudit = body;
+      } catch (e) {
+        this.faceAuditError = String(e);
+      } finally {
+        this.faceAuditLoading = false;
+      }
+    },
+
+    closeFaceAudit() {
+      this.showFaceAudit = false;
+      this.faceAudit = null;
+      this.faceAuditError = '';
+    },
+
     // Mirrors debouncedQuery() in analysis.js: one search per drag, not one per
     // slider step.  The selection handlers call runFaceSearch() directly — the
     // two paths are disjoint, so a drag never fires both.
