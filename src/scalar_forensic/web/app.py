@@ -18,6 +18,7 @@ from qdrant_client import QdrantClient
 
 from scalar_forensic.config import ENV_ALLOW_ONLINE, Settings
 from scalar_forensic.web.routes import analyze as analyze_routes
+from scalar_forensic.web.routes import faces as faces_routes
 from scalar_forensic.web.routes import files as files_routes
 from scalar_forensic.web.routes import tags as tags_routes
 from scalar_forensic.web.routes import video as video_routes
@@ -44,6 +45,13 @@ async def lifespan(_app: FastAPI):
                 "Batch size: 32 (default — run `sfn` once to auto-calibrate)"
             )
 
+    # Face modality: warn once at startup rather than per request.  The
+    # /api/faces/availability endpoint carries the same reason to the UI.
+    if settings.faces_enabled:
+        face_err = settings.face_startup_error()
+        if face_err:
+            logging.getLogger(__name__).warning("Face modality unavailable: %s", face_err)
+
     async def _reaper() -> None:
         while True:
             await asyncio.sleep(60)
@@ -65,6 +73,7 @@ app.include_router(analyze_routes.router)
 app.include_router(files_routes.router)
 app.include_router(video_routes.router)
 app.include_router(tags_routes.router)
+app.include_router(faces_routes.router)
 
 
 # ---------------------------------------------------------------------------
