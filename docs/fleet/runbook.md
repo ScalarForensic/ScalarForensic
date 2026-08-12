@@ -231,3 +231,35 @@ no vector moved. The 10 superseded review JPEGs are now unreferenced on disk —
 
 **Open decision this raises:** whether 0.25 becomes the default (currently 0.15 in
 `config.py`).
+
+### Panel defect FIXED — 2026-08-12, `b008cf9`
+
+Test-first: added `test_faces_panel_loads_for_the_already_selected_hit` to
+`tests/faces/test_static_wiring.py`, confirmed it FAILED against the old markup, then
+changed `index.html:935` to `x-init="loadFacesForHit(selectedHit?.image_hash); $watch(...)"`.
+Suite **476 passed, 5 skipped** (no live Qdrant in that run); ruff check + format rc=0.
+
+**Diagnosis gotcha worth keeping.** After the fix the panel still read "0 in this image",
+and I nearly re-opened the diagnosis. The page was serving **cached HTML**: reading the
+live attribute showed `x-init="$watch('selectedHit', …)"` — the old markup — while
+`curl http://localhost:8080/` returned the new one. `ignoreCache` on the navigation did
+not defeat it; a query-string cache-bust (`/?cachebust=1`) did, and the panel then loaded
+on first render with no click. The app serves no cache headers on `/`. Anyone testing UI
+changes here must cache-bust or they will debug a stale page.
+
+### Crop dilation recorded in config — 2026-08-12
+
+`SFN_FACE_CROP_DILATION=0.25` appended to `.env` (gitignored, local config) with a comment
+carrying the measurement (47×62 box → 61×80 at 0.15, → 71×92 at 0.25) and the warning that
+the value is inside the pipeline config hash, so changing it reprocesses every medium.
+**Still open:** whether 0.25 replaces the 0.15 default in `config.py`.
+
+### New feature request — face-driven query flow
+
+Maintainer specified a face-search UX: query-side face detection with selectable faces,
+FACES as a first-class hit mode alongside EXACT/SEMANTIC/ALTERED, mode filtering, face
+query controls, green borders on selected and matched faces with a score beneath.
+Written up as `docs/specs/face-query-ux.md`. **This is Phase 1b**, which spec §10/§12 gate
+on an active calibration record — the "score beneath the matched face" is precisely what
+the spec forbids showing uncalibrated. First question for the next session is that
+evidential-posture decision, not implementation order.
