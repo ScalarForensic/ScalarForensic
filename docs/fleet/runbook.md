@@ -916,3 +916,11 @@ production `SFN_FACE_REVIEW_MIN_SIZE` (36 shipped), merge to `main` (local, no p
 (shipped as the requested string + the both-models subtitle). **Queued and unassigned:**
 `indexer.py:96-104` should fail with the drop-and-reindex instruction instead of a Pydantic
 error, and the false comment deleted.
+
+**Sizing hazard for the next manager: a worker's self-reported context number understated
+badly.** c3 reported "118k/200k (59%)" when I assigned it S7, and "143k/200k (72%)" on
+completion; `cx s` showed it at **207.7k** at retirement. I made the take-it-or-hand-it-off
+call on the self-reported figure and set a 175k stop line against it — both were measured
+against a number ~65k low. It finished cleanly, so this cost nothing this time. **Size off
+`cx s`, not off the worker's own estimate.** All ownership rows released cleanly on `cx k`
+(`cx o --reap` → nothing stranded).
