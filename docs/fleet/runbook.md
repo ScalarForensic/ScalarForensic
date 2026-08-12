@@ -533,3 +533,36 @@ dilation test survived (0.25 in `.env` and 0.25 in code after `479d046`). The du
 c1's shape: supply an empty env file, do not rely on the value differing.
 
 Scratch plugin (not in the repo): `scratchpad/noenvplug.py`.
+
+### Image-box parity — c1's fix landed `763665f`, independent pass in flight
+
+Maintainer: "due to the new box with the cropped faces it changes the size of the original
+picture box. It should stay the same size as the query image box." Real, and c1 measured the
+mechanism rather than guessing: both compare columns are 939.6 px flex columns with the same
+233 px fixed stack under the image, so the face panel — a sibling on the **match side only**
+— takes its height out of the one flexible item, the match image box (`style.css:629
+flex:1`). At 1920×1080: query 706.1 px constant; match 706.1 (no panel) → 635.3 (panel, 0
+chips) → 509.0 (1 and 3 chips). The loss is exactly the panel height.
+
+Fix: `.cmp-inner > .image-box { flex:none; height:75% }` plus `overflow-y:auto` and
+`scrollbar-gutter:stable` on both columns — the gutter on *both* is why the widths still
+match when only one scrolls. Scoped by a new `cmp-inner` class on the two compared inners
+(`index.html:771,917`), so the triage panels are untouched, and `style.css:2254`'s
+review-only chip rules are unchanged. After: both boxes 575.3×704.7 at 0, 1, 3 and 12 chips
+and with the panel absent.
+
+**Re-derived by me at `763665f`:** 478 passed / 5 skipped, ruff check + format rc=0,
+porcelain 0, diff confined to the two static files plus `docs/qa/`.
+
+**Frontend tester spawned — and the seat could not be spawned as itself.** c1 asked for the
+`f` role (`subagent_roles/roles/frontend-tester.md`, letter `f`, adopted into spec B
+2026-08-11 with operator sign-off). I checked the file exists before acting on the request —
+it does, in `gitea/tmux_skill`, not in this repo. But `cx n csm-f` is refused: *"role must be
+one letter of mpcbego"*. The validator was never taught the letter the spec adopted. Filed
+`cx f` (med) and spawned it as `csm-c` with the role file named in its brief as its contract;
+the cost is that `cx s` and every handoff will show a coder where a tester sits.
+
+Added to its brief beyond c1's request: c1 measured **one viewport**, and `height:75%` is a
+fixed fraction, so the tester verifies parity at a second and a short viewport as well as at
+0/1/3/12 chips. Parity should hold structurally; if it holds at one size and breaks at
+another, that is the finding worth having.
