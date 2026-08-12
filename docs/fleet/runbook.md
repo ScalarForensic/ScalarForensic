@@ -394,3 +394,42 @@ upscaling it; that softness is the browser's, not the store's. Embedded chips ta
 of why the two populations look different side by side.
 
 Nothing changed in this window; both answers are read-only findings.
+
+### Decision triage, 2026-08-12 — three answered at manager level, two are the user's
+
+CTO (`wallet-recovery-com-g1`) verified the §10 premise independently rather than relaying
+it, and returned one **refinement I adopt**: §10 does not *literally* forbid displaying a
+per-face score — it forbids displaying one **with no CI and no defensible threshold**,
+which before calibration is the same thing in practice. The precise wording survives
+challenge; the loose one does not. The runbook entry above should be read with that
+correction. Also from the CTO: evidential posture is the **user's** call, not the CTO's
+(§11 makes jurisdiction-specific legal review an operator duty), and the standing argument
+against my default (B) is that **a banner is a weaker control than a gate — a banner is
+what gets cropped out of a screenshot**. My answer to that is why (B) as I specified it is
+not banner-only: the number is suppressed and the path is behind an opt-in env flag, and
+§10.5's shadow mode (every candidate examiner-adjudicated before thresholds are trusted) is
+the spec's own precedent for human-adjudicated use ahead of trusted thresholds.
+
+**Answered by me (manager), not sent up:**
+
+- **(2) `SFN_FACE_CROP_DILATION` default → 0.25.** The maintainer already authorised the
+  value and it is in `.env`; aligning `config.py` is hygiene, not a new judgement. Assigned.
+- **(3) `purge_all()` missing `is_face_video_rollup`.** A bug against a stated retention
+  promise, not a scope question — fix now, before 1b. Verified again at HEAD:
+  `store.py:474-486` matches `is_face` and `is_face_marker` only; the flag is set at
+  `store.py:251`. Assigned.
+- **(6) Phase 1b vs Phase 2.** Closed — the maintainer's own feature request answers it.
+
+**Deferred by me, deliberately:** (4) the standalone stale-observation inspect/purge command
+is the least specified of the six and adds a user-facing CLI surface; it is not batched with
+(2) and (3) until its shape is written down.
+
+**Still the user's, and only theirs:** the Phase 1b posture (ranked #1 above);
+**(1) production `SFN_FACE_REVIEW_MIN_SIZE`** — a retention policy, default keep 36; and
+**(5) merging `feat/face-pipeline-phase1` into `main`** — 42 commits, 0 behind, local merge
+only, never a push.
+
+**Worker spawned:** `scalarforensic-com-c1` (first worker in this project), owning
+`config.py`, `faces/store.py`, `tests/faces/test_store.py`, `tests/test_config.py`, tasked
+with (2) and (3) test-first and explicitly fenced off from Phase 1b, `face_min_size` and
+`face_review_min_size`. It reports its own measured pytest line; I do not hand it mine.
