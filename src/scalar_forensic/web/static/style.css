@@ -2214,3 +2214,50 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .hit-mark-btn.neg-btn:hover,
 .hit-mark-btn.neg-btn.is-active { background: rgba(192,57,43,0.15); border-color: var(--danger); }
 .hit-mark-spinner { font-size: 9px; color: var(--muted); }
+
+/* ── Face observations panel (optional modality, browse only) ───────────── */
+.faces-panel {
+  border-top: 1px solid var(--border);
+  padding: 8px 0 4px;
+}
+.faces-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+.faces-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.face-chip {
+  display: block;
+  border: 1px solid var(--border2);
+  border-radius: 2px;
+  background: var(--surface2);
+  text-decoration: none;
+  transition: border-color 0.1s;
+}
+.face-chip:hover { border-color: var(--accent); }
+.face-chip img {
+  display: block;
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+}
+.face-chip-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 2px 3px;
+  font-size: 9px;
+  font-family: var(--display);
+  color: var(--text2);
+}
+.faces-caveat {
+  margin: 6px 0 0;
+  font-size: 9px;
+  color: var(--muted);
+  font-style: italic;
+}

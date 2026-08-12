@@ -928,6 +928,31 @@
               <button class="zoom-btn" @click.stop="matchZoom = 1" title="Reset" style="font-size:10px">⊡</button>
             </div>
           </div>
+          <!-- Face observations (optional modality; browse only, never an identification) -->
+          <template x-if="facesAvailable">
+            <div class="faces-panel" x-init="$watch('selectedHit', h => loadFacesForHit(h?.image_hash))">
+              <div class="faces-head">
+                <span class="sub-label">Face observations</span>
+                <span class="sub-val" x-text="facesLoading ? 'loading…' : `${facesForHit.length} in this image`"></span>
+              </div>
+              <div class="faces-grid" x-show="facesForHit.length">
+                <template x-for="face in facesForHit" :key="face.id">
+                  <a class="face-chip" :href="faceReviewUrl(face.chip_hash)" target="_blank" rel="noopener"
+                     :title="`observation ${face.observation_key}`">
+                    <img :src="faceThumbUrl(face.chip_hash)" alt="face observation" loading="lazy">
+                    <span class="face-chip-meta">
+                      <span x-text="`conf ${(face.det_conf ?? 0).toFixed(2)}`"></span>
+                      <span x-text="`q ${faceQualityLabel(face)}`"></span>
+                    </span>
+                  </a>
+                </template>
+              </div>
+              <p class="faces-caveat">
+                Machine-detected face observations — an investigative lead, not an identification.
+              </p>
+            </div>
+          </template>
+
           <!-- Tag membership strip for result image -->
           <template x-if="selectedHit?.image_hash && hitTags[selectedHit.image_hash]?.length > 0">
             <div class="tag-strip">
@@ -1795,6 +1820,7 @@
 <script src="/static/js/evidence.js"></script>
 <script src="/static/js/triage.js"></script>
 <script src="/static/js/reset.js"></script>
+<script src="/static/js/faces.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

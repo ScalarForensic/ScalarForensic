@@ -14,6 +14,7 @@
         this.selectedModes = ['exact'];
         this.serverError = 'Backend unreachable — only exact hash matching is available.';
       }
+      this.checkFacesAvailability().catch(() => {});
       // Load concepts in background (needed for stats-bar concept selector)
       this.loadConcepts().catch(() => {});
       // Screensaver: fade drop-zone out after 5 s of no pointer/keyboard/drag activity

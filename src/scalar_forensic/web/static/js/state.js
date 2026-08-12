@@ -18,6 +18,13 @@
     sessionId: null,
     results: [],
     selectedFileId: null,
+
+    // ── Face modality (optional; browse only) ──────────────────────────────
+    facesAvailable: false,
+    facesReason: '',
+    facesNote: '',
+    facesForHit: [],
+    facesLoading: false,
     selectedHitKey: null,
     thresholdAltered: 0.75,
     thresholdSemantic: 0.55,
