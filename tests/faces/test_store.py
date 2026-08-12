@@ -383,6 +383,20 @@ def test_review_only_points_are_purged_by_purge_all(store):
     assert "r1" in result.chip_hashes
 
 
+def test_purge_all_matches_video_rollup_points(store):
+    # Rollups carry per-video biometric counts, so a purge that leaves them
+    # behind breaks the retention promise of `sfn-faces purge --all`.
+    s, _ = store
+    fake, calls = _scroll_spy([])
+    with patch("scalar_forensic.faces.store.qdrant_scroll_all", fake):
+        s.purge_all()
+    assert [c.key for c in calls[0]["scroll_filter"].should] == [
+        "is_face",
+        "is_face_marker",
+        "is_face_video_rollup",
+    ]
+
+
 def test_marker_records_review_only_counts(store):
     s, _ = store
     p = s.marker_point(

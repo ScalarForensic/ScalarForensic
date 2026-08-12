@@ -481,6 +481,7 @@ class FaceStore:
             should=[
                 FieldCondition(key="is_face", match=MatchValue(value=True)),
                 FieldCondition(key="is_face_marker", match=MatchValue(value=True)),
+                FieldCondition(key="is_face_video_rollup", match=MatchValue(value=True)),
             ]
         )
         return self._purge_by_filter(flt)
