@@ -73,3 +73,45 @@ def test_query_face_functions_live_in_the_faces_part_file():
     for fn in ("loadQueryFaces", "toggleQueryFace", "queryFaceChipUrl"):
         assert fn in js
     assert "Object.assign" not in js
+
+
+def test_hit_list_has_a_faces_badge_slot():
+    html = (STATIC / "index.html").read_text()
+    start = html.index('<div class="hit-scores"')
+    block = html[start : start + 3000]
+    assert "badge-faces" in block
+    assert "'faces' in hit.scores" in block
+    assert "hit.scores.faces.toFixed(" in block
+
+
+def test_faces_filter_pill_exists_and_is_gated_on_availability():
+    html = (STATIC / "index.html").read_text()
+    start = html.index('<div class="hits-filters"')
+    block = html[start : start + 2000]
+    assert "hitsFilterFaces" in block
+    assert "facesAvailable" in block
+
+
+def test_matched_face_gets_a_green_border_and_a_score_beneath_it():
+    html = (STATIC / "index.html").read_text()
+    start = html.index('<div class="faces-grid"')
+    block = html[start : start + 2000]
+    assert "face-chip-matched" in block
+    assert "faceMatchScore(face)" in block
+    css = (STATIC / "style.css").read_text()
+    matched = css[css.index(".face-chip-matched") :][:200]
+    assert "var(--success)" in matched
+
+
+def test_uncalibrated_banner_is_shown_with_face_results():
+    html = (STATIC / "index.html").read_text()
+    assert "faceCalibration?.banner" in html
+    assert "faceCalibration?.model_reference_note" in html
+
+
+def test_merged_hits_getter_is_in_computed_not_elsewhere():
+    computed = (STATIC / "js" / "computed.js").read_text()
+    assert "get mergedHits()" in computed
+    assert "hitsFilterFaces" in computed
+    for other in ("faces.js", "state.js", "helpers.js", "analysis.js"):
+        assert "get mergedHits()" not in (STATIC / "js" / other).read_text()

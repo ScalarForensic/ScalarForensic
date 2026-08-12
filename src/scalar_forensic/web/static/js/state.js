@@ -34,6 +34,19 @@
     queryFacesTruncated: false,
     selectedQueryFaceIndices: [],
 
+    // Cross-file face search.  faceThreshold is a *display floor* on the raw
+    // cosine and stays 0.0: this deployment has no calibrated threshold, and a
+    // non-zero default would manufacture one (spec §10).
+    faceHits: [],
+    faceSearchLoading: false,
+    faceSearchError: '',
+    faceCalibration: null,
+    faceMatchScores: {},        // {point_id (string): raw cosine}
+    hitsFilterFaces: true,
+    faceLimit: 10,
+    faceThreshold: 0.0,
+    faceExactSearch: true,
+
     thresholdAltered: 0.75,
     thresholdSemantic: 0.55,
     limit: 10,

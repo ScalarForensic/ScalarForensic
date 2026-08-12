@@ -112,6 +112,7 @@
       } finally {
         this.queryFacesLoading = false;
       }
+      this.runFaceSearch();
     },
 
     queryFaceChipUrl(index) {
@@ -127,15 +128,64 @@
       const i = this.selectedQueryFaceIndices.indexOf(face.index);
       if (i === -1) this.selectedQueryFaceIndices.push(face.index);
       else this.selectedQueryFaceIndices.splice(i, 1);
+      this.runFaceSearch();
     },
 
     selectAllQueryFaces() {
       this.selectedQueryFaceIndices = this.queryFaces
         .filter(f => f.searchable).map(f => f.index);
+      this.runFaceSearch();
     },
 
     clearQueryFaceSelection() {
       this.selectedQueryFaceIndices = [];
+      this.runFaceSearch();
+    },
+
+    // ── Cross-file face search ────────────────────────────────────────────
+    async runFaceSearch() {
+      if (!this.facesAvailable || !this.selectedQueryFaceIndices.length) {
+        this.faceHits = [];
+        this.faceMatchScores = {};
+        return;
+      }
+      this.faceSearchLoading = true;
+      this.faceSearchError = '';
+      try {
+        const fd = new FormData();
+        fd.append('session_id', this.sessionId);
+        fd.append('file_id', this.selectedFileId);
+        fd.append('face_indices', this.selectedQueryFaceIndices.join(','));
+        fd.append('limit', this.faceLimit);
+        fd.append('threshold', this.faceThreshold);
+        fd.append('exact', this.faceExactSearch ? 'true' : 'false');
+        const resp = await fetch('/api/faces/search', { method: 'POST', body: fd });
+        const body = await resp.json();
+        if (!resp.ok) {
+          this.faceSearchError = body.detail || 'face search failed';
+          return;
+        }
+        this.faceHits = Array.isArray(body.hits) ? body.hits : [];
+        this.faceCalibration = body.calibration || null;
+        // Keyed as strings: /api/faces/by-image returns the raw point id while
+        // the search returns str(id) — an unstringified key never matches.
+        const scores = {};
+        for (const h of this.faceHits) scores[String(h.face.point_id)] = h.score;
+        this.faceMatchScores = scores;
+      } catch (e) {
+        this.faceSearchError = String(e);
+      } finally {
+        this.faceSearchLoading = false;
+      }
+    },
+
+    faceIsMatched(face) {
+      return Object.prototype.hasOwnProperty.call(this.faceMatchScores, String(face.id));
+    },
+
+    faceMatchScore(face) {
+      const s = this.faceMatchScores[String(face.id)];
+      return typeof s === 'number' ? s.toFixed(4) : '';
     },
 
     queryFaceStatusLabel(face) {

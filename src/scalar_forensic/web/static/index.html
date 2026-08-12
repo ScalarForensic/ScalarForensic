@@ -972,7 +972,10 @@
               </div>
               <div class="faces-grid" x-show="facesForHit.length">
                 <template x-for="face in facesForHit" :key="face.id">
-                  <a class="face-chip" :class="{ 'face-chip-review-only': faceIsReviewOnly(face) }"
+                  <a class="face-chip" :class="{
+                       'face-chip-review-only': faceIsReviewOnly(face),
+                       'face-chip-matched': faceIsMatched(face),
+                     }"
                      :href="faceReviewUrl(face.review_chip_hash)" target="_blank" rel="noopener"
                      :title="`observation ${face.observation_key}`">
                     <img :src="faceThumbUrl(face.review_chip_hash)" alt="face observation" loading="lazy">
@@ -985,6 +988,10 @@
                     <span class="face-chip-status" x-text="faceStatusLabel(face)"></span>
                     <span class="face-chip-why" x-show="faceExclusionLabel(face)"
                           x-text="faceExclusionLabel(face)"></span>
+                    <!-- Raw cosine against the selected query face. Uncalibrated:
+                         no confidence, no percentage, no threshold. -->
+                    <span class="face-chip-score" x-show="faceIsMatched(face)"
+                          x-text="`cosine ${faceMatchScore(face)}`"></span>
                   </a>
                 </template>
               </div>
@@ -1204,9 +1211,17 @@
         </template>
       </div>
 
+      <!-- Face scores are raw model output. The banner is required whenever
+           face results are on screen (spec §10 / RULING §2) — it is not a
+           dismissible hint. -->
+      <div class="faces-uncal-banner" x-show="faceCalibration">
+        <span x-text="faceCalibration?.banner"></span>
+        <span class="faces-uncal-note" x-text="faceCalibration?.model_reference_note"></span>
+      </div>
+
       <!-- Filter pills -->
       <div class="hits-filters"
-           x-show="analysisRunModes.includes('altered') || analysisRunModes.includes('semantic')">
+           x-show="analysisRunModes.includes('altered') || analysisRunModes.includes('semantic') || facesAvailable">
         <template x-if="analysisRunModes.includes('altered')">
           <button class="hit-filter-pill hit-filter-pill-altered"
                   :class="{off: !hitsFilterAltered}"
@@ -1216,6 +1231,11 @@
           <button class="hit-filter-pill hit-filter-pill-semantic"
                   :class="{off: !hitsFilterSemantic}"
                   @click="hitsFilterSemantic = !hitsFilterSemantic; selectedHitKey = null; matchSrc = null">SEMANTIC</button>
+        </template>
+        <template x-if="facesAvailable">
+          <button class="hit-filter-pill hit-filter-pill-faces"
+                  :class="{off: !hitsFilterFaces}"
+                  @click="hitsFilterFaces = !hitsFilterFaces; selectedHitKey = null; matchSrc = null">FACES</button>
         </template>
         <button class="hit-filter-pill hit-filter-pill-unify"
                 :class="{off: !hitsUnified}"
@@ -1289,6 +1309,16 @@
                   <span class="badge badge-semantic">SEMAN</span>
                   <span class="pill-score pill-score-semantic"
                         x-text="'semantic' in hit.scores ? hit.scores.semantic.toFixed(3) : ''"></span>
+                </div>
+                <!-- Fixed slot 4: reserved when the face modality is available.
+                     4 dp: this is a raw, uncalibrated cosine, not a rounded
+                     confidence — see the banner above the list. -->
+                <div class="pill-group"
+                     x-show="facesAvailable"
+                     :style="'faces' in hit.scores && hitsFilterFaces ? '' : 'visibility:hidden'">
+                  <span class="badge badge-faces">FACES</span>
+                  <span class="pill-score pill-score-faces"
+                        x-text="'faces' in hit.scores ? hit.scores.faces.toFixed(4) : ''"></span>
                 </div>
               </div>
               <div class="hit-filename">
