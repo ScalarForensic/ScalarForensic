@@ -77,7 +77,7 @@ If no `_faces` collection exists, or it exists with `points_count: 0`, the windo
 
 Why clamping rather than raising: `Settings.__init__` parses the face block unconditionally (`faces_enabled` is only consulted at `config.py:309`), and `Settings()` is constructed per request (`routes/faces.py:53, 89, 111, 245, 278`). Raising would 500 every route — including non-face routes — for an operator who set `SFN_FACE_MIN_CONF=0.5` and never touched the review variable, because the *default* review value 0.6 exceeds their explicit 0.5. A default must never invalidate a user's explicit value.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_review_thresholds_default(monkeypatch):
@@ -112,12 +112,12 @@ def test_review_thresholds_reject_nonsense(monkeypatch):
         Settings()
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest tests/test_config.py -k review -v`
 Expected: FAIL — `AttributeError: 'Settings' object has no attribute 'face_review_min_conf'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `config.py`, immediately after the `face_min_size` block (`config.py:179-181`):
 
@@ -173,12 +173,12 @@ And a public accessor next to `face_startup_error()`:
         return list(self._face_threshold_notes)
 ```
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `uv run pytest tests/test_config.py -k review -v`
 Expected: PASS (4 tests).
 
-- [ ] **Step 5: Surface the notes in `face_startup_error()`**
+- [x] **Step 5: Surface the notes in `face_startup_error()`**
 
 `face_startup_error()` returns `None` when configuration is usable. Clamping is not an error, so do not change its return contract. Instead have the CLI and web lifespan print the notes. Add to `cli.py` where `face_startup_error()` is already consulted, and to the lifespan in `web/app.py` beside the existing faces warning:
 
@@ -192,12 +192,12 @@ Expected: PASS (4 tests).
             log.warning("face threshold: %s", note)
 ```
 
-- [ ] **Step 6: Full suite and lint**
+- [x] **Step 6: Full suite and lint**
 
 Run: `uv run pytest -q && uv run ruff format src tests && uv run ruff check src tests && uv run ruff format --check src tests`
 Expected: 402 passed.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/scalar_forensic/config.py src/scalar_forensic/cli.py src/scalar_forensic/web/app.py tests/test_config.py
@@ -218,7 +218,7 @@ git commit -m "feat(faces): review-path thresholds, clamped not raised"
 
 `GateResult` already exists in `quality.py` with fields `passed: bool`, `reason: str | None`, `subscores: dict[str, float]`. Reuse it unchanged. Size is measured in detector-input pixels exactly as `pre_align_gate` does (`quality.py:46`), so the two gates are directly comparable.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def _det(conf=0.9, w=100.0, h=100.0, scale=1.0):
@@ -270,12 +270,12 @@ def test_review_gate_ignores_pose():
     assert review_gate(det, min_conf=0.6, min_size=24).passed is True
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest tests/faces/test_quality.py -k review_gate -v`
 Expected: FAIL — `ImportError: cannot import name 'review_gate'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 def review_gate(det: FaceDetection, *, min_conf: float, min_size: int) -> GateResult:
@@ -294,12 +294,12 @@ def review_gate(det: FaceDetection, *, min_conf: float, min_size: int) -> GateRe
     return GateResult(True, None, subs)
 ```
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `uv run pytest tests/faces/test_quality.py -k review_gate -v`
 Expected: PASS (5 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/scalar_forensic/faces/quality.py tests/faces/test_quality.py
@@ -321,7 +321,7 @@ git commit -m "feat(faces): review_gate — confidence and size, no pose"
 
 The review thresholds go **inside** `config_hash` deliberately. `processed_hashes` (`store.py:242`) matches markers on exact hash equality, so a threshold outside the hash would leave already-indexed media matching their old marker — lowering the review floor would silently pick up no new faces, with no signal that it did nothing. They also join `_SOFT_FIELDS`, which is the existing mechanism for "changes which faces get in, not what the vectors mean" — without that, `check_compat` reports a stale account of admission criteria.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def _cfg(**over):
@@ -373,12 +373,12 @@ def test_review_thresholds_are_soft_not_hard(fake_client):
     assert any("review_min_size" in n for n in notes)
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest tests/faces/test_provenance.py tests/faces/test_store.py -k review -v`
 Expected: FAIL — `TypeError: PipelineConfig.__init__() got an unexpected keyword argument 'review_min_conf'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `provenance.py`, add to `PipelineConfig` immediately after `crop_dilation`:
 
@@ -401,12 +401,12 @@ _SOFT_FIELDS = (
 )
 ```
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `uv run pytest tests/faces/ -k review -v`
 Expected: PASS.
 
-- [ ] **Step 5: Fix every other construction site**
+- [x] **Step 5: Fix every other construction site**
 
 `PipelineConfig` gains two required fields, so all existing constructions break. Find and fix them:
 
@@ -416,12 +416,12 @@ grep -rn "PipelineConfig(" src tests | grep -v "def "
 
 In `indexing.py:62-67` (the `from_settings` path) pass `review_min_conf=settings.face_review_min_conf, review_min_size=settings.face_review_min_size`. In test helpers add the two fields to the base dict.
 
-- [ ] **Step 6: Full suite and lint**
+- [x] **Step 6: Full suite and lint**
 
 Run: `uv run pytest -q && uv run ruff format src tests && uv run ruff check src tests`
 Expected: all green.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/scalar_forensic/faces/provenance.py src/scalar_forensic/faces/store.py tests/
@@ -448,7 +448,7 @@ git commit -m "feat(faces): record review thresholds in provenance and soft comp
 
 Why domain separation: the same dimension-prefixed RGB array can legitimately arise once as an aligned crop and once as a native review crop. Paths are chosen by hash plus suffix alone, so without separation a review-only observation could be served another observation's aligned PNG.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_hash_domains_are_separated():
@@ -497,12 +497,12 @@ def test_review_thumbnail_never_upscales(tmp_path):
         assert max(t.size) < 256
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest tests/faces/test_chips.py -k "review or domain" -v`
 Expected: FAIL — `ImportError: cannot import name 'review_chip_hash'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Replace `chip_hash` in `chips.py` and add the review functions:
 
@@ -617,16 +617,16 @@ Update its import sites:
 grep -rn "write_chips\|chip_hash(" src tests
 ```
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `uv run pytest tests/faces/test_chips.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Full suite and lint**
+- [x] **Step 5: Full suite and lint**
 
 Run: `uv run pytest -q && uv run ruff format src tests && uv run ruff check src tests`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/scalar_forensic/faces/chips.py src/scalar_forensic/faces/ tests/faces/
@@ -650,7 +650,7 @@ git commit -m "feat(faces): domain-separated chip hashes; review-only chip write
 
 Demotion is the case the first design draft missed. Point IDs (`store.py:75`) exclude `config_hash`, but `processed_hashes` (`store.py:242`) keys idempotency **on** it — so a threshold change reprocesses every medium at the same point IDs. A face demoted from embedded to review-only is upserted with `vector={}` over a point that currently holds a vector. Whether `upsert` clears it is an implementation detail of Qdrant; a forensic guarantee does not run on an implication. Clear it explicitly. The call is idempotent, so no read-before-write is needed.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_clear_face_vector_calls_delete_vectors(fake_client):
@@ -700,12 +700,12 @@ Extend the existing fake Qdrant client in `tests/faces/conftest.py` with:
         )
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest tests/faces/test_store.py -k "clear_face_vector or unreferenced or review_only" -v`
 Expected: FAIL — `AttributeError: 'FaceStore' object has no attribute 'clear_face_vector'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
     def clear_face_vector(self, point_ids: list[str]) -> None:
@@ -765,12 +765,12 @@ Update `_purge_by_filter` (`store.py:300`) to collect both hash fields:
                     chip_hashes.append(chash)
 ```
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `uv run pytest tests/faces/test_store.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/scalar_forensic/faces/store.py tests/faces/
@@ -793,7 +793,7 @@ This is the highest-risk task in the plan. Embeddings are index-aligned with the
 
 **Do not run `./run.sh sfn <dir> --faces` or `uv run sfn-faces purge` between Tasks 4 and 8.** Task 4 moved review artefacts to the review-domain hash and Task 5 made `_purge_by_filter` read `aligned_chip_hash`/`review_chip_hash`, but until this task rewrites the payload the pipeline still writes a bare `chip_hash`. In that window purge deletes the points, finds no hashes, unlinks nothing, and records `n_chip_files=0` — it would report having removed biometric crops that are still on disk. Chips written in the window are also unreachable in the UI, which still derives its URLs from `chip_hash`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_interleaved_outcomes_pair_each_embedding_with_its_own_face(fake_pipeline):
@@ -854,12 +854,12 @@ def test_degenerate_crop_is_rejected_not_retained(fake_pipeline):
     assert r.points == []
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest tests/faces/test_indexing.py -k "interleaved or review_only or degenerate" -v`
 Expected: FAIL — `AttributeError: 'FaceIndexResult' object has no attribute 'n_review_only'`.
 
-- [ ] **Step 3: Extend the result dataclass**
+- [x] **Step 3: Extend the result dataclass**
 
 ```python
 @dataclass
@@ -873,7 +873,7 @@ class FaceIndexResult:
     review_only_point_ids: list[str] = field(default_factory=list)
 ```
 
-- [ ] **Step 4: Rewrite the partition loop**
+- [x] **Step 4: Rewrite the partition loop**
 
 Replace `process_image`'s body from the `kept` loop (`indexing.py:143`) through `if not kept: return result` (`:169`):
 
@@ -939,7 +939,7 @@ Replace `process_image`'s body from the `kept` loop (`indexing.py:143`) through 
 
 Note `dilated_clamped_bbox` must be added to the imports from `scalar_forensic.faces.chips`.
 
-- [ ] **Step 5: Build both point kinds**
+- [x] **Step 5: Build both point kinds**
 
 Keep the existing embedded-point loop (it already enumerates `embeddable`, which is now the only list paired with `embeddings`), changing only its chip call and payload keys:
 
@@ -1016,12 +1016,12 @@ Then append the review-only loop:
 
 `FacePipeline` gains `review_min_conf: float` and `review_min_size: int` fields, populated in `from_settings` from Task 1's settings.
 
-- [ ] **Step 6: Run to verify they pass**
+- [x] **Step 6: Run to verify they pass**
 
 Run: `uv run pytest tests/faces/test_indexing.py -v`
 Expected: PASS.
 
-- [ ] **Step 7: Wire demotion at the call site**
+- [x] **Step 7: Wire demotion at the call site**
 
 In `cli.py`, where `upsert_faces` is called, clear vectors on demoted points immediately after:
 
@@ -1037,11 +1037,11 @@ In `cli.py`, where `upsert_faces` is called, clear vectors on demoted points imm
                 face_pipeline.store.clear_face_vector(_res.review_only_point_ids)
 ```
 
-- [ ] **Step 8: Full suite and lint**
+- [x] **Step 8: Full suite and lint**
 
 Run: `uv run pytest -q && uv run ruff format src tests && uv run ruff check src tests`
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/scalar_forensic/faces/indexing.py src/scalar_forensic/cli.py tests/faces/
@@ -1062,7 +1062,7 @@ git commit -m "feat(faces): three-way partition — rejected, review-only, embed
 
 `n_kept` keeps meaning "embedded", so nothing already written is redefined. `n_dropped_noncanonical` currently increments on the detector (`detect.py:90`) and is persisted nowhere and read by nothing — a silent subtraction from `n_detected`. A design staking its case on the honest account of a medium has to record it.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_marker_records_review_only_counts(fake_client):
@@ -1093,12 +1093,12 @@ def test_rollup_records_review_only_counts(fake_client):
     assert p.payload["n_review_only"] == 1
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest tests/faces/test_store.py -k "review_only_counts" -v`
 Expected: FAIL — `TypeError: marker_point() got an unexpected keyword argument 'n_review_only'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add the three parameters to both builders and to their payloads:
 
@@ -1110,12 +1110,12 @@ Add the three parameters to both builders and to their payloads:
 
 In `indexing.py`, carry the detector's counter onto the result so the caller can pass it: read `getattr(self.detector, "n_dropped_noncanonical", 0)` before detection and again after, and record the delta on `FaceIndexResult.n_dropped_noncanonical: int = 0`.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `uv run pytest tests/faces/ -v`
 Expected: PASS. Update the existing marker/rollup call sites in `cli.py` to pass the new arguments from `FaceIndexResult`.
 
-- [ ] **Step 5: Full suite, lint, commit**
+- [x] **Step 5: Full suite, lint, commit**
 
 ```bash
 uv run pytest -q && uv run ruff format src tests && uv run ruff check src tests
