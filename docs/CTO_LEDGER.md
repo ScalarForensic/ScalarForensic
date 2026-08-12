@@ -18,6 +18,18 @@ deployment is a distributed isolated LAN.
 
 ## current state
 
+- **`m1` RETIRED at ~250k** (handoff `docs/handoffs/scalarforensic-com-m1-20260812-194005.md`,
+  `276a944`); **`m2` is live** and holds Phase 1b. `m1` went well beyond its
+  survey brief on the user's direct instruction: **SFace chosen and verified,
+  the validation run executed, a UI panel defect fixed test-first (`b008cf9`)**.
+- **`m1` reported the live bar as 480 passed / 0 skipped** — the 5 Qdrant skips
+  ran for the first time. **I could NOT reproduce it: Qdrant is unreachable
+  again** (`curl` → 000). **That number belongs to the window Qdrant was up in,
+  and is not re-derivable on demand.** Do not quote it as current.
+- **Tree has one in-flight file, `tests/faces/test_config.py` (`m2`).** `m1`'s
+  handoff named `tests/faces/test_store.py` — **wrong file.** A relayed
+  observation, stale by one commit. Re-derive dirty state; never inherit it.
+
 - **Bar RAN BY cto8 and reproduced exactly** (`475 passed, 5 skipped` of 480
   collected, 7.71s) at branch `feat/face-pipeline-phase1`, HEAD `b270d47` —
   **the SHA the evidence belongs to, never "current HEAD", because a document
@@ -48,12 +60,11 @@ deployment is a distributed isolated LAN.
 
 ## verified findings
 
-- **`purge_all()` leaves biometric-derived points behind. CONFIRMED by cto8, not
-  relayed:** its filter matches `is_face` and `is_face_marker` only, while four
-  flags exist — the fourth, **`is_face_video_rollup`** (set at `store.py:251`),
-  is absent from the filter. `is_face_meta` is excluded *deliberately*; the
-  rollup is not. **`sfn-faces purge --all` therefore does not purge everything**,
-  and that is a retention promise a court would ask about.
+- **`purge_all()` rollup gap — FOUND, then FIXED at `bb39d0e`. VERIFIED BY
+  cto8:** `is_face_video_rollup` is now in the `should` filter (1 line + 14 test
+  lines), and **`is_face_meta` is still correctly excluded** — the enablement
+  record must survive routine purges. `sfn-faces purge --all` now purges
+  everything biometric-derived. This was decision 4 and it is CLOSED.
 - **Docs disagree with the code in three places, all doc-side:** `CLAUDE.md`
   says "300 tests" (measured: **480 collected**); it says the face real-model
   test skips without a YuNet ONNX (the YuNet **is** present at `models/`, so it
