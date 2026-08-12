@@ -457,7 +457,7 @@ by the first two hex chars of the chip hash (frame-store precedent):
    authenticates the model input. This is the reproducibility artefact — nobody reviews it;
    it exists to prove what the model saw.
 2. **Review chip, JPEG quality 95**: the *unwarped* source-resolution crop, bbox dilated by
-   `SFN_FACE_CROP_DILATION` (default 0.15) and clamped to image bounds — hairline/ears/context
+   `SFN_FACE_CROP_DILATION` (default 0.25) and clamped to image bounds — hairline/ears/context
    preserved, resolution inherited from the source. This is what the examiner sees; a warped
    112×112 crop is poor review evidence. (This is where the corpus's dilation prescription
    lands — it has no effect on the aligned crop, which is fully determined by landmarks.)
@@ -737,7 +737,7 @@ it) · `SFN_FACE_COLLECTION` (default derived `{SFN_COLLECTION}_faces`) · `SFN_
 (int > 0, 1600) · `SFN_FACE_MIN_CONF` (float 0–1, 0.8) · `SFN_FACE_MIN_SIZE` (int > 0, 64) ·
 `SFN_FACE_REVIEW_MIN_CONF` (float 0–1, 0.6; clamped to `SFN_FACE_MIN_CONF`) ·
 `SFN_FACE_REVIEW_MIN_SIZE` (int > 0, 48; clamped to `SFN_FACE_MIN_SIZE`) ·
-`SFN_FACE_CROP_DILATION` (float 0–0.5, 0.15; review chip only) · `SFN_FACE_THUMB_SIZE`
+`SFN_FACE_CROP_DILATION` (float 0–0.5, 0.25; review chip only) · `SFN_FACE_THUMB_SIZE`
 (int > 0, 256; browse thumbnail long side, non-evidentiary — §7.3) · `SFN_FACE_TOPK_PER_GROUP`
 (int > 0, 5) · `SFN_EXAMINER_ID` (string, required when faces enabled). Gate thresholds beyond
 these bootstrap values live in the face-calibration record, which supersedes env values when

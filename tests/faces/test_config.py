@@ -9,7 +9,7 @@ def test_faces_disabled_by_default(monkeypatch):
     assert s.faces_enabled is False
     assert s.face_collection == f"{s.collection}_faces"
     assert s.face_detect_max_size == 1600
-    assert s.face_crop_dilation == pytest.approx(0.15)
+    assert s.face_crop_dilation == pytest.approx(0.25)
 
 
 def test_thumb_size_default_and_override(monkeypatch):
@@ -28,6 +28,18 @@ def test_thumb_size_rejects_non_positive(monkeypatch):
 def test_face_collection_follows_case_collection(monkeypatch):
     monkeypatch.setenv("SFN_COLLECTION", "case42")
     assert Settings().face_collection == "case42_faces"
+
+
+def test_crop_dilation_default_is_pinned_without_env(monkeypatch, tmp_path):
+    # An examiner machine sets this in .env, which load_dotenv folds into the
+    # process env — so pinning the *code* default needs both stripped. The
+    # env file must exist and be empty: a missing one makes load_dotenv fall
+    # back to find_dotenv(), which walks up to the repo's own .env.
+    monkeypatch.delenv("SFN_FACE_CROP_DILATION", raising=False)
+    empty = tmp_path / "empty.env"
+    empty.write_text("")
+    s = Settings(env_file=empty)
+    assert s.face_crop_dilation == pytest.approx(0.25)
 
 
 def test_crop_dilation_bounds(monkeypatch):

@@ -221,7 +221,7 @@ class Settings:
         if not (0.0 < self.face_max_clipped <= 1.0):
             raise ValueError("SFN_FACE_MAX_CLIPPED must be in (0, 1]")
         self.face_max_pose: float = self._parse_float("SFN_FACE_MAX_POSE", 0.35)
-        self.face_crop_dilation: float = self._parse_float("SFN_FACE_CROP_DILATION", 0.15)
+        self.face_crop_dilation: float = self._parse_float("SFN_FACE_CROP_DILATION", 0.25)
         if not (0.0 < self.face_crop_dilation <= 0.5):
             raise ValueError("SFN_FACE_CROP_DILATION must be in (0, 0.5]")
         # Browse thumbnail long side (px).  Derived, non-evidentiary artefact
