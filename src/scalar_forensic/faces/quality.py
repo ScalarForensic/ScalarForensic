@@ -55,6 +55,22 @@ def pre_align_gate(
     return GateResult(True, None, subs)
 
 
+def review_gate(det: FaceDetection, *, min_conf: float, min_size: int) -> GateResult:
+    """Admit a detection for hand review (spec: gate-split design).
+
+    Deliberately weaker than pre_align_gate: no pose check.  Pose degrades an
+    *alignment*, and this path never aligns — the examiner looks at the
+    unwarped source crop, where a profile face is perfectly examinable.
+    """
+    min_side_input_px = min(det.bbox[2], det.bbox[3]) * det.detect_scale
+    subs = {"confidence": det.confidence, "size": min_side_input_px}
+    if det.confidence < min_conf:
+        return GateResult(False, "confidence", subs)
+    if min_side_input_px < min_size:
+        return GateResult(False, "size", subs)
+    return GateResult(True, None, subs)
+
+
 def post_align_gate(
     source_crop_gray: np.ndarray, *, min_sharpness: float, max_clipped_frac: float
 ) -> GateResult:

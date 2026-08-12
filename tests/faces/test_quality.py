@@ -1,7 +1,12 @@
 import numpy as np
 import pytest
 
-from scalar_forensic.faces.quality import pose_ratio, post_align_gate, pre_align_gate
+from scalar_forensic.faces.quality import (
+    pose_ratio,
+    post_align_gate,
+    pre_align_gate,
+    review_gate,
+)
 from scalar_forensic.faces.types import FaceDetection
 
 FRONTAL = np.array([[30, 30], [70, 30], [50, 55], [35, 75], [65, 75]], np.float32)
@@ -57,3 +62,46 @@ def test_post_gate_passes_textured_crop():
     textured = rng.integers(60, 200, size=(80, 80), dtype=np.uint8)
     r = post_align_gate(textured, min_sharpness=25.0, max_clipped_frac=0.6)
     assert r.passed and set(r.subscores) == {"sharpness", "exposure"}
+
+
+def _rdet(conf=0.9, w=100.0, h=100.0, scale=1.0, lm=FRONTAL):
+    return FaceDetection(bbox=(0.0, 0.0, w, h), landmarks=lm, confidence=conf, detect_scale=scale)
+
+
+def test_review_gate_passes_a_small_but_confident_face():
+    # 40px: below the 64px embedding floor, above a 24px review floor.
+    r = review_gate(_rdet(conf=0.93, w=40.0, h=49.0), min_conf=0.6, min_size=24)
+    assert r.passed is True
+    assert r.reason is None
+    assert r.subscores["size"] == 40.0
+
+
+def test_review_gate_rejects_below_size():
+    r = review_gate(_rdet(w=20.0, h=20.0), min_conf=0.6, min_size=24)
+    assert r.passed is False
+    assert r.reason == "size"
+
+
+def test_review_gate_rejects_below_confidence():
+    r = review_gate(_rdet(conf=0.55), min_conf=0.6, min_size=24)
+    assert r.passed is False
+    assert r.reason == "confidence"
+
+
+def test_review_gate_measures_size_in_detector_input_px():
+    # A large face in a downscaled image is small to the detector.
+    r = review_gate(_rdet(w=100.0, h=100.0, scale=0.2), min_conf=0.6, min_size=24)
+    assert r.passed is False
+    assert r.subscores["size"] == 20.0
+
+
+def test_review_gate_ignores_pose():
+    # Pose is an embedding concern only: a profile face is still worth a look.
+    # Nose far outside the eye span -> pose_ratio ~2.2, well past any max_pose.
+    profile = np.array([[30, 30], [45, 30], [70, 50], [33, 75], [48, 75]], np.float32)
+    assert pose_ratio(profile) > 0.35
+    assert review_gate(_rdet(lm=profile), min_conf=0.6, min_size=24).passed is True
+    # Same landmarks would be rejected by the embedding gate.
+    assert pre_align_gate(_rdet(lm=profile), min_conf=0.6, min_size=24, max_pose=0.35).reason == (
+        "pose"
+    )
