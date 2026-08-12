@@ -48,7 +48,15 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
   (`data/images/`, zips) live there untracked. Ingestion CSVs go to `data/reports/`.
 - The app sends **no cache headers on `/`**, and `ignoreCache` does not defeat the browser
   cache — use `/?cachebust=N` when testing UI changes, or you will debug a stale page.
-  `style.css` is *not* cache-busted by that query string: re-set the stylesheet href too.
+  **`/?cachebust=N` busts only the HTML.** It busts neither `style.css` **nor any
+  `/static/js/` part file**, so a live check can measure old CSS *and* old JS and report a
+  false pass — or a false RED: on 2026-08-12 a stale `computed.js` made `mergedHits`
+  undefined and the feature look broken when it was not. Force-refetch every `<script src>`
+  and the stylesheet with `fetch(url, {cache: 'reload'})`, then reload.
+- **Never measure the suite against a dirty tree and attribute the number to a commit.**
+  `pytest` collects from disk, not from git, so a parallel worker's uncommitted tests are
+  counted in *your* run. On 2026-08-12 this published 526/5 for a commit whose real bar was
+  521/5. Check `git status --porcelain` is 0 before quoting a bar against a sha.
 - The 14 pytest warnings are a third-party torch `jit.script_method` deprecation — not ours.
 - The face real-model test skips unless a YuNet ONNX is present (`models/` is gitignored; fetch
   with `scripts/download_models.py --yunet`). It is the only check that can catch a wrong YuNet

@@ -810,3 +810,49 @@ ruling is closed and is **not** being re-escalated.
   `tests/faces/test_static_wiring.py`. Briefed test-first, with both session-costing gotchas
   (`/?cachebust=N` does not bust `style.css`; the `x-init` watcher fires only on *change*)
   and the acceptance-scope sentence as a reporting requirement.
+
+### S3, S6, S4, S7-backend landed — and a correction to a number I published
+
+Verified by me at HEAD with **`git status --porcelain` = 0**, which is the point of this entry:
+
+| sha | stage | bar |
+|---|---|---|
+| `a0b09f2` | S3 query-side face strip | — |
+| `78d8711` | S6 spec §10 divergence | — |
+| `433ae84` | S7 backend (audit + dist-stats endpoints) | **521 passed / 5 skipped** |
+| `1124ef3` | S4 FACES hit mode, pill, matched-face score | **526 passed / 5 skipped**, ruff rc=0 |
+
+**CORRECTION, mine.** I published "526 passed / 5 skipped, verified at `433ae84`". That was
+wrong and I am naming the mechanism rather than the slip: I ran the suite while the tree was
+6 files dirty with c3's in-flight S4 work. **`pytest` collects from disk, not from git**, so
+c3's five uncommitted `test_static_wiring.py` tests were counted into a run I attributed to
+c4's commit. c4's real bar was **521/5**; 526/5 became true only at `1124ef3`. c3's own number
+was correct and my check of it was the flawed one — the arithmetic not adding up (526 before
+S4, 526 after adding 5 tests) is what exposed it. Now in `CLAUDE.md`: check porcelain is 0
+before quoting a bar against a sha.
+
+**Second cache finding, from c3, and it is worse than the one we already carried.**
+`/?cachebust=N` busts only the HTML — **neither `style.css` nor any `/static/js/` part file**.
+c3's first S4 pass measured a stale `computed.js`, saw `mergedHits` undefined and the
+face-only row absent, and that would have been a **false RED** — the mirror image of the false
+PASS the old gotcha warned about. Force-refetch every `<script src>` and the stylesheet with
+`fetch(url, {cache:'reload'})` before reloading. Recorded in `CLAUDE.md`.
+
+**Unplanned but necessary, from c3:** nothing in the plan ever *called* `runFaceSearch()`. c3
+wired it to `loadQueryFaces` / `toggleQueryFace` / `selectAllQueryFaces` /
+`clearQueryFaceSelection`. S5's debounced controls layer on top — S5 must confirm it does not
+double-fire.
+
+**c4's two judgement calls, checked in the source, both accepted:** `_stored_config(row)` is
+not a self-comparison (`check_compat` compares its argument against the *collection's*
+recorded fields, so the persisted row asks the right question env-independently), and
+reporting a hard mismatch as `compat.ok=false` rather than raising is right for a *report*.
+`store._meta_payload()` is private, but it is the only accessor and `faces/store.py` is not
+c4's to extend — **noted here so it surfaces if `store.py` is ever refactored.**
+
+S4 live at `/?cachebust=3`: FACES 1.0000 on danny2's own medium, face-only row at 0.1042,
+banner with both sentences, pill toggles the row away and back, matched chip
+`rgb(46,204,113)` with `cosine 1.0000`, 0 console errors. Scope unchanged and restated:
+**danny2 only; the 40–47 px cohort is untested because the embed floor excludes it.**
+
+c4 retired — no frontend work left that does not collide with c3's owned files.
