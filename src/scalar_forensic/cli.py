@@ -362,6 +362,11 @@ def index(
     ),
     dino: bool = typer.Option(False, "--dino", help="Use DINOv2 backend (1024-dim semantic)"),
     sscd: bool = typer.Option(False, "--sscd", help="Use SSCD backend (512-dim copy-detection)"),
+    faces: bool = typer.Option(
+        False,
+        "--faces",
+        help="Also detect, embed and store faces (requires SFN_FACES_ENABLED=true)",
+    ),
     report: Path | None = typer.Option(
         None,
         "--report",
@@ -425,9 +430,49 @@ def index(
         typer.echo(f"[ERROR] Not a directory: {resolved_input}", err=True)
         raise typer.Exit(1)
 
-    if not dino and not sscd:
-        typer.echo("[ERROR] Specify at least one of --dino or --sscd.", err=True)
+    if not dino and not sscd and not faces:
+        typer.echo("[ERROR] Specify at least one of --dino, --sscd or --faces.", err=True)
         raise typer.Exit(1)
+
+    # ── Face modality startup check (spec §13: fail at startup, not mid-run) ──
+    face_pipeline = None
+    _faces_done: set[str] = set()
+    if faces:
+        _face_err = (
+            settings.face_startup_error()
+            if settings.faces_enabled
+            else "SFN_FACES_ENABLED must be 'true' to use --faces "
+            "(see docs/specs/face-pipeline.md)."
+        )
+        if _face_err:
+            typer.echo(f"[ERROR] {_face_err}", err=True)
+            raise typer.Exit(1)
+        from scalar_forensic.faces.indexing import FacePipeline  # deferred: optional deps
+
+        face_pipeline = FacePipeline.from_settings(settings)
+        if face_pipeline.store.collection_is_new():
+            _auth_ref = typer.prompt(
+                "First face-collection activation. Authorization reference (free text,"
+                " recorded in the enablement record; empty allowed)",
+                default="",
+            )
+            if not _auth_ref:
+                typer.echo(
+                    "[WARN] No authorization reference recorded for this activation.", err=True
+                )
+            face_pipeline.store.ensure_collection(
+                face_pipeline.cfg, settings.examiner_id, _auth_ref or None
+            )
+            face_pipeline.audit.append(
+                "enablement",
+                examiner_id=settings.examiner_id,
+                authorization_ref=_auth_ref or None,
+                face_collection=settings.face_collection,
+                case_collection=settings.collection,
+            )
+        for _warn in face_pipeline.store.check_compat(face_pipeline.cfg):
+            typer.echo(f"[WARN] face collection config differs — {_warn}", err=True)
+        _faces_done = face_pipeline.store.processed_hashes(face_pipeline.cfg.config_hash)
 
     if reference:
         if not settings.reference_collection:
@@ -1514,6 +1559,95 @@ def index(
                     records[_p].status = _S_FAIL_PRE
                     records[_p].reason = "duplicate of image that failed preprocessing"
 
+    # ── Face pass (own pass, not a hook in the embedding batch loop) ─────────
+    # The batch loop only iterates *not-yet-embedded* media, so hooking faces
+    # into it would silently yield zero faces on an already-indexed case.  This
+    # pass walks every discovered image plus every stored frame, and uses the
+    # face markers as its own idempotency mechanism.
+    if face_pipeline is not None:
+        _face_work: list[tuple[Path, str, dict | None]] = []
+        for _p, _sha in _file_hashes.items():
+            if _sha in _faces_done:
+                continue
+            _face_work.append((_p, _sha, vmeta_by_path.get(_p)))
+        typer.echo(
+            f"\nFaces: processing {len(_face_work):,} media item(s)  →  {settings.face_collection}"
+        )
+        _face_detected = _face_kept = 0
+        _face_rejected: dict[str, int] = {}
+        _face_failed = 0
+        _video_rollup: dict[str, dict] = {}
+        for _p, _sha, _vmeta in _face_work:
+            try:
+                _data = _p.read_bytes()
+                _fres = face_pipeline.process_image(
+                    _data,
+                    image_hash=_sha,
+                    image_path=str(_p.resolve()),
+                    video_hash=(_vmeta or {}).get("video_hash"),
+                    video_path=(_vmeta or {}).get("video_path"),
+                    frame_timecode_ms=(_vmeta or {}).get("frame_timecode_ms"),
+                )
+            except Exception as _exc:  # one bad file must not end the run
+                _face_failed += 1
+                typer.echo(f"[WARN] Face processing failed for {_p.name}: {_exc}", err=True)
+                continue
+            _marker = face_pipeline.store.marker_point(
+                _sha,
+                (_vmeta or {}).get("video_hash"),
+                face_pipeline.cfg.config_hash,
+                _fres.n_detected,
+                _fres.n_kept,
+                _fres.rejected,
+            )
+            face_pipeline.store.upsert_faces([*_fres.points, _marker])
+            _face_detected += _fres.n_detected
+            _face_kept += _fres.n_kept
+            for _reason, _n in _fres.rejected.items():
+                _face_rejected[_reason] = _face_rejected.get(_reason, 0) + _n
+            _vh_roll = (_vmeta or {}).get("video_hash")
+            if _vh_roll:
+                _agg = _video_rollup.setdefault(
+                    _vh_roll, {"n_frames": 0, "n_detected": 0, "n_kept": 0, "rejected": {}}
+                )
+                _agg["n_frames"] += 1
+                _agg["n_detected"] += _fres.n_detected
+                _agg["n_kept"] += _fres.n_kept
+                for _reason, _n in _fres.rejected.items():
+                    _agg["rejected"][_reason] = _agg["rejected"].get(_reason, 0) + _n
+
+        # Per-video rollup markers, written once each after their frames.
+        for _vh_roll, _agg in _video_rollup.items():
+            face_pipeline.store.upsert_faces(
+                [
+                    face_pipeline.store.video_rollup_point(
+                        _vh_roll,
+                        face_pipeline.cfg.config_hash,
+                        _agg["n_detected"],
+                        _agg["n_kept"],
+                        _agg["rejected"],
+                        _agg["n_frames"],
+                    )
+                ]
+            )
+        _rej_str = ", ".join(f"{_n} {_r}" for _r, _n in sorted(_face_rejected.items()))
+        typer.echo(
+            f"faces: {_face_kept:,} kept / {_face_detected:,} detected"
+            + (f" ({sum(_face_rejected.values()):,} rejected: {_rej_str})" if _rej_str else "")
+            + (f"  │  {_face_failed:,} failed" if _face_failed else "")
+        )
+        face_pipeline.audit.append(
+            "index_run",
+            examiner_id=settings.examiner_id,
+            input_dir=str(resolved_input),
+            n_media=len(_face_work),
+            n_detected=_face_detected,
+            n_kept=_face_kept,
+            n_rejected=_face_rejected,
+            n_failed=_face_failed,
+            pipeline_config_hash=face_pipeline.cfg.config_hash,
+        )
+
     # ── Close hash cache (close() performs the final flush) ──────────────────
     if _hash_cache is not None:
         _hash_cache.close()
@@ -1544,3 +1678,86 @@ def index(
 
 def main() -> None:
     typer.run(index)
+
+
+# ── Face-modality maintenance (separate console script) ──────────────────────
+# `sfn` itself stays a single-command `typer.run(index)` app, so adding a named
+# command here would break every documented `sfn <dir>` invocation.  Purge ships
+# as its own entry point instead, mirroring the sfn / sfn-web split.
+faces_app = typer.Typer(help="Face-modality maintenance commands.")
+
+
+@faces_app.callback()
+def _faces_callback() -> None:
+    """Keep this a command group.
+
+    Typer collapses a single-command app into the top level, which would
+    make the invocation `sfn-faces --media ...` instead of the documented
+    `sfn-faces purge --media ...`.
+    """
+
+
+@faces_app.command()
+def purge(
+    media: str = typer.Option(None, "--media", help="Purge faces for one media sha256"),
+    all_: bool = typer.Option(False, "--all", help="Purge ALL face observations"),
+) -> None:
+    """Delete stored face observations and their chip files."""
+    if bool(media) == bool(all_):
+        typer.echo("[ERROR] Specify exactly one of --media <sha256> or --all.", err=True)
+        raise typer.Exit(1)
+
+    settings = Settings()
+    err = (
+        settings.face_startup_error()
+        if settings.faces_enabled
+        else "SFN_FACES_ENABLED must be 'true' to use face commands."
+    )
+    if err:
+        typer.echo(f"[ERROR] {err}", err=True)
+        raise typer.Exit(1)
+
+    from qdrant_client import QdrantClient
+
+    from scalar_forensic.faces.audit import AuditLog
+    from scalar_forensic.faces.chips import chip_paths
+    from scalar_forensic.faces.store import FaceStore
+
+    if all_ and not typer.confirm(
+        "Delete ALL face observations in "
+        f"{settings.face_collection}? The enablement record is preserved."
+    ):
+        typer.echo("Aborted.")
+        raise typer.Exit(1)
+
+    store = FaceStore(
+        QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key),
+        settings.face_collection,
+        settings.collection,
+        0,  # dim unused on the purge path — no collection is created here
+    )
+    result = store.purge_all() if all_ else store.purge_media(media)
+
+    n_chip_files = 0
+    if settings.face_store_dir is not None:
+        for chash in result.chip_hashes:
+            for path in chip_paths(Path(settings.face_store_dir), chash):
+                if path.exists():
+                    path.unlink()
+                    n_chip_files += 1
+
+    store_dir = Path(settings.face_store_dir) if settings.face_store_dir else Path("data")
+    audit_dir = store_dir.parent if settings.face_store_dir else store_dir
+    AuditLog(audit_dir / "face_audit.log").append(
+        "purge",
+        examiner_id=settings.examiner_id,
+        scope="all" if all_ else "media",
+        image_hash=None if all_ else media,
+        n_points=result.n_points,
+        n_chip_files=n_chip_files,
+    )
+    typer.echo(f"Purged {result.n_points:,} face point(s) and {n_chip_files:,} chip file(s).")
+
+
+def faces_main() -> None:
+    faces_app()

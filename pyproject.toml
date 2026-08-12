@@ -24,6 +24,7 @@ dependencies = [
 [project.scripts]
 sfn = "scalar_forensic.cli:main"
 sfn-web = "scalar_forensic.web.app:start"
+sfn-faces = "scalar_forensic.cli:faces_main"
 
 [dependency-groups]
 dev = [

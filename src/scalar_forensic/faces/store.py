@@ -208,6 +208,35 @@ class FaceStore:
             },
         )
 
+    def video_rollup_point(
+        self,
+        video_hash: str,
+        cfg_hash: str,
+        n_detected: int,
+        n_kept: int,
+        rejected: dict[str, int],
+        n_frames: int,
+    ) -> PointStruct:
+        """Aggregate marker for a whole video, written once after its frames.
+
+        Distinct ID namespace from the per-frame markers so it can never
+        overwrite one — processed_hashes() keys on the frame markers.
+        """
+        return PointStruct(
+            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"face-marker-video:{video_hash}")),
+            vector={},
+            payload={
+                "is_face_video_rollup": True,
+                "video_hash": video_hash,
+                "faces_processed_at": datetime.now(UTC).isoformat(),
+                "faces_pipeline_config_hash": cfg_hash,
+                "n_frames": n_frames,
+                "n_detected": n_detected,
+                "n_kept": n_kept,
+                "n_rejected": rejected,
+            },
+        )
+
     # --- reads ----------------------------------------------------------
 
     def processed_hashes(self, cfg_hash: str) -> set[str]:

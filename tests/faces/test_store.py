@@ -169,6 +169,16 @@ def test_marker_point_is_per_processed_unit(store):
     assert frame.payload["faces_pipeline_config_hash"] == "cfg"
 
 
+def test_video_rollup_never_collides_with_frame_marker(store):
+    s, _ = store
+    # A rollup keyed on the video hash must not share an ID with the frame
+    # marker of a frame that happens to hash to the same value.
+    rollup = s.video_rollup_point("v1", "cfg", 10, 6, {"pose": 4}, n_frames=5)
+    assert rollup.id != s.marker_point("v1", "v1", "cfg", 10, 6, {}).id
+    assert rollup.payload["is_face_video_rollup"] is True
+    assert rollup.payload["n_frames"] == 5
+
+
 def test_processed_hashes_filters_on_config_hash(store):
     s, _ = store
     rec = MagicMock()
