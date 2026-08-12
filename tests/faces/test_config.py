@@ -53,16 +53,27 @@ def test_review_thresholds_default(monkeypatch):
     monkeypatch.delenv("SFN_FACE_REVIEW_MIN_SIZE", raising=False)
     s = Settings()
     assert s.face_review_min_conf == 0.6
-    assert s.face_review_min_size == 48
+    assert s.face_review_min_size == 24
+
+
+def test_embed_floor_default(monkeypatch):
+    """The EMBED floor, lowered 64 -> 40 by maintainer decision 2026-08-12.
+
+    Pinned because this is the gate with evidential consequence: it decides
+    whether a face gets a vector and becomes reachable by search at all.
+    """
+    monkeypatch.delenv("SFN_FACE_MIN_SIZE", raising=False)
+    assert Settings().face_min_size == 40
 
 
 def test_review_thresholds_clamped_to_embedding_gate(monkeypatch):
     # An explicit embedding threshold below the review DEFAULT must not raise.
+    # 16 is below the review default (24), which is what arms the size clamp.
     monkeypatch.setenv("SFN_FACE_MIN_CONF", "0.5")
-    monkeypatch.setenv("SFN_FACE_MIN_SIZE", "32")
+    monkeypatch.setenv("SFN_FACE_MIN_SIZE", "16")
     s = Settings()
     assert s.face_review_min_conf == 0.5
-    assert s.face_review_min_size == 32
+    assert s.face_review_min_size == 16
     notes = s.face_threshold_notes()
     assert any("SFN_FACE_REVIEW_MIN_CONF" in n for n in notes)
     assert any("SFN_FACE_REVIEW_MIN_SIZE" in n for n in notes)

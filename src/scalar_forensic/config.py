@@ -181,7 +181,13 @@ class Settings:
         self.face_min_conf: float = self._parse_float("SFN_FACE_MIN_CONF", 0.8)
         if not (0.0 < self.face_min_conf <= 1.0):
             raise ValueError("SFN_FACE_MIN_CONF must be in (0, 1]")
-        self.face_min_size: int = self._parse_int("SFN_FACE_MIN_SIZE", 64)
+        # 40 by maintainer decision 2026-08-12, lowered from 64.  This is the
+        # EMBED floor: it decides whether a face gets a vector and enters search,
+        # so it is the gate with evidential consequence.  40 is the largest value
+        # that admits the measured 40.1 / 46.9 / 40.8 px cohort (runbook
+        # 2026-08-12).  Lowering it does NOT retroactively vectorise already
+        # indexed observations — a collection must be re-indexed to feel it.
+        self.face_min_size: int = self._parse_int("SFN_FACE_MIN_SIZE", 40)
         if self.face_min_size < 1:
             raise ValueError("SFN_FACE_MIN_SIZE must be >= 1")
         # Review path (spec: 2026-08-12 gate-split design).  Admits faces for
@@ -192,7 +198,10 @@ class Settings:
         review_conf = self._parse_float("SFN_FACE_REVIEW_MIN_CONF", 0.6)
         if not 0 < review_conf <= 1:
             raise ValueError("SFN_FACE_REVIEW_MIN_CONF must be in (0, 1]")
-        review_size = self._parse_int("SFN_FACE_REVIEW_MIN_SIZE", 48)
+        # 24 by maintainer decision 2026-08-12, lowered from 48.  Retention only:
+        # a review-only observation is vectorless and cannot produce a machine
+        # match, so this floor carries no evidential consequence.
+        review_size = self._parse_int("SFN_FACE_REVIEW_MIN_SIZE", 24)
         if review_size < 1:
             raise ValueError("SFN_FACE_REVIEW_MIN_SIZE must be >= 1")
         if review_conf > self.face_min_conf:
