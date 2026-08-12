@@ -305,6 +305,53 @@ class FaceStore:
 
     # --- purge ----------------------------------------------------------
 
+    def clear_face_vector(self, point_ids: list[str]) -> None:
+        """Remove the named face vector from points, keeping their payloads.
+
+        Called when an observation is demoted to review-only on re-index.
+        Point IDs are stable across runs (face_point_id excludes config_hash)
+        while idempotency keys on config_hash, so a threshold change rewrites
+        existing points in place.  An upsert with no vector must not be
+        trusted to clear a previously stored one: a review-only point that
+        kept its vector would still be returned by similarity search.
+        """
+        if not point_ids:
+            return
+        self.client.delete_vectors(
+            collection_name=self.collection,
+            vectors=[FACE_VECTOR_NAME],
+            points=list(point_ids),
+        )
+
+    def unreferenced_chip_hashes(self, hashes: list[str]) -> list[str]:
+        """Of *hashes*, those no surviving point still references.
+
+        Chip files are content-addressed and therefore shared between
+        observations with byte-identical crops — common for review chips
+        across exact-duplicate media, and between an embedded observation and
+        a review-only one that produced the same source crop.  Unlinking a
+        shared chip would break a surviving observation's evidence.
+        """
+        if not hashes:
+            return []
+        wanted = set(hashes)
+        still_referenced: set[str] = set()
+        for rec in qdrant_scroll_all(
+            self.client,
+            self.collection,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="is_face", match=MatchValue(value=True))]
+            ),
+            limit=_SCROLL_LIMIT,
+            with_payload=["aligned_chip_hash", "review_chip_hash"],
+        ):
+            payload = rec.payload or {}
+            for key in ("aligned_chip_hash", "review_chip_hash"):
+                value = payload.get(key)
+                if value in wanted:
+                    still_referenced.add(value)
+        return [h for h in hashes if h not in still_referenced]
+
     def _purge_by_filter(self, flt: Filter) -> PurgeResult:
         ids: list = []
         chip_hashes: list[str] = []
@@ -312,9 +359,11 @@ class FaceStore:
             self.client, self.collection, scroll_filter=flt, limit=_SCROLL_LIMIT, with_payload=True
         ):
             ids.append(rec.id)
-            chash = (rec.payload or {}).get("chip_hash")
-            if chash:
-                chip_hashes.append(chash)
+            payload = rec.payload or {}
+            for key in ("aligned_chip_hash", "review_chip_hash"):
+                chash = payload.get(key)
+                if chash:
+                    chip_hashes.append(chash)
         self.client.delete(
             collection_name=self.collection, points_selector=PointIdsList(points=ids)
         )

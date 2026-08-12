@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from scalar_forensic.faces.provenance import PipelineConfig
-from scalar_forensic.faces.store import FaceStore
+from scalar_forensic.faces.store import FACE_VECTOR_NAME, FaceStore
 
 
 def _cfg(**over):
@@ -193,11 +193,12 @@ def test_purge_media_deletes_points_and_returns_chip_hashes(store):
     s, client = store
     rec1 = MagicMock()
     rec1.id = "p1"
-    rec1.payload = {"chip_hash": "c" * 64}
+    rec1.payload = {"aligned_chip_hash": "a" * 64, "review_chip_hash": "r" * 64}
     with patch("scalar_forensic.faces.store.qdrant_scroll_all", return_value=iter([rec1])):
         result = s.purge_media("h1")
     assert result.n_points == 1
-    assert result.chip_hashes == ["c" * 64]  # caller unlinks chip files (spec §7.5)
+    # Both artefact domains are collected; the caller unlinks chip files (spec §7.5).
+    assert set(result.chip_hashes) == {"a" * 64, "r" * 64}
     client.delete.assert_called_once()
 
 
@@ -227,3 +228,61 @@ def test_review_thresholds_are_soft_not_hard(store):
     _existing_meta(client, {"case_collection": "case1", **_cfg().to_payload()})
     notes = s.check_compat(_cfg(review_min_size=24))
     assert any("review_min_size" in n for n in notes)
+
+
+def _face_rec(pid, payload):
+    rec = MagicMock()
+    rec.id = pid
+    rec.payload = payload
+    return rec
+
+
+def test_clear_face_vector_calls_delete_vectors(store):
+    s, client = store
+    s.clear_face_vector(["id-a", "id-b"])
+    client.delete_vectors.assert_called_once()
+    kwargs = client.delete_vectors.call_args.kwargs
+    assert kwargs["vectors"] == [FACE_VECTOR_NAME]
+    assert set(kwargs["points"]) == {"id-a", "id-b"}
+
+
+def test_clear_face_vector_noop_on_empty(store):
+    s, client = store
+    s.clear_face_vector([])
+    client.delete_vectors.assert_not_called()
+
+
+def test_unreferenced_chip_hashes_keeps_shared_chips(store):
+    # A chip still referenced by a surviving observation must not be unlinked.
+    s, _ = store
+    recs = [_face_rec("p1", {"is_face": True, "review_chip_hash": "shared"})]
+    with patch("scalar_forensic.faces.store.qdrant_scroll_all", return_value=iter(recs)):
+        assert s.unreferenced_chip_hashes(["shared", "orphan"]) == ["orphan"]
+
+
+def test_unreferenced_chip_hashes_checks_both_domains(store):
+    # An embedded observation's aligned PNG counts as a reference too.
+    s, _ = store
+    recs = [_face_rec("p1", {"is_face": True, "aligned_chip_hash": "a1"})]
+    with patch("scalar_forensic.faces.store.qdrant_scroll_all", return_value=iter(recs)):
+        assert s.unreferenced_chip_hashes(["a1", "a2"]) == ["a2"]
+
+
+def test_unreferenced_chip_hashes_noop_on_empty(store):
+    s, client = store
+    assert s.unreferenced_chip_hashes([]) == []
+    client.scroll.assert_not_called()
+
+
+def test_review_only_points_are_purged_by_purge_all(store):
+    s, _ = store
+    recs = [
+        _face_rec(
+            "p1",
+            {"is_face": True, "embedding_status": "review_only", "review_chip_hash": "r1"},
+        )
+    ]
+    with patch("scalar_forensic.faces.store.qdrant_scroll_all", return_value=iter(recs)):
+        result = s.purge_all()
+    assert result.n_points == 1
+    assert "r1" in result.chip_hashes
