@@ -512,7 +512,7 @@
 
   <!-- ── Upload ── -->
   <div class="upload-section" x-show="phase === 'upload' || phase === 'analyzing'">
-    <div class="drop-zone" :class="{'drag-over': dragOver, 'idle': dropZoneIdle, 'analyzing': phase === 'analyzing'}"
+    <div class="drop-zone" :class="{'drag-over': dragOver, 'analyzing': phase === 'analyzing'}"
          @dragover.prevent="dragOver = true"
          @dragleave.prevent="dragOver = false"
          @drop.prevent="onDrop($event)">

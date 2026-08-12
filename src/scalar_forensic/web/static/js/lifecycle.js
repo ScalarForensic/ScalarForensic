@@ -17,8 +17,6 @@
       this.checkFacesAvailability().catch(() => {});
       // Load concepts in background (needed for stats-bar concept selector)
       this.loadConcepts().catch(() => {});
-      // Screensaver: fade drop-zone out after 5 s of no pointer/keyboard/drag activity
-      this._startIdleScreensaver();
     },
 
     toggleMode(mode) {
@@ -49,36 +47,5 @@
     onDrop(e) {
       this.dragOver = false;
       this.addFiles(e.dataTransfer.files);
-    },
-
-    // ── Idle screensaver ───────────────────────────────────────────────────
-    _startIdleScreensaver() {
-      const IDLE_MS = 5000;
-      const IDLE_EVENTS = ['mousemove','mousedown','keydown','touchstart','touchmove','dragenter','dragover'];
-      let lastReset = 0;
-      const resetIdle = () => {
-        const now = Date.now();
-        // Suppress Alpine reactivity + timer churn on high-frequency events
-        // (mousemove can fire 100+ times/s). Only reschedule if ≥100 ms have
-        // elapsed since the last reset, OR the drop-zone is already faded out.
-        if (!this.dropZoneIdle && now - lastReset < 100) return;
-        lastReset = now;
-        this.dropZoneIdle = false;
-        clearTimeout(this._idleTimer);
-        this._idleTimer = setTimeout(() => { this.dropZoneIdle = true; }, IDLE_MS);
-      };
-      this._resetIdle = resetIdle;
-      for (const ev of IDLE_EVENTS) document.addEventListener(ev, resetIdle, { passive: true });
-      resetIdle(); // start the initial countdown
-    },
-
-    _stopIdleScreensaver() {
-      clearTimeout(this._idleTimer);
-      this.dropZoneIdle = false;
-      if (this._resetIdle) {
-        const IDLE_EVENTS = ['mousemove','mousedown','keydown','touchstart','touchmove','dragenter','dragover'];
-        for (const ev of IDLE_EVENTS) document.removeEventListener(ev, this._resetIdle);
-        this._resetIdle = null;
-      }
     },
 });

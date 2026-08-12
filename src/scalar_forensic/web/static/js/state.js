@@ -7,9 +7,6 @@
     phase: 'upload',
     pendingFiles: [],
     dragOver: false,
-    dropZoneIdle: false,
-    _idleTimer: null,
-    _resetIdle: null,
     selectedModes: [],
     availableModes: [],
     analysisRunModes: [],      // modes actually used in the last analysis
