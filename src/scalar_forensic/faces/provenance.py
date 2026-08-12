@@ -27,6 +27,8 @@ class PipelineConfig:
     max_clipped: float
     max_pose: float
     crop_dilation: float
+    review_min_conf: float
+    review_min_size: int
     sfn_version: str
     cv2_version: str
     ort_version: str

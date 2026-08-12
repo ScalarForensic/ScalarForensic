@@ -19,6 +19,8 @@ def _cfg(**over):
         max_clipped=0.6,
         max_pose=0.35,
         crop_dilation=0.15,
+        review_min_conf=0.6,
+        review_min_size=48,
         sfn_version="1.0",
         cv2_version="4.10",
         ort_version="1.18",
@@ -49,3 +51,16 @@ def test_payload_round_trip_contains_everything():
     assert p["pipeline_config_hash"] == _cfg().config_hash
     for key in ("detector_id", "embedder_model_hash", "alignment_version", "cv2_version"):
         assert key in p
+
+
+def test_review_thresholds_change_config_hash():
+    # Must change: processed_hashes() keys on this, and a retuned review floor
+    # has to force reprocessing or it silently admits nothing new.
+    assert _cfg().config_hash != _cfg(review_min_size=32).config_hash
+    assert _cfg().config_hash != _cfg(review_min_conf=0.5).config_hash
+
+
+def test_review_thresholds_are_in_the_payload():
+    p = _cfg().to_payload()
+    assert p["review_min_conf"] == 0.6
+    assert p["review_min_size"] == 48

@@ -24,6 +24,8 @@ def _cfg(**over):
         max_clipped=0.6,
         max_pose=0.35,
         crop_dilation=0.15,
+        review_min_conf=0.6,
+        review_min_size=48,
         sfn_version="1.0",
         cv2_version="4.10",
         ort_version="1.18",
@@ -217,3 +219,11 @@ def test_list_faces_returns_payloads_for_media(store):
     with patch("scalar_forensic.faces.store.qdrant_scroll_all", return_value=iter([rec])):
         faces = s.list_faces("h1")
     assert faces == [{"id": "p1", "chip_hash": "c" * 64, "quality": 0.9}]
+
+
+def test_review_thresholds_are_soft_not_hard(store):
+    # Changing them must not raise — they cannot change what a vector means.
+    s, client = store
+    _existing_meta(client, {"case_collection": "case1", **_cfg().to_payload()})
+    notes = s.check_compat(_cfg(review_min_size=24))
+    assert any("review_min_size" in n for n in notes)

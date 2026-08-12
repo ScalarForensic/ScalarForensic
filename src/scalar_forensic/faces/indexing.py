@@ -78,6 +78,8 @@ class FacePipeline:
             max_clipped=settings.face_max_clipped,
             max_pose=settings.face_max_pose,
             crop_dilation=settings.face_crop_dilation,
+            review_min_conf=settings.face_review_min_conf,
+            review_min_size=settings.face_review_min_size,
             sfn_version=_sfn_version(),
             cv2_version=cv2.__version__,
             ort_version=ort.__version__,

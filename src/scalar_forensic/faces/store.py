@@ -40,7 +40,15 @@ _HARD_FIELDS = (
     "normalization_id",
 )
 # Soft fields change *which* faces get in, not what the vectors mean.
-_SOFT_FIELDS = ("detector_id", "detector_model_hash", "detect_max_size", "min_conf", "min_size")
+_SOFT_FIELDS = (
+    "detector_id",
+    "detector_model_hash",
+    "detect_max_size",
+    "min_conf",
+    "min_size",
+    "review_min_conf",
+    "review_min_size",
+)
 
 
 @dataclass(frozen=True)
