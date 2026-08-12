@@ -2308,6 +2308,63 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   font-family: var(--display);
   color: var(--text2);
 }
+/* Query-side face strip: the probes the examiner selects.  Selection is a
+   green border (var(--success), the same green as .hit-card.mark-pos).  A
+   vectorless review-only face cannot be a probe, so it reads as disabled. */
+.query-faces {
+  margin-top: 6px;
+}
+.query-faces-head {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 9px;
+  font-family: var(--display);
+  color: var(--text2);
+  margin-bottom: 4px;
+}
+.query-faces-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.query-face-chip {
+  border: 2px solid transparent;
+  border-radius: 2px;
+  background: var(--surface2);
+  padding: 2px;
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.1s;
+}
+.query-face-chip:hover { border-color: var(--accent); }
+.query-face-chip img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 72px;
+  max-height: 72px;
+  object-fit: contain;
+  margin: 0 auto;
+}
+.query-face-chip-selected,
+.query-face-chip-selected:hover {
+  border-color: var(--success);
+}
+.query-face-chip-unsearchable {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+.query-face-chip-unsearchable:hover { border-color: transparent; }
+.query-face-status {
+  display: block;
+  padding: 0 3px 2px;
+  font-size: 8px;
+  font-family: var(--display);
+  color: var(--muted);
+  text-align: center;
+}
+
 .faces-caveat {
   margin: 6px 0 0;
   font-size: 9px;

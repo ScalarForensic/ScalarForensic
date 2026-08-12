@@ -26,6 +26,14 @@
     faceExplainOpen: false,
     faceExplainError: '',
     selectedHitKey: null,
+
+    // Query-side faces (session-scoped; detected on upload, never indexed)
+    queryFaces: [],
+    queryFacesLoading: false,
+    queryFacesError: '',
+    queryFacesTruncated: false,
+    selectedQueryFaceIndices: [],
+
     thresholdAltered: 0.75,
     thresholdSemantic: 0.55,
     limit: 10,

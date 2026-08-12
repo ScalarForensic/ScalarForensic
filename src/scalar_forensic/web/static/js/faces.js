@@ -79,4 +79,68 @@
       const q = face?.quality;
       return typeof q === 'number' ? q.toFixed(2) : '—';
     },
+
+    // ── Query-side faces (session-scoped, never persisted) ────────────────
+    // The vectors stay in the server-side Session; the browser only ever holds
+    // face *indices*.  A face that failed the embedding gate is vectorless and
+    // therefore cannot be a probe — toggleQueryFace refuses it.
+    async loadQueryFaces() {
+      if (!this.facesAvailable || !this.sessionId || !this.selectedFileId) return;
+      this.queryFacesLoading = true;
+      this.queryFacesError = '';
+      this.queryFaces = [];
+      this.selectedQueryFaceIndices = [];
+      this.queryFacesTruncated = false;
+      try {
+        const fd = new FormData();
+        fd.append('session_id', this.sessionId);
+        fd.append('file_id', this.selectedFileId);
+        const resp = await fetch('/api/faces/query-faces', { method: 'POST', body: fd });
+        const body = await resp.json();
+        if (!resp.ok) {
+          this.queryFacesError = body.detail || 'face detection failed';
+          return;
+        }
+        this.queryFaces = Array.isArray(body.faces) ? body.faces : [];
+        this.queryFacesTruncated = body.truncated === true;
+        // Pre-select every searchable face: the examiner de-selects, rather than
+        // starting from an empty selection that looks like "no faces found".
+        this.selectedQueryFaceIndices = this.queryFaces
+          .filter(f => f.searchable).map(f => f.index);
+      } catch (e) {
+        this.queryFacesError = String(e);
+      } finally {
+        this.queryFacesLoading = false;
+      }
+    },
+
+    queryFaceChipUrl(index) {
+      return `/api/faces/query-chip/${this.sessionId}/${this.selectedFileId}/${index}`;
+    },
+
+    queryFaceSelected(index) {
+      return this.selectedQueryFaceIndices.includes(index);
+    },
+
+    toggleQueryFace(face) {
+      if (!face.searchable) return;   // review-only faces have no vector
+      const i = this.selectedQueryFaceIndices.indexOf(face.index);
+      if (i === -1) this.selectedQueryFaceIndices.push(face.index);
+      else this.selectedQueryFaceIndices.splice(i, 1);
+    },
+
+    selectAllQueryFaces() {
+      this.selectedQueryFaceIndices = this.queryFaces
+        .filter(f => f.searchable).map(f => f.index);
+    },
+
+    clearQueryFaceSelection() {
+      this.selectedQueryFaceIndices = [];
+    },
+
+    queryFaceStatusLabel(face) {
+      if (face.searchable) return 'searchable';
+      const why = face.embedding_exclusion_reason;
+      return why ? `not searchable — ${why} below threshold` : 'not searchable';
+    },
 });

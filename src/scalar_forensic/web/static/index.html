@@ -785,6 +785,35 @@
               <button class="zoom-btn" @click.stop="queryZoom = 1" title="Reset" style="font-size:10px">⊡</button>
             </div>
           </div>
+          <!-- Query-side faces.  Session-scoped: detected on upload, never
+               indexed and never persisted.  x-init calls the loader once *and*
+               watches — the watcher alone fires only on change, so the already
+               selected file would never be detected (fixed at 936-939 too). -->
+          <div class="query-faces" x-show="facesAvailable && queryFaces.length"
+               x-init="loadQueryFaces(); $watch('selectedFileId', () => loadQueryFaces())">
+            <div class="query-faces-head">
+              <span x-text="`${queryFaces.length} face observations in this image`"></span>
+              <button class="btn-tiny" @click="selectAllQueryFaces()">All</button>
+              <button class="btn-tiny" @click="clearQueryFaceSelection()">None</button>
+            </div>
+            <div class="query-faces-grid">
+              <template x-for="face in queryFaces" :key="`qf-${face.index}`">
+                <div class="query-face-chip"
+                     :class="{
+                       'query-face-chip-selected': queryFaceSelected(face.index),
+                       'query-face-chip-unsearchable': !face.searchable,
+                     }"
+                     @click="toggleQueryFace(face)">
+                  <img :src="queryFaceChipUrl(face.index)" alt="">
+                  <span class="query-face-status" x-text="queryFaceStatusLabel(face)"></span>
+                </div>
+              </template>
+            </div>
+            <p class="faces-caveat" x-show="queryFacesTruncated">
+              Detection was capped; not every face in this image is shown.
+            </p>
+            <p class="faces-caveat" x-show="queryFacesError" x-text="queryFacesError"></p>
+          </div>
           <!-- Frame navigation (video uploads only) -->
           <template x-if="isVideoUpload && queryFrames && queryFrames.length > 0">
             <div class="frame-nav-row">

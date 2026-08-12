@@ -49,3 +49,27 @@ def test_review_only_chips_are_not_upscaled_or_cropped():
     block = css[css.index(".face-chip-review-only img") :].split("}")[0]
     assert "object-fit: contain" in block
     assert "max-width: 72px" in block and "width: auto" in block
+
+
+def test_query_face_strip_selects_only_searchable_faces():
+    html = (STATIC / "index.html").read_text()
+    start = html.index('<div class="query-faces"')
+    block = html[start : start + 2500]
+    assert "toggleQueryFace(" in block
+    assert "face.searchable" in block  # review-only chips are not selectable
+    assert "query-face-chip-selected" in block
+
+
+def test_selected_query_faces_get_the_green_border():
+    css = (STATIC / "style.css").read_text()
+    start = css.index(".query-face-chip-selected")
+    block = css[start : start + 200]
+    assert "var(--success)" in block
+    assert "border" in block
+
+
+def test_query_face_functions_live_in_the_faces_part_file():
+    js = (STATIC / "js" / "faces.js").read_text()
+    for fn in ("loadQueryFaces", "toggleQueryFace", "queryFaceChipUrl"):
+        assert fn in js
+    assert "Object.assign" not in js
