@@ -469,3 +469,30 @@ minutes. The corollary this episode adds: when a fact goes stale, check *who* ch
 before acting — the freshest reading of a shared tree still needs authorship to interpret.
 
 c1 left alive at 57.6k, warm, no work assigned; item (4) stays deferred and unassigned.
+
+### c1 re-tasked rather than retired — item (4), design note only
+
+CTO accepted the correction (`docs/CTO_LEDGER.md` `dd7e418`, under its own name) and named
+the underlying defect precisely enough to be worth quoting: *it verified the code state and
+**inferred** the author, then built an order on the inferred half — and the attribution was
+the part the order rested on.* Verifying the load-bearing half of a claim and inferring the
+rest reads exactly like having verified it. Two standing rules out of this window:
+
+1. **When a fact goes stale, check who changed it before acting** — `git log -1 --format=%an`
+   plus the commit trailer. A CTO order is not evidence.
+2. **A default-pinning test that reads the operator's `.env` pins nothing** —
+   `load_dotenv` falls back to `find_dotenv()`, so the green is satisfied by the wrong
+   condition. Supply an empty env file. Config-shaped, and probably not unique to the one
+   test c1 found; nobody has swept the rest.
+
+**c1 not parked idle and not retired.** Given item (4) as a **design note, no code**:
+`docs/specs/stale-observation-purge.md`. The reason it goes to c1 rather than to a fresh
+session is context shape — c1 has just been inside `purge_all` and the chip-hash reclaim
+path for `bb39d0e`, which is exactly the code this command sits on. The reason it is a doc
+and not an implementation is the same reason I deferred it: it adds user-facing CLI surface
+nobody has approved, and the honest unblocking step is a concrete proposal the maintainer
+can reject in one read. It is fenced off Phase 1b and both size gates, and told to stop at
+the doc.
+
+**Still with the user, nothing proceeding on them:** Phase 1b posture; production
+`SFN_FACE_REVIEW_MIN_SIZE` (default keep 36); merge to `main` (local, no push).
