@@ -667,6 +667,26 @@ operator-chosen model's published demographic evaluation (e.g. NIST FRVT) where 
 states plainly when the local calibration data cannot measure cohort effects. Cohort labels come
 from dataset annotation only; the tool never infers demographics at runtime (§1 non-goal).
 
+**DEPLOYMENT DIVERGENCE — 2026-08-12, by the maintainer's ruling.** This deployment ships
+Phase 1b face search **without** an active face-calibration record, and **displays the raw
+pairwise cosine**. The gate above was not met and was deliberately waived; the ruling is
+recorded verbatim in `docs/specs/face-query-ux.md`. What holds instead:
+
+- The score is presented as a raw model output, labelled as having **no confidence interval and
+  no calibrated threshold**. No FMR/FPIR tier is claimed anywhere in the UI or the docs.
+- The model authors' published reference figure (SFace, 0.363) may be shown, always attributed
+  to the model authors and never as this deployment's threshold. It is not a default of any
+  control and is applied nowhere in the search path.
+- The "uncalibrated — not evidential" banner and the §11 opt-in enablement gate remain in force.
+- §10.4's precedence rule is unchanged: when a record exists, **the record wins**, and the UI
+  copy above is replaced by the record's T, CI and provenance.
+- Nothing in §6.2's exclusion guarantee is relaxed: review-only observations remain vectorless
+  and unreachable by search, on the index side and on the query side alike.
+
+**Also diverging from §8/§12:** uploaded probes, listed as Phase 2, are pulled into Phase 1b
+because the maintainer's query flow is upload-driven. The §8 constraint they carry is kept in
+full — query-side faces are session-scoped, written to no collection and to no chip store.
+
 ---
 
 ## 11. Legal position, logging, and enablement

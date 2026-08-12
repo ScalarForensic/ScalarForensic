@@ -146,6 +146,11 @@ how the system was used.
   about this must measure it on its own data.
 - **No claim about the operator's recognition weights.** Their provenance, training data and
   legal status are the operator's responsibility.
+- **No calibrated threshold, and no error rate, is claimed for face search in this deployment.**
+  The cosine shown beneath a matched face is the raw model output. The number that would tell an
+  examiner what it means — a face-calibration record with stated pair counts and confidence
+  intervals (spec §10) — does not exist here. SFace's published 0.363 same/different figure is
+  the model authors' measurement on their material, not a measurement on this operator's.
 
 A per-deployment method annex — the document that could carry validated operating points —
 arrives only with a calibration record. Until then, this document describes the *method*, not
