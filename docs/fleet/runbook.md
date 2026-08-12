@@ -433,3 +433,39 @@ only, never a push.
 `config.py`, `faces/store.py`, `tests/faces/test_store.py`, `tests/test_config.py`, tasked
 with (2) and (3) test-first and explicitly fenced off from Phase 1b, `face_min_size` and
 `face_review_min_size`. It reports its own measured pytest line; I do not hand it mine.
+
+### `scalarforensic-com-c1` DONE — both items landed; one misattribution corrected
+
+Worker reported and I re-derived rather than relayed. Verified at HEAD `8dc2b65`:
+
+- `bb39d0e` **fix(faces): purge --all now matches video rollup points** — one line at
+  `store.py:484` adding the `is_face_video_rollup` should-clause, plus 14 test lines
+  (`test_purge_all_matches_video_rollup_points`). `is_face_meta` correctly still excluded:
+  the enablement record must survive a routine purge.
+- `479d046` **default `SFN_FACE_CROP_DILATION` 0.15 → 0.25** — `config.py:224`, plus
+  `docs/specs/face-pipeline.md:460,740`. Worth keeping: the worker found the **old pin
+  could not fail** — `.env` puts 0.25 in the process env and a missing env file makes
+  `load_dotenv` fall back to `find_dotenv()`, so the new test
+  (`tests/faces/test_config.py::test_crop_dilation_default_is_pinned_without_env`) passes an
+  empty env file explicitly. A default-pinning test that reads the operator's `.env` pins
+  nothing.
+
+**Bar re-measured by me, not quoted from the worker:** `uv run pytest -q` →
+**478 passed, 5 skipped**, 14 warnings, 7.87 s. `ruff check` → `All checks passed!` rc=0;
+`ruff format --check` → `85 files already formatted` rc=0. `git status --porcelain` → 0.
+Consistent with the worker's own line.
+
+**Correction to a CTO instruction.** The CTO ordered c1 pulled off the purge item on the
+grounds that "m1 landed it while your window was open" and that c1's test might collide with
+the 14 lines already in `tests/faces/test_store.py`. The code state it read was real; the
+attribution was not. RAN `git log --format='%h %aI %s'` and `git show bb39d0e`: that commit
+is **c1's own**, 21:46:57, carrying the `[scalarforensic-com-c1]` trailer, and the 14 test
+lines are the same 14 lines. `m1` landed nothing here. There was no duplicate to prevent and
+no re-scope to perform — c1 had finished both items and was `idle` before the order arrived.
+
+The CTO's general rule is still worth keeping and is the reason this was checked rather than
+obeyed: **a re-verification is only as fresh as its read**, and in a shared tree that is
+minutes. The corollary this episode adds: when a fact goes stale, check *who* changed it
+before acting — the freshest reading of a shared tree still needs authorship to interpret.
+
+c1 left alive at 57.6k, warm, no work assigned; item (4) stays deferred and unassigned.
