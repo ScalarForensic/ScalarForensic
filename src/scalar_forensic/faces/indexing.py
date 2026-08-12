@@ -21,12 +21,16 @@ from qdrant_client.models import PointStruct
 
 from scalar_forensic.faces.align import ALIGNMENT_VERSION, align_face
 from scalar_forensic.faces.audit import AuditLog
-from scalar_forensic.faces.chips import write_aligned_chips
+from scalar_forensic.faces.chips import (
+    dilated_clamped_bbox,
+    write_aligned_chips,
+    write_review_chips,
+)
 from scalar_forensic.faces.decode import load_for_detection
 from scalar_forensic.faces.detect import YuNetDetector
 from scalar_forensic.faces.embed import OnnxFaceEmbedder
 from scalar_forensic.faces.provenance import PipelineConfig
-from scalar_forensic.faces.quality import post_align_gate, pre_align_gate
+from scalar_forensic.faces.quality import post_align_gate, pre_align_gate, review_gate
 from scalar_forensic.faces.store import FACE_VECTOR_NAME, FaceStore
 
 
@@ -34,8 +38,11 @@ from scalar_forensic.faces.store import FACE_VECTOR_NAME, FaceStore
 class FaceIndexResult:
     n_detected: int = 0
     n_kept: int = 0
+    n_review_only: int = 0
     rejected: dict[str, int] = field(default_factory=dict)
+    review_only_reasons: dict[str, int] = field(default_factory=dict)
     points: list[PointStruct] = field(default_factory=list)
+    review_only_point_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -50,6 +57,8 @@ class FacePipeline:
     min_sharpness: float
     max_clipped: float
     max_pose: float
+    review_min_conf: float
+    review_min_size: int
     crop_dilation: float
     store_dir: Path | None
     thumb_size: int = 256
@@ -103,6 +112,8 @@ class FacePipeline:
             min_sharpness=settings.face_min_sharpness,
             max_clipped=settings.face_max_clipped,
             max_pose=settings.face_max_pose,
+            review_min_conf=settings.face_review_min_conf,
+            review_min_size=settings.face_review_min_size,
             crop_dilation=settings.face_crop_dilation,
             store_dir=store_dir,
             thumb_size=settings.face_thumb_size,
@@ -142,13 +153,35 @@ class FacePipeline:
         if not detections:
             return result
 
-        kept: list[tuple] = []  # (det, aligned, pre_subs, post_subs)
+        # Three-way partition (spec: gate-split design).  A detection is
+        # rejected, retained for review only, or embeddable -- never two of
+        # those.  `embeddable` is the ONLY list paired with `embeddings`
+        # positionally; pairing anything else against it would attach one
+        # person's vector to another person's observation, silently.
+        embeddable: list[tuple] = []  # (det, aligned, pre_subs, post_subs)
+        review_only: list[tuple] = []  # (det, review_subs, exclusion_reason)
+
+        def _count(bucket: dict[str, int], reason: str) -> None:
+            bucket[reason] = bucket.get(reason, 0) + 1
+
         for det in detections:
+            rev = review_gate(det, min_conf=self.review_min_conf, min_size=self.review_min_size)
+            if not rev.passed:
+                _count(result.rejected, rev.reason)
+                continue
+            # The review crop must exist, or the observation has no reason to be.
+            x0, y0, cw, ch = dilated_clamped_bbox(
+                det.bbox, self.crop_dilation, img.shape[1], img.shape[0]
+            )
+            if cw <= 0 or ch <= 0:
+                _count(result.rejected, "size")
+                continue
+
             pre = pre_align_gate(
                 det, min_conf=self.min_conf, min_size=self.min_size, max_pose=self.max_pose
             )
             if not pre.passed:
-                result.rejected[pre.reason] = result.rejected.get(pre.reason, 0) + 1
+                review_only.append((det, rev.subscores, pre.reason))
                 continue
             aligned = align_face(img, det.landmarks)
             # Sharpness/exposure are measured on the native-resolution source
@@ -156,30 +189,38 @@ class FacePipeline:
             x, y, w, h = (int(v) for v in det.bbox)
             crop = img[max(0, y) : y + h, max(0, x) : x + w]
             if crop.size == 0:
-                result.rejected["size"] = result.rejected.get("size", 0) + 1
+                review_only.append((det, rev.subscores, "size"))
                 continue
             gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
             post = post_align_gate(
                 gray, min_sharpness=self.min_sharpness, max_clipped_frac=self.max_clipped
             )
             if not post.passed:
-                result.rejected[post.reason] = result.rejected.get(post.reason, 0) + 1
+                review_only.append((det, rev.subscores, post.reason))
                 continue
-            kept.append((det, aligned, pre.subscores, post.subscores))
+            embeddable.append((det, aligned, pre.subscores, post.subscores))
 
-        if not kept:
+        for _, _, reason in review_only:
+            _count(result.review_only_reasons, reason)
+        result.n_review_only = len(review_only)
+
+        if not embeddable and not review_only:
             return result
 
-        embeddings = self.embedder.embed([k[1] for k in kept])
-        norms = np.asarray(self.embedder.embedding_norms)
+        embeddings = (
+            self.embedder.embed([e[1] for e in embeddable])
+            if embeddable
+            else np.empty((0, 0), dtype=np.float32)
+        )
+        norms = np.asarray(self.embedder.embedding_norms) if embeddable else np.empty(0)
         provenance = self.cfg.to_payload()
         indexed_at = datetime.now(UTC).isoformat()
 
-        for i, (det, aligned, pre_subs, post_subs) in enumerate(kept):
-            chip_hash = None
+        for i, (det, aligned, pre_subs, post_subs) in enumerate(embeddable):
+            aligned_hash = None
+            review_hash = None
             if self.store_dir is not None:
-                # Task 6 replaces this payload field with the aligned/review pair.
-                chip_hash, _ = write_aligned_chips(
+                aligned_hash, review_hash = write_aligned_chips(
                     self.store_dir,
                     aligned,
                     img,
@@ -208,7 +249,10 @@ class FacePipeline:
                 "quality_exposure": post_subs["exposure"],
                 "quality": self._composite_quality(pre_subs, post_subs),
                 "embedding_norm": float(norms[i]) if i < len(norms) else 0.0,
-                "chip_hash": chip_hash,
+                "aligned_chip_hash": aligned_hash,
+                "review_chip_hash": review_hash,
+                "embedding_status": "embedded",
+                "embedding_exclusion_reason": None,
                 "indexed_at": indexed_at,
                 **provenance,
             }
@@ -219,7 +263,58 @@ class FacePipeline:
                     payload=payload,
                 )
             )
-        result.n_kept = len(result.points)
+
+        for det, rev_subs, reason in review_only:
+            review_hash = None
+            if self.store_dir is not None:
+                review_hash = write_review_chips(
+                    self.store_dir,
+                    img,
+                    bbox=det.bbox,
+                    dilation=self.crop_dilation,
+                    thumb_size=self.thumb_size,
+                )
+            point_id = self.store.face_point_id(image_hash, frame_timecode_ms, det.bbox)
+            result.review_only_point_ids.append(point_id)
+            result.points.append(
+                PointStruct(
+                    id=point_id,
+                    # No named vector: a similarity search structurally cannot
+                    # return this point.  embedding_status is annotation only.
+                    vector={},
+                    payload={
+                        "is_face": True,
+                        "image_hash": image_hash,
+                        "image_path": image_path,
+                        "video_hash": video_hash,
+                        "video_path": video_path,
+                        "frame_timecode_ms": frame_timecode_ms,
+                        "observation_key": self.store.observation_key(
+                            image_hash, frame_timecode_ms, det.bbox
+                        ),
+                        "bbox": [int(round(v)) for v in det.bbox],
+                        "landmarks": det.landmarks.tolist(),
+                        "det_conf": det.confidence,
+                        "detect_scale": det.detect_scale,
+                        "quality_confidence": rev_subs["confidence"],
+                        "quality_size": rev_subs["size"],
+                        # None, not 0.0: these were never measured, and a 0.0
+                        # pose would read as "perfectly frontal".
+                        "quality_pose": None,
+                        "quality_sharpness": None,
+                        "quality_exposure": None,
+                        "quality": None,
+                        "embedding_norm": None,
+                        "aligned_chip_hash": None,
+                        "review_chip_hash": review_hash,
+                        "embedding_status": "review_only",
+                        "embedding_exclusion_reason": reason,
+                        "indexed_at": indexed_at,
+                        **provenance,
+                    },
+                )
+            )
+        result.n_kept = sum(1 for p in result.points if p.payload["embedding_status"] == "embedded")
         return result
 
 

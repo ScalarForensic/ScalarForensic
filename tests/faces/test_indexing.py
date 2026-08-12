@@ -4,7 +4,9 @@ from unittest.mock import MagicMock
 import numpy as np
 from PIL import Image
 
+from scalar_forensic.faces.chips import chip_paths, review_chip_paths
 from scalar_forensic.faces.indexing import FacePipeline
+from scalar_forensic.faces.store import FACE_VECTOR_NAME
 from scalar_forensic.faces.types import FaceDetection
 
 FRONTAL = np.array([[130, 130], [170, 130], [150, 155], [135, 175], [165, 175]], np.float32)
@@ -18,6 +20,15 @@ def _img_bytes() -> bytes:
     return buf.getvalue()
 
 
+def _det(x=100.0, y=100.0, w=100.0, h=None, conf=0.95, scale=1.0, lm=FRONTAL):
+    return FaceDetection(
+        bbox=(x, y, w, h if h is not None else w),
+        landmarks=lm,
+        confidence=conf,
+        detect_scale=scale,
+    )
+
+
 def _pipeline(detections):
     detector = MagicMock()
     detector.detect.return_value = detections
@@ -27,7 +38,9 @@ def _pipeline(detections):
     embedder.embed.side_effect = lambda crops: np.eye(512, dtype=np.float32)[: len(crops)]
     embedder.embedding_norms = np.full(len(detections), 21.7, np.float32)
     store = MagicMock()
-    store.face_point_id.side_effect = lambda h, t, b: f"id-{h}-{t}"
+    # bbox enters the id: distinct faces in one image must not collide, or the
+    # review-only id list would silently deduplicate.
+    store.face_point_id.side_effect = lambda h, t, b: f"id-{h}-{t}-{int(b[0])}x{int(b[2])}"
     store.observation_key.side_effect = lambda h, t, b: f"{h}:{t or ''}:obs"
     return FacePipeline(
         detector=detector,
@@ -40,9 +53,18 @@ def _pipeline(detections):
         min_sharpness=25.0,
         max_clipped=0.6,
         max_pose=0.35,
+        review_min_conf=0.6,
+        review_min_size=24,
         crop_dilation=0.15,
         store_dir=None,
     )
+
+
+def _embedded_crops(pipeline):
+    """The aligned crops actually handed to the embedder."""
+    if not pipeline.embedder.embed.call_args_list:
+        return []
+    return pipeline.embedder.embed.call_args_list[0].args[0]
 
 
 def test_process_image_keeps_good_face_and_builds_payload():
@@ -100,3 +122,108 @@ def test_embedding_is_one_batch_per_image():
     result = p.process_image(_img_bytes(), image_hash="h1", image_path="/x.png")
     assert result.n_kept == 2
     assert p.embedder.embed.call_count == 1  # one batch, not one call per face
+
+
+def test_interleaved_outcomes_pair_each_embedding_with_its_own_face():
+    # SENTINEL: the embeddings array has one row per EMBEDDABLE face only.
+    # Alternating outcomes is what breaks a naive enumerate() over a combined
+    # list -- it would attach one person's vector to another's observation.
+    dets = [
+        _det(x=10.0, w=200.0),  # embeddable
+        _det(x=220.0, w=50.0),  # review-only (below the 64px embedding floor)
+        _det(x=10.0, w=200.0, y=10.0),  # embeddable
+        _det(x=220.0, w=50.0, y=200.0),  # review-only
+    ]
+    p = _pipeline(dets)
+    result = p.process_image(_img_bytes(), image_hash="hash", image_path="path.jpg")
+
+    assert result.n_kept == 2
+    assert result.n_review_only == 2
+    embedded = [pt for pt in result.points if pt.payload["embedding_status"] == "embedded"]
+    assert len(embedded) == 2
+    # eye(512) row i is handed back for the i-th crop in the batch, so a
+    # misaligned pairing shows up as the wrong one-hot index.
+    assert embedded[0].vector[FACE_VECTOR_NAME][0] == 1.0
+    assert embedded[1].vector[FACE_VECTOR_NAME][1] == 1.0
+    assert len(_embedded_crops(p)) == 2
+    # And each embedded point must describe the face whose vector it holds.
+    assert [pt.payload["bbox"][2] for pt in embedded] == [200, 200]
+
+
+def test_all_review_only_image_still_yields_observations():
+    # Guards the early-return: this is exactly what danny1.jpeg produces.
+    p = _pipeline([_det(x=10.0, w=50.0), _det(x=100.0, w=50.0), _det(x=200.0, w=50.0)])
+    result = p.process_image(_img_bytes(), image_hash="hash", image_path="path.jpg")
+    assert result.n_review_only == 3
+    assert len(result.points) == 3
+    assert p.embedder.embed.call_count == 0  # nothing to embed, no batch at all
+
+
+def test_review_only_points_carry_no_vector():
+    p = _pipeline([_det(w=50.0)])
+    point = p.process_image(_img_bytes(), image_hash="hash", image_path="path.jpg").points[0]
+    assert point.vector == {}
+    assert point.payload["embedding_status"] == "review_only"
+    assert point.payload["embedding_exclusion_reason"] == "size"
+    assert point.payload["is_face"] is True
+    assert point.payload["aligned_chip_hash"] is None
+    # Embedding-only quality subscores must be absent, not zero: a 0.0 pose
+    # would read as "perfectly frontal" rather than "never measured".
+    assert point.payload["quality_pose"] is None
+    assert point.payload["quality_sharpness"] is None
+    assert point.payload["quality"] is None
+    assert point.payload["embedding_norm"] is None
+
+
+def test_review_only_point_ids_are_collected_for_demotion():
+    p = _pipeline([_det(x=10.0, w=50.0), _det(x=100.0, w=200.0)])
+    r = p.process_image(_img_bytes(), image_hash="hash", image_path="path.jpg")
+    review_only = [pt for pt in r.points if pt.payload["embedding_status"] == "review_only"]
+    assert r.review_only_point_ids == [pt.id for pt in review_only]
+    # Never an embedded point's id: clearing its vector would destroy data.
+    embedded_ids = {pt.id for pt in r.points if pt.payload["embedding_status"] == "embedded"}
+    assert not embedded_ids & set(r.review_only_point_ids)
+
+
+def test_review_only_failures_are_not_counted_as_rejections():
+    p = _pipeline([_det(x=10.0, w=50.0), _det(x=100.0, w=10.0)])
+    r = p.process_image(_img_bytes(), image_hash="hash", image_path="path.jpg")
+    assert r.n_review_only == 1
+    assert r.review_only_reasons == {"size": 1}
+    assert r.rejected == {"size": 1}
+    # The partition is exhaustive: every detection lands in exactly one bucket.
+    assert r.n_detected == r.n_kept + r.n_review_only + sum(r.rejected.values())
+
+
+def test_degenerate_crop_is_rejected_not_retained():
+    # A review-only observation whose crop does not exist is useless.
+    p = _pipeline([_det(x=5000.0, y=5000.0, w=50.0)])
+    r = p.process_image(_img_bytes(), image_hash="hash", image_path="path.jpg")
+    assert r.n_review_only == 0
+    assert r.rejected == {"size": 1}
+    assert r.points == []
+
+
+def test_embedded_points_record_both_chip_hashes(tmp_path):
+    p = _pipeline([_det(w=200.0)])
+    p.store_dir = tmp_path
+    r = p.process_image(_img_bytes(), image_hash="hash", image_path="path.jpg")
+    payload = r.points[0].payload
+    assert payload["embedding_status"] == "embedded"
+    assert payload["embedding_exclusion_reason"] is None
+    # Distinct domains, and both files exist where the payload says they are.
+    assert payload["aligned_chip_hash"] != payload["review_chip_hash"]
+    png, _, _ = chip_paths(tmp_path, payload["aligned_chip_hash"])
+    review, thumb = review_chip_paths(tmp_path, payload["review_chip_hash"])
+    assert png.exists() and review.exists() and thumb.exists()
+
+
+def test_review_only_chips_are_written_under_the_review_hash(tmp_path):
+    p = _pipeline([_det(w=50.0)])
+    p.store_dir = tmp_path
+    r = p.process_image(_img_bytes(), image_hash="hash", image_path="path.jpg")
+    payload = r.points[0].payload
+    review, thumb = review_chip_paths(tmp_path, payload["review_chip_hash"])
+    assert review.exists() and thumb.exists()
+    # No aligned PNG is written for a face that was never aligned.
+    assert not any(tmp_path.rglob("*.png"))

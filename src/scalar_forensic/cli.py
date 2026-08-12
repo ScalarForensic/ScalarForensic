@@ -1603,6 +1603,15 @@ def index(
                 _fres.rejected,
             )
             face_pipeline.store.upsert_faces([*_fres.points, _marker])
+            # Every review-only point, not only genuinely demoted ones:
+            # delete_vectors is idempotent and ignores absent vectors, so
+            # first-time review-only observations cost nothing.  An upsert with
+            # vector={} must not be trusted to clear a vector a previous run
+            # stored at the same point id -- a review-only point that kept its
+            # vector would still be returned by similarity search.  Only ever
+            # pass review-only ids: clearing an embedded point's vector
+            # destroys data recoverable only by a full re-index.
+            face_pipeline.store.clear_face_vector(_fres.review_only_point_ids)
             _face_detected += _fres.n_detected
             _face_kept += _fres.n_kept
             for _reason, _n in _fres.rejected.items():
