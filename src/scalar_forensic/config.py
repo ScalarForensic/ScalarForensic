@@ -187,6 +187,11 @@ class Settings:
         self.face_crop_dilation: float = self._parse_float("SFN_FACE_CROP_DILATION", 0.15)
         if not (0.0 < self.face_crop_dilation <= 0.5):
             raise ValueError("SFN_FACE_CROP_DILATION must be in (0, 0.5]")
+        # Browse thumbnail long side (px).  Derived, non-evidentiary artefact
+        # (spec §7.3) — regenerable, so it is not a comparability field.
+        self.face_thumb_size: int = self._parse_int("SFN_FACE_THUMB_SIZE", 256)
+        if self.face_thumb_size < 1:
+            raise ValueError("SFN_FACE_THUMB_SIZE must be >= 1")
         self.examiner_id: str | None = os.environ.get("SFN_EXAMINER_ID") or None
 
     def _parse_float(self, key: str, default: float) -> float:

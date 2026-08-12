@@ -12,6 +12,19 @@ def test_faces_disabled_by_default(monkeypatch):
     assert s.face_crop_dilation == pytest.approx(0.15)
 
 
+def test_thumb_size_default_and_override(monkeypatch):
+    monkeypatch.delenv("SFN_FACE_THUMB_SIZE", raising=False)
+    assert Settings().face_thumb_size == 256
+    monkeypatch.setenv("SFN_FACE_THUMB_SIZE", "128")
+    assert Settings().face_thumb_size == 128
+
+
+def test_thumb_size_rejects_non_positive(monkeypatch):
+    monkeypatch.setenv("SFN_FACE_THUMB_SIZE", "0")
+    with pytest.raises(ValueError, match="SFN_FACE_THUMB_SIZE"):
+        Settings()
+
+
 def test_face_collection_follows_case_collection(monkeypatch):
     monkeypatch.setenv("SFN_COLLECTION", "case42")
     assert Settings().face_collection == "case42_faces"
