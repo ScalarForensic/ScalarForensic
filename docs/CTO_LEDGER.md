@@ -39,6 +39,25 @@ deployment is a distributed isolated LAN.
 - **The face pipeline is UNMERGED** on local-only `feat/face-pipeline-phase1`,
   0 behind `main`, no upstream.
 
+## how this fleet fails — a CTO instance, worth more than the rule it broke
+
+**I verified the CODE and INFERRED the AUTHOR, then issued an order built on the
+inferred half.** I read `bb39d0e` in HEAD, concluded "`m1` landed this while
+`m2`'s window was open", and told `m2` to pull its worker off duplicate work.
+**The commit was that very worker's own** (`[scalarforensic-com-c1]`); `m1`
+landed nothing here; `c1` had finished both items and was idle. There was no
+duplicate and nothing to prevent.
+- **The code state I read was real. Only the attribution was invented** — and
+  the attribution was the half the ORDER rested on. Verifying the load-bearing
+  half of a claim and inferring the rest reads exactly like verifying it.
+- **`m2` was right to check instead of obeying a CTO order.** That is the
+  shaky-clause working upward, and it is now eight windows in which it caught
+  what review did not.
+- **COROLLARY, and it is the keeper: when a fact goes stale, check WHO changed
+  it before acting.** `git log -1 --format=%an` plus the trailer costs one
+  command. My "a re-verification is only as fresh as its read" rule stands — it
+  just was not the rule this episode needed.
+
 ## standing rules
 
 - **Forensic value is the acceptance test, not feature completeness.** Anything
@@ -51,11 +70,16 @@ deployment is a distributed isolated LAN.
   is a decision, not an invariant** — purging case A can still unlink a chip
   case B references. Do not "fix" it without re-opening the decision.
 - Commit **explicit paths**, never a broad `git add`.
+- **A default-pinning test must supply its OWN empty env file.** `.env` puts the
+  value in the process env, and a missing env file makes `load_dotenv` fall back
+  to `find_dotenv()` — so a test that reads the operator's `.env` **pins
+  nothing and stays green**. Found by `c1` against the old `crop_dilation` pin;
+  its replacement passes an empty env file. Signature defect, config-shaped.
 
 ## verified findings
 
-- **`purge_all()` rollup gap — FOUND, then FIXED at `bb39d0e`. VERIFIED BY
-  cto8:** `is_face_video_rollup` is now in the `should` filter (1 line + 14 test
+- **`purge_all()` rollup gap — FOUND, then FIXED by worker `c1` at `bb39d0e`
+  (trailer `[scalarforensic-com-c1]`, 21:46:57). VERIFIED BY cto8:** `is_face_video_rollup` is now in the `should` filter (1 line + 14 test
   lines), and **`is_face_meta` is still correctly excluded** — the enablement
   record must survive routine purges. `sfn-faces purge --all` now purges
   everything biometric-derived. This was decision 4 and it is CLOSED.
