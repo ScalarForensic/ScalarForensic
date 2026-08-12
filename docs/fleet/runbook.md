@@ -924,3 +924,46 @@ call on the self-reported figure and set a 175k stop line against it — both we
 against a number ~65k low. It finished cleanly, so this cost nothing this time. **Size off
 `cx s`, not off the worker's own estimate.** All ownership rows released cleanly on `cx k`
 (`cx o --reap` → nothing stranded).
+
+### End of day 2026-08-12 — floors lowered, merged to `main`, one thing NOT finished
+
+Maintainer directed: lower the min sizes, merge to main, fix what is fast, round up.
+
+**Done, verified by me on `main` at `2933a11`, porcelain 0: 530 passed / 5 skipped, ruff
+check + format rc=0.** Merge is `--no-ff`, local, **13 commits ahead of `origin/main` and
+never pushed**.
+
+- `b91fd61` floors lowered: **`SFN_FACE_MIN_SIZE` 64 → 40**, **`SFN_FACE_REVIEW_MIN_SIZE`
+  48 → 24**. New test pins the embed floor; the clamp test was re-armed (it set
+  `MIN_SIZE=32`, which no longer trips a review default of 24 — now 16).
+- `e14e056` queued `indexer.py` fix: the false "Qdrant supports adding new named vector
+  types" comment is gone and the path now raises a `ValueError` naming the remedy
+  (drop and re-index with every modality flag at once).
+- `2933a11` merge to `main`.
+
+**NOT FINISHED, and it is the half that matters: the lowering changed no stored data.**
+Before and after a `--faces` re-index attempt, `faces_danny_validation` is **identical —
+17 observations, 2 with a vector, 15 vectorless**. The three danny1 faces are still
+unsearchable. **The ingestion loop skips already-indexed media before the face pipeline
+runs, so `--faces` only processes new media.** Remediation command and expected counts
+(5 with vector, 12 vectorless) are in
+`docs/fleet/acceptance-scope-2026-08-13-face-query-phase1b.md` (`cdddb64`). It needs
+`sfn-faces purge --all` first, which is destructive, so I left it for a fresh session
+rather than starting it at end of day on low context.
+
+**Two "documented facts" that turned out to be artifacts of ad-hoc exports, both found today:**
+- **`SFN_FACE_REVIEW_MIN_SIZE` was 48 in code, never 36.** `git log -S` shows 36 never
+  existed in `config.py`. It came from an export during an index run plus a MagicMock
+  fixture, and was written into the handoff, the plan and CLAUDE.md as the deployed default.
+- **`SFN_FACE_COLLECTION=faces_danny_validation` is load-bearing.** `Settings` derives
+  `danny_validation_faces`, which does not exist. The first re-index attempt aborted on the
+  "first face-collection activation" prompt because of it; had it not prompted, it would
+  have created a second empty collection and split the data.
+  **Lesson: when a value appears only in prose and in a mock, check `git log -S` before
+  trusting it.**
+
+**Tooling:** `cx n` is BROKEN — `TypeError: send() missing 1 required keyword-only argument:
+'frm'` at `cxlib/spawn.py:341`. It crashes *after* creating the window and registry row,
+leaving a half-spawned worker at 0 tokens with the prompt never delivered. Filed via `cx f`
+(high). I killed the orphan (`c5`) and implemented the end-of-day tasks inline; no worker
+dispatch is possible until it is fixed.
