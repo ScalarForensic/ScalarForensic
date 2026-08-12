@@ -25,6 +25,11 @@ from scalar_forensic.web.pipeline.faces_search import (
     calibration_block,
     search_query_faces,
 )
+from scalar_forensic.web.pipeline.faces_stats import (
+    FaceScoreStats,
+    face_audit,
+    face_score_stats,
+)
 from scalar_forensic.web.pipeline.modes import get_available_modes
 from scalar_forensic.web.pipeline.provenance import (
     _PROVENANCE_FIELD_NAMES,
@@ -63,6 +68,7 @@ __all__ = [
     "MODEL_REFERENCE_NOTE",
     "MODEL_REFERENCE_THRESHOLD",
     "UNCALIBRATED_BANNER",
+    "FaceScoreStats",
     "FileResult",
     "Hit",
     "MatchedVideoFrame",
@@ -86,6 +92,8 @@ __all__ = [
     "analyze_session",
     "calibration_block",
     "detect_query_faces",
+    "face_audit",
+    "face_score_stats",
     "get_available_modes",
     "get_hit_qdrant_provenance",
     "query_embedder_block",

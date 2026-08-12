@@ -24,8 +24,12 @@ from scalar_forensic.faces.chips import chip_paths, write_thumbnail
 from scalar_forensic.faces.store import _HARD_FIELDS, FaceStore
 from scalar_forensic.video import extract_frame_at
 from scalar_forensic.web.pipeline import (
+    MODEL_REFERENCE_NOTE,
+    MODEL_REFERENCE_THRESHOLD,
     calibration_block,
     detect_query_faces,
+    face_audit,
+    face_score_stats,
     query_embedder_block,
     search_query_faces,
 )
@@ -665,5 +669,88 @@ def face_search(
             "calibration": calibration_block(),
             "embedder": query_embedder_block(cfg),
             "compat": compat,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-model explainer surfaces: what the face pipeline did to an indexed medium,
+# and what the score distribution behind one probe looks like.  Both are reports
+# — neither re-runs a pipeline step, and neither applies a threshold.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/faces/audit")
+def faces_audit(image_hash: str) -> JSONResponse:
+    """How the machine produced the face observations of one indexed medium.
+
+    Sync ``def``: the Qdrant reads are blocking client calls.
+
+    Every threshold in the response comes from the observation's own persisted
+    provenance, so this reports the gates **in force at index time** rather than
+    the ones the web process happens to be configured with today.
+    """
+    _require_hash(image_hash)
+    settings = Settings()
+    _require_faces(settings)
+
+    try:
+        body = face_audit(_store(settings), image_hash)
+    except Exception as exc:
+        _log.warning("face audit lookup failed for %s: %s", image_hash, exc)
+        raise HTTPException(status_code=503, detail=f"Face collection unreachable: {exc}") from exc
+    if body is None:
+        raise HTTPException(status_code=404, detail="No face observations for this image")
+    return JSONResponse(body)
+
+
+@router.post("/api/faces/dist-stats")
+def faces_dist_stats(
+    session_id: str = Form(...),
+    file_id: str = Form(...),
+    face_index: int = Form(...),
+    sample_size: int = Form(10000, ge=1, le=50000),
+) -> JSONResponse:
+    """Score distribution one query face draws out of the face collection.
+
+    Sync ``def``: the kNN is a blocking client call.
+
+    Deliberately the same field set as the DINOv2 distribution so the two
+    modalities read alike.  The 0.363 rides along as an annotation only — it is
+    the model authors' figure, applied nowhere in this path.
+    """
+    entry = _resolve_entry(session_id, file_id)
+    settings = Settings()
+    _require_faces(settings)
+
+    faces = entry.query_faces or []
+    if face_index < 0 or face_index >= len(faces):
+        raise HTTPException(status_code=404, detail="unknown face index")
+    vector = faces[face_index].vector
+    if vector is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"face {face_index} is review-only and has no vector",
+        )
+
+    store = _store(settings)
+    try:
+        stats = face_score_stats(store, vector, sample_size=sample_size)
+    except Exception as exc:
+        _log.warning("face dist-stats query failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Face collection unreachable: {exc}") from exc
+
+    return JSONResponse(
+        {
+            **vars(stats),
+            # States the guarantee rather than a filter: review-only observations
+            # carry no vector, so they cannot appear in this population at all.
+            "population": (
+                f"embedded face observations in {settings.face_collection}; review-only "
+                "observations carry no vector and are structurally absent from this "
+                "distribution"
+            ),
+            "model_reference_threshold": MODEL_REFERENCE_THRESHOLD,
+            "model_reference_note": MODEL_REFERENCE_NOTE,
         }
     )
