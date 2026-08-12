@@ -637,3 +637,37 @@ ambiguity a second modality creates. Rename to name the model, then give the fac
 own pair of the same shape. This is legibility work of the kind CLAUDE.md's design rule
 asks for, and it is **independent of the calibration question** — the audit/stats surface
 reports what the pipeline did, not what a score means.
+
+### Phase 1b plan landed `306475b`; execution started
+
+`docs/plans/2026-08-13-face-query-phase1b.md` — 2227 lines, 7 stages, 54 checkboxes, each
+stage independently shippable and test-first, endpoint contracts written out.
+
+S0 ops (re-index `danny_validation --dino --sscd`; ALTERED needs it, face search does not) ·
+S1 session-scoped query-face detect+embed (`web/pipeline/faces_query.py`, `QueryFace` on
+`FileEntry`, `POST /api/faces/query-faces` + `query-chip`) · S2 `POST /api/faces/search`
+over `FaceStore.search_faces`, collapsed per `image_hash`, 409 on hard-compat mismatch, a
+new `query` event in `face_audit.log` — the **first web writer to the audit log** ·
+S3 query-side face strip + selection + green border · S4 FACES badge, filter pill,
+`mergedHits` getter, matched-face border with the cosine beneath · S5 face Top K / score
+floor (default **0.0**, never 0.363) / exact toggle · S6 the §10 **deployment divergence**
+block with a test asserting it exists · S7 the DINO rename plus `GET /api/faces/audit` and
+`POST /api/faces/dist-stats`.
+
+**Spot-checked by me rather than accepted on report** — the three constraints that would be
+expensive to discover late all hold in the plan text: review-only query faces carry
+`vector=None` (plan:758), 0.363 never becomes an applied threshold (plan:1040), score floor
+defaults to 0.0.
+
+**Label question, answered by me:** the planner flagged that "DINO Audit" under-describes a
+modal whose `/api/hit-provenance` covers DINOv2 *and* SSCD. Shipping the maintainer's
+requested string plus a subtitle naming both — their words are the instruction, their stated
+purpose ("forensically sound and explaining") is served by the subtitle, and overriding the
+string is not mine to do. The two-string alternative ("Image Audit (DINOv2 + SSCD)") is
+surfaced to them as the planner's finding.
+
+**`scalarforensic-com-c2` executing S0–S2 only**, stopping before the UI stages. It is told
+to measure the plan's own riskiest unknown first — the web process has never loaded YuNet or
+the ONNX embedder, so first-call latency and ORT-vs-torch threading in one process are
+unmeasured — and to report the number rather than design around a bad one silently.
+`scalarforensic-com-p1` retired, no locks held.
