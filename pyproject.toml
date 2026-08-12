@@ -28,6 +28,7 @@ sfn-web = "scalar_forensic.web.app:start"
 [dependency-groups]
 dev = [
     { include-group = "web" },
+    { include-group = "faces" },
     "pytest>=8.0",
     "pytest-cov>=6.0",
     "ruff>=0.15.12",
@@ -35,6 +36,10 @@ dev = [
 ]
 heif = [
     "pillow-heif>=0.13",
+]
+faces = [
+    "opencv-python-headless>=4.10",
+    "onnxruntime>=1.18",
 ]
 web = [
     "fastapi>=0.136.0",
