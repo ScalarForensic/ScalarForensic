@@ -94,14 +94,18 @@ class Indexer:
                     "Drop it (e.g. via qdrant-client or the Qdrant dashboard) and re-index."
                 )
             if vector_name not in vectors_config:
-                # Qdrant supports adding new named vector types to an existing
-                # collection without touching existing data.  This enables
-                # incremental indexing: index --dino in one run, add --sscd later.
-                self.client.update_collection(
-                    collection_name=self.collection,
-                    vectors_config={vector_name: VectorParams(size=dim, distance=Distance.COSINE)},
+                # Qdrant cannot add a named vector to an existing collection:
+                # update_collection takes VectorParamsDiff, which has no `size`,
+                # so the call dies with an opaque Pydantic error.  Incremental
+                # indexing (--dino now, --sscd later) is therefore impossible.
+                raise ValueError(
+                    f"Collection '{self.collection}' has no vector '{vector_name}'. "
+                    "Qdrant cannot add a named vector to an existing collection, so a "
+                    "modality cannot be added incrementally. Drop the collection and "
+                    "re-index with every modality flag in one run (e.g. "
+                    "`sfn <dir> --dino --sscd`); create_collection registers all named "
+                    "vectors together."
                 )
-                info = self.client.get_collection(self.collection)
             else:
                 existing_dim = vectors_config[vector_name].size
                 if existing_dim != dim:
