@@ -856,3 +856,63 @@ banner with both sentences, pill toggles the row away and back, matched chip
 **danny2 only; the 40–47 px cohort is untested because the embed floor excludes it.**
 
 c4 retired — no frontend work left that does not collide with c3's owned files.
+
+### S5 and S7 landed — S3–S7 COMPLETE
+
+Verified by me at HEAD, porcelain 0 before each quoted run:
+
+| sha | stage | bar |
+|---|---|---|
+| `b8bf9c9` | S5 face query controls | 527 passed / 5 skipped |
+| `772e5e0` | S7 Steps 5-8 (DINO rename + FACE modals) | **529 passed / 5 skipped**, ruff rc=0 |
+
+**And the 5 skips run:** `SFN_TEST_QDRANT_URL=http://172.20.0.2:6333 uv run pytest
+tests/faces/test_store_integration.py -q` → **5 passed, 0 skipped**. Per CLAUDE.md this is the
+only check that can observe the exclusion guarantee against a real store, and it holds through
+the finished query path.
+
+**The S5 slider ruling (mine, overturning c3).** c3 hit the plan's own Step 1 test being
+unsatisfiable with the plan's own control order — the slice
+`html.index("</div>", html.index("faceThreshold"))` ends before the exact-search row. c3 kept
+the test verbatim and moved the UI to fit, and flagged it. I overturned it: what blocked it is
+the **slice boundary**, an artifact of how the test was written, not an assertion. Bending
+shipped UI to a brittle string slice leaves a trap for the next person who adds a slider. The
+slice now covers the whole `.sliders` block, all five assertions verbatim, and the plan's
+layout is restored (two sliders adjacent, checkbox last). **c3's instinct — never edit an
+assertion to make it pass — is correct and was explicitly preserved**; it simply did not apply
+to a slice boundary.
+
+**Double-fire, settled with evidence not assurance.** `window.fetch` instrumented, counter
+reset immediately before each gesture: a real 20-step drag on Face Top K → **0** searches
+during, **1** after the 300 ms debounce, **0** `/api/query`. Three ArrowRights spaced >300 ms →
+3 searches, one per settled change, which is the design. The S4 selection handlers and the S5
+slider handlers are disjoint paths.
+
+**Two negatives proved rather than asserted, both worth copying:**
+- The deployment-threshold style is **absent** from the FACE Dist Stats modal — queried live,
+  returned `false`. 0.363 renders as a dashed hatched marker
+  (`.stats-hist-bar-reference`), visibly distinct from any deployment threshold.
+- The population statement failed RED a **second** time because it was server-echoed only.
+  Fixed by stating it **in the page**, not by touching the assertion.
+
+**Scope gaps stated by c3 unprompted, and now on the record:**
+- **danny2 only; the 40–47 px cohort is untested because the embed floor excludes it.**
+- **FACE Audit shows `n_review_only` 0 on danny2**, so that row's rendering is exercised by
+  **data shape, not by this image**. A medium with review-only observations has not been
+  rendered through that panel.
+
+Live at `/?cachebust=6` with every script and the stylesheet force-refetched: buttons read
+`DINO Dist Stats` / `DINO Audit` / `FACE Dist Stats` / `FACE Audit`; the DINO audit subtitle
+reads "Image embedding models: DINOv2 (semantic) and SSCD (altered)."; FACE Audit reports
+index-time gates `min_size` 64 / `review_min_size` 36, sface dim 128, `arcface-112-v1`,
+enablement `m4v1`, compat ok / 0 warnings, caveat present. 0 console errors.
+
+c3 retired at 143k. **S3–S7 complete; the maintainer's visible feature is shipped on
+`feat/face-pipeline-phase1`, still local, never pushed.**
+
+**Still open and NOT mine to take:** production `SFN_FACE_MIN_SIZE` *lowering* (64 shipped),
+production `SFN_FACE_REVIEW_MIN_SIZE` (36 shipped), merge to `main` (local, no push), the
+`stale-observation-purge.md` fork, and the `DINO Audit` vs `Image Audit (DINOv2 + SSCD)` label
+(shipped as the requested string + the both-models subtitle). **Queued and unassigned:**
+`indexer.py:96-104` should fail with the drop-and-reindex instruction instead of a Pydantic
+error, and the false comment deleted.
