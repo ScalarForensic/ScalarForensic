@@ -597,3 +597,43 @@ no longer exists and would have sent the next session hunting a screensaver — 
 the cache trap that is real and has now cost two sessions time, including the `style.css`
 half the tester found. Test count 300 → 478/5 with what the 5 skips are for. The stale YuNet
 line is left alone: it is written for a fresh clone, where it is still true.
+
+## USER RULING — 2026-08-12: show the uncalibrated score
+
+**The maintainer's words:** *"We show it without calibration. Just give us the data and then
+we can work with it later. no need for hiding this, the number is just showing what the tool
+generated."*
+
+This resolves the ranked-#1 decision and **overrides my recommendation** (option B with the
+number suppressed) and the CTO's screenshot-cropping objection. It is the maintainer's call
+to make: spec §11 puts jurisdiction-specific legal review before enablement on the operator,
+and this is that judgement. Recorded as theirs, not softened, and not to be re-escalated.
+
+**Posture now in force — Phase 1b proceeds:**
+- The per-face cosine **is displayed** beneath the matched face, as originally requested.
+- It is displayed as **what it is**: a raw model output with no calibration behind it. The
+  "uncalibrated — not evidential" banner and the opt-in enablement gate stay — those were
+  never the disputed part, and they are what makes the displayed number honest rather than
+  merely visible.
+- The spec's own words for the label come from §10: the number has **no CI and no
+  calibrated threshold**. SFace's reference 0.363 same/different threshold may be shown as
+  a **reference point from the model's authors**, never as this deployment's threshold.
+- Nothing about the *search* path changes: review-only observations stay vectorless and
+  therefore unreachable, which is a structural guarantee, not a display choice.
+
+**`docs/specs/face-pipeline.md` §10 is now out of step with the deployment** and must not be
+silently contradicted — the §10.4 precedence rule (an active record wins over env defaults)
+still holds for when a record exists. Whoever plans 1b records the divergence in the spec
+itself rather than leaving the code disagreeing with the document.
+
+### Second request in the same message — per-model explainer buttons
+
+*"Currently we have an 'Audit' and 'Dist Stats' button on query image. These are for DINOv2.
+We should name them with DINO: Dist Stats | Audit and then do the same for our new model,
+similar explaining and data stuff so it is forensically sound and explaining."*
+
+Read: the existing pair is unlabelled as to which model it explains, which is exactly the
+ambiguity a second modality creates. Rename to name the model, then give the face model its
+own pair of the same shape. This is legibility work of the kind CLAUDE.md's design rule
+asks for, and it is **independent of the calibration question** — the audit/stats surface
+reports what the pipeline did, not what a score means.
