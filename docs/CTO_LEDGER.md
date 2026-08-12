@@ -29,21 +29,15 @@ deployment is a distributed isolated LAN.
 - **Tree has one in-flight file, `tests/faces/test_config.py` (`m2`).** `m1`'s
   handoff named `tests/faces/test_store.py` — **wrong file.** A relayed
   observation, stale by one commit. Re-derive dirty state; never inherit it.
-
-- **Bar RAN BY cto8 and reproduced exactly** (`475 passed, 5 skipped` of 480
-  collected, 7.71s) at branch `feat/face-pipeline-phase1`, HEAD `b270d47` —
-  **the SHA the evidence belongs to, never "current HEAD", because a document
-  moves the SHA it quotes.** `ruff check` and `ruff format --check` both rc=0.
-  Tree clean: dirty 0 / untracked 0.
-- **There is NO check/verify script.** No Makefile, justfile, noxfile or tox
-  config; `.github/workflows/ci.yml` only. **Those four commands are the entire
-  gate.**
-- **The 5 skips need a live Qdrant** (`SFN_TEST_QDRANT_URL` unset), and Qdrant is
-  **not running** (`curl` exit 7). Those five are precisely the tests that could
-  observe the review-only exclusion guarantee against a real store, so **the
-  suite being green says least about the part that matters most.**
-- **42 commits sit on a local-only branch**, 0 behind `main`, no upstream. The
-  whole face pipeline is unmerged.
+- **Earlier bar, superseded but still the only reproducible one:** `475 passed,
+  5 skipped` of 480, ruff check + format rc=0, at `b270d47` — RAN by cto8. The 5
+  skips are the Qdrant-backed tests, and **they are precisely the ones that could
+  observe the review-only exclusion guarantee against a real store**, so a green
+  suite says least about the part that matters most **whenever Qdrant is down.**
+- **There is NO check/verify script** (no Makefile/justfile/noxfile/tox; only
+  `.github/workflows/ci.yml`). **pytest + ruff check + ruff format ARE the gate.**
+- **The face pipeline is UNMERGED** on local-only `feat/face-pipeline-phase1`,
+  0 behind `main`, no upstream.
 
 ## standing rules
 
@@ -77,11 +71,8 @@ deployment is a distributed isolated LAN.
 
 ## open threads
 
-- **Blocked on decision 1:** the `danny*` validation run — 6 unchecked boxes of
-  75 in the gate-split plan, all validation steps. Prerequisites are **further
-  along than the handoff says**: `danny1/2.jpeg` present, `cv2 5.0.0` +
-  `onnxruntime 1.28.0` installed, YuNet in place. **The only missing pieces are
-  the embedder ONNX + manifest, and a running Qdrant.**
+- **The `danny*` validation run is DONE** (`m1`, SFace chosen and verified).
+  **Qdrant must be up to reproduce anything it showed.**
 - Task 13 residual: a declined stale-observation prompt is never re-offered
   (`processed_hashes` skips the medium on re-index). Considered, not built.
 - Phases 1b (calibration record + cross-file face search), 2 (video grouping)
@@ -89,19 +80,31 @@ deployment is a distributed isolated LAN.
 
 ## pending user decisions
 
-Ranked, with defaults. Full text in the survey §4.
+**THE SURVEY'S FIVE ARE SUPERSEDED. `m2` reports EIGHT open, ranked with
+defaults in `docs/fleet/runbook.md`.** Of the original five, **1 is answered**
+(SFace chosen, validation run executed) and **4 is CLOSED** (`bb39d0e`). **I
+have not re-derived the current eight and am deliberately not restating them
+here from memory** — a stale decision list is the same defect as a stale plan
+with 61 unticked boxes, which is the worst thing this project's survey found.
+Read the runbook, or ask `m2`.
 
-1. **Validate with a throwaway random-weight embedder now, or wait for real
-   recognition weights?** *Default: throwaway now; real weights before any
-   evidential use.* Waiting blocks everything below.
-2. **Merge `feat/face-pipeline-phase1` into `main` once validation passes?**
-   *Default: yes, merge locally, no push.*
-3. **Next after Phase 1 — 1b (calibrate + cross-file search) or 2 (video)?**
-   *Default: 1b — face search stays disabled until a calibration record exists.*
-4. **Is the `purge_all` rollup gap a pre-1b fix or a Phase 2 item?**
-   *Default: fix before 1b — it is a deletion promise.*
-5. **Build the standalone stale-observation inspect/purge command?**
-   *Default: yes, small, alongside 4.*
+**THE ONE I HOLD, escalated to the user and blocking `m2`:**
+**Phase 1b evidential posture** — spec §10 gates face search on a
+`face_calibration` record that does not exist. **(A)** calibrate first, gate the
+UI; **(B)** UI first behind an "uncalibrated — not evidential" banner with the
+**number suppressed** (rank + green border; raw cosine confined to
+`/api/faces/explain/` and the audit record; whole path behind an opt-in env
+flag). *Default: (B).*
+**I verified §10 myself:** search IS gated on the record; §10.2 requires the
+calibrated statistic to BE the statistic the UI thresholds; §10.3 makes
+statistical honesty mandatory and prints the CI alongside T. **§10 does not
+literally forbid a per-face score — it forbids one with no CI and no defensible
+threshold**, which pre-calibration is the same thing.
+**The argument against (B), which must be weighed and not skipped: a banner is a
+weaker control than a gate, because a banner is what gets cropped out of a
+screenshot.** §10.5's shadow mode is (B)'s best support. **§11 makes
+jurisdiction-specific legal review an OPERATOR duty — this is the user's call,
+never the CTO's.**
 
 **Unresolved and NOT a maintainer question yet:** the real embedder's licensing
 status. Spec §14.1 names it an operator/legal decision and **no artefact in the
