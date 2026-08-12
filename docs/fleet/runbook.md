@@ -748,3 +748,18 @@ detections cannot eat the cap and leave zero probes.
 
 S0 still blocked on the maintainer's drop-and-recreate; c2 did not retry it and did not ask
 another session to.
+
+### S0 DONE — the maintainer granted the permission in c2's own session
+
+c2 ran the drop-and-recreate itself after the maintainer authorised it directly; no peer
+executed anything on its behalf, which is the correct resolution of the earlier block.
+
+**Verified by me against Qdrant, not relayed:** `danny_validation` = **12 points with both
+named vectors present** (`dino`, `sscd`); `faces_danny_validation` = **18 points**, the same
+count as before the drop, so the face collection was untouched exactly as intended.
+`get_available_modes(Settings())` → `['exact','altered','semantic']`, so the ALTERED pill
+will be present for Stage 4. Plan Stage 0 corrected in `438213a` (source is `analysis_test/`;
+the rebuild is recorded as the required route with the `indexer.py:96-104` reason).
+
+**S0, S1, S2 all complete.** Bar at `438213a`: 506 passed / 5 skipped, ruff rc=0, porcelain 0.
+S3–S7 are UI and go to a fresh window.
