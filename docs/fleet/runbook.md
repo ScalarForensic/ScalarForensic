@@ -763,3 +763,50 @@ the rebuild is recorded as the required route with the `indexer.py:96-104` reaso
 
 **S0, S1, S2 all complete.** Bar at `438213a`: 506 passed / 5 skipped, ruff rc=0, porcelain 0.
 S3–S7 are UI and go to a fresh window.
+
+---
+
+## 2026-08-12 — `scalarforensic-com-m3` window opens (S3–S7)
+
+Successor to m2. Inherited bar re-derived by m2 at `438213a`, not re-run by me yet:
+506 passed / 5 skipped hermetic, ruff check + format rc=0, porcelain 0. m2 retired at 187.4k,
+`sent`, window closed by me — that released its three ownership rows (`CLAUDE.md`,
+`docs/fleet/runbook.md`, `docs/specs/face-query-ux.md`), which I now hold. `cx o --release`
+does **not** transfer ownership; only closing the window does. Worth knowing before the next
+manager waits on a release that cannot come.
+
+### The floor decision, and the scope trap inside it
+
+`SFN_FACE_MIN_SIZE` **stays at 64** and the acceptance pass uses **danny2.jpeg**. Taken as a
+**test-material** choice: it changes no gate and admits no face. The *lowering* question is
+still the maintainer's and is still open.
+
+The trap, recorded in `docs/fleet/acceptance-scope-2026-08-13-face-query-phase1b.md`
+(`0eb56a3`) **before the pass was run**, not after: danny2's face is 147.8 px, so a green
+acceptance exercises only material the 64 px floor **already admits**. danny1's three faces
+(40.1 / 46.9 / 40.8 px) are exactly what the floor excludes. The sentence every report citing
+this pass must carry, verbatim:
+
+> **danny2 only; the 40–47 px cohort is untested because the embed floor excludes it.**
+
+Two inferences are blocked in writing, so the citation cannot be made later: a green here is
+**not** evidence the pipeline handles this case's imagery, and it is **not** a justification
+for lowering the floor. "It worked on danny2" proves nothing about 40 px — lowering must
+stand on its own measurement and get its own acceptance pass over the newly admitted cohort.
+The two are deliberately not bundled.
+
+### Escalated, not held
+
+Five maintainer decisions written to the `~/.claude/cx/cto.md` inbox tail with defaults; only
+the floor blocked, and it came back answered on the default. The other four (production
+`SFN_FACE_REVIEW_MIN_SIZE` keep 36, merge to `main` local-only, the stale-purge fork, the
+DINO / "Image Audit" label string) are accepted as answerable late. The uncalibrated-display
+ruling is closed and is **not** being re-escalated.
+
+### Dispatched
+
+- `scalarforensic-com-c3` — **Stage 3**, query-side face strip with selection and green
+  borders. Owns `state.js`, `faces.js`, `index.html`, `style.css`,
+  `tests/faces/test_static_wiring.py`. Briefed test-first, with both session-costing gotchas
+  (`/?cachebust=N` does not bust `style.css`; the `x-init` watcher fires only on *change*)
+  and the acceptance-scope sentence as a reporting requirement.
