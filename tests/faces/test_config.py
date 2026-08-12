@@ -113,3 +113,13 @@ def test_no_startup_error_when_fully_configured(monkeypatch, tmp_path):
     monkeypatch.setenv("SFN_FACE_EMBEDDER_MODEL", str(emb))
     monkeypatch.setenv("SFN_EXAMINER_ID", "ex1")
     assert Settings().face_startup_error() is None
+
+
+def test_face_query_max_faces_defaults_and_parses(monkeypatch):
+    monkeypatch.delenv("SFN_FACE_QUERY_MAX_FACES", raising=False)
+    assert Settings().face_query_max_faces == 25
+    monkeypatch.setenv("SFN_FACE_QUERY_MAX_FACES", "4")
+    assert Settings().face_query_max_faces == 4
+    monkeypatch.setenv("SFN_FACE_QUERY_MAX_FACES", "0")
+    with pytest.raises(ValueError, match="SFN_FACE_QUERY_MAX_FACES"):
+        Settings()

@@ -229,6 +229,14 @@ class Settings:
         self.face_thumb_size: int = self._parse_int("SFN_FACE_THUMB_SIZE", 256)
         if self.face_thumb_size < 1:
             raise ValueError("SFN_FACE_THUMB_SIZE must be >= 1")
+        # Cap on faces taken from ONE uploaded query image (spec §8, Phase 1b).
+        # Detection is truncated at this many retained faces rather than
+        # refused: a crowd scene must still yield selectable probes.  Query
+        # scope only — it never affects what an index run stores, so it is not
+        # a comparability field.
+        self.face_query_max_faces: int = self._parse_int("SFN_FACE_QUERY_MAX_FACES", 25)
+        if self.face_query_max_faces < 1:
+            raise ValueError("SFN_FACE_QUERY_MAX_FACES must be >= 1")
         self.examiner_id: str | None = os.environ.get("SFN_EXAMINER_ID") or None
 
     def _parse_float(self, key: str, default: float) -> float:

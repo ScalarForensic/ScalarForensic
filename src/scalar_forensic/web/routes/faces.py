@@ -1,23 +1,29 @@
-"""Face-modality browse routes: availability, per-image observations, chips.
+"""Face-modality routes: availability, per-image observations, chips, query faces.
 
-Browse only — there is deliberately no face *search* endpoint in Phase 1;
-cross-file search is gated on a calibration record (spec §10).
+Phase 1 was browse-only.  Phase 1b adds the *query* side: faces detected in an
+uploaded image (session-scoped, never persisted) and a cross-file search over
+them.  The search ships uncalibrated by the maintainer's ruling of 2026-08-12 —
+the raw cosine is displayed and labelled as such (spec §10 divergence).
 """
 
 from __future__ import annotations
 
+import io
 import logging
 import re
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import APIRouter, Form, HTTPException
+from fastapi.responses import FileResponse, JSONResponse, Response
 from qdrant_client import QdrantClient
 
 from scalar_forensic.config import Settings
 from scalar_forensic.faces.chips import chip_paths, write_thumbnail
 from scalar_forensic.faces.store import FaceStore
+from scalar_forensic.video import extract_frame_at
+from scalar_forensic.web.pipeline import detect_query_faces, query_embedder_block
+from scalar_forensic.web.session import get_session
 
 _log = logging.getLogger(__name__)
 
@@ -31,6 +37,21 @@ def _require_hash(value: str) -> str:
     if not re.fullmatch(_HASH_RE, value):
         raise HTTPException(status_code=400, detail="Invalid hash")
     return value
+
+
+def _entry_for(session, file_id: str):
+    for e in session.files:
+        if e.file_id == file_id:
+            return e
+    return None
+
+
+def _require_faces(settings: Settings) -> None:
+    if not settings.faces_enabled:
+        raise HTTPException(503, "Face modality is disabled (set SFN_FACES_ENABLED=true).")
+    err = settings.face_startup_error()
+    if err:
+        raise HTTPException(503, err)
 
 
 def _store(settings: Settings) -> FaceStore:
@@ -370,3 +391,130 @@ async def face_chip_thumb(chip_hash: str) -> FileResponse:
             raise HTTPException(status_code=404, detail="Chip not found")
         write_thumbnail(review, thumb, Settings().face_thumb_size)
     return FileResponse(thumb, media_type="image/jpeg")
+
+
+# ---------------------------------------------------------------------------
+# Query-side faces (Phase 1b).  Session-scoped: nothing here reaches Qdrant or
+# SFN_FACE_STORE_DIR, and no vector is ever serialised into a response — the
+# client selects probes by *index* and the vectors stay in this process.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_entry(session_id: str, file_id: str):
+    """Session/file resolution, before any capability gate.
+
+    Deliberately ordered ahead of ``_require_faces``: an unknown session is a
+    malformed request whatever the face modality's state, and answering 503 for
+    it would tell the client to go enable faces over a request that would still
+    fail afterwards.  Nothing expensive happens here — no model is loaded.
+    """
+    session = get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    entry = _entry_for(session, file_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="file not found in session")
+    return entry
+
+
+def _query_image_bytes(entry, timecode_ms: int | None) -> bytes:
+    """The bytes to detect on: the upload itself, or one frame of a video."""
+    if getattr(entry, "is_video", False):
+        if timecode_ms is None:
+            raise HTTPException(
+                status_code=400,
+                detail="timecode_ms is required to detect faces in a video upload",
+            )
+        img = extract_frame_at(Path(entry.temp_path), timecode_ms)
+        if img is None:
+            raise HTTPException(status_code=404, detail="Frame not found at given timecode")
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=95)
+        return buf.getvalue()
+    try:
+        return Path(entry.temp_path).read_bytes()
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail="file not found in session") from exc
+
+
+def _face_json(face, session_id: str, file_id: str) -> dict:
+    """Serialise one QueryFace for the wire.
+
+    Built field by field on purpose.  ``dataclasses.asdict`` would carry
+    ``vector`` and ``review_jpeg`` into the response, which is exactly the leak
+    the session-scope rule exists to prevent — ``searchable`` is the only thing
+    the client learns about the vector.
+    """
+    return {
+        "index": face.index,
+        "bbox": list(face.bbox),
+        "landmarks": face.landmarks,
+        "det_conf": face.det_conf,
+        "detect_scale": face.detect_scale,
+        "searchable": face.vector is not None,
+        "embedding_status": face.embedding_status,
+        "embedding_exclusion_reason": face.embedding_exclusion_reason,
+        "quality": face.quality,
+        "chip_url": f"/api/faces/query-chip/{session_id}/{file_id}/{face.index}",
+    }
+
+
+@router.post("/api/faces/query-faces")
+def query_faces(
+    session_id: str = Form(...),
+    file_id: str = Form(...),
+    timecode_ms: int | None = Form(None),
+) -> JSONResponse:
+    """Detect the faces in the uploaded query image.
+
+    Sync ``def`` on purpose: detection and ONNX embedding are CPU-bound, so
+    Starlette runs this in its threadpool instead of blocking the event loop.
+
+    Re-detects on every call — the examiner may have moved to a different video
+    frame — and caches the result on the session entry so the chip endpoint and
+    the search endpoint can address faces by index.
+    """
+    entry = _resolve_entry(session_id, file_id)
+    settings = Settings()
+    _require_faces(settings)
+
+    data = _query_image_bytes(entry, timecode_ms)
+    try:
+        result = detect_query_faces(data, settings, max_faces=settings.face_query_max_faces)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"not an image: {exc}") from exc
+
+    entry.query_faces = result.faces
+    return JSONResponse(
+        {
+            "faces": [_face_json(f, session_id, file_id) for f in result.faces],
+            "n_detected": result.n_detected,
+            "n_searchable": result.n_searchable,
+            "n_review_only": result.n_review_only,
+            "rejected": result.rejected,
+            "pipeline_config_hash": result.cfg.config_hash,
+            "embedder": query_embedder_block(result.cfg),
+            "truncated": result.truncated,
+        }
+    )
+
+
+@router.get("/api/faces/query-chip/{session_id}/{file_id}/{face_index}")
+def query_chip(session_id: str, file_id: str, face_index: int) -> Response:
+    """The session review crop for one query face.
+
+    Served from memory with ``no-store``: this crop is never written to
+    SFN_FACE_STORE_DIR, and it must not survive in a browser cache either.
+    """
+    entry = _resolve_entry(session_id, file_id)
+    faces = entry.query_faces or []
+    if face_index < 0 or face_index >= len(faces):
+        raise HTTPException(status_code=404, detail="unknown face index")
+    jpeg = faces[face_index].review_jpeg
+    if jpeg is None:
+        raise HTTPException(status_code=404, detail="no review crop for this face")
+    return Response(
+        content=jpeg,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )

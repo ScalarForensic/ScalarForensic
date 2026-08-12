@@ -13,6 +13,11 @@ from scalar_forensic.web.pipeline.analysis import (
     _video_frame_batch,
     analyze_session,
 )
+from scalar_forensic.web.pipeline.faces_query import (
+    QueryFaceResult,
+    detect_query_faces,
+    query_embedder_block,
+)
 from scalar_forensic.web.pipeline.modes import get_available_modes
 from scalar_forensic.web.pipeline.provenance import (
     _PROVENANCE_FIELD_NAMES,
@@ -52,6 +57,7 @@ __all__ = [
     "Hit",
     "MatchedVideoFrame",
     "ProgressEvent",
+    "QueryFaceResult",
     "QueryProvenance",
     "SemanticStats",
     "_analyze_file",
@@ -68,8 +74,10 @@ __all__ = [
     "_unmerged_sort_key",
     "_video_frame_batch",
     "analyze_session",
+    "detect_query_faces",
     "get_available_modes",
     "get_hit_qdrant_provenance",
+    "query_embedder_block",
     "query_semantic_stats",
     "query_session",
 ]

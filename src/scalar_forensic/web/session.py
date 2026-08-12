@@ -23,6 +23,30 @@ class VideoFrameEntry:
 
 
 @dataclass
+class QueryFace:
+    """A face detected in an *uploaded* image.
+
+    Session-scoped: it is never written to Qdrant and never written to the face
+    chip store (spec §8 — the web analyze path is ephemeral by design).  A face
+    that fails the embedding gate carries ``vector=None``; the review-only
+    exclusion guarantee (spec §6.2) is structural on the query side too, exactly
+    as the vectorless point is on the index side.  Never give one a vector and
+    never replace that with a flag consulted at search time.
+    """
+
+    index: int
+    bbox: tuple[float, float, float, float]
+    landmarks: list[list[float]]
+    det_conf: float
+    detect_scale: float
+    quality: dict[str, float | None]
+    embedding_status: str  # "embedded" | "review_only"
+    embedding_exclusion_reason: str | None
+    vector: list[float] | None
+    review_jpeg: bytes | None
+
+
+@dataclass
 class FileEntry:
     file_id: str
     filename: str  # original name, may include relative path from webkitdirectory
@@ -34,6 +58,8 @@ class FileEntry:
     error: str | None = None
     is_video: bool = False
     video_frames: list[VideoFrameEntry] | None = None
+    # Populated by POST /api/faces/query-faces; in-process only.
+    query_faces: list[QueryFace] | None = None
 
 
 @dataclass
