@@ -496,3 +496,40 @@ the doc.
 
 **Still with the user, nothing proceeding on them:** Phase 1b posture; production
 `SFN_FACE_REVIEW_MIN_SIZE` (default keep 36); merge to `main` (local, no push).
+
+### `.env` pin sweep — 0 tests flip, and my first discriminator was broken
+
+Ran the sweep the CTO sized. Its bound (≤6 candidates from an 8-file superset) was not used
+as the answer; the set was derived from the mechanism instead.
+
+**Mechanism, read at `config.py:33-36`:** `Settings.__init__` resolves `Path(".env")` and,
+only if that misses, calls `load_dotenv(None)` — whose python-dotenv fallback walks up from
+`config.py`'s own directory and reaches the same operator `.env` anyway. `override=False`,
+so a test that sets the var explicitly is unaffected. Only the **13 keys present in `.env`**
+can leak at all.
+
+**My first discriminator blocked nothing, and the run that "passed" proved nothing.** It
+disabled only the `path is None` fallback — but pytest runs from the repo root, where the
+direct `Path(".env")` branch hits first, so `load_dotenv` was still reading the operator's
+file. The 478/5 it returned was indistinguishable from a real result. Caught by a positive
+control, not by the suite: `Settings()` returned `batch_size 128` under both arms. **A
+discriminator that has not been shown to move something is not evidence.** Corrected version
+blocks the repo `.env` *by resolved path*, leaving a test-supplied env file working; the
+control then moves — `batch_size 128 → None`, `normalize_size 512 → 224`.
+
+**Result with the working discriminator:** `478 passed, 5 skipped, 14 warnings` — identical
+to the baseline. **Zero tests flip.** Nothing to fix; nothing was fixed. c1's `479d046` was
+the only live instance.
+
+**The blind spot this method has, stated because the green does not state it.** A verdict
+flip only appears where the operator's value differs from the code default. RAN a full
+`vars(Settings())` diff across both arms: **5 attrs move** (`model_dino`, `model_sscd`,
+`normalize_size`, `batch_size`, `input_dir`); the other **8** `.env` keys currently *equal*
+their code defaults — `SFN_COLLECTION_DINO`, `SFN_COLLECTION_SSCD`, `SFN_DEVICE`,
+`SFN_DUPLICATE_CHECK_MODE`, `SFN_EXTRACT_EXIF`, `SFN_FACE_CROP_DILATION`, `SFN_QDRANT_URL`,
+`SFN_THUMBNAIL_DIR`. A test asserting one of those defaults passes under both arms and still
+pins nothing — it is the same defect, invisible to this sweep, and it is exactly how the
+dilation test survived (0.25 in `.env` and 0.25 in code after `479d046`). The durable fix is
+c1's shape: supply an empty env file, do not rely on the value differing.
+
+Scratch plugin (not in the repo): `scratchpad/noenvplug.py`.
