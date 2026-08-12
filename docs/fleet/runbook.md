@@ -69,3 +69,65 @@ against ResNet100's 65M. Doc left unchanged.
 (`store.py:35-41`), so each model needs its own `SFN_FACE_COLLECTION` and mixing raises.
 Bundling weights in-repo was declined: GPL-3.0 repo, and `INSTALL.md:236-238` deliberately
 refuses a works-out-of-the-box recognition path.
+
+### SFace adopted and verified — 2026-08-12
+
+Maintainer chose SFace as the real candidate; a private, unpublished research fork will
+compare against research-only weights separately (licences left intact, no redistribution).
+
+**Downloaded** `models/face_recognition_sface_2021dec.onnx` (38 696 353 bytes, sha256
+`0ba9fbfa…c34e79`) plus its Apache-2.0 LICENSE from the OpenCV Zoo HF mirror. `models/` is
+gitignored — no weights entered the repo.
+
+**Preprocessing determined empirically, not guessed.** RAN a probe that aligns a real face
+with OpenCV's own `FaceRecognizerSF.alignCrop`, takes `FaceRecognizerSF.feature` as ground
+truth, and scores 8 candidate manifests against it by cosine:
+
+| cosine vs OpenCV reference | channel_order | mean | scale |
+|---|---|---|---|
+| **1.000000** | **RGB** | **0.0** | **1.0** |
+| 0.956842 | BGR | 0.0 | 1.0 |
+| 0.121230 | RGB | 0.0 | 255.0 |
+| 0.058843 | RGB | 127.5 | 128.0 |
+
+The 0.9568 row is the hazard in the flesh: the wrong channel order still looks plausible.
+And `INSTALL.md:247`'s example manifest (the InsightFace `(x−127.5)/128` convention) scores
+**0.0588** here — copying it would have produced silently wrong vectors. ONNX io read from
+the file: input `data` `[1,3,112,112]`, output `fc1` `[1,128]`.
+
+Manifest written to `models/face_recognition_sface_2021dec.onnx.manifest.json`;
+`normalization_id` = `affine-0.0-1.0`, `embedding_dim` 128.
+
+**Pipeline verified through the repo's own modules** (`load_for_detection` → `YuNetDetector`
+→ `align_face` → `OnnxFaceEmbedder`):
+
+- Same face, JPEG re-encoded at q=60: cosine **0.9898**.
+- Different person (`orig_04_*.jpg`): cosine **0.1042** — SFace's own same/different
+  threshold is 0.363.
+- **`n_dropped_noncanonical` = 0** over both danny images: the YuNet landmark-column map is
+  correct. That was the designated stop-and-investigate signal.
+
+**Gate outcomes, measured in detector-input px** (`quality.review_gate`, defaults
+review 48 px/0.6, embed 64 px/0.8; `detect_scale` = 1.000 for both images, so source px
+and input px coincide here):
+
+| file | face | size | conf | review(48) | embed(64) |
+|---|---|---|---|---|---|
+| danny2.jpeg | 0 | 147.8 px | 0.945 | PASS | **PASS → embedded** |
+| danny1.jpeg | 0 | 40.1 px | 0.930 | **size** | size |
+| danny1.jpeg | 1 | 46.9 px | 0.923 | **size** | size |
+| danny1.jpeg | 2 | 40.8 px | 0.912 | **size** | size |
+
+**The plan's prediction is wrong, and this is the calibration finding it asked for.** The
+plan expected danny1's faces to be *retained for review* with reason `size`; all three are
+**rejected outright** — they fall below the 48 px review floor, not merely below the 64 px
+embedding floor. The plan anticipated exactly this possibility and called it the finding.
+
+**The floor is discarding an identifiable face.** danny1 face 1 (46.9 px, thrown away by
+the 48 px floor) scores cosine **0.6097** against danny2's embedded face — well above
+SFace's 0.363 same-person threshold. Faces 0 and 2 score −0.0142 and 0.1125, so the model
+is not scoring everything high. Caveat: identity is inferred from the score, not
+independently confirmed, and this is one image with three faces.
+
+**NOT done:** no Qdrant run, no collection, no audit record, no UI check. Those need Qdrant
+started and the maintainer at the activation prompt.
