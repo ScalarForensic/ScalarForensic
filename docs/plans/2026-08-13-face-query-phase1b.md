@@ -384,7 +384,7 @@ here would put a persistence-capable code path one argument away from the query 
 primitives are all imported from `scalar_forensic.faces.*`, so no pipeline *step* is duplicated —
 only the ~60-line orchestration is, and it is the part that must provably not persist.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/faces/test_query_faces.py`:
 
@@ -570,7 +570,7 @@ def test_face_query_max_faces_defaults_and_parses(monkeypatch):
         Settings()
 ```
 
-- [ ] **Step 2: Run them and confirm they fail**
+- [x] **Step 2: Run them and confirm they fail**
 
 ```
 uv run pytest tests/faces/test_query_faces.py tests/faces/test_config.py -q
@@ -578,7 +578,7 @@ uv run pytest tests/faces/test_query_faces.py tests/faces/test_config.py -q
 Expected: `ModuleNotFoundError: No module named 'scalar_forensic.web.pipeline.faces_query'`
 and `AttributeError: … face_query_max_faces`.
 
-- [ ] **Step 3: Add the config knob**
+- [x] **Step 3: Add the config knob**
 
 In `src/scalar_forensic/config.py`, beside the other `SFN_FACE_*` parses (the block ending
 around line 229 with `face_thumb_size`):
@@ -591,7 +591,7 @@ around line 229 with `face_thumb_size`):
 Match the exact helper name and signature used by the neighbouring `_parse_int` calls — read
 lines 178-229 before writing this line.
 
-- [ ] **Step 4: Add the session types**
+- [x] **Step 4: Add the session types**
 
 In `src/scalar_forensic/web/session.py`, above `FileEntry`:
 
@@ -624,7 +624,7 @@ and add to `FileEntry`:
     query_faces: list[QueryFace] | None = None
 ```
 
-- [ ] **Step 5: Implement `faces_query.py`**
+- [x] **Step 5: Implement `faces_query.py`**
 
 ```python
 """Session-scoped face detection for *uploaded* query images.
@@ -798,7 +798,7 @@ def detect_query_faces(
 `src/scalar_forensic/faces/provenance.py` and `faces/indexing.py:68-140` and construct
 `PipelineConfig` the way `FacePipeline.from_settings` does. Do not invent a constructor.
 
-- [ ] **Step 6: Add endpoints 1 and 2 to `routes/faces.py`**
+- [x] **Step 6: Add endpoints 1 and 2 to `routes/faces.py`**
 
 Handlers must be **sync `def`** (not `async def`) so Starlette runs the CPU-bound ONNX work in
 its threadpool instead of blocking the event loop. Add near the existing helpers:
@@ -825,13 +825,13 @@ the selected video frame). Serialise exactly the field set in the contract — b
 explicitly; do **not** `dataclasses.asdict` the `QueryFace`, or the vector and JPEG bytes leak
 into the response.
 
-- [ ] **Step 7: Re-export from the pipeline package**
+- [x] **Step 7: Re-export from the pipeline package**
 
 In `src/scalar_forensic/web/pipeline/__init__.py`, import `detect_query_faces`,
 `QueryFaceResult`, `query_embedder_block` from `.faces_query` and add all three to `__all__`
 (keep the list alphabetised as it already is).
 
-- [ ] **Step 8: Run the tests**
+- [x] **Step 8: Run the tests**
 
 ```
 uv run pytest tests/faces/ -q
@@ -839,7 +839,7 @@ uv run ruff check src tests scripts && uv run ruff format --check src tests scri
 ```
 Expected: all pass, ruff rc=0.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/scalar_forensic/web/pipeline/faces_query.py \
@@ -888,7 +888,7 @@ before any UI consumes it.
   ) -> list[dict]: ...        # hits in the endpoint-3 shape, score-desc
   ```
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/faces/test_face_search.py`:
 
@@ -1087,7 +1087,7 @@ def test_search_faces_uses_the_named_face_vector_and_exact_mode(store):
     assert kwargs["search_params"].exact is True
 ```
 
-- [ ] **Step 2: Run them and confirm they fail**
+- [x] **Step 2: Run them and confirm they fail**
 
 ```
 uv run pytest tests/faces/test_face_search.py tests/faces/test_store.py -q
@@ -1095,7 +1095,7 @@ uv run pytest tests/faces/test_face_search.py tests/faces/test_store.py -q
 Expected: `ModuleNotFoundError … faces_search`, `AttributeError: 'FaceStore' object has no
 attribute 'search_faces'`, and 404s from the missing route.
 
-- [ ] **Step 3: Add `FaceStore.search_faces`**
+- [x] **Step 3: Add `FaceStore.search_faces`**
 
 In `src/scalar_forensic/faces/store.py`, in the **reads** section (after `list_faces`, around
 line 320):
@@ -1129,7 +1129,7 @@ line 320):
 Import `SearchParams` from `qdrant_client.models` alongside the existing model imports at the
 top of `store.py`.
 
-- [ ] **Step 4: Implement `faces_search.py`**
+- [x] **Step 4: Implement `faces_search.py`**
 
 ```python
 """Cross-file face search (spec §8, Phase 1b).
@@ -1222,7 +1222,7 @@ def _hit(row: dict, face_index: int) -> dict:
     }
 ```
 
-- [ ] **Step 5: Implement endpoint 3 and `_audit_log`**
+- [x] **Step 5: Implement endpoint 3 and `_audit_log`**
 
 In `routes/faces.py`:
 
@@ -1256,14 +1256,14 @@ The handler, sync `def`, in order:
    Read `faces/provenance.py` for the actual `config_hash` accessor name before writing this.
 7. Return the endpoint-3 JSON, with `calibration_block()` and the embedder block from Stage 1.
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 ```
 uv run pytest tests/faces/ -q
 uv run ruff check src tests scripts && uv run ruff format --check src tests scripts
 ```
 
-- [ ] **Step 7: Run the integration test against a throwaway Qdrant**
+- [x] **Step 7: Run the integration test against a throwaway Qdrant**
 
 CLAUDE.md: `tests/faces/test_store_integration.py` is the only test that can observe the
 exclusion guarantee against a real store, and this stage adds the first production search path.
@@ -1274,7 +1274,7 @@ SFN_TEST_QDRANT_URL=http://<qdrant>:6333 uv run pytest tests/faces/test_store_in
 Expected: passes, 0 skipped. If it skips, say so in the commit message rather than claiming the
 guarantee was verified.
 
-- [ ] **Step 8: Record the new gotcha in CLAUDE.md**
+- [x] **Step 8: Record the new gotcha in CLAUDE.md**
 
 Claim it first (`cx o CLAUDE.md`), then add one line under **Gotchas**:
 
@@ -1284,7 +1284,7 @@ Claim it first (`cx o CLAUDE.md`), then add one line under **Gotchas**:
   a filter or a deployment threshold. See `docs/specs/face-pipeline.md` §10.
 ```
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/scalar_forensic/web/pipeline/faces_search.py \
