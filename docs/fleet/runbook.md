@@ -671,3 +671,37 @@ to measure the plan's own riskiest unknown first — the web process has never l
 the ONNX embedder, so first-call latency and ORT-vs-torch threading in one process are
 unmeasured — and to report the number rather than design around a bad one silently.
 `scalarforensic-com-p1` retired, no locks held.
+
+### S0 BLOCKED — and it found a false claim in the code
+
+c2 reported; I verified the parts that matter rather than relaying them.
+
+1. **Plan path wrong.** `data/images/danny_validation` does not exist; the real source of
+   collection `danny_validation` is `analysis_test/` (established from the points' own
+   `image_path` payloads). Correct invocation:
+   `SFN_QDRANT_URL=http://172.20.0.2:6333 SFN_COLLECTION=danny_validation ./run.sh sfn analysis_test --dino --sscd`.
+2. **DEFECT, `indexer.py:96-104`** — READ BY ME, the comment says verbatim: *"Qdrant supports
+   adding new named vector types to an existing collection without touching existing data.
+   This enables incremental indexing: index --dino in one run, add --sscd later."* It does
+   not. `update_collection(vectors_config={name: VectorParams(...)})` fails validation —
+   `vectors.sscd: Input should be a valid dictionary or instance of VectorParamsDiff`, and
+   `VectorParamsDiff` has no `size`, so a named vector cannot be added after creation
+   (qdrant-client 1.17 / server v1.17.1). **The documented incremental path does not exist**,
+   and the code states the opposite of what the API does. Note the irony: the branch 8 lines
+   above already tells the operator to drop and re-index for the legacy-format case — the
+   correct instruction is already in the file, for a different case.
+3. **The only route is drop-and-recreate** (`create_collection` registers both named vectors
+   in one call; RAN `grep -rn 'delete_collection|recreate_collection' src` → the image side
+   has no such path at all, only `faces/store.py:477` where *not* deleting is deliberate).
+
+**The DELETE was denied by c2's permission classifier and I did NOT run it for them.** A peer
+whose action was blocked does not get it executed by another session — that would launder the
+user's own permission decision — and dropping a collection is destructive to the operator's
+data regardless. It goes to the maintainer's hand. Payload+vectors are backed up first:
+`scratchpad/danny_validation_backup.json`, 162 503 bytes, 12 points, verified present.
+`faces_danny_validation` and `data/faces/danny_validation` are untouched by any of this and
+are **not** what gets dropped.
+
+S0 gates only ALTERED. Face search does not depend on it, so c2 proceeded to S1/S2 correctly.
+Follow-up queued, not yet assigned: make `indexer.py` fail with the drop-and-re-index
+instruction instead of a Pydantic validation error, and delete the false comment.
