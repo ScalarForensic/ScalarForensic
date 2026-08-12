@@ -1668,10 +1668,21 @@ def index(
                     )
                 ]
             )
+        # "kept" no longer names one population: a review-only observation is
+        # kept on disk and in the collection but is not comparable.  The summary
+        # must therefore reconcile — detected = comparable + retained + rejected
+        # — or it understates how many biometric crops the run wrote.
         _rej_str = ", ".join(f"{_n} {_r}" for _r, _n in sorted(_face_rejected.items()))
+        _rev_str = ", ".join(f"{_n} {_r}" for _r, _n in sorted(_face_review_reasons.items()))
         typer.echo(
-            f"faces: {_face_kept:,} kept / {_face_detected:,} detected"
-            + (f" ({sum(_face_rejected.values()):,} rejected: {_rej_str})" if _rej_str else "")
+            f"faces: {_face_detected:,} detected  │  {_face_kept:,} comparable"
+            + (
+                f"  │  {_face_review_only:,} retained for review"
+                + (f" ({_rev_str})" if _rev_str else "")
+                if _face_review_only
+                else ""
+            )
+            + (f"  │  {sum(_face_rejected.values()):,} rejected: {_rej_str}" if _rej_str else "")
             + (f"  │  {_face_failed:,} failed" if _face_failed else "")
         )
         face_pipeline.audit.append(
@@ -1681,7 +1692,10 @@ def index(
             n_media=len(_face_work),
             n_detected=_face_detected,
             n_kept=_face_kept,
+            n_review_only=_face_review_only,
+            review_only_reasons=_face_review_reasons,
             n_rejected=_face_rejected,
+            n_dropped_noncanonical=_face_dropped_noncanon,
             n_failed=_face_failed,
             pipeline_config_hash=face_pipeline.cfg.config_hash,
         )
@@ -1760,7 +1774,7 @@ def purge(
     from qdrant_client import QdrantClient
 
     from scalar_forensic.faces.audit import AuditLog
-    from scalar_forensic.faces.chips import chip_paths
+    from scalar_forensic.faces.chips import chip_paths, review_chip_paths
     from scalar_forensic.faces.store import FaceStore
 
     if all_ and not typer.confirm(
@@ -1778,10 +1792,29 @@ def purge(
     )
     result = store.purge_all() if all_ else store.purge_media(media)
 
+    # Chips are content-addressed, so a hash freed by this purge may still be
+    # referenced by a surviving observation (an exact-duplicate medium, or an
+    # embedded face whose source crop matched a review-only one).  Filter through
+    # the store before unlinking.  Three limits are deployment properties, not
+    # code defects, and are documented rather than engineered away:
+    #   1. The check is collection-scoped but the chip store is not — purging
+    #      case A can unlink a chip case B references unless SFN_FACE_STORE_DIR
+    #      is set per case (INSTALL.md; the rule check_compat enforces for vectors).
+    #   2. Check-then-unlink: a concurrent index run can write a referencing
+    #      point between the two, leaving a dangling reference.  Single writer.
+    #   3. Both are mitigated, not cured, by chips being re-derivable from media.
     n_chip_files = 0
     if settings.face_store_dir is not None:
-        for chash in result.chip_hashes:
-            for path in chip_paths(Path(settings.face_store_dir), chash):
+        for chash in store.unreferenced_chip_hashes(result.chip_hashes):
+            # Both builders, deliberately: a hash may be an aligned hash (PNG)
+            # or a review hash (JPEG + thumb), and the caller cannot tell which.
+            # The two overlap on the review pair; exists() keeps the count honest.
+            for path in dict.fromkeys(
+                (
+                    *chip_paths(Path(settings.face_store_dir), chash),
+                    *review_chip_paths(Path(settings.face_store_dir), chash),
+                )
+            ):
                 if path.exists():
                     path.unlink()
                     n_chip_files += 1
