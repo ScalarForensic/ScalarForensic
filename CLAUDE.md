@@ -59,3 +59,9 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 - `tests/faces/test_store_integration.py` skips unless `SFN_TEST_QDRANT_URL` is set; it is the
   only test that can observe the exclusion guarantee, since a hermetic test can inspect only the
   `PointStruct` constructor. Run it against a throwaway Qdrant before touching demotion or purge.
+- Face search is uncalibrated by deliberate ruling (2026-08-12): the raw cosine is displayed and
+  labelled as such. SFace's 0.363 is the model authors' reference figure only — never a default, a
+  filter or a deployment threshold. See `docs/specs/face-pipeline.md` §10.
+- `indexer.py:96-104` claims Qdrant can add a named vector to an existing collection. It cannot
+  (`VectorParamsDiff` has no `size`), so `--dino` now and `--sscd` later is impossible — adding a
+  modality means dropping the collection and re-indexing.
