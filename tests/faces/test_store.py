@@ -326,3 +326,42 @@ def test_review_only_points_are_purged_by_purge_all(store):
         result = s.purge_all()
     assert result.n_points == 1
     assert "r1" in result.chip_hashes
+
+
+def test_marker_records_review_only_counts(store):
+    s, _ = store
+    p = s.marker_point(
+        "img",
+        None,
+        "cfg",
+        n_detected=6,
+        n_kept=1,
+        rejected={"confidence": 2},
+        n_review_only=3,
+        review_only_reasons={"size": 2, "pose": 1},
+        n_dropped_noncanonical=0,
+    )
+    assert p.payload["n_review_only"] == 3
+    assert p.payload["review_only_reasons"] == {"size": 2, "pose": 1}
+    assert p.payload["n_dropped_noncanonical"] == 0
+    # The marker must reconcile with its own breakdown, or it is not an
+    # honest account of the medium.
+    total = p.payload["n_kept"] + p.payload["n_review_only"] + sum(p.payload["n_rejected"].values())
+    assert total == p.payload["n_detected"]
+
+
+def test_rollup_records_review_only_counts(store):
+    s, _ = store
+    p = s.video_rollup_point(
+        "vid",
+        "cfg",
+        n_detected=2,
+        n_kept=1,
+        rejected={},
+        n_frames=1,
+        n_review_only=1,
+        review_only_reasons={"size": 1},
+        n_dropped_noncanonical=0,
+    )
+    assert p.payload["n_review_only"] == 1
+    assert p.payload["review_only_reasons"] == {"size": 1}

@@ -1575,8 +1575,10 @@ def index(
         typer.echo(
             f"\nFaces: processing {len(_face_work):,} media item(s)  →  {settings.face_collection}"
         )
-        _face_detected = _face_kept = 0
+        _face_detected = _face_kept = _face_review_only = 0
         _face_rejected: dict[str, int] = {}
+        _face_review_reasons: dict[str, int] = {}
+        _face_dropped_noncanon = 0
         _face_failed = 0
         _video_rollup: dict[str, dict] = {}
         for _p, _sha, _vmeta in _face_work:
@@ -1601,6 +1603,9 @@ def index(
                 _fres.n_detected,
                 _fres.n_kept,
                 _fres.rejected,
+                n_review_only=_fres.n_review_only,
+                review_only_reasons=_fres.review_only_reasons,
+                n_dropped_noncanonical=_fres.n_dropped_noncanonical,
             )
             face_pipeline.store.upsert_faces([*_fres.points, _marker])
             # Every review-only point, not only genuinely demoted ones:
@@ -1614,18 +1619,37 @@ def index(
             face_pipeline.store.clear_face_vector(_fres.review_only_point_ids)
             _face_detected += _fres.n_detected
             _face_kept += _fres.n_kept
+            _face_review_only += _fres.n_review_only
+            _face_dropped_noncanon += _fres.n_dropped_noncanonical
             for _reason, _n in _fres.rejected.items():
                 _face_rejected[_reason] = _face_rejected.get(_reason, 0) + _n
+            for _reason, _n in _fres.review_only_reasons.items():
+                _face_review_reasons[_reason] = _face_review_reasons.get(_reason, 0) + _n
             _vh_roll = (_vmeta or {}).get("video_hash")
             if _vh_roll:
                 _agg = _video_rollup.setdefault(
-                    _vh_roll, {"n_frames": 0, "n_detected": 0, "n_kept": 0, "rejected": {}}
+                    _vh_roll,
+                    {
+                        "n_frames": 0,
+                        "n_detected": 0,
+                        "n_kept": 0,
+                        "rejected": {},
+                        "n_review_only": 0,
+                        "review_only_reasons": {},
+                        "n_dropped_noncanonical": 0,
+                    },
                 )
                 _agg["n_frames"] += 1
                 _agg["n_detected"] += _fres.n_detected
                 _agg["n_kept"] += _fres.n_kept
+                _agg["n_review_only"] += _fres.n_review_only
+                _agg["n_dropped_noncanonical"] += _fres.n_dropped_noncanonical
                 for _reason, _n in _fres.rejected.items():
                     _agg["rejected"][_reason] = _agg["rejected"].get(_reason, 0) + _n
+                for _reason, _n in _fres.review_only_reasons.items():
+                    _agg["review_only_reasons"][_reason] = (
+                        _agg["review_only_reasons"].get(_reason, 0) + _n
+                    )
 
         # Per-video rollup markers, written once each after their frames.
         for _vh_roll, _agg in _video_rollup.items():
@@ -1638,6 +1662,9 @@ def index(
                         _agg["n_kept"],
                         _agg["rejected"],
                         _agg["n_frames"],
+                        n_review_only=_agg["n_review_only"],
+                        review_only_reasons=_agg["review_only_reasons"],
+                        n_dropped_noncanonical=_agg["n_dropped_noncanonical"],
                     )
                 ]
             )

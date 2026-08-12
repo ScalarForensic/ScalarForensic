@@ -41,6 +41,7 @@ class FaceIndexResult:
     n_review_only: int = 0
     rejected: dict[str, int] = field(default_factory=dict)
     review_only_reasons: dict[str, int] = field(default_factory=dict)
+    n_dropped_noncanonical: int = 0
     points: list[PointStruct] = field(default_factory=list)
     review_only_point_ids: list[str] = field(default_factory=list)
 
@@ -148,8 +149,18 @@ class FacePipeline:
         frame_timecode_ms: int | None = None,
     ) -> FaceIndexResult:
         img = load_for_detection(data)
+        # The detector silently drops rows whose landmarks are non-canonical
+        # (detect.py), subtracting them from n_detected.  Take the delta so the
+        # marker can record it -- a wholesale-wrong landmark map shows up as a
+        # large count here and nowhere else.
+        _dropped_before = getattr(self.detector, "n_dropped_noncanonical", 0)
         detections = self.detector.detect(img)
-        result = FaceIndexResult(n_detected=len(detections))
+        result = FaceIndexResult(
+            n_detected=len(detections),
+            n_dropped_noncanonical=(
+                getattr(self.detector, "n_dropped_noncanonical", 0) - _dropped_before
+            ),
+        )
         if not detections:
             return result
 

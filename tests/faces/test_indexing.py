@@ -227,3 +227,27 @@ def test_review_only_chips_are_written_under_the_review_hash(tmp_path):
     assert review.exists() and thumb.exists()
     # No aligned PNG is written for a face that was never aligned.
     assert not any(tmp_path.rglob("*.png"))
+
+
+def test_noncanonical_drops_are_carried_onto_the_result():
+    # The detector's counter is cumulative across images; the result must
+    # record this image's delta, not the running total.
+    p = _pipeline([_det(w=200.0)])
+    p.detector.n_dropped_noncanonical = 7  # a previous image already dropped 7
+
+    def _detect_and_drop(_img):
+        p.detector.n_dropped_noncanonical += 2
+        return [_det(w=200.0)]
+
+    p.detector.detect.side_effect = _detect_and_drop
+    r = p.process_image(_img_bytes(), image_hash="hash", image_path="path.jpg")
+    assert r.n_dropped_noncanonical == 2
+
+
+def test_detector_without_the_counter_is_tolerated():
+    p = _pipeline([_det(w=200.0)])
+    del p.detector.n_dropped_noncanonical
+    p.detector.mock_add_spec(["detect", "detector_id", "model_hash"])
+    p.detector.detect.return_value = [_det(w=200.0)]
+    r = p.process_image(_img_bytes(), image_hash="hash", image_path="path.jpg")
+    assert r.n_dropped_noncanonical == 0

@@ -195,6 +195,9 @@ class FaceStore:
         n_detected: int,
         n_kept: int,
         rejected: dict[str, int],
+        n_review_only: int = 0,
+        review_only_reasons: dict[str, int] | None = None,
+        n_dropped_noncanonical: int = 0,
     ) -> PointStruct:
         """One marker per *processed unit* — per image, per video frame.
 
@@ -213,6 +216,14 @@ class FaceStore:
                 "n_detected": n_detected,
                 "n_kept": n_kept,
                 "n_rejected": rejected,
+                # n_kept still means "embedded".  Without these two the marker
+                # understates how many biometric crops the run wrote, and
+                # n_detected stops reconciling with its own breakdown.
+                "n_review_only": n_review_only,
+                "review_only_reasons": review_only_reasons or {},
+                # Silently subtracted from n_detected before this: the detector
+                # drops rows whose landmarks are non-canonical.
+                "n_dropped_noncanonical": n_dropped_noncanonical,
             },
         )
 
@@ -224,6 +235,9 @@ class FaceStore:
         n_kept: int,
         rejected: dict[str, int],
         n_frames: int,
+        n_review_only: int = 0,
+        review_only_reasons: dict[str, int] | None = None,
+        n_dropped_noncanonical: int = 0,
     ) -> PointStruct:
         """Aggregate marker for a whole video, written once after its frames.
 
@@ -242,6 +256,9 @@ class FaceStore:
                 "n_detected": n_detected,
                 "n_kept": n_kept,
                 "n_rejected": rejected,
+                "n_review_only": n_review_only,
+                "review_only_reasons": review_only_reasons or {},
+                "n_dropped_noncanonical": n_dropped_noncanonical,
             },
         )
 
