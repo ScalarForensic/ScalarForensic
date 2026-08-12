@@ -566,3 +566,34 @@ Added to its brief beyond c1's request: c1 measured **one viewport**, and `heigh
 fixed fraction, so the tester verifies parity at a second and a short viewport as well as at
 0/1/3/12 chips. Parity should hold structurally; if it holds at one size and breaks at
 another, that is the finding worth having.
+
+### Parity verified independently, screensaver removed — both landed
+
+**`ed6ffea` — independent verification pass (`scalarforensic-csm-c1`, tester seat).**
+**PASS on all 15 case×viewport combinations** (5 cases × 3 viewports), both boxes equal to
+the hundredth of a pixel: 1920×1080 703.78×693.33, 1280×800 383.78×483.33, 1440×720
+463.78×423.33. The second and short viewports were added because c1's `height:75%` is a
+fixed fraction measured at one size; parity held at all three, so the fraction is structural,
+not tuned. **The tester was honest about what it could not reach**: 0 and 12 chips do not
+exist in the real material (max real count is 4 raw / 3 kept on one image), so it synthesized
+them and said so rather than reporting a real case it never drove. Replay spec and
+screenshots in `docs/qa/2026-08-12-image-box-parity-verify/`.
+
+**`2d31a94` — drop-zone idle screensaver removed**, on the maintainer's request that the
+upload zone stay always present. 6 files, +2/−48. c1's inventory beat mine by two sites: the
+`_resetIdle` listener handle (`state.js:12`) and the `opacity 0.4s ease` term in the *base*
+`.drop-zone` transition (`style.css:219`), which existed only for this fade — the leftover
+that makes a removal look done when it is not. `.drop-zone.analyzing { pointer-events:none }`
+stays: different phase, different purpose. Live check at `/?cachebust=313` with the
+stylesheet re-fetched: after 31 s of zero input the zone reads `class="drop-zone"`,
+opacity 1, pointer-events auto, and `elementFromPoint` at its centre still lands inside it.
+
+**Re-derived by me at `2d31a94`:** 478 passed / 5 skipped, ruff check + format rc=0,
+porcelain 0, and `grep -rn 'dropZoneIdle|_idleTimer|IdleScreensaver|_resetIdle|drop-zone\.idle'
+src tests` → **0 hits**.
+
+**`CLAUDE.md` corrected** (I own it now): the drop-zone-fade gotcha described a feature that
+no longer exists and would have sent the next session hunting a screensaver — replaced with
+the cache trap that is real and has now cost two sessions time, including the `style.css`
+half the tester found. Test count 300 → 478/5 with what the 5 skips are for. The stale YuNet
+line is left alone: it is written for a fresh clone, where it is still true.
