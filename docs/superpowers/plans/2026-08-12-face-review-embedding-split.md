@@ -1137,7 +1137,7 @@ git commit -m "feat(faces): persist review-only and non-canonical-drop counts"
 
 The audit `index_run` record is spec §7.4's auditable account of the run. As written it reports `n_kept` and `n_rejected` only, so under the split it would **understate how many biometric crops were written to disk**. For a modality whose defensibility rests on its audit trail, that is not cosmetic.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_cli_summary_reconciles_counts(run_faces_cli, capsys):
@@ -1161,12 +1161,12 @@ def test_purge_keeps_chips_still_referenced(tmp_path, fake_client):
     ...  # assert a chip referenced by a surviving observation is not unlinked
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest tests/test_cli_faces.py -k "reconciles or index_run or still_referenced" -v`
 Expected: FAIL on the missing summary text.
 
-- [ ] **Step 3: Implement the summary**
+- [x] **Step 3: Implement the summary**
 
 Replace the summary line (`cli.py:1634-1638`):
 
@@ -1184,7 +1184,7 @@ Replace the summary line (`cli.py:1634-1638`):
 
 Add `n_review_only=_face_review_only, review_only_reasons=_face_review_reasons` to the `audit.append("index_run", ...)` call, and accumulate both counters alongside the existing `_face_kept` / `_face_rejected` aggregation.
 
-- [ ] **Step 4: Implement purge reference safety**
+- [x] **Step 4: Implement purge reference safety**
 
 At `cli.py:1741`, filter through the store before unlinking:
 
@@ -1211,7 +1211,7 @@ Three limits of this check must be stated in the audit record and the docs rathe
                     n_chip_files += 1
 ```
 
-- [ ] **Step 5: Run to verify they pass, then full suite, lint, commit**
+- [x] **Step 5: Run to verify they pass, then full suite, lint, commit**
 
 ```bash
 uv run pytest tests/test_cli_faces.py -v && uv run pytest -q
@@ -1238,7 +1238,7 @@ Three concrete defects to fix, all found in review:
 2. It emits a `chips.aligned` URL whenever a chip hash is set (`routes/faces.py:226`), which for a review-only face is a guaranteed 404.
 3. The aligned-chip endpoint never resolves the observation, so it cannot tell the two chip kinds apart.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_by_image_orders_embedded_before_review_only(client, fake_store):
@@ -1279,12 +1279,12 @@ def test_explain_still_marks_embedded_faces_passed(client, fake_store):
     assert body["chips"]["aligned"] is not None
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest tests/web/test_routes_faces.py -k "review_only or orders or not_performed" -v`
 Expected: FAIL — the explainer returns `passed: True` for every step.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In the explain handler, derive each step's `passed` from the payload rather than hardcoding, and add the terminal step:
 
@@ -1351,7 +1351,7 @@ For the aligned-chip endpoint, return 404 with a clear detail when the PNG is ab
 
 In `list_faces` (`store.py:280`), sort embedded observations first, each group by descending quality (embedded) or descending `det_conf` (review-only), since review-only faces have `quality: None`.
 
-- [ ] **Step 4: Run to verify they pass, then full suite, lint, commit**
+- [x] **Step 4: Run to verify they pass, then full suite, lint, commit**
 
 ```bash
 uv run pytest tests/web/ -v && uv run pytest -q
@@ -1374,7 +1374,7 @@ git commit -m "feat(faces): payload-driven explainer and chip-kind-aware endpoin
 
 `style.css:2243` renders every chip at `width:72px; height:72px; object-fit: cover`. The stored review JPEG is native resolution, but the browser upscales *and* centre-crops it — worst for exactly the small faces this design adds, hiding part of the crop and fabricating display pixels. Shipping that while the spec claims "never upscales" is a gap a competent cross-examination finds.
 
-- [ ] **Step 1: Add the helper to `faces.js`**
+- [x] **Step 1: Add the helper to `faces.js`**
 
 New component code goes in the matching part file; computed getters belong in `computed.js`. This is a method, so it belongs here:
 
@@ -1388,11 +1388,11 @@ New component code goes in the matching part file; computed getters belong in `c
     },
 ```
 
-- [ ] **Step 2: Mark review-only chips in the grid**
+- [x] **Step 2: Mark review-only chips in the grid**
 
 In `index.html`, on the face chip element add `:class="{ 'face-chip-review-only': faceIsReviewOnly(face) }"` and a visible caption bound to `faceStatusLabel(face)`.
 
-- [ ] **Step 3: Fix the display resolution**
+- [x] **Step 3: Fix the display resolution**
 
 In `style.css`, replace the blanket rule so small crops are neither upscaled nor cropped:
 
@@ -1416,11 +1416,11 @@ In `style.css`, replace the blanket rule so small crops are neither upscaled nor
 }
 ```
 
-- [ ] **Step 4: Verify in the running UI**
+- [x] **Step 4: Verify in the running UI**
 
 Run `./run.sh sfn-web`, open a medium with both kinds, and confirm: review-only chips are visibly labelled, are not upscaled or cropped, and the explainer shows the embedding step as not performed with the failing check named. Remember the drop zone fades after 5 s idle and swallows pointer events — it wakes on `mousemove`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/scalar_forensic/web/static/
@@ -1441,7 +1441,7 @@ git commit -m "feat(faces): label review-only observations and stop upscaling th
 
 The exclusion guarantee is the design's load-bearing claim, and no hermetic test can observe it: asserting `PointStruct.vector == {}` inspects a constructor, not Qdrant's storage or search behaviour. This is the only test that can catch a demotion regression. Marked and skipped by default, like the real-YuNet test.
 
-- [ ] **Step 1: Write the test**
+- [x] **Step 1: Write the test**
 
 ```python
 """Live-Qdrant check for the review-only exclusion guarantee.
@@ -1541,12 +1541,12 @@ def test_clear_face_vector_on_absent_points_is_a_noop():
         client.delete_collection(collection_name=name)
 ```
 
-- [ ] **Step 2: Verify it skips by default**
+- [x] **Step 2: Verify it skips by default**
 
 Run: `uv run pytest tests/faces/test_store_integration.py -v`
 Expected: 2 skipped.
 
-- [ ] **Step 3: Verify it passes against live Qdrant**
+- [x] **Step 3: Verify it passes against live Qdrant**
 
 Create `docker-compose.override.yml` with `services: {qdrant: {ports: ["127.0.0.1:6333:6333"]}}`, `docker compose up -d qdrant`, then:
 
@@ -1555,11 +1555,11 @@ Expected: PASS.
 
 **If the post-demotion search still returns the point, STOP.** That is the failure mode the design exists to prevent; report it rather than working around it.
 
-- [ ] **Step 4: Decide on the override file**
+- [x] **Step 4: Decide on the override file**
 
 `docker-compose.override.yml` is not gitignored and is picked up automatically. Either add it to `.gitignore` or delete it after the run — do not commit it silently.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tests/faces/test_store_integration.py
@@ -1578,13 +1578,13 @@ git commit -m "test(faces): live-Qdrant proof that demoted points leave the sear
 - Consumes: everything above
 - Produces: nothing
 
-- [ ] **Step 1: Amend the parent spec**
+- [x] **Step 1: Amend the parent spec**
 
 In §6.2, replace "A face must pass all checks to be embedded. **Rejected faces are not persisted**" with the two-gate account: the review gate admits for retention, the existing checks decide embedding, and faces retained without embedding are review-only observations that carry no vector. In §7.3 document `aligned_chip_hash` / `review_chip_hash` and the domain separation. In §7.4 document `n_review_only`, `review_only_reasons` and `n_dropped_noncanonical`, and the invariant. In §13 add both new variables.
 
 Add to §6.5 (Phase 2 grouping) an explicit open question: how review-only observations participate in within-file grouping and group counts. Do not resolve it.
 
-- [ ] **Step 2: Update INSTALL.md**
+- [x] **Step 2: Update INSTALL.md**
 
 Add to the settings table:
 
@@ -1597,7 +1597,7 @@ Add a short paragraph: faces clearing the review bar but not the embedding bar a
 
 Also document the chip-store scoping rule, which the code cannot enforce: `SFN_FACE_COLLECTION` is per case but `SFN_FACE_STORE_DIR` defaults to a single `data/faces`, and chips are content-addressed, so two cases holding the same image share one chip file. Purge's reference check (Task 8) scrolls only its own collection and would unlink a chip another case still references. **Set `SFN_FACE_STORE_DIR` per case**, for the same reason `check_compat` refuses to mix biometric data across cases. Note also that purge assumes a single writer: it checks for references and then unlinks, so a concurrent index run can leave a dangling chip reference. Both are recoverable — chips are re-derivable from the source media — but neither should be discovered during an examination.
 
-- [ ] **Step 3: Update CLAUDE.md**
+- [x] **Step 3: Update CLAUDE.md**
 
 Add one line under the face bullets:
 
@@ -1607,7 +1607,7 @@ Add one line under the face bullets:
   payload filter. Never give them a vector.
 ```
 
-- [ ] **Step 4: Full suite, lint, commit**
+- [x] **Step 4: Full suite, lint, commit**
 
 ```bash
 uv run pytest -q && uv run ruff check src tests scripts && uv run ruff format --check src tests scripts

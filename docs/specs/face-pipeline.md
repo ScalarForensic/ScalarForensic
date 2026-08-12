@@ -209,10 +209,37 @@ because the signals live at different pipeline points:
 | Sharpness | Laplacian variance measured on the **native-resolution source crop** (not the 112×112 resample, whose Laplacian mostly re-encodes the resize factor) | calibrate |
 | Exposure | fraction of clipped pixels in the crop | calibrate |
 
-A face must pass all checks to be embedded. Each subscore is persisted on kept faces. Rejected
-faces are **not** persisted; the per-media processed marker (§7.4) records counts per rejection
-reason, which is the auditable trail ("this file had 14 detections, 11 rejected: 6 size,
-4 pose, 1 exposure").
+**Two gates, three outcomes.** The checks above decide *embedding*. A separate, lower **review
+gate** decides *retention*, and runs first:
+
+| Check | Signal | Bootstrap default |
+|---|---|---|
+| Detector confidence | from detector | ≥ 0.6 (`SFN_FACE_REVIEW_MIN_CONF`) |
+| Resolution | bbox min side, detector-input px | ≥ 48 (`SFN_FACE_REVIEW_MIN_SIZE`) |
+
+The review gate deliberately does **not** check pose: a face turned away from the camera is
+poor material for a vector and perfectly good material for a human examiner. Both review
+thresholds are clamped to never exceed their embedding counterparts (a review bar above the
+embedding bar would discard faces the pipeline was about to embed); the clamp is reported at
+startup, not silently applied.
+
+Every detection therefore lands in exactly one of three outcomes:
+
+1. **Rejected** — below the review gate. Not persisted; counted by reason on the marker.
+2. **Review-only** — clears the review gate, fails the embedding gate. Persisted as a
+   **vectorless point** with `embedding_status: "review_only"` and the failing check in
+   `embedding_exclusion_reason`, plus a review chip. It is what an examiner looks at and is
+   never compared with anything. The exclusion is structural — the point carries no vector, so
+   a similarity search cannot return it — not a payload filter that a later query could forget.
+3. **Embedded** — clears both. Aligned, embedded, comparable.
+
+Subscores the embedding path never measured are persisted as `null`, never `0.0`: a review-only
+face has no pose, sharpness or exposure score, and a stored `0.0` pose would read as
+"perfectly frontal" rather than "never measured". The composite `quality` is likewise `null`.
+
+The per-media processed marker (§7.4) records counts for all three, which is the auditable
+trail ("this file had 14 detections, 3 embedded, 5 retained for review, 6 rejected: 4 pose,
+2 exposure").
 
 The **embedding-norm quality proxy** (pre-normalisation L2 norm, meaningful for
 ArcFace/AdaFace-family models) is computed after embedding and stored as an *annotation*
@@ -277,6 +304,11 @@ signal free).
   which is our prior doc's own fallback path, needs no new dependency, and is more defensible
   than motion heuristics. Payload field `group_id` (namespaced per media file:
   `{video_hash}:{n}`), plus `ts_first_ms`, `ts_last_ms`, `n_observations`.
+- **Open question (Phase 2, deliberately unresolved):** how review-only observations participate
+  in within-file grouping and group counts. Grouping is agglomerative over embeddings, which
+  review-only faces do not have, so they can neither join a group nor be ranked against its
+  members — yet excluding them silently would make a group's `n_observations` disagree with what
+  an examiner sees in the same file. Resolve this when Phase 2 lands, not before.
 - Per group keep **top-K representatives** (K default 5, `SFN_FACE_TOPK_PER_GROUP`) ranked by a
   monotone ranking proxy — face size × sharpness, or `embedding_norm` where the model family
   supports it — *not* by the min-composite gate score, which is a pass/fail construct dominated
@@ -311,6 +343,14 @@ Each step carries one plain-language sentence of explanation, fixed in the UI (s
 as all court-facing copy; "similar faces" language rules apply). Rejected faces cannot be
 replayed (they are not persisted — §6.2); the view therefore also shows the source file's
 rejection counts by reason, which is the honest statement of what was filtered out.
+
+For a **review-only** observation the same view describes a shorter history, and every step's
+pass flag is derived from the stored payload rather than assumed: the step whose check failed
+is marked not-passed, and so is every step after it, because those measurements were never
+taken. The embedding step is replaced by a statement that the face was not embedded, which
+check excluded it, and that it is never compared with other faces. No aligned-chip link is
+offered where no aligned chip exists — a URL that is a guaranteed 404 would read as a lost file
+rather than an artefact that was never produced.
 
 Implementation note: this is a frontend feature over existing endpoints (payload + chips +
 media) plus at most one convenience endpoint bundling an observation's explainer data. It lives
@@ -396,8 +436,21 @@ original media — never modified; referenced via image_hash / video_hash + fram
   └─ aligned crop    112×112 lossless PNG — the exact embedder input                    (reproducibility)
 ```
 
-Three artefacts per kept face, under `SFN_FACE_STORE_DIR` (default `data/faces/`), sharded by
-the first two hex chars of `chip_hash` (frame-store precedent):
+**Two hash domains, not one.** `chip_hash` is split into `aligned_chip_hash` (the 112×112 RGB
+tensor) and `review_chip_hash` (the unwarped source crop), each computed under its own domain
+prefix that also covers dtype and full array shape. The aligned PNG is addressed in the aligned
+domain; *every* review artefact — JPEG and thumbnail, for embedded and review-only observations
+alike — in the review domain. A review-only observation has `aligned_chip_hash: null`, so a
+consumer must choose the path builder from `embedding_status` rather than assuming both exist.
+
+One consequence is intended: because review artefacts are content-addressed on the source crop,
+an embedded face and a review-only face with byte-identical crops share one JPEG on disk. That
+is why purge must check whether a surviving observation still references a chip before
+unlinking it (§7.5).
+
+Three artefacts per **embedded** face and two per **review-only** face (there is no aligned
+crop where there was no alignment), under `SFN_FACE_STORE_DIR` (default `data/faces/`), sharded
+by the first two hex chars of the chip hash (frame-store precedent):
 
 1. **Aligned crop, lossless PNG** of the exact 112×112 RGB tensor fed to the embedder
    (pre-normalisation). `chip_hash` is computed over these exact raw bytes, so the stored file
@@ -451,7 +504,22 @@ produced in it is marked as such.
 
 Per-media payload-only marker point in the face collection (deterministic ID from
 `image_hash`/`video_hash` + `"faces_processed"`): `faces_processed_at`, the pipeline-config
-hash, `n_detected`, `n_kept`, and `n_rejected` broken down by rejection reason. This makes
+hash, `n_detected`, `n_kept`, `n_rejected` broken down by rejection reason, `n_review_only`,
+`review_only_reasons` broken down by failing check, and `n_dropped_noncanonical`.
+
+The invariant the marker must satisfy:
+
+```
+n_detected == n_kept + n_review_only + sum(n_rejected.values())
+```
+
+`n_dropped_noncanonical` counts detections discarded before any gate saw them, because the
+detector returned a row that is not a canonical 5-landmark face. It is subtracted from
+`n_detected` at the detector, so it is *outside* the equation above — and it must be persisted
+rather than merely incremented, because a non-zero value on ordinary material is the signal for
+a wrong YuNet landmark-column map. Video rollups carry the same fields summed across frames.
+
+This makes
 "legitimately zero faces" distinguishable from "never processed", gives `--faces` runs the same
 skip-already-done behaviour the image pipeline gets from `get_all_indexed_hashes()`, and is the
 per-file audit trail for gate decisions.
@@ -463,6 +531,21 @@ evidence workflow: a CLI operation (`sfn faces purge --media <hash>` / `--all`) 
 observations, marker points, chip-store files, and labels referencing them, and appends the
 purge to the query/event log (§11). Case closure and data-subject erasure both need this path;
 it ships in Phase 1, not later.
+
+Because chips are content-addressed and therefore shared (§7.3), purge filters the freed hashes
+through a reference check before unlinking, so it cannot remove a chip that authenticates a
+surviving observation. Three limits of that check are deployment properties, stated rather than
+engineered away:
+
+1. **The check is collection-scoped; the chip store is not.** `SFN_FACE_COLLECTION` is per case
+   but `SFN_FACE_STORE_DIR` defaults to one `data/faces` for every case, and content-addressing
+   does not stop at a collection boundary. Purging case A can unlink a chip case B still
+   references. **Set `SFN_FACE_STORE_DIR` per case** — the same cross-case rule `check_compat`
+   already enforces for vectors, which the chip store cannot enforce for itself.
+2. **Check-then-unlink.** A concurrent index run can write a referencing point between the check
+   and the `unlink()`; the file then already exists, so the writer will not recreate it and the
+   reference dangles. Purge assumes a single writer.
+3. Both are mitigated but not cured by chips being re-derivable from the source media.
 
 ---
 
@@ -631,6 +714,8 @@ model path is a startup error, not a first-detection surprise):
 it) · `SFN_FACE_COLLECTION` (default derived `{SFN_COLLECTION}_faces`) · `SFN_FACE_STORE_DIR`
 (path, `data/faces`, empty disables ⇒ degraded-evidence mode) · `SFN_FACE_DETECT_MAX_SIZE`
 (int > 0, 1600) · `SFN_FACE_MIN_CONF` (float 0–1, 0.8) · `SFN_FACE_MIN_SIZE` (int > 0, 64) ·
+`SFN_FACE_REVIEW_MIN_CONF` (float 0–1, 0.6; clamped to `SFN_FACE_MIN_CONF`) ·
+`SFN_FACE_REVIEW_MIN_SIZE` (int > 0, 48; clamped to `SFN_FACE_MIN_SIZE`) ·
 `SFN_FACE_CROP_DILATION` (float 0–0.5, 0.15; review chip only) · `SFN_FACE_THUMB_SIZE`
 (int > 0, 256; browse thumbnail long side, non-evidentiary — §7.3) · `SFN_FACE_TOPK_PER_GROUP`
 (int > 0, 5) · `SFN_EXAMINER_ID` (string, required when faces enabled). Gate thresholds beyond

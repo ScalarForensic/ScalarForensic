@@ -127,6 +127,40 @@ reversed embedding pairing, and combined-list indexing (what a single `kept`
 list would produce). Both fail the test. Worth redoing if anyone refactors
 `process_image`.
 
+## Tasks 8–12 execution notes (added 2026-08-12, second session)
+
+- **Task 9 ordering lives in the route, not `list_faces`.** The plan put the
+  embedded-first sort in `store.py`. It went into `routes/faces.py` instead
+  (`_browse_order`), next to `_normalized`, because the same handler must also
+  default `embedding_status` for pre-split payloads — that is an API contract
+  concern, and splitting the two across layers would have made the ordering
+  untestable from the route tests the plan itself specifies.
+- **`chip_hash` was stale in three places.** The payload key became
+  `aligned_chip_hash` / `review_chip_hash` in Task 4, but `routes/faces.py`,
+  `index.html` and the route-test fixture still read `chip_hash`. The UI would
+  have rendered a broken image for every face. Now covered by
+  `test_face_grid_uses_the_review_hash_domain`.
+- **Two live-Qdrant findings contradict the plan's Task 11 assumptions** (see
+  the commit message on the Task 11 commit). Neither changes the design, both
+  are now tests:
+  1. A re-upsert with `vector={}` *already* drops the named vector on qdrant
+     1.17 — the explicit `clear_face_vector` is belt-and-braces there. It stays:
+     that is a storage-engine detail, not an API guarantee.
+  2. `delete_vectors` on an id that does not exist returns **404, not a no-op**.
+     The plan assumed a no-op. The CLI call site is safe (it upserts first, and
+     the client's `upsert` defaults to `wait=True`), and the error is
+     deliberately not swallowed — a silently ignored clear could leave a
+     review-only observation searchable. Precondition now documented on
+     `clear_face_vector`.
+  The load-bearing claim itself holds: after demotion, vector search returns
+  nothing and the payload survives intact.
+- **Task 10 Step 4 (manual UI check) is not done and cannot be.** It needs
+  indexed face data, which needs the models. Substituted: `node --check` on
+  `faces.js`, a TestClient smoke check that `/`, `faces.js` and `style.css`
+  serve, and four static-wiring assertions. The visual confirmation — review
+  crops legible at native resolution, both populations distinguishable — is
+  folded into the validation run, `SETUP-2026-08-12-face-validation-run.md` §7.
+
 ## Plan edits made during execution
 
 The plan document is not as committed at `10ace0d`. Changes:

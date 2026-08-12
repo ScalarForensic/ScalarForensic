@@ -50,3 +50,9 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 - The face real-model test skips unless a YuNet ONNX is present (`models/` is gitignored; fetch
   with `scripts/download_models.py --yunet`). It is the only check that can catch a wrong YuNet
   landmark-column map — the other detector tests build rows from the same assumption as the code.
+- Faces have two gates: review (keep the native-resolution crop) and embedding (align + vector).
+  Review-only observations are vectorless points — that is what keeps them out of search, not a
+  payload filter. Never give them a vector.
+- `tests/faces/test_store_integration.py` skips unless `SFN_TEST_QDRANT_URL` is set; it is the
+  only test that can observe the exclusion guarantee, since a hermetic test can inspect only the
+  `PointStruct` constructor. Run it against a throwaway Qdrant before touching demotion or purge.

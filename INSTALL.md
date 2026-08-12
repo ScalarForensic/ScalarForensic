@@ -290,6 +290,16 @@ references chips by hash only, never by path. Leaving it unset disables chip sto
 the pipeline still runs, and the UI reports "degraded-evidence mode" because review chips are
 then unavailable.
 
+> **Set `SFN_FACE_STORE_DIR` per case.** `SFN_FACE_COLLECTION` is already per case, but the
+> chip store defaults to a single `data/faces` for all of them, and chips are content-addressed
+> — two cases holding the same image share one file on disk. Purge's reference check scrolls
+> only its own collection, so **purging case A can unlink a chip case B still references**. The
+> code cannot enforce this the way `check_compat` refuses to mix biometric data across cases for
+> vectors; it is an operator setting. Note also that purge assumes a **single writer**: it
+> checks for references and then unlinks, so a concurrent index run can leave a dangling chip
+> reference. Both situations are recoverable — chips are re-derivable from the source media —
+> but neither should be discovered during an examination.
+
 ### Purging
 
 ```bash
@@ -312,8 +322,10 @@ The enablement record survives a purge — it is an auditable act, not routine d
 | `SFN_FACE_STORE_DIR` | `data/faces` | Chip store; unset disables chips |
 | `SFN_FACE_THUMB_SIZE` | `256` | Browse thumbnail long side (px) |
 | `SFN_FACE_DETECT_MAX_SIZE` | `1600` | Detector input cap (px, long side) |
-| `SFN_FACE_MIN_CONF` | `0.8` | Minimum detector confidence |
-| `SFN_FACE_MIN_SIZE` | `64` | Minimum face size (px) |
+| `SFN_FACE_MIN_CONF` | `0.8` | Minimum detector confidence to embed |
+| `SFN_FACE_MIN_SIZE` | `64` | Minimum face size to embed (px) |
+| `SFN_FACE_REVIEW_MIN_CONF` | `0.6` | Confidence floor for keeping a face for hand review |
+| `SFN_FACE_REVIEW_MIN_SIZE` | `48` | bbox min side (detector-input px) for hand review |
 | `SFN_FACE_MIN_SHARPNESS` | `25.0` | Minimum Laplacian variance |
 | `SFN_FACE_MAX_CLIPPED` | `0.6` | Maximum clipped-pixel fraction |
 | `SFN_FACE_MAX_POSE` | `0.35` | Maximum yaw proxy |
@@ -321,6 +333,21 @@ The enablement record survives a purge — it is an auditable act, not routine d
 
 All gate thresholds are **bootstrap values**, not validated operating points. They are recorded
 in every point's provenance so a later calibration can supersede them by name.
+
+### Two gates: comparable and review-only
+
+A detected face passes through two gates. The **review gate**
+(`SFN_FACE_REVIEW_MIN_CONF` / `_SIZE`) decides whether the face is kept at all; the **embedding
+gate** (`SFN_FACE_MIN_CONF` / `_SIZE` / `_SHARPNESS` / `_MAX_CLIPPED` / `_MAX_POSE`) decides
+whether it is measured. A face that clears the first but not the second is kept as a
+**review-only observation**: it has a review chip, it is croppable and examinable, and it is
+never compared with any other face. The exclusion is structural — the point carries no vector —
+not a filter a later query could forget to apply. The CLI summary and the audit record report
+all three populations, and `detected = comparable + retained for review + rejected`.
+
+The review thresholds are clamped so they can never exceed their embedding counterparts; if you
+set them higher, the run prints a note and uses the clamped value. Both are bootstrap numbers
+awaiting the same calibration as the rest.
 
 ## Network policy
 
