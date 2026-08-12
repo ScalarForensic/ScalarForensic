@@ -152,6 +152,43 @@ class Settings:
         if self.max_active_sessions < 0:
             raise ValueError("SFN_MAX_ACTIVE_SESSIONS must be >= 0 (0 disables the cap)")
 
+        # --- Face modality (optional; spec docs/specs/face-pipeline.md) ---
+        # Disabled by default.  Enabling requires a detector model, an
+        # embedder model + manifest, and SFN_EXAMINER_ID; validated by
+        # face_startup_error() so entry points fail fast with guidance.
+        self.faces_enabled: bool = self._parse_bool("SFN_FACES_ENABLED", default=False)
+        self.face_detector: str = os.environ.get("SFN_FACE_DETECTOR", "yunet")
+        if self.face_detector != "yunet":
+            raise ValueError(
+                f"SFN_FACE_DETECTOR={self.face_detector!r} is invalid. Supported: yunet"
+            )
+        self.face_detector_model: Path | None = self._parse_optional_path("SFN_FACE_DETECTOR_MODEL")
+        self.face_embedder_model: Path | None = self._parse_optional_path("SFN_FACE_EMBEDDER_MODEL")
+        self.face_collection: str = (
+            os.environ.get("SFN_FACE_COLLECTION") or f"{self.collection}_faces"
+        )
+        self.face_store_dir: Path | None = self._parse_optional_path(
+            "SFN_FACE_STORE_DIR", "data/faces"
+        )
+        self.face_detect_max_size: int = self._parse_int("SFN_FACE_DETECT_MAX_SIZE", 1600)
+        if self.face_detect_max_size < 64:
+            raise ValueError("SFN_FACE_DETECT_MAX_SIZE must be >= 64")
+        self.face_min_conf: float = self._parse_float("SFN_FACE_MIN_CONF", 0.8)
+        if not (0.0 < self.face_min_conf <= 1.0):
+            raise ValueError("SFN_FACE_MIN_CONF must be in (0, 1]")
+        self.face_min_size: int = self._parse_int("SFN_FACE_MIN_SIZE", 64)
+        if self.face_min_size < 1:
+            raise ValueError("SFN_FACE_MIN_SIZE must be >= 1")
+        self.face_min_sharpness: float = self._parse_float("SFN_FACE_MIN_SHARPNESS", 25.0)
+        self.face_max_clipped: float = self._parse_float("SFN_FACE_MAX_CLIPPED", 0.6)
+        if not (0.0 < self.face_max_clipped <= 1.0):
+            raise ValueError("SFN_FACE_MAX_CLIPPED must be in (0, 1]")
+        self.face_max_pose: float = self._parse_float("SFN_FACE_MAX_POSE", 0.35)
+        self.face_crop_dilation: float = self._parse_float("SFN_FACE_CROP_DILATION", 0.15)
+        if not (0.0 < self.face_crop_dilation <= 0.5):
+            raise ValueError("SFN_FACE_CROP_DILATION must be in (0, 0.5]")
+        self.examiner_id: str | None = os.environ.get("SFN_EXAMINER_ID") or None
+
     def _parse_float(self, key: str, default: float) -> float:
         raw = os.environ.get(key)
         if raw is None:
@@ -257,6 +294,42 @@ class Settings:
         else:
             os.environ["HF_HUB_OFFLINE"] = "1"
             os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+    def face_startup_error(self) -> str | None:
+        """Actionable error if the face modality is enabled but unusable, else None.
+
+        Checked at entry points (CLI --faces, sfn-web lifespan) so
+        misconfiguration fails at startup, not at first detection.
+        """
+        if not self.faces_enabled:
+            return None
+        problems: list[str] = []
+        if self.face_detector_model is None or not self.face_detector_model.exists():
+            problems.append(
+                f"  - SFN_FACE_DETECTOR_MODEL={str(self.face_detector_model)!r} not found.\n"
+                "    Fetch the YuNet ONNX (MIT) once and point this at the local file."
+            )
+        if self.face_embedder_model is None or not self.face_embedder_model.exists():
+            problems.append(
+                f"  - SFN_FACE_EMBEDDER_MODEL={str(self.face_embedder_model)!r} not found.\n"
+                "    ScalarForensic ships no recognition weights (see INSTALL.md, licensing);\n"
+                "    supply an ONNX model plus its .manifest.json."
+            )
+        elif not Path(str(self.face_embedder_model) + ".manifest.json").exists():
+            problems.append(
+                f"  - Manifest not found: {self.face_embedder_model}.manifest.json\n"
+                "    Every embedder model needs a manifest (see docs/specs/face-pipeline.md §6.3)."
+            )
+        if not self.examiner_id:
+            problems.append(
+                "  - SFN_EXAMINER_ID is required while faces are enabled (self-asserted\n"
+                "    examiner identity, stamped on adjudications and audit-log entries)."
+            )
+        if not problems:
+            return None
+        return "Face modality is enabled (SFN_FACES_ENABLED=true) but not usable:\n" + "\n".join(
+            problems
+        )
 
     def offline_model_error(self, *, need_dino: bool = False) -> str | None:
         """Return a user-facing error string if a model is not locally accessible, else None.
