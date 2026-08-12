@@ -74,3 +74,42 @@ evidential posture, not about implementation order.
 - Review-crop framing now `SFN_FACE_CROP_DILATION=0.25` (1.50× the detection box).
 
 Full measurement trail: `docs/fleet/runbook.md`, entries of 2026-08-12.
+
+---
+
+## RULING — 2026-08-12, the maintainer, on the blocking constraint above
+
+*"We show it without calibration. Just give us the data and then we can work with it later.
+no need for hiding this, the number is just showing what the tool generated."*
+
+**The blocking question above is answered and is not to be re-raised.** The per-face score
+**is displayed**, uncalibrated. §11 makes the pre-enablement legal judgement the operator's,
+and this is that judgement.
+
+What follows from it, for whoever plans this:
+
+1. The score is shown as a **raw model output**, labelled as having **no confidence interval
+   and no calibrated threshold** (§10.3's language, inverted: the record that would supply
+   them does not exist). SFace's 0.363 may appear as *the model authors' reference
+   threshold*, never as this deployment's.
+2. The "uncalibrated — not evidential" banner and the opt-in enablement gate **remain** —
+   they were never the disputed part. The ruling is about hiding versus showing the number,
+   not about dropping the surrounding honesty.
+3. `docs/specs/face-pipeline.md` §10 gates search on an active calibration record. The
+   deployment now diverges from that gate deliberately. **Record the divergence in §10
+   itself**; do not leave the code silently contradicting the spec. §10.4's precedence rule
+   still stands for the day a record exists: the record wins.
+4. Nothing about the search path changes. Review-only observations remain vectorless and
+   therefore unreachable by search — a structural guarantee, not a display choice.
+
+## Second request, same message — per-model explainer buttons
+
+*"Currently we have an 'Audit' and 'Dist Stats' button on query image. These are for DINOv2.
+We should name them with DINO: Dist Stats | Audit and then do the same for our new model,
+similar explaining and data stuff so it is forensically sound and explaining."*
+
+The existing pair does not say which model it explains — tolerable with one modality,
+ambiguous with two. Rename to name the model, then give the face model an equivalent pair:
+the same shape of explanation and underlying data, so a reviewer can ask "what did this
+model do, and on what distribution" of either modality. Independent of the ruling above:
+this surface reports what the pipeline *did*, not what a score *means*.
