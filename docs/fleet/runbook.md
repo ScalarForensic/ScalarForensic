@@ -346,3 +346,51 @@ Survey §4.1 (embedder) is **CLOSED** — SFace, adopted and verified. Six remai
 Escalated to `wallet-recovery-com-g1` via `~/.claude/cx/cto.md` inbox. Nothing proceeds on
 Phase 1b until the posture answer comes back; the six above are independently actionable
 and item 2 is the smallest first move if the maintainer wants motion meanwhile.
+
+### Maintainer questions, 2026-08-12 — the two gates, and why small crops look worse
+
+**Q1 "size below threshold — reduce it for further testing?"** The label they are reading is
+the **embedding** gate, not the review gate. Two different settings, and only one was
+lowered today:
+
+- `SFN_FACE_REVIEW_MIN_SIZE` — 48 → **36**, already done. It decides *retention*. All three
+  danny1 faces (40.1 / 46.9 / 40.8 px) now pass it; that is why they appear in the panel.
+- `SFN_FACE_MIN_SIZE` — still the **64** default (`config.py:184`). It decides *embedding*,
+  i.e. whether a face gets a vector and enters search. 40–47 px is below 64, so all three
+  are `review only — not comparable / size below threshold`.
+
+To make them comparable in testing, lower `SFN_FACE_MIN_SIZE` (to ~36–40), not the review
+floor. Two constraints, both verified in code, not remembered:
+`config.py:205` clamps `review_min_size` to ≤ `face_min_size`, so the embed floor can never
+sit below the review floor; and `min_size` is a hashed field of `PipelineConfig`
+(`provenance.py:25`, `_VERSION_INFO_FIELDS` excludes only the version fields), so changing
+it changes `config_hash` and reprocesses every medium — same trap as `crop_dilation`.
+
+**This is the gate with evidential consequence.** Lowering the review floor only adds human
+review; a review-only point is vectorless and cannot produce a machine match. Lowering the
+embed floor puts ~40 px faces *into search*. The one measurement pointing at it is the
+46.9 px face scoring 0.6097 vs SFace's 0.363 — and the other two danny1 faces score −0.0142
+and 0.1125 against the same probe, so the model is not indiscriminate at that size. One
+image, three faces, identity inferred from score: enough to justify a test run, not enough
+to set a production floor. Recommend lowering it in a **separate throwaway collection**
+(`SFN_FACE_COLLECTION`), leaving `faces_danny_validation` intact as the 480/0 evidence.
+
+**Q2 "the observation faces look worse quality than the faces in the real pictures — why?"**
+They carry fewer pixels, and nothing in the pipeline degrades them. RAN `PIL` over the chip
+store:
+
+| observation | review crop on disk |
+|---|---|
+| danny2 face 0 (147.8 px detection) | **222 × 315** |
+| danny1 faces (40–47 px detection) | **53 × 64** and **61 × 80** (0.15-era), **71 × 92** at 0.25 |
+
+A ~4× linear difference, straight from the source image. The chips are JPEG **quality 95**
+(`chips.py:27`), and `style.css:2254` deliberately refuses to upscale a review-only chip
+(`width:auto; max-width:72px; object-fit:contain; image-rendering:pixelated`) — the comment
+above it says why: upscaling would make the spec's "native resolution" claim false. So the
+panel is showing the truth. Opening a 61×80 crop full-screen in a new tab is the browser
+upscaling it; that softness is the browser's, not the store's. Embedded chips take
+`object-fit:cover` into a fixed 72×72, so they are *down*-scaled — which is the other half
+of why the two populations look different side by side.
+
+Nothing changed in this window; both answers are read-only findings.
