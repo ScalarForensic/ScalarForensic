@@ -12,3 +12,28 @@ def test_faces_part_registers_via_sfn_parts_not_object_assign():
     js = (STATIC / "js" / "faces.js").read_text()
     assert "__sfnParts" in js
     assert "Object.assign" not in js  # would evaluate getters instead of copying
+
+
+def test_face_grid_uses_the_review_hash_domain():
+    # chip_hash no longer exists in the payload, and the aligned hash names no
+    # review artefact: binding either one renders a broken image for every face.
+    html = (STATIC / "index.html").read_text()
+    assert "face.chip_hash" not in html
+    assert "faceThumbUrl(face.review_chip_hash)" in html
+    assert "faceReviewUrl(face.review_chip_hash)" in html
+
+
+def test_face_grid_labels_review_only_observations():
+    html = (STATIC / "index.html").read_text()
+    assert "face-chip-review-only" in html
+    assert "faceStatusLabel(face)" in html
+
+
+def test_review_only_chips_are_not_upscaled_or_cropped():
+    # The blanket .face-chip img rule upscales and centre-crops; on a 40 px
+    # crop that fabricates display pixels and hides part of the evidence,
+    # contradicting the spec's native-resolution claim.
+    css = (STATIC / "style.css").read_text()
+    block = css[css.index(".face-chip-review-only img") :].split("}")[0]
+    assert "object-fit: contain" in block
+    assert "max-width: 72px" in block and "width: auto" in block

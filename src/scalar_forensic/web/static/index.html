@@ -937,13 +937,19 @@
               </div>
               <div class="faces-grid" x-show="facesForHit.length">
                 <template x-for="face in facesForHit" :key="face.id">
-                  <a class="face-chip" :href="faceReviewUrl(face.chip_hash)" target="_blank" rel="noopener"
+                  <a class="face-chip" :class="{ 'face-chip-review-only': faceIsReviewOnly(face) }"
+                     :href="faceReviewUrl(face.review_chip_hash)" target="_blank" rel="noopener"
                      :title="`observation ${face.observation_key}`">
-                    <img :src="faceThumbUrl(face.chip_hash)" alt="face observation" loading="lazy">
+                    <img :src="faceThumbUrl(face.review_chip_hash)" alt="face observation" loading="lazy">
                     <span class="face-chip-meta">
                       <span x-text="`conf ${(face.det_conf ?? 0).toFixed(2)}`"></span>
                       <span x-text="`q ${faceQualityLabel(face)}`"></span>
                     </span>
+                    <!-- Not a tooltip: a reviewer must never mistake a review-only
+                         observation for one the machine actually compared. -->
+                    <span class="face-chip-status" x-text="faceStatusLabel(face)"></span>
+                    <span class="face-chip-why" x-show="faceExclusionLabel(face)"
+                          x-text="faceExclusionLabel(face)"></span>
                   </a>
                 </template>
               </div>
@@ -982,7 +988,7 @@
                     </template>
                     <p class="faces-explain-totals"
                        x-show="faceExplain.file_totals?.n_detected != null"
-                       x-text="`this file: ${faceExplain.file_totals.n_detected} detections, ${faceExplain.file_totals.n_kept} kept`"></p>
+                       x-text="`this file: ${faceExplain.file_totals.n_detected} detections, ${faceExplain.file_totals.n_kept} comparable, ${faceExplain.file_totals.n_review_only ?? 0} retained for review`"></p>
                     <p class="faces-caveat" x-text="faceExplain.caveat"></p>
                   </div>
                 </template>

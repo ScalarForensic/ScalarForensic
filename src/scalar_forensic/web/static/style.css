@@ -2246,6 +2246,45 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   height: 72px;
   object-fit: cover;
 }
+/* Review-only chips are the small crops this modality exists to preserve.
+   Never upscale and never centre-crop them: the examiner must see the whole
+   crop at its true resolution, or the spec's "native resolution" claim is
+   false.  image-rendering: pixelated keeps the browser from inventing
+   intermediate pixels if the box does bound a larger crop. */
+.face-chip-review-only img {
+  width: auto;
+  height: auto;
+  max-width: 72px;
+  max-height: 72px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  margin: 0 auto;
+}
+.face-chip-review-only {
+  border-style: dashed;
+  border-color: var(--muted);
+}
+.face-chip-status {
+  display: block;
+  padding: 0 3px 2px;
+  font-size: 8px;
+  font-family: var(--display);
+  color: var(--text2);
+  text-align: center;
+}
+.face-chip-review-only .face-chip-status {
+  color: var(--accent);
+  font-weight: 600;
+}
+.face-chip-why {
+  display: block;
+  padding: 0 3px 3px;
+  font-size: 8px;
+  font-family: var(--display);
+  color: var(--muted);
+  text-align: center;
+  font-style: italic;
+}
 .face-chip-meta {
   display: flex;
   justify-content: space-between;
