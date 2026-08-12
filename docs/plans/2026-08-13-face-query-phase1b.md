@@ -95,21 +95,36 @@ ship the code without that edit.
   filter pills read `ALTERED` / `SEMANTIC` (`index.html:1179-1195`). Follow the local convention
   in each place: badge `FACES` (5 chars fits the existing slot), pill `FACES`.
 
-### Stage 0 — operational prerequisite (no code, not a shippable stage)
+### Stage 0 — operational prerequisite (no code, not a shippable stage) — **DONE 2026-08-12**
 
 `ALTERED` cannot be exercised against `danny_validation`: it was indexed `--dino` only, so the
 collection has no `sscd` vector and `get_available_modes` will not offer `altered`
 (`web/pipeline/modes.py:176-177`). Face search does not depend on this; only the four-mode UI
-demo does. Before the maintainer's acceptance pass, re-index with both:
+demo does.
+
+Two things the plan had wrong, corrected here after execution:
+
+- **The source directory is `analysis_test/`, not `data/images/danny_validation`** (which does
+  not exist). Verified from the `image_path` payload of all 12 points.
+- **The collection had to be dropped and rebuilt, not extended.** `indexer.py:96-104` claims
+  Qdrant can add a named vector to an existing collection; it cannot — `update_collection`
+  takes `VectorParamsDiff`, which has no `size`, so the call fails with
+  `1 validation error for UpdateCollection / vectors.sscd`. Adding a modality to an existing
+  collection always means a rebuild. `create_collection` registers both vectors in one call,
+  so a fresh run with both flags is the fix.
+
+What was actually run (maintainer-authorised drop; the 12 points were backed up first and every
+source image was still on disk, so the rebuild was reversible):
 
 ```bash
-./run.sh sfn data/images/danny_validation --dino --sscd
+curl -X DELETE http://172.20.0.2:6333/collections/danny_validation
+SFN_QDRANT_URL=http://172.20.0.2:6333 SFN_COLLECTION=danny_validation \
+  ./run.sh sfn analysis_test --dino --sscd
 ```
 
-This is an index-time change to the case collection only; it does not touch
-`faces_danny_validation`. If it is not run, Stage 4's mode filter must be demonstrated with
-EXACT / SEMANTIC / FACES and the ALTERED pill will be absent, which is correct behaviour, not a
-defect.
+Result: 12 points, `dino` 1024-d on 12 and `sscd` 512-d on 12; `get_available_modes` now returns
+`['exact', 'altered', 'semantic']`. `faces_danny_validation` was untouched (18 points before and
+after) — this is an index-time change to the case collection only.
 
 ---
 
