@@ -83,6 +83,32 @@ async def faces_availability() -> JSONResponse:
     return JSONResponse(body)
 
 
+def _normalized(face: dict) -> dict:
+    """Guarantee the split fields on every entry the API hands out.
+
+    Observations written before the split carry neither field.  They were all
+    embedded — that was the only outcome that got stored — so defaulting to
+    "embedded" states what actually happened rather than inventing a status.
+    """
+    return {
+        **face,
+        "embedding_status": face.get("embedding_status") or "embedded",
+        "embedding_exclusion_reason": face.get("embedding_exclusion_reason"),
+    }
+
+
+def _browse_order(face: dict) -> tuple[int, float]:
+    """Embedded observations first, each group by its own score, descending.
+
+    The two populations cannot share a sort key: review-only faces have no
+    composite quality (it is None, because most of its subscores were never
+    measured), so they are ordered by detector confidence among themselves.
+    """
+    embedded = face["embedding_status"] == "embedded"
+    score = face.get("quality") if embedded else face.get("det_conf")
+    return (0 if embedded else 1, -(score if score is not None else 0.0))
+
+
 @router.get("/api/faces/by-image/{image_hash}")
 async def faces_by_image(image_hash: str) -> JSONResponse:
     _require_hash(image_hash)
@@ -92,7 +118,7 @@ async def faces_by_image(image_hash: str) -> JSONResponse:
     except Exception as exc:
         _log.warning("face lookup failed for %s: %s", image_hash, exc)
         raise HTTPException(status_code=503, detail=f"Face collection unreachable: {exc}") from exc
-    return JSONResponse({"faces": faces})
+    return JSONResponse({"faces": sorted((_normalized(f) for f in faces), key=_browse_order)})
 
 
 @router.get("/api/faces/explain/{point_id}")
@@ -124,7 +150,33 @@ async def face_explain(point_id: str) -> JSONResponse:
         except Exception:  # the totals are contextual, not load-bearing
             marker = None
 
-    chip = face.get("chip_hash")
+    face = _normalized(face)
+    status = face["embedding_status"]
+    excluded_at = face["embedding_exclusion_reason"]
+    # Which gate the exclusion reason belongs to.  Everything from that gate
+    # onwards did not happen: alignment and the post-align checks are skipped
+    # for a face the pre-align gate excluded, so reporting them as "passed"
+    # would claim measurements the record does not contain.
+    _STEP_FOR_REASON = {
+        "confidence": "pre_align_gate",
+        "size": "pre_align_gate",
+        "pose": "pre_align_gate",
+        "sharpness": "post_align_gate",
+        "exposure": "post_align_gate",
+    }
+    _ORDER = ["detection", "pre_align_gate", "alignment", "post_align_gate", "embedding"]
+    failing_step = _STEP_FOR_REASON.get(excluded_at) if status == "review_only" else None
+    _from = _ORDER.index(failing_step) if failing_step else len(_ORDER)
+
+    def _passed(step_name: str) -> bool:
+        if step_name == "embedding":
+            # Never inferred from the reason: a review-only observation has no
+            # vector whether or not its exclusion reason was recorded.
+            return status == "embedded"
+        return _ORDER.index(step_name) < _from
+
+    aligned_chip = face.get("aligned_chip_hash")
+    review_chip = face.get("review_chip_hash")
     steps = [
         {
             "step": "detection",
@@ -138,7 +190,7 @@ async def face_explain(point_id: str) -> JSONResponse:
                 "detector_score_threshold": face.get("detector_score_threshold"),
                 "detect_max_size": face.get("detect_max_size"),
             },
-            "passed": True,
+            "passed": _passed("detection"),
         },
         {
             "step": "pre_align_gate",
@@ -156,7 +208,7 @@ async def face_explain(point_id: str) -> JSONResponse:
                 "min_size": face.get("min_size"),
                 "max_pose": face.get("max_pose"),
             },
-            "passed": True,
+            "passed": _passed("pre_align_gate"),
         },
         {
             "step": "alignment",
@@ -166,7 +218,7 @@ async def face_explain(point_id: str) -> JSONResponse:
             ),
             "scores": {},
             "thresholds_in_force": {"alignment_version": face.get("alignment_version")},
-            "passed": True,
+            "passed": _passed("alignment"),
         },
         {
             "step": "post_align_gate",
@@ -182,7 +234,7 @@ async def face_explain(point_id: str) -> JSONResponse:
                 "min_sharpness": face.get("min_sharpness"),
                 "max_clipped": face.get("max_clipped"),
             },
-            "passed": True,
+            "passed": _passed("post_align_gate"),
         },
         {
             "step": "embedding",
@@ -192,7 +244,22 @@ async def face_explain(point_id: str) -> JSONResponse:
             ),
             "scores": {"embedding_norm": face.get("embedding_norm")},
             "thresholds_in_force": {"normalization_id": face.get("normalization_id")},
-            "passed": True,
+            "passed": _passed("embedding"),
+        }
+        if status == "embedded"
+        else {
+            "step": "embedding",
+            "sentence": (
+                f"This face was NOT embedded, because its {excluded_at} check did not meet "
+                "the threshold in force when the file was processed. It is kept for "
+                "examination by eye and is never compared with other faces."
+                if excluded_at
+                else "This face was NOT embedded. It is kept for examination by eye and is "
+                "never compared with other faces."
+            ),
+            "scores": {},
+            "thresholds_in_force": {},
+            "passed": False,
         },
     ]
 
@@ -223,14 +290,23 @@ async def face_explain(point_id: str) -> JSONResponse:
                 "normalization_id": face.get("normalization_id"),
                 "pipeline_config_hash": face.get("pipeline_config_hash"),
             },
+            # Gated on the hash of its own domain: the aligned PNG is addressed
+            # in the aligned domain, every review artefact in the review domain.
+            # A review-only observation has no aligned hash, and emitting a URL
+            # that is a guaranteed 404 would read as a lost file rather than as
+            # a chip that was never produced.
             "chips": {
-                "aligned": f"/api/faces/chip/{chip}" if chip else None,
-                "review": f"/api/faces/chip/{chip}/review" if chip else None,
-                "thumb": f"/api/faces/chip/{chip}/thumb" if chip else None,
+                "aligned": f"/api/faces/chip/{aligned_chip}" if aligned_chip else None,
+                "review": f"/api/faces/chip/{review_chip}/review" if review_chip else None,
+                "thumb": f"/api/faces/chip/{review_chip}/thumb" if review_chip else None,
             },
+            "embedding_status": status,
+            "embedding_exclusion_reason": excluded_at,
             "file_totals": {
                 "n_detected": (marker or {}).get("n_detected"),
                 "n_kept": (marker or {}).get("n_kept"),
+                "n_review_only": (marker or {}).get("n_review_only"),
+                "review_only_reasons": (marker or {}).get("review_only_reasons") or {},
                 "n_rejected": (marker or {}).get("n_rejected") or {},
             },
             "caveat": (
@@ -254,7 +330,16 @@ async def face_chip(chip_hash: str) -> FileResponse:
     """The aligned 112x112 PNG — the exact tensor the embedder saw."""
     path = _chip_file(chip_hash, 0)
     if not path.exists():
-        raise HTTPException(status_code=404, detail="Chip not found")
+        # The endpoint is given a hash, not an observation, so it cannot tell
+        # which case applies — it names both rather than asserting either.
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No aligned chip for this hash. Either the observation is review-only "
+                "and was never aligned or embedded, or the chip file is missing from "
+                "the store."
+            ),
+        )
     return FileResponse(path, media_type="image/png")
 
 

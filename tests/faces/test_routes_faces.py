@@ -61,7 +61,9 @@ def test_availability_notes_degraded_evidence_without_store_dir(tmp_path):
 def test_by_image_returns_store_payloads(tmp_path):
     store = MagicMock()
     store.collection_is_new.return_value = False
-    store.list_faces.return_value = [{"id": "p1", "chip_hash": "c" * 64, "quality": 0.8}]
+    store.list_faces.return_value = [
+        {"id": "p1", "aligned_chip_hash": "c" * 64, "quality": 0.8, "embedding_status": "embedded"}
+    ]
     with (
         patch("scalar_forensic.web.routes.faces.Settings", return_value=_settings(tmp_path)),
         patch("scalar_forensic.web.routes.faces.FaceStore", return_value=store),
@@ -69,7 +71,7 @@ def test_by_image_returns_store_payloads(tmp_path):
     ):
         resp = client.get(f"/api/faces/by-image/{'a' * 64}")
     assert resp.status_code == 200
-    assert resp.json()["faces"][0]["chip_hash"] == "c" * 64
+    assert resp.json()["faces"][0]["aligned_chip_hash"] == "c" * 64
 
 
 def test_by_image_rejects_non_hash_path_component(tmp_path):
@@ -154,7 +156,10 @@ def _stored_face():
         "quality_exposure": 0.01,
         "quality": 0.86,
         "embedding_norm": 21.7,
-        "chip_hash": "c" * 64,
+        "aligned_chip_hash": "c" * 64,
+        "review_chip_hash": "9" * 64,
+        "embedding_status": "embedded",
+        "embedding_exclusion_reason": None,
         "indexed_at": "2026-08-12T06:00:00+00:00",
         # provenance as recorded at index time
         "detector_id": "yunet",
@@ -228,6 +233,165 @@ def test_explain_404_on_unknown_point(tmp_path):
     ):
         resp = client.get("/api/faces/explain/11111111-1111-1111-1111-111111111111")
     assert resp.status_code == 404
+
+
+def _review_only_face(**over):
+    face = _stored_face()
+    face.update(
+        {
+            "quality_pose": None,
+            "quality_sharpness": None,
+            "quality_exposure": None,
+            "quality": None,
+            "embedding_norm": None,
+            "aligned_chip_hash": None,
+            "review_chip_hash": "9" * 64,
+            "embedding_status": "review_only",
+            "embedding_exclusion_reason": "size",
+            "quality_size": 40.0,
+        }
+    )
+    face.update(over)
+    return face
+
+
+def _explain(tmp_path, face, marker=None):
+    store = MagicMock()
+    store.get_face.return_value = face
+    store.get_marker.return_value = marker
+    with (
+        patch("scalar_forensic.web.routes.faces.Settings", return_value=_settings(tmp_path)),
+        patch("scalar_forensic.web.routes.faces.FaceStore", return_value=store),
+        patch("scalar_forensic.web.routes.faces.QdrantClient", MagicMock()),
+    ):
+        return client.get("/api/faces/explain/11111111-1111-1111-1111-111111111111").json()
+
+
+def test_explain_marks_embedding_step_not_performed(tmp_path):
+    body = _explain(tmp_path, _review_only_face())
+    steps = {s["step"]: s for s in body["steps"]}
+    assert steps["embedding"]["passed"] is False
+    assert "size" in steps["embedding"]["sentence"]
+    assert "never compared" in steps["embedding"]["sentence"]
+    assert body["embedding_status"] == "review_only"
+    assert body["embedding_exclusion_reason"] == "size"
+
+
+def test_explain_marks_the_gate_that_failed_not_every_step(tmp_path):
+    # A size exclusion fails the pre-align gate.  Detection succeeded — saying
+    # otherwise would misdescribe the record; alignment never ran.
+    body = _explain(tmp_path, _review_only_face())
+    steps = {s["step"]: s for s in body["steps"]}
+    assert steps["detection"]["passed"] is True
+    assert steps["pre_align_gate"]["passed"] is False
+    assert steps["alignment"]["passed"] is False
+    assert steps["post_align_gate"]["passed"] is False
+
+
+def test_explain_marks_post_align_exclusion_at_the_right_gate(tmp_path):
+    # Sharpness is measured after alignment, so both earlier steps did pass.
+    body = _explain(tmp_path, _review_only_face(embedding_exclusion_reason="sharpness"))
+    steps = {s["step"]: s for s in body["steps"]}
+    assert steps["pre_align_gate"]["passed"] is True
+    assert steps["alignment"]["passed"] is True
+    assert steps["post_align_gate"]["passed"] is False
+    assert steps["embedding"]["passed"] is False
+
+
+def test_explain_omits_aligned_chip_url_for_review_only(tmp_path):
+    # Emitting a URL that is a guaranteed 404 would read as a missing file
+    # rather than a chip that was never produced.
+    body = _explain(tmp_path, _review_only_face())
+    assert body["chips"]["aligned"] is None
+    assert body["chips"]["review"].endswith("9" * 64 + "/review")
+    assert body["chips"]["thumb"].endswith("9" * 64 + "/thumb")
+
+
+def test_explain_still_marks_embedded_faces_passed(tmp_path):
+    body = _explain(tmp_path, _stored_face())
+    assert all(s["passed"] for s in body["steps"])
+    assert body["chips"]["aligned"].endswith("c" * 64)
+    assert body["chips"]["review"].endswith("9" * 64 + "/review")
+    assert body["embedding_status"] == "embedded"
+
+
+def test_explain_file_totals_include_review_only(tmp_path):
+    body = _explain(
+        tmp_path,
+        _stored_face(),
+        marker={
+            "n_detected": 14,
+            "n_kept": 3,
+            "n_rejected": {"size": 6},
+            "n_review_only": 5,
+            "review_only_reasons": {"size": 5},
+        },
+    )
+    assert body["file_totals"]["n_review_only"] == 5
+    assert body["file_totals"]["review_only_reasons"] == {"size": 5}
+
+
+def test_aligned_chip_404_names_the_review_only_possibility(tmp_path):
+    # The endpoint sees only a hash, so it cannot assert *which* cause applies;
+    # it must name both rather than report a bare "not found".
+    with patch("scalar_forensic.web.routes.faces.Settings", return_value=_settings(tmp_path)):
+        resp = client.get(f"/api/faces/chip/{'b' * 64}")
+    assert resp.status_code == 404
+    assert "review-only" in resp.json()["detail"].lower()
+
+
+def test_by_image_orders_embedded_before_review_only(tmp_path):
+    store = MagicMock()
+    # Deliberately worst-case input: the review-only face comes first from the
+    # store and has the higher raw confidence, so only a status-aware sort
+    # produces ["a", "b"].
+    store.list_faces.return_value = [
+        {"point_id": "b", "embedding_status": "review_only", "det_conf": 0.99},
+        {"point_id": "a", "embedding_status": "embedded", "quality": 0.4},
+    ]
+    with (
+        patch("scalar_forensic.web.routes.faces.Settings", return_value=_settings(tmp_path)),
+        patch("scalar_forensic.web.routes.faces.FaceStore", return_value=store),
+        patch("scalar_forensic.web.routes.faces.QdrantClient", MagicMock()),
+    ):
+        body = client.get(f"/api/faces/by-image/{'a' * 64}").json()
+    assert [f["point_id"] for f in body["faces"]] == ["a", "b"]
+    assert all("embedding_status" in f for f in body["faces"])
+    assert all("embedding_exclusion_reason" in f for f in body["faces"])
+
+
+def test_by_image_orders_each_group_by_its_own_score(tmp_path):
+    # Review-only faces have quality None — sorting the whole list on quality
+    # would put them in an arbitrary order relative to each other.
+    store = MagicMock()
+    store.list_faces.return_value = [
+        {"point_id": "r_low", "embedding_status": "review_only", "det_conf": 0.61},
+        {"point_id": "e_low", "embedding_status": "embedded", "quality": 0.30},
+        {"point_id": "r_high", "embedding_status": "review_only", "det_conf": 0.78},
+        {"point_id": "e_high", "embedding_status": "embedded", "quality": 0.91},
+    ]
+    with (
+        patch("scalar_forensic.web.routes.faces.Settings", return_value=_settings(tmp_path)),
+        patch("scalar_forensic.web.routes.faces.FaceStore", return_value=store),
+        patch("scalar_forensic.web.routes.faces.QdrantClient", MagicMock()),
+    ):
+        body = client.get(f"/api/faces/by-image/{'a' * 64}").json()
+    assert [f["point_id"] for f in body["faces"]] == ["e_high", "e_low", "r_high", "r_low"]
+
+
+def test_by_image_defaults_status_for_pre_split_payloads(tmp_path):
+    # Points written before the split carry neither field; the UI must still be
+    # able to read every entry the same way.
+    store = MagicMock()
+    store.list_faces.return_value = [{"point_id": "old", "quality": 0.7}]
+    with (
+        patch("scalar_forensic.web.routes.faces.Settings", return_value=_settings(tmp_path)),
+        patch("scalar_forensic.web.routes.faces.FaceStore", return_value=store),
+        patch("scalar_forensic.web.routes.faces.QdrantClient", MagicMock()),
+    ):
+        face = client.get(f"/api/faces/by-image/{'a' * 64}").json()["faces"][0]
+    assert face["embedding_status"] == "embedded"
+    assert face["embedding_exclusion_reason"] is None
 
 
 def test_explain_validates_point_id_before_store_access(tmp_path):
