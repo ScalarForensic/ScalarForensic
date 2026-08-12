@@ -331,6 +331,14 @@ class FaceStore:
         existing points in place.  An upsert with no vector must not be
         trusted to clear a previously stored one: a review-only point that
         kept its vector would still be returned by similarity search.
+
+        Precondition: every id must already exist in the collection.  qdrant
+        returns 404 for an unknown id rather than treating it as a no-op
+        (verified live in tests/faces/test_store_integration.py), and the
+        error is deliberately not swallowed — a silently ignored clear could
+        leave a review-only observation searchable.  The CLI satisfies this by
+        upserting the points immediately before, with the client's default
+        wait=True.
         """
         if not point_ids:
             return
