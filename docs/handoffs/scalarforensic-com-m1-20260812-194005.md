@@ -85,6 +85,9 @@ evidential" banner. That is an evidential-posture decision, theirs alone.
 - **Open escalations:** five decisions in survey §4, plus three added since — make 0.25 the
   `SFN_FACE_CROP_DILATION` default? what production review floor? and the Phase 1b
   posture question in §3 above, which ranks first. All are recorded in
-  `~/.claude/cx/cto.md`'s inbox for `wallet-recovery-com-g1`, which still has no
-  `docs/CTO_LEDGER.md` for this project and should write one from the survey.
+  `~/.claude/cx/cto.md`'s inbox for `wallet-recovery-com-g1`.
+  **CORRECTION (appended 2026-08-12, m2 flagged it and is right):** this section originally
+  said the project had no `docs/CTO_LEDGER.md` and that the CTO should write one. It exists —
+  seeded from the survey at `f2de36c`. That was true when the survey ran and stale by the
+  time I wrote this handoff. Read the ledger, not this sentence's original claim.
 - **Full measurement trail:** `docs/fleet/runbook.md`, all entries dated 2026-08-12.
