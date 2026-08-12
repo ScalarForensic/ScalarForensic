@@ -705,3 +705,46 @@ are **not** what gets dropped.
 S0 gates only ALTERED. Face search does not depend on it, so c2 proceeded to S1/S2 correctly.
 Follow-up queued, not yet assigned: make `indexer.py` fail with the drop-and-re-index
 instruction instead of a Pydantic validation error, and delete the false comment.
+
+### S1 + S2 LANDED — cross-file face search exists
+
+`783516a` (S1, session-scoped query-image face detection) and `dfc5342` (S2, cross-file face
+search), plan checkboxes ticked in `a4b4851`. c2 stopped before S3 as briefed.
+
+**Bar re-measured by me at `a4b4851`, not relayed:** `uv run pytest -q` → **506 passed,
+5 skipped** (bar was 478/5 — 28 new tests). ruff check + format rc=0. porcelain 0.
+
+**The plan's named riskiest unknown is dead:** first `POST /api/faces/query-faces` on
+danny1.jpeg = **84 ms cold** (YuNet + SFace both unloaded, torch/CUDA already up as in the
+web process), warm median 18 ms, danny2.jpeg 26 ms. ORT pinned to 1 intra-op thread against
+torch's 12, no contention. Nothing to design around — the stage that was gated on this is
+free.
+
+**The exclusion guarantee holds live, through the new search path** — this is the test that
+matters and it was run against real YuNet + SFace: danny2's embedded face returns itself
+1.0000 and `orig_04` 0.1042 in 31 ms, while the 46.9 px review-only observation that scores
+**0.6097** against that exact probe does not appear. Searching a review-only query face
+returns 400 *"face 0 is review-only and has no vector; it cannot be searched"*. Structural,
+no payload filter anywhere.
+
+**Four plan-vs-reality corrections c2 made and recorded in its commit bodies** — the plan's
+draft code was wrong and the worker was right to deviate: `post_align_gate` takes
+`max_clipped_frac`; `PipelineConfig.from_settings` does not exist; `config_hash` is a
+property; `_parse_int` has no `min_value`. Two deviations of substance: (a) sharpness and
+exposure are measured on the **undilated** bbox crop to match `indexing.py`, so the same face
+does not gate differently by index than by upload — the plan measured the dilated review
+crop; (b) truncation counts **retained** faces, not raw detections, so a crowd of rejected
+detections cannot eat the cap and leave zero probes.
+
+**Two things for the maintainer, both real:**
+- **danny1.jpeg yields zero searchable probes** at the shipped embed floor (`min_size` 64;
+  its faces are ~47 px). The S3+ acceptance pass must use **danny2.jpeg** as the query image
+  or the feature will look broken when it is not. This is the same open decision as the
+  production `SFN_FACE_MIN_SIZE`, arriving through a second door.
+- c2's live verification appended one genuine `query` event to the operational
+  `data/faces/face_audit.log` with `probe_hash` = 64 zeros (harness placeholder, not a real
+  medium). **It was not deleted** — the log is append-only evidence and quietly editing it
+  would be worse than the stray row. Flagged so nobody reads it as a real case query.
+
+S0 still blocked on the maintainer's drop-and-recreate; c2 did not retry it and did not ask
+another session to.
