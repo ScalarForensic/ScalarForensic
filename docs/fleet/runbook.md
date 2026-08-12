@@ -131,3 +131,53 @@ independently confirmed, and this is one image with three faces.
 
 **NOT done:** no Qdrant run, no collection, no audit record, no UI check. Those need Qdrant
 started and the maintainer at the activation prompt.
+
+### Validation run EXECUTED — 2026-08-12, SFace + `analysis_test`
+
+First end-to-end run of the face pipeline. Qdrant was already up (container
+`scalarforensic-qdrant-1`, qdrant/qdrant:v1.17.1) but publishes no host port; reached
+directly on the container IP via `SFN_QDRANT_URL=http://172.20.0.2:6333`, so **no
+`docker-compose.override.yml` was created** and nothing was written into the working tree.
+
+Config: examiner `m4v1`, `SFN_FACE_REVIEW_MIN_SIZE=36` (lowered from 48 on the maintainer's
+authorisation, after the 48 px floor was measured to reject all three danny1 faces),
+embed floor unchanged at 64/0.8, collection `faces_danny_validation`, store
+`data/faces/danny_validation`.
+
+**CLI summary:** `6 detected │ 2 comparable │ 3 retained for review (3 size) │ 1 rejected:
+1 confidence`. Reconciles: 6 = 2 + 3 + 1.
+
+**Audit record** (`data/faces/face_audit.log`): `enablement` written once with examiner id
+and the authorization reference; one `index_run` with `n_detected=6, n_kept=2,
+n_review_only=3, rejected{confidence:1}, review_only_reasons{size:3},
+n_dropped_noncanonical=0, n_stale_detected=0`. Reconciles against the CLI summary.
+
+**Qdrant census** (18 points): 1 meta + 12 markers + 5 faces = **2 face points WITH a
+vector, 3 vectorless**. The vectorless three are exactly the review-only observations.
+
+**On disk:** 2 aligned PNGs (one per embedded face) and 10 JPEGs (review crop + thumbnail
+for each of the 5 retained faces). Counts match the point census exactly.
+
+**Payload spot-check** on a review-only point: `embedding_exclusion_reason="size"`,
+`quality_size=46.89`, `aligned_chip_hash=null`, `embedding_norm=null`, full provenance
+present (`embedder_model_hash`, `manifest_hash`, `normalization_id="affine-0.0-1.0"`,
+`review_min_size=36`). (The field is `embedding_exclusion_reason`, not
+`exclusion_reason` — an earlier guess at the name was wrong; there is no defect.)
+
+**Exclusion guarantee demonstrated live.** Querying the collection with danny2's own
+embedded vector returns **2 points, both `embedded`** (self at 1.0000, `orig_04` at
+0.1042). Zero review-only points appear, while all 3 remain retrievable by id. The
+strength of this test: the 46.9 px review-only face scores **0.6097** against that exact
+probe — far above SFace's 0.363 same-person threshold — so it is a face that would
+certainly have matched had it been searchable. It is retained and invisible to search,
+which is the design guarantee.
+
+**Test suite with a live server:** `SFN_TEST_QDRANT_URL=http://172.20.0.2:6333 uv run
+pytest -q` → **480 passed, 0 skipped**. This morning's bar (475 passed / 5 skipped) was
+skip-limited only by the absent server.
+
+**Still outstanding:** Task 10 Step 4, the visual UI check — review crops legible at
+native resolution, the two populations distinguishable, explainer naming the failing
+check. Needs a human looking at `./run.sh sfn-web`. The production review floor is still
+an open judgement; the measured input is that 48 px discards an identifiable face (46.9 px
+→ 0.6097) and 36 px retains all three.
