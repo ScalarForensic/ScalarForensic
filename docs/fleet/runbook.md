@@ -38,3 +38,34 @@ RAN `sed -n '20,45p' src/scalar_forensic/faces/embed.py`: nine required manifest
 embedding_dim`); `input_size` **must be 112** (`embed.py:67` raises otherwise —
 arcface-112-v1 is the pinned alignment template) and `embedding_dim` is checked against
 the model's real output shape (`embed.py:101`). Decisions 2–5 remain open.
+
+### Embedder licensing research — 2026-08-12, findings
+
+RAN web research at the maintainer's request. Material enough to change decision 1.
+
+- **InsightFace `w600k_r50` (buffalo_l): non-commercial research only.** Verbatim from the
+  project README: *"The pretrained models we provided with this library are available for
+  non-commercial research purposes only."* The MIT license commonly cited covers the
+  **code**, not the weights.
+- **ArcFace ResNet100 (ONNX Model Zoo): Apache 2.0 label, questionable provenance.**
+  OpenVINO's model docs and the HF card both say Apache 2.0 (65.1M params, 24.2 GFLOPs,
+  BGR, 112×112, 512-d, LFW 99.68%). But the weights originate at deepinsight/insightface,
+  whose weights are research-only — the label may be the rehosting repo's license rather
+  than a valid grant. **I reported this as clean earlier in the day; that was wrong.**
+- **SFace (`face_recognition_sface_2021dec.onnx`, OpenCV Zoo): Apache 2.0, per-model
+  LICENSE file in the model's own directory.** MobileFaceNet + SFace loss, 112×112,
+  128-d output, quoted accuracy 0.9940. Same zoo as the YuNet detector already in
+  `models/`, and the recognizer OpenCV pairs YuNet with. Training data not stated —
+  `INSTALL.md:239`'s provenance caveat still applies. Ruled out: Intel
+  `face-reidentification-retail-0095` (128×128) and FaceNet (160×160), both refused by
+  `embed.py:67`'s hard 112 requirement.
+
+`INSTALL.md:227-229` ("no permissively-licensed model **of comparable quality**") is NOT
+contradicted by the SFace finding — SFace is permissive but mobile-grade, ~1M params
+against ResNet100's 65M. Doc left unchanged.
+
+**Note on the "include both, switch by config" proposal:** already supported, zero code —
+`SFN_FACE_EMBEDDER_MODEL` is a path and `embedder_model_hash` is a hard field
+(`store.py:35-41`), so each model needs its own `SFN_FACE_COLLECTION` and mixing raises.
+Bundling weights in-repo was declined: GPL-3.0 repo, and `INSTALL.md:236-238` deliberately
+refuses a works-out-of-the-box recognition path.
