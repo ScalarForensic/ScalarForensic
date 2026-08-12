@@ -447,6 +447,8 @@ def index(
         if _face_err:
             typer.echo(f"[ERROR] {_face_err}", err=True)
             raise typer.Exit(1)
+        for _note in settings.face_threshold_notes():
+            typer.secho(f"note: {_note}", fg=typer.colors.YELLOW)
         from scalar_forensic.faces.indexing import FacePipeline  # deferred: optional deps
 
         face_pipeline = FacePipeline.from_settings(settings)
@@ -1716,6 +1718,8 @@ def purge(
     if err:
         typer.echo(f"[ERROR] {err}", err=True)
         raise typer.Exit(1)
+    for _note in settings.face_threshold_notes():
+        typer.secho(f"note: {_note}", fg=typer.colors.YELLOW)
 
     from qdrant_client import QdrantClient
 

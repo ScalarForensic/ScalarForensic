@@ -9,6 +9,11 @@ _VALID_DEDUP_MODES = frozenset({"hash", "filepath", "both"})
 
 _DEFAULT_HASH_CACHE_PATH = "data/hash_cache.db"
 
+# Mirrors YuNetDetector's default score_threshold (faces/detect.py); faces
+# below it never reach any gate.  Duplicated rather than imported: config.py
+# must not import cv2 transitively.
+_DETECTOR_SCORE_FLOOR = 0.5
+
 # Environment variable name for the allow-online flag.  Both the CLI and the
 # web entry-point write this variable before constructing Settings() so that
 # every per-request Settings() instance created by FastAPI handlers also sees
@@ -179,6 +184,38 @@ class Settings:
         self.face_min_size: int = self._parse_int("SFN_FACE_MIN_SIZE", 64)
         if self.face_min_size < 1:
             raise ValueError("SFN_FACE_MIN_SIZE must be >= 1")
+        # Review path (spec: 2026-08-12 gate-split design).  Admits faces for
+        # hand examination only — never for embedding.  Clamped, never raising:
+        # this block parses even when faces are disabled and Settings() is
+        # built per request, so a default must not invalidate an explicit value.
+        self._face_threshold_notes: list[str] = []
+        review_conf = self._parse_float("SFN_FACE_REVIEW_MIN_CONF", 0.6)
+        if not 0 < review_conf <= 1:
+            raise ValueError("SFN_FACE_REVIEW_MIN_CONF must be in (0, 1]")
+        review_size = self._parse_int("SFN_FACE_REVIEW_MIN_SIZE", 48)
+        if review_size < 1:
+            raise ValueError("SFN_FACE_REVIEW_MIN_SIZE must be >= 1")
+        if review_conf > self.face_min_conf:
+            self._face_threshold_notes.append(
+                f"SFN_FACE_REVIEW_MIN_CONF ({review_conf}) exceeds SFN_FACE_MIN_CONF "
+                f"({self.face_min_conf}); clamped to {self.face_min_conf}. The review "
+                "gate can never be stricter than the embedding gate."
+            )
+            review_conf = self.face_min_conf
+        if review_size > self.face_min_size:
+            self._face_threshold_notes.append(
+                f"SFN_FACE_REVIEW_MIN_SIZE ({review_size}) exceeds SFN_FACE_MIN_SIZE "
+                f"({self.face_min_size}); clamped to {self.face_min_size}."
+            )
+            review_size = self.face_min_size
+        if review_conf < _DETECTOR_SCORE_FLOOR:
+            self._face_threshold_notes.append(
+                f"SFN_FACE_REVIEW_MIN_CONF ({review_conf}) is below the detector's own "
+                f"score threshold ({_DETECTOR_SCORE_FLOOR}); no face below that ever "
+                "reaches the gate, so the lower value has no effect."
+            )
+        self.face_review_min_conf: float = review_conf
+        self.face_review_min_size: int = review_size
         self.face_min_sharpness: float = self._parse_float("SFN_FACE_MIN_SHARPNESS", 25.0)
         self.face_max_clipped: float = self._parse_float("SFN_FACE_MAX_CLIPPED", 0.6)
         if not (0.0 < self.face_max_clipped <= 1.0):
@@ -299,6 +336,10 @@ class Settings:
         else:
             os.environ["HF_HUB_OFFLINE"] = "1"
             os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+    def face_threshold_notes(self) -> list[str]:
+        """Non-fatal notices about face threshold clamping (spec §Config)."""
+        return list(self._face_threshold_notes)
 
     def face_startup_error(self) -> str | None:
         """Actionable error if the face modality is enabled but unusable, else None.

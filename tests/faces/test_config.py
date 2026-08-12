@@ -36,6 +36,38 @@ def test_crop_dilation_bounds(monkeypatch):
         Settings()
 
 
+def test_review_thresholds_default(monkeypatch):
+    monkeypatch.delenv("SFN_FACE_REVIEW_MIN_CONF", raising=False)
+    monkeypatch.delenv("SFN_FACE_REVIEW_MIN_SIZE", raising=False)
+    s = Settings()
+    assert s.face_review_min_conf == 0.6
+    assert s.face_review_min_size == 48
+
+
+def test_review_thresholds_clamped_to_embedding_gate(monkeypatch):
+    # An explicit embedding threshold below the review DEFAULT must not raise.
+    monkeypatch.setenv("SFN_FACE_MIN_CONF", "0.5")
+    monkeypatch.setenv("SFN_FACE_MIN_SIZE", "32")
+    s = Settings()
+    assert s.face_review_min_conf == 0.5
+    assert s.face_review_min_size == 32
+    notes = s.face_threshold_notes()
+    assert any("SFN_FACE_REVIEW_MIN_CONF" in n for n in notes)
+    assert any("SFN_FACE_REVIEW_MIN_SIZE" in n for n in notes)
+
+
+def test_review_conf_below_detector_floor_is_noted(monkeypatch):
+    monkeypatch.setenv("SFN_FACE_REVIEW_MIN_CONF", "0.2")
+    s = Settings()
+    assert any("0.5" in n for n in s.face_threshold_notes())
+
+
+def test_review_thresholds_reject_nonsense(monkeypatch):
+    monkeypatch.setenv("SFN_FACE_REVIEW_MIN_SIZE", "0")
+    with pytest.raises(ValueError, match="SFN_FACE_REVIEW_MIN_SIZE"):
+        Settings()
+
+
 def test_startup_error_when_enabled_without_models(monkeypatch, tmp_path):
     monkeypatch.setenv("SFN_FACES_ENABLED", "true")
     monkeypatch.setenv("SFN_EXAMINER_ID", "ex1")

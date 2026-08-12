@@ -37,7 +37,7 @@
 
 The spec assumes no medium has ever been indexed with faces, which makes every schema change free. That is an operational claim, not a code fact. Verify before writing code.
 
-- [ ] **Step 1: Check whether a face collection exists and is populated**
+- [x] **Step 1: Check whether a face collection exists and is populated**
 
 Qdrant is not published to the host by default (`docker-compose.yml:44`). If `curl` fails, that is expected; use the container.
 
@@ -54,7 +54,10 @@ docker exec scalarforensic-qdrant-1 sh -c \
   'wget -qO- http://localhost:6333/collections/<name>_faces'
 ```
 
-- [ ] **Step 2: Decide**
+- [x] **Step 2: Decide** — 2026-08-12: Qdrant reports `{"collections":[]}` (queried at
+container IP 172.20.0.2:6333; the container has neither `wget` nor `curl`). No `_faces`
+collection has ever existed. Migration window is open; the plan's free-schema-change
+assumption holds.
 
 If no `_faces` collection exists, or it exists with `points_count: 0`, the window is open — proceed to Task 1.
 

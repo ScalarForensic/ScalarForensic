@@ -51,6 +51,8 @@ async def lifespan(_app: FastAPI):
         face_err = settings.face_startup_error()
         if face_err:
             logging.getLogger(__name__).warning("Face modality unavailable: %s", face_err)
+        for note in settings.face_threshold_notes():
+            logging.getLogger(__name__).warning("face threshold: %s", note)
 
     async def _reaper() -> None:
         while True:
