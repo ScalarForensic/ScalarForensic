@@ -1,20 +1,36 @@
 # Handoff — face review/embedding gate split
 
-**Written:** 2026-08-12, mid-execution, at the maintainer's request before a break.
+**Written:** 2026-08-12 mid-execution; **updated 2026-08-12 at completion.**
 **Branch:** `feat/face-pipeline-phase1` (local only — never pushed)
 **Plan:** `docs/superpowers/plans/2026-08-12-face-review-embedding-split.md`
 **Spec:** `docs/superpowers/specs/2026-08-12-face-review-embedding-split-design.md`
 
-## How to resume
+## Status: code-complete. Only the validation run is outstanding.
 
-Say "continue the face gate split" and point me at this file. Read the three
-open decisions below first — two of them change what Task 8 and Task 12 say,
-and I deliberately did not guess. Everything else is mechanical plan execution
-and needs nothing from you.
+Plan Tasks 0–12 are done and ticked, plus an unplanned **Task 13** (stale
+reconciliation) added after the review checkpoint. **475 tests pass, 5 skipped**
+(the live-Qdrant file, which needs `SFN_TEST_QDRANT_URL`), `ruff check` and
+`ruff format --check` clean on `src tests scripts`.
 
-Plan step checkboxes are ticked through Task 7. Tasks 8–12 are untouched.
+### What a fresh session should do
 
-## State: Tasks 0–7 complete, 441 tests passing
+Nothing in the plan is left to execute. The one outstanding item is the
+`danny*` validation run, which needs the maintainer's YuNet ONNX and an
+operator-supplied embedder — runbook at
+`docs/superpowers/plans/SETUP-2026-08-12-face-validation-run.md`. It also
+carries Task 10's visual UI check and the calibration judgement on the 48 px
+review floor, neither of which can be done without indexed face data.
+
+Two optional follow-ups, both written up below and neither started: a
+standalone stale-observation inspect/purge command (closes Task 13's known
+gap), and `purge_all()`'s failure to delete video rollup points (pre-existing,
+recorded in the plan as out of scope).
+
+Second-half commits: `f33a4ed` setup guide + decisions · `0b13cbd` Task 8 ·
+`8c697d3` Task 9 · `4252fb4` Task 10 · `0a8de15` Task 11 · `79c4695` Task 12 ·
+`f4e8ebe` review fixes · `6aab839` Task 13.
+
+## State at the first checkpoint: Tasks 0–7, 441 tests passing
 
 | Task | Commit | What landed |
 |---|---|---|
@@ -95,13 +111,12 @@ The plan closes with a validation run against `danny*`. It needs a YuNet ONNX
 supply the embedder. Tell me when you want it and whether the models are in
 place.
 
-## Do not run `--faces` or `sfn-faces purge` right now
+## ~~Do not run `--faces` or `sfn-faces purge`~~ — resolved by Task 8
 
-This window is narrower than it was — Task 6 fixed the payload — but Task 8
-has not yet made purge unlink through `unreferenced_chip_hashes`, so purge
-still unlinks unconditionally and can remove a shared chip. Nothing is
-indexed, so this costs nothing as long as no one indexes on this branch before
-Task 8. The warning is written into the plan at Task 6's preamble.
+**Obsolete, kept for the record.** Between Tasks 6 and 8 purge unlinked chips
+unconditionally and could remove a chip a surviving observation still
+referenced. Task 8 (`0b13cbd`) routed it through `unreferenced_chip_hashes`.
+Both commands are safe to run now.
 
 ## Findings worth remembering
 
@@ -211,12 +226,37 @@ The plan document is not as committed at `10ace0d`. Changes:
   Task 2's `_det` helper collided with an existing one; Task 5's tests assumed
   a `fake_client` fixture this repo doesn't have. All adapted to repo idiom.
 
-## What's next, in order
+## ~~What's next, in order~~ — all executed
 
-**Task 8** (CLI summary + audit record, ~90 plan lines) — needs decision 1 only
-for its documentation wording; the code is independent. Then **9** (endpoints
-and explainer), **10** (UI labelling), **11** (live-Qdrant test), **12** (docs).
+Tasks 8–12 landed in that order, the review checkpoint ran over
+`56043ab..HEAD` as planned, and its findings produced `f4e8ebe` and Task 13.
+See the status section at the top for what actually remains.
 
-My suggested review checkpoint: after Task 9, since Tasks 8–9 together decide
-what the audit record and the API say about review-only observations, and that
-is the pair a reviewer would have to read as one.
+### Review checkpoint findings, and what came of them
+
+Three real defects, all fixed in `f4e8ebe`:
+
+1. **Marker commit ordering.** The processed marker was written in the same
+   upsert as the points, *before* `clear_face_vector`. A failure in the clear
+   would have left a point whose payload said review-only while its vector
+   stayed live — and because the marker is the idempotency record, the medium
+   would never be reprocessed to fix it. Now points → clear → marker. Both new
+   tests were mutation-verified.
+2. **Explainer honesty.** An unrecognised or absent exclusion reason made every
+   pre-embedding step report `passed: true`, so the page would have stated a
+   review-only face was aligned and passed the blur check while the payload
+   stored `null` for all of it. Unknown reasons now fail at the earliest gate.
+3. **Negative-stop crop slice** in `indexing.py` — a box entirely off the left
+   or top edge wrapped to the far end of the axis and measured sharpness on
+   most of the frame instead of tripping the empty-crop guard. Pre-existing and
+   unreachable from YuNet, but it sat behind a guard that read as if it covered
+   the case.
+
+Also: three decorative assertions removed (they summed their own literals), and
+a comment in `detect.py` that told an examiner to look for a `landmark_order`
+rejection reason which does not exist — the real signal is
+`n_dropped_noncanonical`, which is **not** in the CLI summary.
+
+The reviewer property-tested `process_image` over 400 randomised detection sets
+and found no embedding/detection mispairing, no review-only point ever
+receiving a vector, and the count invariant holding on every path.
