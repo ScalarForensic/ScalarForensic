@@ -181,3 +181,53 @@ native resolution, the two populations distinguishable, explainer naming the fai
 check. Needs a human looking at `./run.sh sfn-web`. The production review floor is still
 an open judgement; the measured input is that 48 px discards an identifiable face (46.9 px
 → 0.6097) and 36 px retains all three.
+
+### UI check performed — 2026-08-12. One real defect found.
+
+Task 10 Step 4 (the manual UI check the plan could not automate) was carried out against
+`./run.sh sfn-web`. Two prerequisites the plan does not mention: the case collection must
+actually be indexed (`--faces` alone writes no image vectors, so there is no hit to select
+— `danny_validation` had to be built with `--dino`), and **`SFN_INPUT_DIR` must be set**
+or `/api/metadata` returns 403 and the hit panel shows no hashes.
+
+**DEFECT: the face panel never loads for the initially-selected hit.** `index.html:933`
+wires the panel as `x-init="$watch('selectedHit', h => loadFacesForHit(h?.image_hash))"`.
+The watcher fires only on *change*; `selectedHit` is already set when the panel mounts, so
+in the ordinary flow no `/api/faces/by-image/` request is ever issued and the panel reads
+**"0 in this image"** for every image. Evidence, all RAN in the live page:
+
+- `list_network_requests` over two full page loads: **zero** `/api/faces/by-image/` calls,
+  including after clicking the hit row.
+- In-page state at that moment: `facesAvailable=true`,
+  `selectedHit.image_hash="ca4bed…"` (correct), `facesForHit.length=0`.
+- Calling `loadFacesForHit(selectedHit.image_hash)` by hand returns **3** observations,
+  all `review_only/size` — so API, payload and rendering are all correct.
+- Forcing the watcher (`selectedHit = null`, then restore) loads **1** face on danny2.
+  The watcher works; it simply never sees the initial value.
+
+Impact: with a single hit — the common case — the face browser is unreachable through the
+UI. Task 10's substituted static checks (`node --check`, TestClient smoke, static wiring
+assertions) could not have caught this; only the manual check could, exactly as the
+handoff anticipated. **Not fixed — this window changes no code.** Likely one line: invoke
+`loadFacesForHit` once in `x-init` alongside registering the watcher.
+
+**Once loaded the panel is correct:** "3 in this image", each observation labelled
+`review only — not comparable` / `size below threshold` with its confidence, thumbnails
+from the review hash domain, full-resolution review crop on click, an explainer button per
+face, and the standing disclaimer "Machine-detected face observations — an investigative
+lead, not an identification." Both populations are distinguishable.
+
+### Crop framing — `SFN_FACE_CROP_DILATION` 0.15 → 0.25
+
+Maintainer observed from the rendered panel that the crops clip the tops of heads. RAN a
+re-index at 0.25: review crops go from **1.30× to 1.50×** the detection box (e.g. the
+47×62 bbox: 61×80 → 71×92 px). Visual comparison confirms hair and chin are no longer cut.
+`crop_dilation` is inside `PipelineConfig`, so it is part of `config_hash`
+(`provenance.py:37-43`) — the markers changed and all 12 media were reprocessed, no trap.
+Counts unchanged: `6 detected │ 2 comparable │ 3 review (3 size) │ 1 rejected`.
+Aligned PNGs still 2 and byte-identical in hash, confirming the dilation is review-only and
+no vector moved. The 10 superseded review JPEGs are now unreferenced on disk — that is what
+`unreferenced_chip_hashes` exists to reclaim on purge.
+
+**Open decision this raises:** whether 0.25 becomes the default (currently 0.15 in
+`config.py`).
