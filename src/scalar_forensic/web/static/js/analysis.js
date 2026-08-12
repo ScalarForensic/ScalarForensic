@@ -3,8 +3,6 @@
     // ── Analysis ──────────────────────────────────────────────────────────
     async startAnalysis() {
       if (!this.pendingFiles.length || !this.selectedModes.length) return;
-      // Tear down idle screensaver — stop timer and remove all listeners
-      this._stopIdleScreensaver();
       this.analysisRunModes = [...this.selectedModes];
       this.phase = 'analyzing';
       this.progress = { current: 0, total: this.pendingFiles.length, filename: '', frameCount: 0 };

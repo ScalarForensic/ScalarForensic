@@ -55,7 +55,5 @@
       this.markedOverrides = {};
       this.hitTags = {};
       this.activeTagId = '';
-      // Re-initialize idle screensaver for this upload session
-      this._startIdleScreensaver();
     },
 });

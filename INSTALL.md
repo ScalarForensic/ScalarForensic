@@ -193,6 +193,176 @@ snapshot_download('facebook/dinov2-large', local_dir='models/dinov2-large', loca
 
 Then set `SFN_MODEL_DINO=models/dinov2-large` in `.env`.
 
+## Face modality (optional)
+
+The face modality is **disabled by default** and ships as an optional dependency group. It
+detects faces in indexed media, quality-gates them, aligns and embeds them, and stores them as
+searchable observations in a case-scoped sidecar collection. It is a **discovery aid, not an
+identification system** — see `docs/face-matching-math.md` for the method chain and its stated
+limits, and `docs/specs/face-pipeline.md` for the full design.
+
+### 1. Install the dependencies
+
+```bash
+uv sync --group faces      # opencv-python-headless + onnxruntime
+```
+
+### 2. Fetch the detector (YuNet, MIT)
+
+```bash
+uv run python scripts/download_models.py --yunet
+```
+
+One-time online fetch of a ~230 KB ONNX file, checksum-verified against a pinned commit. After
+this the face pipeline performs **zero network I/O**. Add the printed line to `.env`:
+
+```bash
+SFN_FACE_DETECTOR_MODEL=models/face_detection_yunet_2023mar.onnx
+```
+
+### 3. Supply a recognition model — and read this first
+
+**ScalarForensic ships no face-recognition weights, and this is deliberate.**
+
+The entire ArcFace / AdaFace / InsightFace weight family in common use is released for
+**research purposes only**. No permissively-licensed face-recognition model of comparable
+quality is known to us. That means:
+
+- **Whether research-only weights may lawfully be used in your deployment is a legal question,
+  not a technical one.** It depends on your jurisdiction, your organisation and your purpose.
+- **"Non-commercial" is not automatically satisfied by government or law-enforcement use.**
+  Public-sector operation is not the same thing as non-commercial use, and several licences in
+  this family have been read narrowly.
+- **The decision, and its legal review, belong to the operator — in writing.** We deliberately
+  provide no "works out of the box" recognition path, because shipping one would make that
+  decision silently on your behalf.
+- If you obtain weights, their provenance and training data are your responsibility too.
+
+Until an embedder is configured, the face modality reports itself unavailable and says why.
+
+### 4. Describe the model with a manifest
+
+Every embedder needs a JSON manifest next to it at `<model>.manifest.json`. It is validated
+against the ONNX session's real inputs and outputs at load time; a mismatch is a hard error.
+Example, using the InsightFace convention `(x − 127.5) / 128`:
+
+```json
+{
+  "input_name": "input.1",
+  "layout": "NCHW",
+  "channel_order": "RGB",
+  "dtype": "float32",
+  "input_size": 112,
+  "mean": 127.5,
+  "scale": 128.0,
+  "output_name": "683",
+  "embedding_dim": 512
+}
+```
+
+`input_size` must be 112 — the alignment template (`arcface-112-v1`) is fixed.
+
+### 5. Enable it
+
+```bash
+SFN_FACES_ENABLED=true
+SFN_EXAMINER_ID=your-examiner-id        # required; stamped on audit entries
+SFN_FACE_DETECTOR_MODEL=models/face_detection_yunet_2023mar.onnx
+SFN_FACE_EMBEDDER_MODEL=/path/to/your_embedder.onnx
+```
+
+Then index with faces:
+
+```bash
+./run.sh sfn <dir> --dino --faces     # alongside embeddings
+./run.sh sfn <dir> --faces            # faces only
+```
+
+The **first activation prompts for a free-text authorization reference**, which is written into
+the collection's enablement record and the audit log. Turning the feature on is a recorded act.
+
+### Storage location
+
+Face chips (aligned PNG, review JPEG, thumbnail) are written under `SFN_FACE_STORE_DIR`
+(default `data/faces`). This accepts **any absolute path** — another drive is just another
+path, another server is an NFS/SMB mount. The store is freely relocatable because the database
+references chips by hash only, never by path. Leaving it unset disables chip storage entirely:
+the pipeline still runs, and the UI reports "degraded-evidence mode" because review chips are
+then unavailable.
+
+> **Set `SFN_FACE_STORE_DIR` per case.** `SFN_FACE_COLLECTION` is already per case, but the
+> chip store defaults to a single `data/faces` for all of them, and chips are content-addressed
+> — two cases holding the same image share one file on disk. Purge's reference check scrolls
+> only its own collection, so **purging case A can unlink a chip case B still references**. The
+> code cannot enforce this the way `check_compat` refuses to mix biometric data across cases for
+> vectors; it is an operator setting. Note also that purge assumes a **single writer**: it
+> checks for references and then unlinks, so a concurrent index run can leave a dangling chip
+> reference. Both situations are recoverable — chips are re-derivable from the source media —
+> but neither should be discovered during an examination.
+
+### Purging
+
+```bash
+uv run sfn-faces purge --media <sha256>   # one medium
+uv run sfn-faces purge --all              # everything, with confirmation
+```
+
+Both delete the face points and their chip files, and append a `purge` event to the audit log.
+The enablement record survives a purge — it is an auditable act, not routine data.
+
+### Settings reference
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SFN_FACES_ENABLED` | `false` | Master switch |
+| `SFN_EXAMINER_ID` | — | Required while faces are enabled |
+| `SFN_FACE_DETECTOR_MODEL` | — | Path to the YuNet ONNX |
+| `SFN_FACE_EMBEDDER_MODEL` | — | Path to your recognition ONNX (needs a manifest) |
+| `SFN_FACE_COLLECTION` | `{SFN_COLLECTION}_faces` | Case-scoped sidecar collection |
+| `SFN_FACE_STORE_DIR` | `data/faces` | Chip store; unset disables chips |
+| `SFN_FACE_THUMB_SIZE` | `256` | Browse thumbnail long side (px) |
+| `SFN_FACE_DETECT_MAX_SIZE` | `1600` | Detector input cap (px, long side) |
+| `SFN_FACE_MIN_CONF` | `0.8` | Minimum detector confidence to embed |
+| `SFN_FACE_MIN_SIZE` | `64` | Minimum face size to embed (px) |
+| `SFN_FACE_REVIEW_MIN_CONF` | `0.6` | Confidence floor for keeping a face for hand review |
+| `SFN_FACE_REVIEW_MIN_SIZE` | `48` | bbox min side (detector-input px) for hand review |
+| `SFN_FACE_MIN_SHARPNESS` | `25.0` | Minimum Laplacian variance |
+| `SFN_FACE_MAX_CLIPPED` | `0.6` | Maximum clipped-pixel fraction |
+| `SFN_FACE_MAX_POSE` | `0.35` | Maximum yaw proxy |
+| `SFN_FACE_CROP_DILATION` | `0.15` | Review-chip context margin |
+
+All gate thresholds are **bootstrap values**, not validated operating points. They are recorded
+in every point's provenance so a later calibration can supersede them by name.
+
+### Two gates: comparable and review-only
+
+A detected face passes through two gates. The **review gate**
+(`SFN_FACE_REVIEW_MIN_CONF` / `_SIZE`) decides whether the face is kept at all; the **embedding
+gate** (`SFN_FACE_MIN_CONF` / `_SIZE` / `_SHARPNESS` / `_MAX_CLIPPED` / `_MAX_POSE`) decides
+whether it is measured. A face that clears the first but not the second is kept as a
+**review-only observation**: it has a review chip, it is croppable and examinable, and it is
+never compared with any other face. The exclusion is structural — the point carries no vector —
+not a filter a later query could forget to apply. The CLI summary and the audit record report
+all three populations, and `detected = comparable + retained for review + rejected`.
+
+The review thresholds are clamped so they can never exceed their embedding counterparts; if you
+set them higher, the run prints a note and uses the clamped value. Both are bootstrap numbers
+awaiting the same calibration as the rest.
+
+### Re-indexing after a threshold or detector change
+
+Changing a threshold and re-indexing **rewrites** each affected observation in place — point IDs
+come from the bbox, not from the thresholds — so you do not accumulate duplicates. Two changes
+can leave something behind: a face that drops below the *review* gate produces no point at all,
+and a new detector shifts bboxes onto new IDs. In both cases the old observation survives, still
+searchable if it was embedded, under thresholds you no longer apply.
+
+The face pass detects these, prints what it found (how many, of which kind, under which config
+hash) and asks before deleting anything. Answering no is fine and is recorded in the audit log;
+the observations stay and you will be asked again next time that medium is reprocessed. A
+non-interactive run never deletes. Deletion routes through the same chip reference check as
+purge, so chips shared with surviving observations are kept.
+
 ## Network policy
 
 ScalarForensic is designed for **airgapped / offline environments**.  By default:

@@ -6,11 +6,16 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 
 ## Commands
 
-- `uv run pytest -q` — full suite (300 tests), hermetic, needs no Qdrant
+- `uv run pytest -q` — full suite (478 passed / 5 skipped as of 2026-08-12), hermetic,
+  needs no Qdrant; the 5 skips need `SFN_TEST_QDRANT_URL` and are the only tests that can
+  observe the face exclusion guarantee against a real store
 - `uv run ruff check src tests scripts` and `uv run ruff format --check src tests scripts` — CI runs exactly these
 - `./run.sh sfn-web` — start web UI (wrapper exports venv CUDA libs); boots fine without
   Qdrant and degrades to exact-hash-only mode
 - `./run.sh sfn <dir> --dino --sscd` — CLI indexing
+- `./run.sh sfn <dir> --faces` — optional face modality (needs `SFN_FACES_ENABLED=true`,
+  `SFN_EXAMINER_ID`, a YuNet ONNX and an operator-supplied embedder; `uv sync --group faces`).
+  Purge via `uv run sfn-faces purge --media <sha256> | --all`
 
 ## Architecture decisions (do not re-litigate)
 
@@ -41,6 +46,30 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 - `scripts/` ignores E402 (imports follow an intentional `sys.path` bootstrap).
 - `data/` is gitignored except `data/sample_images/`; huge local test sets
   (`data/images/`, zips) live there untracked. Ingestion CSVs go to `data/reports/`.
-- Web UI drop zone fades after 5 s idle (screensaver) and swallows pointer events;
-  it wakes on `mousemove` — relevant when driving the UI with browser automation.
+- The app sends **no cache headers on `/`**, and `ignoreCache` does not defeat the browser
+  cache — use `/?cachebust=N` when testing UI changes, or you will debug a stale page.
+  **`/?cachebust=N` busts only the HTML.** It busts neither `style.css` **nor any
+  `/static/js/` part file**, so a live check can measure old CSS *and* old JS and report a
+  false pass — or a false RED: on 2026-08-12 a stale `computed.js` made `mergedHits`
+  undefined and the feature look broken when it was not. Force-refetch every `<script src>`
+  and the stylesheet with `fetch(url, {cache: 'reload'})`, then reload.
+- **Never measure the suite against a dirty tree and attribute the number to a commit.**
+  `pytest` collects from disk, not from git, so a parallel worker's uncommitted tests are
+  counted in *your* run. On 2026-08-12 this published 526/5 for a commit whose real bar was
+  521/5. Check `git status --porcelain` is 0 before quoting a bar against a sha.
 - The 14 pytest warnings are a third-party torch `jit.script_method` deprecation — not ours.
+- The face real-model test skips unless a YuNet ONNX is present (`models/` is gitignored; fetch
+  with `scripts/download_models.py --yunet`). It is the only check that can catch a wrong YuNet
+  landmark-column map — the other detector tests build rows from the same assumption as the code.
+- Faces have two gates: review (keep the native-resolution crop) and embedding (align + vector).
+  Review-only observations are vectorless points — that is what keeps them out of search, not a
+  payload filter. Never give them a vector.
+- `tests/faces/test_store_integration.py` skips unless `SFN_TEST_QDRANT_URL` is set; it is the
+  only test that can observe the exclusion guarantee, since a hermetic test can inspect only the
+  `PointStruct` constructor. Run it against a throwaway Qdrant before touching demotion or purge.
+- Face search is uncalibrated by deliberate ruling (2026-08-12): the raw cosine is displayed and
+  labelled as such. SFace's 0.363 is the model authors' reference figure only — never a default, a
+  filter or a deployment threshold. See `docs/specs/face-pipeline.md` §10.
+- `indexer.py:96-104` claims Qdrant can add a named vector to an existing collection. It cannot
+  (`VectorParamsDiff` has no `size`), so `--dino` now and `--sscd` later is impossible — adding a
+  modality means dropping the collection and re-indexing.

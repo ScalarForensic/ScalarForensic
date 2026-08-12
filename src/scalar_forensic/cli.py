@@ -362,6 +362,11 @@ def index(
     ),
     dino: bool = typer.Option(False, "--dino", help="Use DINOv2 backend (1024-dim semantic)"),
     sscd: bool = typer.Option(False, "--sscd", help="Use SSCD backend (512-dim copy-detection)"),
+    faces: bool = typer.Option(
+        False,
+        "--faces",
+        help="Also detect, embed and store faces (requires SFN_FACES_ENABLED=true)",
+    ),
     report: Path | None = typer.Option(
         None,
         "--report",
@@ -425,9 +430,51 @@ def index(
         typer.echo(f"[ERROR] Not a directory: {resolved_input}", err=True)
         raise typer.Exit(1)
 
-    if not dino and not sscd:
-        typer.echo("[ERROR] Specify at least one of --dino or --sscd.", err=True)
+    if not dino and not sscd and not faces:
+        typer.echo("[ERROR] Specify at least one of --dino, --sscd or --faces.", err=True)
         raise typer.Exit(1)
+
+    # ── Face modality startup check (spec §13: fail at startup, not mid-run) ──
+    face_pipeline = None
+    _faces_done: set[str] = set()
+    if faces:
+        _face_err = (
+            settings.face_startup_error()
+            if settings.faces_enabled
+            else "SFN_FACES_ENABLED must be 'true' to use --faces "
+            "(see docs/specs/face-pipeline.md)."
+        )
+        if _face_err:
+            typer.echo(f"[ERROR] {_face_err}", err=True)
+            raise typer.Exit(1)
+        for _note in settings.face_threshold_notes():
+            typer.secho(f"note: {_note}", fg=typer.colors.YELLOW)
+        from scalar_forensic.faces.indexing import FacePipeline  # deferred: optional deps
+
+        face_pipeline = FacePipeline.from_settings(settings)
+        if face_pipeline.store.collection_is_new():
+            _auth_ref = typer.prompt(
+                "First face-collection activation. Authorization reference (free text,"
+                " recorded in the enablement record; empty allowed)",
+                default="",
+            )
+            if not _auth_ref:
+                typer.echo(
+                    "[WARN] No authorization reference recorded for this activation.", err=True
+                )
+            face_pipeline.store.ensure_collection(
+                face_pipeline.cfg, settings.examiner_id, _auth_ref or None
+            )
+            face_pipeline.audit.append(
+                "enablement",
+                examiner_id=settings.examiner_id,
+                authorization_ref=_auth_ref or None,
+                face_collection=settings.face_collection,
+                case_collection=settings.collection,
+            )
+        for _warn in face_pipeline.store.check_compat(face_pipeline.cfg):
+            typer.echo(f"[WARN] face collection config differs — {_warn}", err=True)
+        _faces_done = face_pipeline.store.processed_hashes(face_pipeline.cfg.config_hash)
 
     if reference:
         if not settings.reference_collection:
@@ -1514,6 +1561,263 @@ def index(
                     records[_p].status = _S_FAIL_PRE
                     records[_p].reason = "duplicate of image that failed preprocessing"
 
+    # ── Face pass (own pass, not a hook in the embedding batch loop) ─────────
+    # The batch loop only iterates *not-yet-embedded* media, so hooking faces
+    # into it would silently yield zero faces on an already-indexed case.  This
+    # pass walks every discovered image plus every stored frame, and uses the
+    # face markers as its own idempotency mechanism.
+    if face_pipeline is not None:
+        _face_work: list[tuple[Path, str, dict | None]] = []
+        for _p, _sha in _file_hashes.items():
+            if _sha in _faces_done:
+                continue
+            _face_work.append((_p, _sha, vmeta_by_path.get(_p)))
+        typer.echo(
+            f"\nFaces: processing {len(_face_work):,} media item(s)  →  {settings.face_collection}"
+        )
+        _face_detected = _face_kept = _face_review_only = 0
+        _face_rejected: dict[str, int] = {}
+        _face_review_reasons: dict[str, int] = {}
+        _face_dropped_noncanon = 0
+        _face_failed = 0
+        # Collected across the run, acted on once at the end: prompting per
+        # medium would ask the same question hundreds of times, and deleting
+        # biometric observations without showing what they are first is not a
+        # decision the tool gets to make on the operator's behalf.
+        _stale_points: list[dict] = []
+        _video_rollup: dict[str, dict] = {}
+        for _p, _sha, _vmeta in _face_work:
+            try:
+                _data = _p.read_bytes()
+                _fres = face_pipeline.process_image(
+                    _data,
+                    image_hash=_sha,
+                    image_path=str(_p.resolve()),
+                    video_hash=(_vmeta or {}).get("video_hash"),
+                    video_path=(_vmeta or {}).get("video_path"),
+                    frame_timecode_ms=(_vmeta or {}).get("frame_timecode_ms"),
+                )
+            except Exception as _exc:  # one bad file must not end the run
+                _face_failed += 1
+                typer.echo(f"[WARN] Face processing failed for {_p.name}: {_exc}", err=True)
+                continue
+            _marker = face_pipeline.store.marker_point(
+                _sha,
+                (_vmeta or {}).get("video_hash"),
+                face_pipeline.cfg.config_hash,
+                _fres.n_detected,
+                _fres.n_kept,
+                _fres.rejected,
+                n_review_only=_fres.n_review_only,
+                review_only_reasons=_fres.review_only_reasons,
+                n_dropped_noncanonical=_fres.n_dropped_noncanonical,
+            )
+            # Points first, marker last, with the vector clear between them.
+            # The marker is this medium's idempotency record: once it is
+            # committed for this config hash, the medium is never reprocessed.
+            # Committing it in the same call as the points would make a failed
+            # clear permanent and invisible — a point whose payload says
+            # review-only while its vector is still live in the index, which is
+            # the one state this design exists to prevent.  clear_face_vector
+            # can raise (delete_vectors 404s on an unknown id, see
+            # tests/faces/test_store_integration.py), so the ordering is
+            # load-bearing, not stylistic.
+            #
+            # Checked before the upsert, while the collection still holds only
+            # what previous runs wrote: point ids come from the bbox, not from
+            # any threshold, so a threshold change rewrites a point in place
+            # and leaves nothing stale.  What does survive is a face that has
+            # dropped below the review gate (no point produced at all) or an
+            # observation whose bbox moved because the detector changed — in
+            # both cases the old point is still there, still carrying its old
+            # provenance, and if it was embedded it is still searchable.
+            _stale_points.extend(
+                face_pipeline.store.stale_face_points(_sha, {str(p.id) for p in _fres.points})
+            )
+            face_pipeline.store.upsert_faces(_fres.points)
+            # Every review-only point, not only genuinely demoted ones:
+            # delete_vectors is idempotent and ignores absent vectors, so
+            # first-time review-only observations cost nothing.  An upsert with
+            # vector={} must not be trusted to clear a vector a previous run
+            # stored at the same point id -- a review-only point that kept its
+            # vector would still be returned by similarity search.  Only ever
+            # pass review-only ids: clearing an embedded point's vector
+            # destroys data recoverable only by a full re-index.
+            face_pipeline.store.clear_face_vector(_fres.review_only_point_ids)
+            face_pipeline.store.upsert_faces([_marker])
+            _face_detected += _fres.n_detected
+            _face_kept += _fres.n_kept
+            _face_review_only += _fres.n_review_only
+            _face_dropped_noncanon += _fres.n_dropped_noncanonical
+            for _reason, _n in _fres.rejected.items():
+                _face_rejected[_reason] = _face_rejected.get(_reason, 0) + _n
+            for _reason, _n in _fres.review_only_reasons.items():
+                _face_review_reasons[_reason] = _face_review_reasons.get(_reason, 0) + _n
+            _vh_roll = (_vmeta or {}).get("video_hash")
+            if _vh_roll:
+                _agg = _video_rollup.setdefault(
+                    _vh_roll,
+                    {
+                        "n_frames": 0,
+                        "n_detected": 0,
+                        "n_kept": 0,
+                        "rejected": {},
+                        "n_review_only": 0,
+                        "review_only_reasons": {},
+                        "n_dropped_noncanonical": 0,
+                    },
+                )
+                _agg["n_frames"] += 1
+                _agg["n_detected"] += _fres.n_detected
+                _agg["n_kept"] += _fres.n_kept
+                _agg["n_review_only"] += _fres.n_review_only
+                _agg["n_dropped_noncanonical"] += _fres.n_dropped_noncanonical
+                for _reason, _n in _fres.rejected.items():
+                    _agg["rejected"][_reason] = _agg["rejected"].get(_reason, 0) + _n
+                for _reason, _n in _fres.review_only_reasons.items():
+                    _agg["review_only_reasons"][_reason] = (
+                        _agg["review_only_reasons"].get(_reason, 0) + _n
+                    )
+
+        # Per-video rollup markers, written once each after their frames.
+        for _vh_roll, _agg in _video_rollup.items():
+            face_pipeline.store.upsert_faces(
+                [
+                    face_pipeline.store.video_rollup_point(
+                        _vh_roll,
+                        face_pipeline.cfg.config_hash,
+                        _agg["n_detected"],
+                        _agg["n_kept"],
+                        _agg["rejected"],
+                        _agg["n_frames"],
+                        n_review_only=_agg["n_review_only"],
+                        review_only_reasons=_agg["review_only_reasons"],
+                        n_dropped_noncanonical=_agg["n_dropped_noncanonical"],
+                    )
+                ]
+            )
+        # ── Stale observations: show, ask, then delete ───────────────────────
+        _n_stale_removed = 0
+        _n_stale_chip_files = 0
+        if _stale_points:
+            _by_status: dict[str, int] = {}
+            _by_cfg: dict[str, int] = {}
+            for _sp in _stale_points:
+                _st = _sp.get("embedding_status") or "embedded"
+                _by_status[_st] = _by_status.get(_st, 0) + 1
+                _cfg_h = _sp.get("pipeline_config_hash") or "unknown"
+                _by_cfg[_cfg_h] = _by_cfg.get(_cfg_h, 0) + 1
+            typer.echo("")
+            typer.secho(
+                f"{len(_stale_points):,} stale face observation(s) found: stored by an earlier "
+                "run and not produced again by this one.",
+                fg=typer.colors.YELLOW,
+            )
+            typer.echo(
+                "  by kind:   "
+                + ", ".join(
+                    f"{_n} {'review-only' if _s == 'review_only' else _s}"
+                    for _s, _n in sorted(_by_status.items())
+                )
+            )
+            typer.echo(
+                "  by config: "
+                + ", ".join(f"{_n} under {_c[:12]}" for _c, _n in sorted(_by_cfg.items()))
+            )
+            if _by_status.get("embedded"):
+                typer.echo(
+                    "  Embedded ones are still returned by similarity search, under thresholds "
+                    "this run no longer applies."
+                )
+            typer.echo(
+                "  Adjudications reference observation_key, not point ids, so they are not "
+                "deleted — but a deleted observation's key stops resolving."
+            )
+            # An unattended run has no answer to give: click aborts on EOF,
+            # which here would kill the run at the very end, after every marker
+            # was already written.  Catch it and leave the observations alone —
+            # deleting biometric data is not something to infer from a closed
+            # stdin, and "not deleted, and here is why" is the safe outcome.
+            try:
+                _do_delete = typer.confirm("Delete these stale observations?", default=False)
+            except (typer.Abort, EOFError):
+                _do_delete = False
+                typer.echo("")
+                typer.secho(
+                    "  Non-interactive run: not deleting. Re-run from a terminal to confirm.",
+                    fg=typer.colors.YELLOW,
+                )
+            if _do_delete:
+                _ids = [str(_sp["id"]) for _sp in _stale_points]
+                _stale_result = face_pipeline.store.delete_face_points(_ids)
+                _n_stale_removed = _stale_result.n_points
+                if settings.face_store_dir is not None:
+                    from scalar_forensic.faces.chips import chip_paths as _chip_paths
+                    from scalar_forensic.faces.chips import (
+                        review_chip_paths as _review_chip_paths,
+                    )
+
+                    for _chash in face_pipeline.store.unreferenced_chip_hashes(
+                        _stale_result.chip_hashes
+                    ):
+                        for _path in dict.fromkeys(
+                            (
+                                *_chip_paths(Path(settings.face_store_dir), _chash),
+                                *_review_chip_paths(Path(settings.face_store_dir), _chash),
+                            )
+                        ):
+                            if _path.exists():
+                                _path.unlink()
+                                _n_stale_chip_files += 1
+            else:
+                typer.secho(
+                    f"  Left in place: {len(_stale_points):,} stale observation(s) remain in "
+                    f"{settings.face_collection}. Re-run and confirm, or purge the media.",
+                    fg=typer.colors.YELLOW,
+                )
+
+        # "kept" no longer names one population: a review-only observation is
+        # kept on disk and in the collection but is not comparable.  The summary
+        # must therefore reconcile — detected = comparable + retained + rejected
+        # — or it understates how many biometric crops the run wrote.
+        _rej_str = ", ".join(f"{_n} {_r}" for _r, _n in sorted(_face_rejected.items()))
+        _rev_str = ", ".join(f"{_n} {_r}" for _r, _n in sorted(_face_review_reasons.items()))
+        typer.echo(
+            f"faces: {_face_detected:,} detected  │  {_face_kept:,} comparable"
+            + (
+                f"  │  {_face_review_only:,} retained for review"
+                + (f" ({_rev_str})" if _rev_str else "")
+                if _face_review_only
+                else ""
+            )
+            + (f"  │  {sum(_face_rejected.values()):,} rejected: {_rej_str}" if _rej_str else "")
+            + (f"  │  {_face_failed:,} failed" if _face_failed else "")
+            + (f"  │  {_n_stale_removed:,} stale removed" if _n_stale_removed else "")
+        )
+        face_pipeline.audit.append(
+            "index_run",
+            examiner_id=settings.examiner_id,
+            input_dir=str(resolved_input),
+            n_media=len(_face_work),
+            n_detected=_face_detected,
+            n_kept=_face_kept,
+            n_review_only=_face_review_only,
+            review_only_reasons=_face_review_reasons,
+            n_rejected=_face_rejected,
+            n_dropped_noncanonical=_face_dropped_noncanon,
+            n_failed=_face_failed,
+            # Detected and removed are recorded separately on purpose: a run
+            # where the operator declined must be distinguishable in the audit
+            # trail from one where nothing was stale.
+            n_stale_detected=len(_stale_points),
+            n_stale_removed=_n_stale_removed,
+            n_stale_chip_files=_n_stale_chip_files,
+            stale_observation_keys=[
+                _sp.get("observation_key") for _sp in _stale_points if _sp.get("observation_key")
+            ],
+            pipeline_config_hash=face_pipeline.cfg.config_hash,
+        )
+
     # ── Close hash cache (close() performs the final flush) ──────────────────
     if _hash_cache is not None:
         _hash_cache.close()
@@ -1544,3 +1848,107 @@ def index(
 
 def main() -> None:
     typer.run(index)
+
+
+# ── Face-modality maintenance (separate console script) ──────────────────────
+# `sfn` itself stays a single-command `typer.run(index)` app, so adding a named
+# command here would break every documented `sfn <dir>` invocation.  Purge ships
+# as its own entry point instead, mirroring the sfn / sfn-web split.
+faces_app = typer.Typer(help="Face-modality maintenance commands.")
+
+
+@faces_app.callback()
+def _faces_callback() -> None:
+    """Keep this a command group.
+
+    Typer collapses a single-command app into the top level, which would
+    make the invocation `sfn-faces --media ...` instead of the documented
+    `sfn-faces purge --media ...`.
+    """
+
+
+@faces_app.command()
+def purge(
+    media: str = typer.Option(None, "--media", help="Purge faces for one media sha256"),
+    all_: bool = typer.Option(False, "--all", help="Purge ALL face observations"),
+) -> None:
+    """Delete stored face observations and their chip files."""
+    if bool(media) == bool(all_):
+        typer.echo("[ERROR] Specify exactly one of --media <sha256> or --all.", err=True)
+        raise typer.Exit(1)
+
+    settings = Settings()
+    err = (
+        settings.face_startup_error()
+        if settings.faces_enabled
+        else "SFN_FACES_ENABLED must be 'true' to use face commands."
+    )
+    if err:
+        typer.echo(f"[ERROR] {err}", err=True)
+        raise typer.Exit(1)
+    for _note in settings.face_threshold_notes():
+        typer.secho(f"note: {_note}", fg=typer.colors.YELLOW)
+
+    from qdrant_client import QdrantClient
+
+    from scalar_forensic.faces.audit import AuditLog
+    from scalar_forensic.faces.chips import chip_paths, review_chip_paths
+    from scalar_forensic.faces.store import FaceStore
+
+    if all_ and not typer.confirm(
+        "Delete ALL face observations in "
+        f"{settings.face_collection}? The enablement record is preserved."
+    ):
+        typer.echo("Aborted.")
+        raise typer.Exit(1)
+
+    store = FaceStore(
+        QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key),
+        settings.face_collection,
+        settings.collection,
+        0,  # dim unused on the purge path — no collection is created here
+    )
+    result = store.purge_all() if all_ else store.purge_media(media)
+
+    # Chips are content-addressed, so a hash freed by this purge may still be
+    # referenced by a surviving observation (an exact-duplicate medium, or an
+    # embedded face whose source crop matched a review-only one).  Filter through
+    # the store before unlinking.  Three limits are deployment properties, not
+    # code defects, and are documented rather than engineered away:
+    #   1. The check is collection-scoped but the chip store is not — purging
+    #      case A can unlink a chip case B references unless SFN_FACE_STORE_DIR
+    #      is set per case (INSTALL.md; the rule check_compat enforces for vectors).
+    #   2. Check-then-unlink: a concurrent index run can write a referencing
+    #      point between the two, leaving a dangling reference.  Single writer.
+    #   3. Both are mitigated, not cured, by chips being re-derivable from media.
+    n_chip_files = 0
+    if settings.face_store_dir is not None:
+        for chash in store.unreferenced_chip_hashes(result.chip_hashes):
+            # Both builders, deliberately: a hash may be an aligned hash (PNG)
+            # or a review hash (JPEG + thumb), and the caller cannot tell which.
+            # The two overlap on the review pair; exists() keeps the count honest.
+            for path in dict.fromkeys(
+                (
+                    *chip_paths(Path(settings.face_store_dir), chash),
+                    *review_chip_paths(Path(settings.face_store_dir), chash),
+                )
+            ):
+                if path.exists():
+                    path.unlink()
+                    n_chip_files += 1
+
+    store_dir = Path(settings.face_store_dir) if settings.face_store_dir else Path("data")
+    audit_dir = store_dir.parent if settings.face_store_dir else store_dir
+    AuditLog(audit_dir / "face_audit.log").append(
+        "purge",
+        examiner_id=settings.examiner_id,
+        scope="all" if all_ else "media",
+        image_hash=None if all_ else media,
+        n_points=result.n_points,
+        n_chip_files=n_chip_files,
+    )
+    typer.echo(f"Purged {result.n_points:,} face point(s) and {n_chip_files:,} chip file(s).")
+
+
+def faces_main() -> None:
+    faces_app()

@@ -1,0 +1,11 @@
+{
+  "input_name": "input",
+  "layout": "NCHW",
+  "channel_order": "RGB",
+  "dtype": "float32",
+  "input_size": 112,
+  "mean": 127.5,
+  "scale": 128.0,
+  "output_name": "embedding",
+  "embedding_dim": 512
+}

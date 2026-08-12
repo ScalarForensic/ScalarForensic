@@ -95,6 +95,216 @@
     </div>
   </div>
 
+  <!-- ── Face score-distribution modal ──
+       Structurally the DINOv2 modal above, with two additions the face
+       modality requires: the population statement (review-only observations
+       carry no vector and are structurally absent) and the 0.363 marker,
+       attributed to the SFace authors and drawn in its own dashed style so it
+       can never be mistaken for a threshold this deployment applies. -->
+  <div class="face-stats-modal-backdrop" x-show="showFaceStats" @click.self="showFaceStats = false" @keydown.escape.window="showFaceStats = false">
+    <div class="stats-modal">
+      <div class="stats-modal-header">
+        <span>Face model — score distribution</span>
+        <button class="stats-modal-close" @click="showFaceStats = false">✕</button>
+      </div>
+
+      <div x-show="faceStatsLoading" class="stats-modal-body stats-modal-loading">Computing…</div>
+
+      <template x-if="!faceStatsLoading && faceStatsError">
+        <div class="stats-modal-body stats-modal-error" x-text="faceStatsError"></div>
+      </template>
+
+      <template x-if="!faceStatsLoading && faceStats">
+        <div class="stats-modal-body">
+          <div class="stats-modal-subtitle">
+            <span x-text="shortName(selectedFile?.filename ?? '')"></span>
+            &nbsp;·&nbsp;
+            <span x-text="faceStats.count.toLocaleString()"></span> face observations
+          </div>
+
+          <div class="stats-modal-grid">
+            <div class="stats-cell"><span class="stats-k">Min</span><span class="stats-v" x-text="faceStats.min_score.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">Mean</span><span class="stats-v" x-text="faceStats.mean.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">P10</span><span class="stats-v" x-text="faceStats.p10.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">Std Dev</span><span class="stats-v" x-text="faceStats.stdev.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">P25</span><span class="stats-v" x-text="faceStats.p25.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">Max</span><span class="stats-v" x-text="faceStats.max_score.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">Median</span><span class="stats-v" x-text="faceStats.median.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">P75</span><span class="stats-v" x-text="faceStats.p75.toFixed(4)"></span></div>
+            <div class="stats-cell"><span class="stats-k">P90</span><span class="stats-v" x-text="faceStats.p90.toFixed(4)"></span></div>
+          </div>
+
+          <!-- Histogram. The marked bucket is the model authors' reference
+               figure, not a deployment threshold — hence the reference style,
+               never the .stats-hist-bar-threshold used by the DINO modal. -->
+          <div class="stats-hist-wrap">
+            <div class="stats-hist">
+              <template x-for="(count, i) in faceStats.histogram" :key="i">
+                <div class="stats-hist-bar"
+                     :style="`height: ${Math.max(2, Math.round(count / Math.max(...faceStats.histogram) * 60))}px`"
+                     :class="{'stats-hist-bar-reference': i === Math.min(19, Math.floor(Math.max(0, Math.min(1, (faceStats.model_reference_threshold + 1) / 2)) * 20))}">
+                </div>
+              </template>
+            </div>
+            <div class="stats-hist-labels">
+              <span>0.0</span><span>0.25</span><span>0.5</span><span>0.75</span><span>1.0</span>
+            </div>
+          </div>
+
+          <div class="stats-reference-row">
+            <span class="stats-k">Marked bucket</span>
+            <span class="stats-v stats-reference-val" x-text="faceStats.model_reference_threshold.toFixed(3)"></span>
+            <span class="stats-reference-note" x-text="faceStats.model_reference_note"></span>
+          </div>
+
+          <!-- Stated in the page, not only echoed from the response: the
+               guarantee is structural, and a reader must see it even if a
+               future response drops the field. -->
+          <p class="stats-population" x-text="faceStats.population"></p>
+          <p class="stats-population">
+            A review-only observation is absent here because it carries no
+            vector at all — a property of the store, not a filter applied to
+            this plot.
+          </p>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- ── Face forensic-audit modal ──
+       Every value is read off the observation's persisted provenance, so this
+       reports the gates in force at index time, not today's environment. -->
+  <div class="face-audit-modal-backdrop" x-show="showFaceAudit"
+       @click.self="showFaceAudit=false"
+       @keydown.escape.window="showFaceAudit=false">
+    <div class="audit-modal">
+
+      <div class="audit-modal-header">
+        <span>Face model — forensic audit
+          <span class="audit-modal-sub">Detector YuNet · embedder as recorded on the observation.</span>
+        </span>
+        <button class="stats-modal-close" @click="showFaceAudit=false">✕</button>
+      </div>
+
+      <div x-show="faceAuditLoading" class="stats-modal-body stats-modal-loading">
+        Fetching audit data…
+      </div>
+
+      <template x-if="!faceAuditLoading && faceAuditError">
+        <div class="stats-modal-body stats-modal-error" x-text="faceAuditError"></div>
+      </template>
+
+      <template x-if="!faceAuditLoading && !faceAuditError && faceAudit">
+        <div class="audit-body">
+
+          <div class="audit-section">
+            <div class="audit-section-hdr">Detector</div>
+            <template x-for="(v, k) in faceAudit.detector" :key="`fd-${k}`">
+              <div class="audit-row">
+                <span class="audit-k" x-text="k"></span>
+                <span class="audit-v" x-text="v ?? '—'"></span>
+              </div>
+            </template>
+          </div>
+
+          <div class="audit-section">
+            <div class="audit-section-hdr">Gate thresholds at index time</div>
+            <template x-for="(v, k) in faceAudit.gates_in_force_at_index_time" :key="`fg-${k}`">
+              <div class="audit-row">
+                <span class="audit-k" x-text="k"></span>
+                <span class="audit-v" x-text="v ?? '—'"></span>
+              </div>
+            </template>
+          </div>
+
+          <div class="audit-section">
+            <div class="audit-section-hdr">Alignment and embedder</div>
+            <template x-for="(v, k) in faceAudit.embedder" :key="`fe-${k}`">
+              <div class="audit-row">
+                <span class="audit-k" x-text="k"></span>
+                <span class="audit-v" x-text="v ?? '—'"></span>
+              </div>
+            </template>
+            <div class="audit-row">
+              <span class="audit-k">pipeline_config_hash</span>
+              <span class="audit-v" x-text="faceAudit.pipeline_config_hash ?? '—'"></span>
+            </div>
+            <template x-for="(v, k) in faceAudit.library_versions" :key="`fl-${k}`">
+              <div class="audit-row">
+                <span class="audit-k" x-text="k"></span>
+                <span class="audit-v" x-text="v ?? '—'"></span>
+              </div>
+            </template>
+          </div>
+
+          <div class="audit-section">
+            <div class="audit-section-hdr">File totals</div>
+            <div class="audit-row">
+              <span class="audit-k">observations in this file</span>
+              <span class="audit-v" x-text="faceAudit.n_observations"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">detected</span>
+              <span class="audit-v" x-text="faceAudit.file_totals.n_detected ?? '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">embedded (searchable)</span>
+              <span class="audit-v" x-text="faceAudit.file_totals.n_kept ?? '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">review only (no vector)</span>
+              <span class="audit-v" x-text="faceAudit.file_totals.n_review_only ?? '—'"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">review-only reasons</span>
+              <span class="audit-v" x-text="JSON.stringify(faceAudit.file_totals.review_only_reasons)"></span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-k">rejected</span>
+              <span class="audit-v" x-text="JSON.stringify(faceAudit.file_totals.rejected)"></span>
+            </div>
+          </div>
+
+          <div class="audit-section">
+            <div class="audit-section-hdr">Enablement</div>
+            <template x-if="faceAudit.enablement">
+              <div>
+                <template x-for="(v, k) in faceAudit.enablement" :key="`fn-${k}`">
+                  <div class="audit-row">
+                    <span class="audit-k" x-text="k"></span>
+                    <span class="audit-v" x-text="v ?? '—'"></span>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <template x-if="!faceAudit.enablement">
+              <div class="audit-row">
+                <span class="audit-k">record</span>
+                <span class="audit-v audit-muted">none stored for this collection</span>
+              </div>
+            </template>
+          </div>
+
+          <div class="audit-section">
+            <div class="audit-section-hdr">Compatibility</div>
+            <div class="audit-row" :class="faceAudit.compat.ok ? 'audit-row-ok' : 'audit-row-warn'">
+              <span class="audit-k">comparable</span>
+              <span class="audit-v" x-text="faceAudit.compat.ok ? 'yes' : 'no'"></span>
+            </div>
+            <template x-for="(w, i) in faceAudit.compat.warnings" :key="`fw-${i}`">
+              <div class="audit-row audit-row-warn">
+                <span class="audit-k">warning</span>
+                <span class="audit-v" x-text="w"></span>
+              </div>
+            </template>
+          </div>
+
+          <p class="faces-caveat" x-text="faceAudit.caveat"></p>
+        </div>
+      </template>
+    </div>
+  </div>
+
   <!-- ── Forensic Audit modal ── -->
   <div class="audit-modal-backdrop" x-show="showAudit"
        @click.self="showAudit=false"
@@ -102,7 +312,12 @@
     <div class="audit-modal">
 
       <div class="audit-modal-header">
-        <span>Forensic Audit Report</span>
+        <!-- The subtitle names both models on purpose: the button says "DINO
+             Audit", but this report covers the SSCD side too, and a bare DINO
+             label would print a false scope onto an exhibit. -->
+        <span>Forensic Audit Report
+          <span class="audit-modal-sub">Image embedding models: DINOv2 (semantic) and SSCD (altered).</span>
+        </span>
         <div class="audit-modal-header-btns">
           <button class="btn-tiny" x-show="!auditLoading && !auditError"
                   @click="exportAuditJson()">Copy JSON</button>
@@ -512,7 +727,7 @@
 
   <!-- ── Upload ── -->
   <div class="upload-section" x-show="phase === 'upload' || phase === 'analyzing'">
-    <div class="drop-zone" :class="{'drag-over': dragOver, 'idle': dropZoneIdle, 'analyzing': phase === 'analyzing'}"
+    <div class="drop-zone" :class="{'drag-over': dragOver, 'analyzing': phase === 'analyzing'}"
          @dragover.prevent="dragOver = true"
          @dragleave.prevent="dragOver = false"
          @drop.prevent="onDrop($event)">
@@ -621,6 +836,31 @@
             <span class="slider-value semantic-val" x-text="thresholdSemantic.toFixed(2)"></span>
           </div>
           <input type="range" min="0" max="1" step="0.01" x-model.number="thresholdSemantic" @input="debouncedQuery()" class="range-semantic">
+        </div>
+        <!-- Face query controls. The score floor is a *display* floor on a raw,
+             uncalibrated cosine — it is not a decision threshold, and it is
+             never seeded from the model authors' reference figure. -->
+        <div class="slider-row" x-show="facesAvailable">
+          <div class="slider-label">
+            <span title="Maximum face observations returned per selected query face">Face Top K</span>
+            <span class="slider-value" x-text="faceLimit"></span>
+          </div>
+          <input type="range" min="1" max="50" step="1" x-model.number="faceLimit"
+                 @input="debouncedFaceQuery()">
+        </div>
+        <div class="slider-row" x-show="facesAvailable">
+          <div class="slider-label">
+            <span title="Display floor on the raw cosine. Uncalibrated: this is not a decision threshold.">Face score floor (raw cosine, uncalibrated)</span>
+            <span class="slider-value" x-text="faceThreshold.toFixed(2)"></span>
+          </div>
+          <input type="range" min="0" max="1" step="0.01" x-model.number="faceThreshold"
+                 @input="debouncedFaceQuery()">
+        </div>
+        <div class="slider-row" x-show="facesAvailable">
+          <label class="slider-label">
+            <input type="checkbox" x-model="faceExactSearch" @change="runFaceSearch()">
+            <span title="Exact kNN. Turning this off uses the approximate index; the mode is recorded in the query log.">Exact face search</span>
+          </label>
         </div>
       </div>
 
@@ -754,12 +994,24 @@
         <template x-if="analysisRunModes.includes('semantic') && selectedFileId && !(selectedFile?.errors?.length > 0)">
           <button class="btn-tiny" :disabled="semanticStatsLoading"
                   @click="calcSemanticStats()"
-                  x-text="semanticStatsLoading ? '…' : 'Dist Stats'"></button>
+                  x-text="semanticStatsLoading ? '…' : 'DINO Dist Stats'"></button>
         </template>
         <template x-if="selectedFileId && selectedHit && !(selectedFile?.errors?.length > 0)">
           <button class="btn-tiny" :disabled="auditLoading"
                   @click="openAudit()"
-                  x-text="auditLoading ? '…' : 'Audit'"></button>
+                  x-text="auditLoading ? '…' : 'DINO Audit'"></button>
+        </template>
+        <!-- The face pair. Gated on a *searchable* query face: a review-only
+             face has no vector, so it can draw no distribution. -->
+        <template x-if="facesAvailable && queryFaces.some(f => f.searchable)">
+          <button class="btn-tiny" :disabled="faceStatsLoading"
+                  @click="openFaceStats()"
+                  x-text="faceStatsLoading ? '…' : 'FACE Dist Stats'"></button>
+        </template>
+        <template x-if="facesAvailable && selectedHit">
+          <button class="btn-tiny" :disabled="faceAuditLoading"
+                  @click="openFaceAudit()"
+                  x-text="faceAuditLoading ? '…' : 'FACE Audit'"></button>
         </template>
       </div>
 
@@ -768,7 +1020,9 @@
       </template>
 
       <template x-if="selectedFileId">
-        <div class="image-panel-inner">
+        <!-- cmp-inner: the query and match columns are compared side by side, so
+             their image boxes must stay the same size — see style.css. -->
+        <div class="image-panel-inner cmp-inner">
           <div class="image-box"
                @wheel="if ($event.ctrlKey || $event.metaKey) return; $event.preventDefault(); queryZoom = Math.min(4, Math.max(0.2, queryZoom - Math.sign($event.deltaY) * 0.1))"
                @dblclick.self="queryZoom = 1">
@@ -782,6 +1036,35 @@
               <button class="zoom-btn" @click.stop="queryZoom = Math.max(0.2, queryZoom - 0.25)" title="Zoom out">−</button>
               <button class="zoom-btn" @click.stop="queryZoom = 1" title="Reset" style="font-size:10px">⊡</button>
             </div>
+          </div>
+          <!-- Query-side faces.  Session-scoped: detected on upload, never
+               indexed and never persisted.  x-init calls the loader once *and*
+               watches — the watcher alone fires only on change, so the already
+               selected file would never be detected (fixed at 936-939 too). -->
+          <div class="query-faces" x-show="facesAvailable && queryFaces.length"
+               x-init="loadQueryFaces(); $watch('selectedFileId', () => loadQueryFaces())">
+            <div class="query-faces-head">
+              <span x-text="`${queryFaces.length} face observations in this image`"></span>
+              <button class="btn-tiny" @click="selectAllQueryFaces()">All</button>
+              <button class="btn-tiny" @click="clearQueryFaceSelection()">None</button>
+            </div>
+            <div class="query-faces-grid">
+              <template x-for="face in queryFaces" :key="`qf-${face.index}`">
+                <div class="query-face-chip"
+                     :class="{
+                       'query-face-chip-selected': queryFaceSelected(face.index),
+                       'query-face-chip-unsearchable': !face.searchable,
+                     }"
+                     @click="toggleQueryFace(face)">
+                  <img :src="queryFaceChipUrl(face.index)" alt="">
+                  <span class="query-face-status" x-text="queryFaceStatusLabel(face)"></span>
+                </div>
+              </template>
+            </div>
+            <p class="faces-caveat" x-show="queryFacesTruncated">
+              Detection was capped; not every face in this image is shown.
+            </p>
+            <p class="faces-caveat" x-show="queryFacesError" x-text="queryFacesError"></p>
           </div>
           <!-- Frame navigation (video uploads only) -->
           <template x-if="isVideoUpload && queryFrames && queryFrames.length > 0">
@@ -912,7 +1195,9 @@
       </template>
 
       <template x-if="selectedHit">
-        <div class="image-panel-inner">
+        <!-- cmp-inner: pairs with the query column above; the face panel below
+             must not shrink this image box — see style.css. -->
+        <div class="image-panel-inner cmp-inner">
           <div class="image-box"
                @wheel="if ($event.ctrlKey || $event.metaKey) return; $event.preventDefault(); matchZoom = Math.min(4, Math.max(0.2, matchZoom - Math.sign($event.deltaY) * 0.1))"
                @dblclick.self="matchZoom = 1">
@@ -928,6 +1213,83 @@
               <button class="zoom-btn" @click.stop="matchZoom = 1" title="Reset" style="font-size:10px">⊡</button>
             </div>
           </div>
+          <!-- Face observations (optional modality; browse only, never an identification) -->
+          <template x-if="facesAvailable">
+            <!-- Load once for the hit already selected when this panel mounts, then on
+                 every later change: $watch alone never fires for the initial selection. -->
+            <div class="faces-panel" x-init="loadFacesForHit(selectedHit?.image_hash); $watch('selectedHit', h => loadFacesForHit(h?.image_hash))">
+              <div class="faces-head">
+                <span class="sub-label">Face observations</span>
+                <span class="sub-val" x-text="facesLoading ? 'loading…' : `${facesForHit.length} in this image`"></span>
+              </div>
+              <div class="faces-grid" x-show="facesForHit.length">
+                <template x-for="face in facesForHit" :key="face.id">
+                  <a class="face-chip" :class="{
+                       'face-chip-review-only': faceIsReviewOnly(face),
+                       'face-chip-matched': faceIsMatched(face),
+                     }"
+                     :href="faceReviewUrl(face.review_chip_hash)" target="_blank" rel="noopener"
+                     :title="`observation ${face.observation_key}`">
+                    <img :src="faceThumbUrl(face.review_chip_hash)" alt="face observation" loading="lazy">
+                    <span class="face-chip-meta">
+                      <span x-text="`conf ${(face.det_conf ?? 0).toFixed(2)}`"></span>
+                      <span x-text="`q ${faceQualityLabel(face)}`"></span>
+                    </span>
+                    <!-- Not a tooltip: a reviewer must never mistake a review-only
+                         observation for one the machine actually compared. -->
+                    <span class="face-chip-status" x-text="faceStatusLabel(face)"></span>
+                    <span class="face-chip-why" x-show="faceExclusionLabel(face)"
+                          x-text="faceExclusionLabel(face)"></span>
+                    <!-- Raw cosine against the selected query face. Uncalibrated:
+                         no confidence, no percentage, no threshold. -->
+                    <span class="face-chip-score" x-show="faceIsMatched(face)"
+                          x-text="`cosine ${faceMatchScore(face)}`"></span>
+                  </a>
+                </template>
+              </div>
+              <p class="faces-caveat">
+                Machine-detected face observations — an investigative lead, not an identification.
+              </p>
+              <!-- Pipeline explainer (spec §6.6): how this face was processed -->
+              <div class="faces-explain-list" x-show="facesForHit.length">
+                <template x-for="face in facesForHit" :key="`ex-${face.id}`">
+                  <button class="faces-explain-btn" @click="explainFace(face.id)">
+                    How was this face processed?
+                  </button>
+                </template>
+              </div>
+              <div class="faces-explain" x-show="faceExplainOpen" x-cloak>
+                <div class="faces-explain-head">
+                  <span class="sub-label">Processing steps</span>
+                  <button class="zoom-btn" @click="closeFaceExplain()" title="Close">×</button>
+                </div>
+                <p class="faces-caveat" x-show="faceExplainError" x-text="faceExplainError"></p>
+                <template x-if="faceExplain">
+                  <div>
+                    <template x-for="step in faceExplain.steps" :key="step.step">
+                      <div class="faces-explain-step">
+                        <div class="faces-explain-name" x-text="step.step.replace(/_/g, ' ')"></div>
+                        <p class="faces-explain-sentence" x-text="step.sentence"></p>
+                        <div class="faces-explain-nums">
+                          <template x-for="[k, v] in Object.entries(step.scores || {})" :key="k">
+                            <span x-text="`${k}: ${v}`"></span>
+                          </template>
+                          <template x-for="[k, v] in Object.entries(step.thresholds_in_force || {})" :key="`t-${k}`">
+                            <span class="faces-explain-thr" x-text="`${k} = ${v}`"></span>
+                          </template>
+                        </div>
+                      </div>
+                    </template>
+                    <p class="faces-explain-totals"
+                       x-show="faceExplain.file_totals?.n_detected != null"
+                       x-text="`this file: ${faceExplain.file_totals.n_detected} detections, ${faceExplain.file_totals.n_kept} comparable, ${faceExplain.file_totals.n_review_only ?? 0} retained for review`"></p>
+                    <p class="faces-caveat" x-text="faceExplain.caveat"></p>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
           <!-- Tag membership strip for result image -->
           <template x-if="selectedHit?.image_hash && hitTags[selectedHit.image_hash]?.length > 0">
             <div class="tag-strip">
@@ -1101,9 +1463,17 @@
         </template>
       </div>
 
+      <!-- Face scores are raw model output. The banner is required whenever
+           face results are on screen (spec §10 / RULING §2) — it is not a
+           dismissible hint. -->
+      <div class="faces-uncal-banner" x-show="faceCalibration">
+        <span x-text="faceCalibration?.banner"></span>
+        <span class="faces-uncal-note" x-text="faceCalibration?.model_reference_note"></span>
+      </div>
+
       <!-- Filter pills -->
       <div class="hits-filters"
-           x-show="analysisRunModes.includes('altered') || analysisRunModes.includes('semantic')">
+           x-show="analysisRunModes.includes('altered') || analysisRunModes.includes('semantic') || facesAvailable">
         <template x-if="analysisRunModes.includes('altered')">
           <button class="hit-filter-pill hit-filter-pill-altered"
                   :class="{off: !hitsFilterAltered}"
@@ -1113,6 +1483,11 @@
           <button class="hit-filter-pill hit-filter-pill-semantic"
                   :class="{off: !hitsFilterSemantic}"
                   @click="hitsFilterSemantic = !hitsFilterSemantic; selectedHitKey = null; matchSrc = null">SEMANTIC</button>
+        </template>
+        <template x-if="facesAvailable">
+          <button class="hit-filter-pill hit-filter-pill-faces"
+                  :class="{off: !hitsFilterFaces}"
+                  @click="hitsFilterFaces = !hitsFilterFaces; selectedHitKey = null; matchSrc = null">FACES</button>
         </template>
         <button class="hit-filter-pill hit-filter-pill-unify"
                 :class="{off: !hitsUnified}"
@@ -1186,6 +1561,16 @@
                   <span class="badge badge-semantic">SEMAN</span>
                   <span class="pill-score pill-score-semantic"
                         x-text="'semantic' in hit.scores ? hit.scores.semantic.toFixed(3) : ''"></span>
+                </div>
+                <!-- Fixed slot 4: reserved when the face modality is available.
+                     4 dp: this is a raw, uncalibrated cosine, not a rounded
+                     confidence — see the banner above the list. -->
+                <div class="pill-group"
+                     x-show="facesAvailable"
+                     :style="'faces' in hit.scores && hitsFilterFaces ? '' : 'visibility:hidden'">
+                  <span class="badge badge-faces">FACES</span>
+                  <span class="pill-score pill-score-faces"
+                        x-text="'faces' in hit.scores ? hit.scores.faces.toFixed(4) : ''"></span>
                 </div>
               </div>
               <div class="hit-filename">
@@ -1795,6 +2180,7 @@
 <script src="/static/js/evidence.js"></script>
 <script src="/static/js/triage.js"></script>
 <script src="/static/js/reset.js"></script>
+<script src="/static/js/faces.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

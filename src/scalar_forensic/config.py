@@ -9,6 +9,11 @@ _VALID_DEDUP_MODES = frozenset({"hash", "filepath", "both"})
 
 _DEFAULT_HASH_CACHE_PATH = "data/hash_cache.db"
 
+# Mirrors YuNetDetector's default score_threshold (faces/detect.py); faces
+# below it never reach any gate.  Duplicated rather than imported: config.py
+# must not import cv2 transitively.
+_DETECTOR_SCORE_FLOOR = 0.5
+
 # Environment variable name for the allow-online flag.  Both the CLI and the
 # web entry-point write this variable before constructing Settings() so that
 # every per-request Settings() instance created by FastAPI handlers also sees
@@ -152,6 +157,97 @@ class Settings:
         if self.max_active_sessions < 0:
             raise ValueError("SFN_MAX_ACTIVE_SESSIONS must be >= 0 (0 disables the cap)")
 
+        # --- Face modality (optional; spec docs/specs/face-pipeline.md) ---
+        # Disabled by default.  Enabling requires a detector model, an
+        # embedder model + manifest, and SFN_EXAMINER_ID; validated by
+        # face_startup_error() so entry points fail fast with guidance.
+        self.faces_enabled: bool = self._parse_bool("SFN_FACES_ENABLED", default=False)
+        self.face_detector: str = os.environ.get("SFN_FACE_DETECTOR", "yunet")
+        if self.face_detector != "yunet":
+            raise ValueError(
+                f"SFN_FACE_DETECTOR={self.face_detector!r} is invalid. Supported: yunet"
+            )
+        self.face_detector_model: Path | None = self._parse_optional_path("SFN_FACE_DETECTOR_MODEL")
+        self.face_embedder_model: Path | None = self._parse_optional_path("SFN_FACE_EMBEDDER_MODEL")
+        self.face_collection: str = (
+            os.environ.get("SFN_FACE_COLLECTION") or f"{self.collection}_faces"
+        )
+        self.face_store_dir: Path | None = self._parse_optional_path(
+            "SFN_FACE_STORE_DIR", "data/faces"
+        )
+        self.face_detect_max_size: int = self._parse_int("SFN_FACE_DETECT_MAX_SIZE", 1600)
+        if self.face_detect_max_size < 64:
+            raise ValueError("SFN_FACE_DETECT_MAX_SIZE must be >= 64")
+        self.face_min_conf: float = self._parse_float("SFN_FACE_MIN_CONF", 0.8)
+        if not (0.0 < self.face_min_conf <= 1.0):
+            raise ValueError("SFN_FACE_MIN_CONF must be in (0, 1]")
+        # 40 by maintainer decision 2026-08-12, lowered from 64.  This is the
+        # EMBED floor: it decides whether a face gets a vector and enters search,
+        # so it is the gate with evidential consequence.  40 is the largest value
+        # that admits the measured 40.1 / 46.9 / 40.8 px cohort (runbook
+        # 2026-08-12).  Lowering it does NOT retroactively vectorise already
+        # indexed observations — a collection must be re-indexed to feel it.
+        self.face_min_size: int = self._parse_int("SFN_FACE_MIN_SIZE", 40)
+        if self.face_min_size < 1:
+            raise ValueError("SFN_FACE_MIN_SIZE must be >= 1")
+        # Review path (spec: 2026-08-12 gate-split design).  Admits faces for
+        # hand examination only — never for embedding.  Clamped, never raising:
+        # this block parses even when faces are disabled and Settings() is
+        # built per request, so a default must not invalidate an explicit value.
+        self._face_threshold_notes: list[str] = []
+        review_conf = self._parse_float("SFN_FACE_REVIEW_MIN_CONF", 0.6)
+        if not 0 < review_conf <= 1:
+            raise ValueError("SFN_FACE_REVIEW_MIN_CONF must be in (0, 1]")
+        # 24 by maintainer decision 2026-08-12, lowered from 48.  Retention only:
+        # a review-only observation is vectorless and cannot produce a machine
+        # match, so this floor carries no evidential consequence.
+        review_size = self._parse_int("SFN_FACE_REVIEW_MIN_SIZE", 24)
+        if review_size < 1:
+            raise ValueError("SFN_FACE_REVIEW_MIN_SIZE must be >= 1")
+        if review_conf > self.face_min_conf:
+            self._face_threshold_notes.append(
+                f"SFN_FACE_REVIEW_MIN_CONF ({review_conf}) exceeds SFN_FACE_MIN_CONF "
+                f"({self.face_min_conf}); clamped to {self.face_min_conf}. The review "
+                "gate can never be stricter than the embedding gate."
+            )
+            review_conf = self.face_min_conf
+        if review_size > self.face_min_size:
+            self._face_threshold_notes.append(
+                f"SFN_FACE_REVIEW_MIN_SIZE ({review_size}) exceeds SFN_FACE_MIN_SIZE "
+                f"({self.face_min_size}); clamped to {self.face_min_size}."
+            )
+            review_size = self.face_min_size
+        if review_conf < _DETECTOR_SCORE_FLOOR:
+            self._face_threshold_notes.append(
+                f"SFN_FACE_REVIEW_MIN_CONF ({review_conf}) is below the detector's own "
+                f"score threshold ({_DETECTOR_SCORE_FLOOR}); no face below that ever "
+                "reaches the gate, so the lower value has no effect."
+            )
+        self.face_review_min_conf: float = review_conf
+        self.face_review_min_size: int = review_size
+        self.face_min_sharpness: float = self._parse_float("SFN_FACE_MIN_SHARPNESS", 25.0)
+        self.face_max_clipped: float = self._parse_float("SFN_FACE_MAX_CLIPPED", 0.6)
+        if not (0.0 < self.face_max_clipped <= 1.0):
+            raise ValueError("SFN_FACE_MAX_CLIPPED must be in (0, 1]")
+        self.face_max_pose: float = self._parse_float("SFN_FACE_MAX_POSE", 0.35)
+        self.face_crop_dilation: float = self._parse_float("SFN_FACE_CROP_DILATION", 0.25)
+        if not (0.0 < self.face_crop_dilation <= 0.5):
+            raise ValueError("SFN_FACE_CROP_DILATION must be in (0, 0.5]")
+        # Browse thumbnail long side (px).  Derived, non-evidentiary artefact
+        # (spec §7.3) — regenerable, so it is not a comparability field.
+        self.face_thumb_size: int = self._parse_int("SFN_FACE_THUMB_SIZE", 256)
+        if self.face_thumb_size < 1:
+            raise ValueError("SFN_FACE_THUMB_SIZE must be >= 1")
+        # Cap on faces taken from ONE uploaded query image (spec §8, Phase 1b).
+        # Detection is truncated at this many retained faces rather than
+        # refused: a crowd scene must still yield selectable probes.  Query
+        # scope only — it never affects what an index run stores, so it is not
+        # a comparability field.
+        self.face_query_max_faces: int = self._parse_int("SFN_FACE_QUERY_MAX_FACES", 25)
+        if self.face_query_max_faces < 1:
+            raise ValueError("SFN_FACE_QUERY_MAX_FACES must be >= 1")
+        self.examiner_id: str | None = os.environ.get("SFN_EXAMINER_ID") or None
+
     def _parse_float(self, key: str, default: float) -> float:
         raw = os.environ.get(key)
         if raw is None:
@@ -257,6 +353,46 @@ class Settings:
         else:
             os.environ["HF_HUB_OFFLINE"] = "1"
             os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+    def face_threshold_notes(self) -> list[str]:
+        """Non-fatal notices about face threshold clamping (spec §Config)."""
+        return list(self._face_threshold_notes)
+
+    def face_startup_error(self) -> str | None:
+        """Actionable error if the face modality is enabled but unusable, else None.
+
+        Checked at entry points (CLI --faces, sfn-web lifespan) so
+        misconfiguration fails at startup, not at first detection.
+        """
+        if not self.faces_enabled:
+            return None
+        problems: list[str] = []
+        if self.face_detector_model is None or not self.face_detector_model.exists():
+            problems.append(
+                f"  - SFN_FACE_DETECTOR_MODEL={str(self.face_detector_model)!r} not found.\n"
+                "    Fetch the YuNet ONNX (MIT) once and point this at the local file."
+            )
+        if self.face_embedder_model is None or not self.face_embedder_model.exists():
+            problems.append(
+                f"  - SFN_FACE_EMBEDDER_MODEL={str(self.face_embedder_model)!r} not found.\n"
+                "    ScalarForensic ships no recognition weights (see INSTALL.md, licensing);\n"
+                "    supply an ONNX model plus its .manifest.json."
+            )
+        elif not Path(str(self.face_embedder_model) + ".manifest.json").exists():
+            problems.append(
+                f"  - Manifest not found: {self.face_embedder_model}.manifest.json\n"
+                "    Every embedder model needs a manifest (see docs/specs/face-pipeline.md §6.3)."
+            )
+        if not self.examiner_id:
+            problems.append(
+                "  - SFN_EXAMINER_ID is required while faces are enabled (self-asserted\n"
+                "    examiner identity, stamped on adjudications and audit-log entries)."
+            )
+        if not problems:
+            return None
+        return "Face modality is enabled (SFN_FACES_ENABLED=true) but not usable:\n" + "\n".join(
+            problems
+        )
 
     def offline_model_error(self, *, need_dino: bool = False) -> str | None:
         """Return a user-facing error string if a model is not locally accessible, else None.

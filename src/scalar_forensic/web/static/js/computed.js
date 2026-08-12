@@ -42,13 +42,44 @@
       }
       return hits[0] ?? null;
     },
+    get mergedHits() {
+      // Face hits arrive from a second endpoint; merge them into the image-mode
+      // hit list by image_hash so one row is one medium across all four modes.
+      const base = this.selectedFile ? this.selectedFile.hits : [];
+      if (!this.faceHits.length) return base;
+      const byHash = new Map();
+      for (const fh of this.faceHits) byHash.set(fh.image_hash, fh);
+      const merged = base.map(h => {
+        const fh = byHash.get(h.image_hash);
+        if (!fh) return h;
+        byHash.delete(h.image_hash);
+        return { ...h, scores: { ...h.scores, faces: fh.score }, face_match: fh.face };
+      });
+      // Media found only by face, appended score-desc.  `path` is set from
+      // whichever locator the record has: hitKey() keys on it, so a null path
+      // would collapse every face-only row onto one Alpine :key.
+      const faceOnly = [...byHash.values()]
+        .sort((a, b) => b.score - a.score)
+        .map(fh => ({
+          path: fh.image_path ?? fh.video_path ?? fh.image_hash,
+          image_hash: fh.image_hash,
+          scores: { faces: fh.score }, face_match: fh.face,
+          is_video_frame: fh.is_video_frame, video_hash: fh.video_hash,
+          video_path: fh.video_path, frame_timecode_ms: fh.frame_timecode_ms,
+          exif: null, exif_geo_data: null, model_provenance: null,
+          matched_frames: null, query_timecodes: null,
+          best_query_timecode_ms: null, is_reference: false,
+        }));
+      return merged.concat(faceOnly);
+    },
     get filteredHits() {
       if (!this.selectedFile) return [];
-      let hits = this.selectedFile.hits.filter(h => {
+      let hits = this.mergedHits.filter(h => {
         // Keep if any active-mode score is present
         if ('exact' in h.scores) return true;
         if ('altered' in h.scores && this.hitsFilterAltered) return true;
         if ('semantic' in h.scores && this.hitsFilterSemantic) return true;
+        if ('faces' in h.scores && this.hitsFilterFaces) return true;
         return false;
       });
       // When a specific query frame child is selected, show only that frame's hits

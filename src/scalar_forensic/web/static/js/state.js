@@ -7,9 +7,6 @@
     phase: 'upload',
     pendingFiles: [],
     dragOver: false,
-    dropZoneIdle: false,
-    _idleTimer: null,
-    _resetIdle: null,
     selectedModes: [],
     availableModes: [],
     analysisRunModes: [],      // modes actually used in the last analysis
@@ -18,7 +15,49 @@
     sessionId: null,
     results: [],
     selectedFileId: null,
+
+    // ── Face modality (optional; browse only) ──────────────────────────────
+    facesAvailable: false,
+    facesReason: '',
+    facesNote: '',
+    facesForHit: [],
+    facesLoading: false,
+    faceExplain: null,
+    faceExplainOpen: false,
+    faceExplainError: '',
     selectedHitKey: null,
+
+    // Query-side faces (session-scoped; detected on upload, never indexed)
+    queryFaces: [],
+    queryFacesLoading: false,
+    queryFacesError: '',
+    queryFacesTruncated: false,
+    selectedQueryFaceIndices: [],
+
+    // Cross-file face search.  faceThreshold is a *display floor* on the raw
+    // cosine and stays 0.0: this deployment has no calibrated threshold, and a
+    // non-zero default would manufacture one (spec §10).
+    faceHits: [],
+    faceSearchLoading: false,
+    faceSearchError: '',
+    faceCalibration: null,
+    faceMatchScores: {},        // {point_id (string): raw cosine}
+    hitsFilterFaces: true,
+    faceLimit: 10,
+    faceThreshold: 0.0,
+    faceExactSearch: true,
+    _faceQueryTimer: null,
+
+    // Per-model explainer surfaces (face pair; the DINO pair is above)
+    faceStats: null,
+    faceStatsLoading: false,
+    faceStatsError: '',
+    showFaceStats: false,
+    faceAudit: null,
+    faceAuditLoading: false,
+    faceAuditError: '',
+    showFaceAudit: false,
+
     thresholdAltered: 0.75,
     thresholdSemantic: 0.55,
     limit: 10,
