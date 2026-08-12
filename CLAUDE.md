@@ -6,7 +6,9 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 
 ## Commands
 
-- `uv run pytest -q` — full suite (300 tests), hermetic, needs no Qdrant
+- `uv run pytest -q` — full suite (478 passed / 5 skipped as of 2026-08-12), hermetic,
+  needs no Qdrant; the 5 skips need `SFN_TEST_QDRANT_URL` and are the only tests that can
+  observe the face exclusion guarantee against a real store
 - `uv run ruff check src tests scripts` and `uv run ruff format --check src tests scripts` — CI runs exactly these
 - `./run.sh sfn-web` — start web UI (wrapper exports venv CUDA libs); boots fine without
   Qdrant and degrades to exact-hash-only mode
@@ -44,8 +46,9 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 - `scripts/` ignores E402 (imports follow an intentional `sys.path` bootstrap).
 - `data/` is gitignored except `data/sample_images/`; huge local test sets
   (`data/images/`, zips) live there untracked. Ingestion CSVs go to `data/reports/`.
-- Web UI drop zone fades after 5 s idle (screensaver) and swallows pointer events;
-  it wakes on `mousemove` — relevant when driving the UI with browser automation.
+- The app sends **no cache headers on `/`**, and `ignoreCache` does not defeat the browser
+  cache — use `/?cachebust=N` when testing UI changes, or you will debug a stale page.
+  `style.css` is *not* cache-busted by that query string: re-set the stylesheet href too.
 - The 14 pytest warnings are a third-party torch `jit.script_method` deprecation — not ours.
 - The face real-model test skips unless a YuNet ONNX is present (`models/` is gitignored; fetch
   with `scripts/download_models.py --yunet`). It is the only check that can catch a wrong YuNet
