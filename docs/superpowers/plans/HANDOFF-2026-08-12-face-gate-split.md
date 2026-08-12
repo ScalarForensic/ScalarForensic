@@ -33,6 +33,21 @@ Baseline was 398 passed. Now 441, zero skipped, `ruff check` and
 Task 5 (`7a9ce8e`) landed between 4 and 6: `clear_face_vector`,
 `unreferenced_chip_hashes`, and `_purge_by_filter` reading both hash domains.
 
+## Decisions — resolved 2026-08-12
+
+The three below were answered by the maintainer:
+
+1. **Chip store scoping: Option A.** Document that `SFN_FACE_STORE_DIR` is set per case.
+   No code change; Task 12 Step 2's placeholder wording stands.
+2. **Chip-hash prefix: keep widened.** No revert.
+3. **Validation run:** setup written up as
+   `docs/superpowers/plans/SETUP-2026-08-12-face-validation-run.md`; the maintainer runs
+   it when the models are in place. Not scheduled into task order.
+4. **Task 6 review:** no separate pass — folded into the review checkpoint after Task 9,
+   which therefore covers `56043ab..HEAD` (Tasks 6–9) as one read.
+
+The original statements of 1–3 are kept below for the reasoning.
+
 ## Open decisions — these are yours
 
 ### 1. `SFN_FACE_STORE_DIR` scoping (blocks nothing, changes Task 12)
