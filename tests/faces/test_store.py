@@ -344,10 +344,10 @@ def test_marker_records_review_only_counts(store):
     assert p.payload["n_review_only"] == 3
     assert p.payload["review_only_reasons"] == {"size": 2, "pose": 1}
     assert p.payload["n_dropped_noncanonical"] == 0
-    # The marker must reconcile with its own breakdown, or it is not an
-    # honest account of the medium.
-    total = p.payload["n_kept"] + p.payload["n_review_only"] + sum(p.payload["n_rejected"].values())
-    assert total == p.payload["n_detected"]
+    # No reconciliation assertion here: marker_point only echoes its arguments,
+    # so summing them would check this test's arithmetic, not the pipeline's.
+    # The invariant is enforced where the counts are produced —
+    # tests/faces/test_indexing.py, against a real process_image run.
 
 
 def test_rollup_records_review_only_counts(store):

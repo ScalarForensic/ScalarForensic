@@ -165,7 +165,15 @@ async def face_explain(point_id: str) -> JSONResponse:
         "exposure": "post_align_gate",
     }
     _ORDER = ["detection", "pre_align_gate", "alignment", "post_align_gate", "embedding"]
-    failing_step = _STEP_FOR_REASON.get(excluded_at) if status == "review_only" else None
+    if status == "review_only":
+        # An unrecognised or absent reason must not read as "everything before
+        # embedding passed": a review-only observation stores null for pose,
+        # sharpness, exposure and the aligned hash, so claiming it was aligned
+        # and passed the blur check would be a false statement about an exhibit.
+        # The earliest gate is the safe default — it claims the least.
+        failing_step = _STEP_FOR_REASON.get(excluded_at, "pre_align_gate")
+    else:
+        failing_step = None
     _from = _ORDER.index(failing_step) if failing_step else len(_ORDER)
 
     def _passed(step_name: str) -> bool:

@@ -80,6 +80,8 @@ def run_faces_cli(tmp_path, monkeypatch):
         rejected: dict[str, int] | None = None,
         review_reasons: dict[str, int] | None = None,
         dropped_noncanonical: int = 0,
+        review_only_point_ids: list[str] | None = None,
+        clear_raises: Exception | None = None,
     ):
         _enable_faces(monkeypatch, tmp_path)
         pipeline = MagicMock()
@@ -88,6 +90,8 @@ def run_faces_cli(tmp_path, monkeypatch):
         pipeline.store.collection_is_new.return_value = False
         pipeline.store.check_compat.return_value = []
         pipeline.store.processed_hashes.return_value = set()
+        if clear_raises is not None:
+            pipeline.store.clear_face_vector.side_effect = clear_raises
         pipeline.process_image.return_value = FaceIndexResult(
             n_detected=detected,
             n_kept=kept,
@@ -95,6 +99,7 @@ def run_faces_cli(tmp_path, monkeypatch):
             rejected=dict(rejected or {}),
             review_only_reasons=dict(review_reasons or {}),
             n_dropped_noncanonical=dropped_noncanonical,
+            review_only_point_ids=list(review_only_point_ids or []),
         )
         with patch(
             "scalar_forensic.faces.indexing.FacePipeline.from_settings", return_value=pipeline
@@ -104,18 +109,21 @@ def run_faces_cli(tmp_path, monkeypatch):
                 _typer_app(index),
                 [str(img_dir), "--faces", "--report", str(tmp_path / "ingestion.csv")],
             )
-        events = [
-            json.loads(line)
-            for line in (tmp_path / "face_audit.log").read_text().splitlines()
-            if line
-        ]
-        return result, events
+        # A run that dies inside the face pass never reaches the index_run
+        # append, so the log may legitimately not exist.
+        log = tmp_path / "face_audit.log"
+        events = (
+            [json.loads(line) for line in log.read_text().splitlines() if line]
+            if log.exists()
+            else []
+        )
+        return result, events, pipeline
 
     return _run
 
 
 def test_cli_summary_reconciles_counts(run_faces_cli):
-    result, _ = run_faces_cli(
+    result, _, _pipeline = run_faces_cli(
         detected=6,
         kept=1,
         review_only=3,
@@ -130,7 +138,7 @@ def test_cli_summary_reconciles_counts(run_faces_cli):
 
 
 def test_audit_index_run_records_review_only(run_faces_cli):
-    _, events = run_faces_cli(
+    _, events, _pipeline = run_faces_cli(
         detected=6,
         kept=1,
         review_only=3,
@@ -140,21 +148,69 @@ def test_audit_index_run_records_review_only(run_faces_cli):
     ev = [e for e in events if e["event"] == "index_run"][-1]
     assert ev["n_review_only"] == 3
     assert ev["review_only_reasons"] == {"size": 3}
-    assert ev["n_kept"] + ev["n_review_only"] + sum(ev["n_rejected"].values()) == ev["n_detected"]
+    # Deliberately no reconciliation sum here: process_image is mocked, so the
+    # numbers are this test's own literals.  The invariant is enforced against
+    # a real run in tests/faces/test_indexing.py; what matters here is that the
+    # record carries every field needed to check it.
+    assert {"n_detected", "n_kept", "n_review_only", "n_rejected"} <= ev.keys()
 
 
 def test_audit_index_run_records_noncanonical_drops(run_faces_cli):
     # A non-canonical drop is subtracted from n_detected before any gate sees
     # the face; without it in the record the reconciliation above is unfalsifiable.
-    _, events = run_faces_cli(detected=2, kept=2, dropped_noncanonical=4)
+    _, events, _pipeline = run_faces_cli(detected=2, kept=2, dropped_noncanonical=4)
     ev = [e for e in events if e["event"] == "index_run"][-1]
     assert ev["n_dropped_noncanonical"] == 4
 
 
 def test_cli_summary_omits_review_clause_when_none(run_faces_cli):
-    result, _ = run_faces_cli(detected=2, kept=2)
+    result, _, _pipeline = run_faces_cli(detected=2, kept=2)
     assert "retained for review" not in result.output
     assert "2 comparable" in result.output
+
+
+def test_cli_clears_vectors_for_every_review_only_point(run_faces_cli):
+    # The one line of production code that keeps a demoted observation out of
+    # the search space.  Deleting it must fail the suite, not just the skipped
+    # live-Qdrant test.
+    ids = ["11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"]
+    _, _, pipeline = run_faces_cli(
+        detected=3, kept=1, review_only=2, review_reasons={"size": 2}, review_only_point_ids=ids
+    )
+    pipeline.store.clear_face_vector.assert_called_once_with(ids)
+
+
+def test_cli_writes_the_marker_only_after_the_vector_clear(run_faces_cli):
+    # The marker is the idempotency record: once written for this config hash
+    # the medium is never reprocessed.  Committing it before the clear would
+    # make a failed demotion permanent and invisible — the payload would say
+    # review-only while the vector stayed live in the index.
+    ids = ["11111111-1111-1111-1111-111111111111"]
+    _, _, pipeline = run_faces_cli(
+        detected=2, kept=1, review_only=1, review_reasons={"size": 1}, review_only_point_ids=ids
+    )
+    order = [
+        c[0] for c in pipeline.store.method_calls if c[0] in ("upsert_faces", "clear_face_vector")
+    ]
+    assert order == ["upsert_faces", "clear_face_vector", "upsert_faces"]
+    marker_call = pipeline.store.upsert_faces.call_args_list[-1]
+    assert marker_call.args[0] == [pipeline.store.marker_point.return_value]
+
+
+def test_cli_marker_is_not_written_when_the_clear_fails(run_faces_cli):
+    # delete_vectors 404s on an unknown id (verified live), so this is reachable.
+    # The medium must stay unprocessed so a re-run can finish the demotion.
+    ids = ["11111111-1111-1111-1111-111111111111"]
+    _, _, pipeline = run_faces_cli(
+        detected=2,
+        kept=1,
+        review_only=1,
+        review_reasons={"size": 1},
+        review_only_point_ids=ids,
+        clear_raises=RuntimeError("Not found: no point with id"),
+    )
+    written = [c.args[0] for c in pipeline.store.upsert_faces.call_args_list]
+    assert [pipeline.store.marker_point.return_value] not in written
 
 
 def test_purge_requires_exactly_one_scope(monkeypatch, tmp_path):
@@ -197,9 +253,12 @@ def test_purge_media_deletes_chips_and_audits(monkeypatch, tmp_path):
     assert events[-1]["examiner_id"] == "ex1" and events[-1]["n_points"] == 2
 
 
-def test_purge_keeps_chips_still_referenced(monkeypatch, tmp_path):
-    # Chips are content-addressed and therefore shared: purging one medium must
-    # not unlink a chip a surviving observation still authenticates.
+def test_purge_routes_freed_hashes_through_the_reference_check(monkeypatch, tmp_path):
+    # Wiring only: the reference *decision* is the store's, and is covered by
+    # test_store.py's scroll-projection test plus the live integration test.
+    # What this pins is that the CLI asks before unlinking and unlinks exactly
+    # what it was told — a purge that skipped the call would delete a chip a
+    # surviving observation still authenticates.
     _enable_faces(monkeypatch, tmp_path)
     store_dir = tmp_path / "faces"
     from scalar_forensic.faces.chips import chip_paths

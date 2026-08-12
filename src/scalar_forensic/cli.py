@@ -1607,7 +1607,17 @@ def index(
                 review_only_reasons=_fres.review_only_reasons,
                 n_dropped_noncanonical=_fres.n_dropped_noncanonical,
             )
-            face_pipeline.store.upsert_faces([*_fres.points, _marker])
+            # Points first, marker last, with the vector clear between them.
+            # The marker is this medium's idempotency record: once it is
+            # committed for this config hash, the medium is never reprocessed.
+            # Committing it in the same call as the points would make a failed
+            # clear permanent and invisible — a point whose payload says
+            # review-only while its vector is still live in the index, which is
+            # the one state this design exists to prevent.  clear_face_vector
+            # can raise (delete_vectors 404s on an unknown id, see
+            # tests/faces/test_store_integration.py), so the ordering is
+            # load-bearing, not stylistic.
+            face_pipeline.store.upsert_faces(_fres.points)
             # Every review-only point, not only genuinely demoted ones:
             # delete_vectors is idempotent and ignores absent vectors, so
             # first-time review-only observations cost nothing.  An upsert with
@@ -1617,6 +1627,7 @@ def index(
             # pass review-only ids: clearing an embedded point's vector
             # destroys data recoverable only by a full re-index.
             face_pipeline.store.clear_face_vector(_fres.review_only_point_ids)
+            face_pipeline.store.upsert_faces([_marker])
             _face_detected += _fres.n_detected
             _face_kept += _fres.n_kept
             _face_review_only += _fres.n_review_only

@@ -298,6 +298,18 @@ def test_explain_marks_post_align_exclusion_at_the_right_gate(tmp_path):
     assert steps["embedding"]["passed"] is False
 
 
+def test_explain_does_not_claim_steps_passed_for_an_unrecorded_reason(tmp_path):
+    # An unmapped or missing reason must not read as "aligned and passed the
+    # blur check" — the payload stores null for pose, sharpness, exposure and
+    # the aligned hash, so that would be a false statement about an exhibit.
+    for reason in (None, "some_future_check"):
+        body = _explain(tmp_path, _review_only_face(embedding_exclusion_reason=reason))
+        steps = {s["step"]: s for s in body["steps"]}
+        assert steps["alignment"]["passed"] is False, reason
+        assert steps["post_align_gate"]["passed"] is False, reason
+        assert steps["embedding"]["passed"] is False, reason
+
+
 def test_explain_omits_aligned_chip_url_for_review_only(tmp_path):
     # Emitting a URL that is a guaranteed 404 would read as a missing file
     # rather than a chip that was never produced.

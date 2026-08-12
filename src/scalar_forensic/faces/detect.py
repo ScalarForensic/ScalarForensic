@@ -85,8 +85,9 @@ class YuNetDetector:
             # Runtime guard against a wrong _YUNET_TO_CANONICAL map: drop
             # non-canonical output rather than raise — one legitimately rotated
             # face must not crash a whole indexing run.  A wholesale-wrong map
-            # shows up as ~100% "landmark_order" rejections in the marker stats
-            # and CLI summary, which is loud enough to catch immediately.
+            # shows up as a large n_dropped_noncanonical on the marker and in
+            # the index_run audit record — note it is NOT in the CLI summary,
+            # so it has to be looked for rather than noticed.
             try:
                 assert_canonical_landmarks(lm)
             except ValueError:

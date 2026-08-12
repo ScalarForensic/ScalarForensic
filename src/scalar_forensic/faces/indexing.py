@@ -198,7 +198,11 @@ class FacePipeline:
             # Sharpness/exposure are measured on the native-resolution source
             # crop, not the 112x112 resample (spec §6.2).
             x, y, w, h = (int(v) for v in det.bbox)
-            crop = img[max(0, y) : y + h, max(0, x) : x + w]
+            # Stops clamped to >= 0 as well as starts: for a box entirely off
+            # the left/top edge, x + w is negative and numpy reads it from the
+            # far end of the axis, silently measuring sharpness on most of the
+            # frame instead of yielding the empty crop the guard below expects.
+            crop = img[max(0, y) : max(0, y + h), max(0, x) : max(0, x + w)]
             if crop.size == 0:
                 review_only.append((det, rev.subscores, "size"))
                 continue
