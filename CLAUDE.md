@@ -11,6 +11,9 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 - `./run.sh sfn-web` — start web UI (wrapper exports venv CUDA libs); boots fine without
   Qdrant and degrades to exact-hash-only mode
 - `./run.sh sfn <dir> --dino --sscd` — CLI indexing
+- `./run.sh sfn <dir> --faces` — optional face modality (needs `SFN_FACES_ENABLED=true`,
+  `SFN_EXAMINER_ID`, a YuNet ONNX and an operator-supplied embedder; `uv sync --group faces`).
+  Purge via `uv run sfn-faces purge --media <sha256> | --all`
 
 ## Architecture decisions (do not re-litigate)
 
@@ -44,3 +47,6 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 - Web UI drop zone fades after 5 s idle (screensaver) and swallows pointer events;
   it wakes on `mousemove` — relevant when driving the UI with browser automation.
 - The 14 pytest warnings are a third-party torch `jit.script_method` deprecation — not ours.
+- The face real-model test skips unless a YuNet ONNX is present (`models/` is gitignored; fetch
+  with `scripts/download_models.py --yunet`). It is the only check that can catch a wrong YuNet
+  landmark-column map — the other detector tests build rows from the same assumption as the code.

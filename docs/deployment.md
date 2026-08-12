@@ -108,3 +108,32 @@ keep these identical everywhere embeddings are produced:
 Collection names (`SFN_COLLECTION`, `SFN_TAGS_COLLECTION`,
 `SFN_REFERENCE_COLLECTION`) must match on every machine that talks to the same
 Qdrant instance.
+
+## Legal assumptions for the optional face modality
+
+This section states **assumptions, not legal conclusions.**
+
+The face modality is a post-hoc biometric search aid operated by the deploying organisation
+(the deployer role). Depending on jurisdiction and use, EU AI Act obligations for post-remote
+biometric identification, GDPR/LED duties (including a DPIA and Art. 9/10 special-category
+processing), and national law — including authorisation regimes for law-enforcement use — may
+apply, with obligations phasing in on the Act's timeline.
+
+**The technical controls in ScalarForensic support such compliance; they do not establish it.**
+Jurisdiction-specific legal review before enablement is an operator duty, as is the assessment
+of your own role under the applicable framework.
+
+The controls the legal story rests on:
+
+- **Append-only audit log** (`data/face_audit.log`) recording enablement, index runs and
+  purges — what the system did and how it was used, separately from artefact provenance.
+- **Enablement record**: first activation writes examiner id, timestamp and a free-text
+  authorization reference into the collection metadata and the audit log. Enabling the feature
+  is a recorded act, not config drift.
+- **Provenance on every artefact**: models, hashes, alignment version, and every gate threshold
+  in force (see `docs/face-matching-math.md`).
+- **Purge path** for face observations and their chip files.
+- **Disabled by default**, with no bundled recognition weights.
+
+Machine output is an investigative lead. Identification is a human conclusion by a named
+examiner, and the tool is built to keep that line visible.
