@@ -622,6 +622,31 @@
           </div>
           <input type="range" min="0" max="1" step="0.01" x-model.number="thresholdSemantic" @input="debouncedQuery()" class="range-semantic">
         </div>
+        <!-- Face query controls. The score floor is a *display* floor on a raw,
+             uncalibrated cosine — it is not a decision threshold, and it is
+             never seeded from the model authors' reference figure. -->
+        <div class="slider-row" x-show="facesAvailable">
+          <div class="slider-label">
+            <span title="Maximum face observations returned per selected query face">Face Top K</span>
+            <span class="slider-value" x-text="faceLimit"></span>
+          </div>
+          <input type="range" min="1" max="50" step="1" x-model.number="faceLimit"
+                 @input="debouncedFaceQuery()">
+        </div>
+        <div class="slider-row" x-show="facesAvailable">
+          <label class="slider-label">
+            <input type="checkbox" x-model="faceExactSearch" @change="runFaceSearch()">
+            <span title="Exact kNN. Turning this off uses the approximate index; the mode is recorded in the query log.">Exact face search</span>
+          </label>
+        </div>
+        <div class="slider-row" x-show="facesAvailable">
+          <div class="slider-label">
+            <span title="Display floor on the raw cosine. Uncalibrated: this is not a decision threshold.">Face score floor (raw cosine, uncalibrated)</span>
+            <span class="slider-value" x-text="faceThreshold.toFixed(2)"></span>
+          </div>
+          <input type="range" min="0" max="1" step="0.01" x-model.number="faceThreshold"
+                 @input="debouncedFaceQuery()">
+        </div>
       </div>
 
       <div class="panel-header section-header">

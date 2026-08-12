@@ -179,6 +179,14 @@
       }
     },
 
+    // Mirrors debouncedQuery() in analysis.js: one search per drag, not one per
+    // slider step.  The selection handlers call runFaceSearch() directly — the
+    // two paths are disjoint, so a drag never fires both.
+    debouncedFaceQuery() {
+      clearTimeout(this._faceQueryTimer);
+      this._faceQueryTimer = setTimeout(() => this.runFaceSearch(), 300);
+    },
+
     faceIsMatched(face) {
       return Object.prototype.hasOwnProperty.call(this.faceMatchScores, String(face.id));
     },

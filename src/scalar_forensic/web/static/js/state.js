@@ -46,6 +46,7 @@
     faceLimit: 10,
     faceThreshold: 0.0,
     faceExactSearch: true,
+    _faceQueryTimer: null,
 
     thresholdAltered: 0.75,
     thresholdSemantic: 0.55,

@@ -115,3 +115,14 @@ def test_merged_hits_getter_is_in_computed_not_elsewhere():
     assert "hitsFilterFaces" in computed
     for other in ("faces.js", "state.js", "helpers.js", "analysis.js"):
         assert "get mergedHits()" not in (STATIC / "js" / other).read_text()
+
+
+def test_face_query_controls_sit_with_the_other_sliders():
+    html = (STATIC / "index.html").read_text()
+    start = html.index('<div class="sliders">')
+    block = html[start : html.index("</div>", html.index("faceThreshold")) + 6]
+    assert "faceLimit" in block
+    assert "faceThreshold" in block
+    assert "faceExactSearch" in block
+    assert "0.363" not in block  # never a default in the UI controls
+    assert "uncalibrated" in block.lower()
