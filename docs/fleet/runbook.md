@@ -263,3 +263,86 @@ Written up as `docs/specs/face-query-ux.md`. **This is Phase 1b**, which spec §
 on an active calibration record — the "score beneath the matched face" is precisely what
 the spec forbids showing uncalibrated. First question for the next session is that
 evidential-posture decision, not implementation order.
+
+## 2026-08-12 — manager window OPEN (`scalarforensic-com-m2`, successor to `m1`)
+
+Read-only so far: handoff `docs/handoffs/scalarforensic-com-m1-20260812-194005.md`, this
+runbook's 2026-08-12 entries, `docs/specs/face-query-ux.md`, survey §4, spec §10. No code
+touched, no worker spawned, no number re-measured (nothing below is published as mine
+except the two file facts named). Ownership claimed: `docs/fleet/runbook.md` only.
+
+State check RAN (`cx s`): `scalarforensic-com-m1` is still live at **249.5k, busy** — past
+the 230k wrap-up rung, one rung below the 250k hard stop, and its row is **not** `sent`.
+Its handoff is written and committed (`e5d14d5`), so nothing is lost if the ladder closes
+it. Not killed by me while it is busy and unreported.
+
+### THE BLOCKING QUESTION — put to the maintainer, ranked #1
+
+The face-query UX request is Phase 1b. Spec §10 gates face *search* on an active
+`face_calibration` record; §10.4 fixes its schema and gives it precedence over env
+thresholds. The record does not exist, and the "score beneath the matched face" in the
+request (`docs/specs/face-query-ux.md`, step 5) is exactly the display §10 forbids
+uncalibrated. Two postures, and the choice is evidential, not technical:
+
+- **(A) Calibration first, UI gated on the record.**
+- **(B) UI first, behind an explicit "uncalibrated — not evidential" banner.**
+
+**Recommended default: (B), with the number suppressed.** Reasons, from what is already
+measured here — not re-derived:
+
+1. §10.1 requires labelled operator-local imagery evaluated through our exact pipeline.
+   The whole corpus on hand is `analysis_test` — 2 images, 6 detected faces, 2 embedded —
+   and its one identity claim (46.9 px ↔ 147.8 px at 0.6097) is *inferred from the score,
+   not independently confirmed*. §10.3 makes counts and CIs mandatory; observing 1e-4 needs
+   ~1e5 non-mated pairs. (A) therefore blocks the feature on data acquisition the
+   maintainer must do regardless, with no delivery in between.
+2. §10.4 refuses a record whose pipeline-config hash mismatches the collection.
+   `crop_dilation` moved 0.15 → 0.25 today and `review_min_size` 48 → 36; both sit inside
+   that hash. Calibrating now would produce a record invalidated by the next config
+   judgement — i.e. (A) is also *sequenced wrong* until those two settle.
+3. The 1b search path is the instrument the calibration run needs. FPIR/FNIR at a stated
+   gallery size (§10.2) is measured *through* cross-file face search, which is unbuilt.
+   (B) builds the measuring device first; (A) asks for the measurement without it.
+
+The recommendation's price, stated plainly: (B) puts a face-match UI in front of an
+examiner before anyone has calibrated it, which is precisely the risk §10 exists to
+prevent. It is only acceptable if the banner is not the sole guard. Proposed shape —
+the maintainer may reject any part:
+
+- Display **rank order and the green border, no number on the panel.** The raw cosine
+  stays reachable in `/api/faces/explain/` and the audit record, labelled raw and
+  uncalibrated. This is the one deviation from the request as written, and it is the
+  deviation that keeps (B) inside the spec's intent rather than merely disclaiming it.
+- Gate the whole path on an explicit opt-in env flag plus the examiner id already
+  required for faces, so the posture is enforced by config, not by a paragraph.
+- When a record later goes active, the record wins (§10.4) and the number appears with
+  its CI. Nothing built under (B) is thrown away.
+
+If the maintainer wants the number visible now, that is their call to make and it is
+recorded as theirs; the banner alone then carries it.
+
+### The other open decisions, ranked, with defaults
+
+Survey §4.1 (embedder) is **CLOSED** — SFace, adopted and verified. Six remain open:
+
+1. **Production `SFN_FACE_REVIEW_MIN_SIZE`?** *Default: keep 36.* Measured: 48 discards a
+   face that scores 0.6097 against SFace's 0.363 threshold; 36 retains all three danny1
+   faces. This is a **retention** floor, not a search floor — a review-only face is
+   vectorless and cannot produce a machine match, so a lower floor adds human review, not
+   false hits. Ranked first because it is an input to any later calibration record.
+2. **Make `SFN_FACE_CROP_DILATION=0.25` the `config.py` default?** *Default: yes.* It is
+   already in `.env`; leaving 0.15 in code means the next case silently reverts. It is in
+   `config_hash`, so it reprocesses existing collections — only `danny_validation` exists,
+   local, so the cost is now and near zero. Ranked second: it must settle before §10.4.
+3. **`purge_all()` skips `is_face_video_rollup` points — fix before 1b?** *Default: yes.*
+   A retention promise; "purge --all" leaving biometric-derived points is a courtroom
+   question.
+4. **Build the standalone stale-observation inspect/purge command?** *Default: yes, with 3.*
+5. **Merge `feat/face-pipeline-phase1` into `main` now that validation passed?**
+   *Default: yes, locally, no push.* 42 commits, 0 behind.
+6. **Phase 1b or Phase 2 next?** *Default: 1b* — the maintainer's own request already
+   answers this in practice; it is listed only so the ranking is complete.
+
+Escalated to `wallet-recovery-com-g1` via `~/.claude/cx/cto.md` inbox. Nothing proceeds on
+Phase 1b until the posture answer comes back; the six above are independently actionable
+and item 2 is the smallest first move if the maintainer wants motion meanwhile.
