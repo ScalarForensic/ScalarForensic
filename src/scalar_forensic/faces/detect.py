@@ -16,14 +16,13 @@ from scalar_forensic.embedder import hash_file
 from scalar_forensic.faces.types import FaceDetection, assert_canonical_landmarks
 
 # Map from YuNet's native landmark column order to the canonical order.
-# STILL THE WORKING HYPOTHESIS — not yet derived against the real model
-# (no YuNet weights available on the dev machine at implementation time).
-# OpenCV's "right eye" is the *subject's* right eye, i.e. plausibly already
-# the canonical image-left point, which makes identity correct.  Verify by
-# running the real model on real faces (see tests/faces/test_detect.py
-# ::test_real_model_landmark_order_on_real_face); until then
-# assert_canonical_landmarks in detect() is the guard that makes a wrong
-# map visible instead of silent.
+# DERIVED EMPIRICALLY against the real 2023mar model on 10 real faces from
+# data/sample_images (varied pose and scale): column 0 was left of column 1
+# and column 3 left of column 4 in every case.  OpenCV documents these as
+# the *subject's* right eye/mouth corner, which is image-left — so the
+# identity map is already canonical.  assert_canonical_landmarks in detect()
+# keeps guarding it at runtime; see tests/faces/test_detect.py
+# ::test_real_model_landmark_order_on_real_face.
 _YUNET_TO_CANONICAL = [0, 1, 2, 3, 4]
 
 

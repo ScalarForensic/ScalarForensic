@@ -7,7 +7,7 @@ import pytest
 
 from scalar_forensic.faces.detect import YuNetDetector, _scaled_size
 
-REAL_MODEL = os.environ.get("SFN_FACE_DETECTOR_MODEL", "")
+REAL_MODEL = os.environ.get("SFN_FACE_DETECTOR_MODEL", "models/face_detection_yunet_2023mar.onnx")
 
 
 def test_scaled_size_caps_long_side_and_reports_scale():
@@ -88,19 +88,21 @@ def test_no_faces_returns_empty(tmp_path):
 
 
 @pytest.mark.skipif(
-    not Path(REAL_MODEL or "/nonexistent").exists(), reason="YuNet model not present"
+    not Path(REAL_MODEL or "/nonexistent").exists(),
+    reason="YuNet model not present (uv run python scripts/download_models.py --yunet)",
 )
 def test_real_model_landmark_order_on_real_face():
-    # Committed fixture: any permissively-licensed photo with one clear frontal
-    # face (tests/fixtures/faces/real_face.jpg — implementer supplies, e.g. a
-    # self-taken photo).  Asserts the ordering invariant on REAL detector output,
-    # which is the only thing that can catch a wrong _YUNET_TO_CANONICAL map.
+    # Runs against an already-committed sample photo with a clear frontal face.
+    # This asserts the ordering invariant on REAL detector output, which is the
+    # only thing that can catch a wrong _YUNET_TO_CANONICAL map — the synthetic
+    # rows above merely pin test/code consistency.
     from PIL import Image as _Image
 
-    img = np.array(_Image.open(Path("tests/fixtures/faces/real_face.jpg")).convert("RGB"))
+    img = np.array(_Image.open(Path("data/sample_images/RixHj-Q6CaY.jpg")).convert("RGB"))
     det = YuNetDetector(Path(REAL_MODEL), max_size=1600)
     faces = det.detect(img)
-    assert faces, "fixture must contain a detectable face"
+    assert faces, "sample image must contain a detectable face"
+    assert det.n_dropped_noncanonical == 0  # a wrong map would drop, not emit
     for f in faces:
         assert f.landmarks[0, 0] < f.landmarks[1, 0]  # left eye left of right eye
         assert f.landmarks[3, 0] < f.landmarks[4, 0]  # left mouth left of right mouth

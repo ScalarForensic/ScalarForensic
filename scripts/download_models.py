@@ -3,7 +3,7 @@
 
 Run once on an internet-connected machine:
 
-    uv run python scripts/download_models.py [--sscd] [--dino] [--all]
+    uv run python scripts/download_models.py [--sscd] [--dino] [--yunet] [--all]
 
 With no flags, both models are downloaded (equivalent to --all).
 
@@ -39,6 +39,19 @@ from pathlib import Path
 
 SSCD_URL = "https://dl.fbaipublicfiles.com/sscd-copy-detection/sscd_disc_mixup.torchscript.pt"
 SSCD_DEST = Path("models/sscd_disc_mixup.torchscript.pt")
+
+# YuNet face detector (MIT licence, code and weights) from OpenCV Zoo.
+# Pinned to a commit rather than a branch so the fetched bytes are stable.
+# The repo stores models via git-lfs, so the raw.githubusercontent URL serves a
+# ~130-byte LFS pointer, not the model — the media host is the one that works.
+YUNET_URL = (
+    "https://media.githubusercontent.com/media/opencv/opencv_zoo/"
+    "f12e12798e8314f7c074a6656816c048dcc95b7a/models/face_detection_yunet/"
+    "face_detection_yunet_2023mar.onnx"
+)
+# sha256 of the pinned file, verified at implementation time.
+YUNET_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+YUNET_DEST = Path("models/face_detection_yunet_2023mar.onnx")
 
 DINO_MODEL_ID = "facebook/dinov2-large"
 DINO_DEST = Path("models/dinov2-large")
@@ -146,6 +159,38 @@ def download_sscd(force: bool = False, expected_hash: str | None = None) -> None
         print("  hash verified ✓")
 
 
+def download_yunet(force: bool = False, expected_hash: str | None = None) -> None:
+    """Fetch the YuNet ONNX detector for the optional face modality.
+
+    ScalarForensic ships no model weights; this is a one-time online fetch,
+    after which the face pipeline is fully offline (spec §3.2).
+    """
+    YUNET_DEST.parent.mkdir(parents=True, exist_ok=True)
+    if YUNET_DEST.exists() and not force:
+        print(f"YuNet: already present at {YUNET_DEST}")
+        actual = _compute_sscd_hash(YUNET_DEST)  # plain file sha256
+        print(f"  content hash: {actual}")
+        if expected_hash and actual != expected_hash:
+            print(f"  [ERROR] hash mismatch — expected: {expected_hash}")
+            print("  Pass --force to re-download.")
+            sys.exit(1)
+        return
+    tmp = YUNET_DEST.with_suffix(".tmp")
+    print(f"Downloading YuNet detector → {YUNET_DEST} ...")
+    try:
+        urllib.request.urlretrieve(YUNET_URL, tmp, reporthook=_progress)
+        tmp.rename(YUNET_DEST)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    print(f"\nYuNet: saved ({YUNET_DEST.stat().st_size / 1e6:.1f} MB)")
+    actual = _compute_sscd_hash(YUNET_DEST)
+    print(f"  content hash: {actual}")
+    if expected_hash and actual != expected_hash:
+        print(f"  [ERROR] hash mismatch — expected: {expected_hash}")
+        sys.exit(1)
+
+
 def _dino_is_complete() -> bool:
     """Return True only when config.json and at least one weight file are present."""
     if not DINO_DEST.exists():
@@ -230,6 +275,11 @@ def main() -> None:
     parser.add_argument("--sscd", action="store_true", help="Download SSCD checkpoint only")
     parser.add_argument("--dino", action="store_true", help="Download DINOv2 snapshot only")
     parser.add_argument(
+        "--yunet",
+        action="store_true",
+        help="Download the YuNet face detector (MIT) for the optional face modality",
+    )
+    parser.add_argument(
         "--all", dest="all_models", action="store_true", help="Download both (default)"
     )
     parser.add_argument(
@@ -280,8 +330,11 @@ def main() -> None:
             )
             sys.exit(1)
 
-    do_sscd = args.sscd or args.all_models or not (args.sscd or args.dino)
-    do_dino = args.dino or args.all_models or not (args.sscd or args.dino)
+    _any_explicit = args.sscd or args.dino or args.yunet
+    do_sscd = args.sscd or args.all_models or not _any_explicit
+    do_dino = args.dino or args.all_models or not _any_explicit
+    # Faces are opt-in: never fetched by a bare invocation or --all.
+    do_yunet = args.yunet
 
     if args.hash and do_sscd and do_dino:
         print(
@@ -295,6 +348,8 @@ def main() -> None:
         download_sscd(force=args.force, expected_hash=args.hash)
     if do_dino:
         download_dino(force=args.force, revision=args.dino_revision, expected_hash=args.hash)
+    if do_yunet:
+        download_yunet(force=args.force, expected_hash=args.hash or YUNET_SHA256)
 
     print("\nAll requested models are ready.")
     print("Make sure your .env contains:")
@@ -302,6 +357,8 @@ def main() -> None:
         print(f"  SFN_MODEL_SSCD={SSCD_DEST}")
     if do_dino:
         print(f"  SFN_MODEL_DINO={DINO_DEST}")
+    if do_yunet:
+        print(f"  SFN_FACE_DETECTOR_MODEL={YUNET_DEST}")
 
 
 if __name__ == "__main__":
