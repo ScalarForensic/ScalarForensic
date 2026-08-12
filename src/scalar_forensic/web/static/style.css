@@ -625,6 +625,26 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   overflow: hidden;
 }
 
+/* The query and match columns are read side by side, so their image boxes must
+   be dimensionally identical whatever sits below them.  With `flex: 1` they are
+   not: every sibling's height comes straight out of the box, and the face panel
+   is such a sibling on the match side only — measured at 1920x1080, the match
+   box went 706.1 -> 635.3 px with an empty panel and -> 509.0 px with chips,
+   while the query box stayed 706.1.  So size both boxes off the column instead
+   of off what flex has left over, and let the column scroll when the face panel
+   does not fit.  Both columns reserve the scrollbar gutter, or the one that
+   scrolls would come out narrower than the one that does not.
+   Scoped to the compare columns: the triage panels have no twin to match. */
+.cmp-inner {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.cmp-inner > .image-box {
+  flex: none;
+  height: 75%;
+}
+
 /* Grows to fill available panel height; both panels share the same flex rules */
 .image-box {
   flex: 1;
