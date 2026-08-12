@@ -547,6 +547,27 @@ engineered away:
    reference dangles. Purge assumes a single writer.
 3. Both are mitigated but not cured by chips being re-derivable from the source media.
 
+**Stale observations on re-index.** Point IDs derive from `image_hash` + timecode + rounded bbox
++ alignment version, never from a threshold, so changing a gate rewrites a point in place and
+leaves nothing behind. Two changes do leave something: a face that drops below the *review* gate
+produces no point at all, and a detector change shifts bboxes onto new IDs. In both the old
+point survives with its old provenance, and if it was embedded it is still in the search space
+under thresholds the current run no longer applies — while the medium's marker reports counts
+that disagree with it.
+
+The face pass therefore reconciles per medium: before writing this run's points it collects any
+`is_face` point for that `image_hash` the run did not produce, and at the end of the pass
+**shows the operator what was found** — how many, of which kind, under which config hash — and
+deletes only on explicit confirmation. Deletion routes through the same reference check as purge
+so shared chips survive. Declining is recorded, not silent: `n_stale_detected` and
+`n_stale_removed` are separate fields in the `index_run` record, along with the affected
+observation keys, so a run where the operator said no is distinguishable from one where nothing
+was stale. A non-interactive run never deletes.
+
+Adjudications (§9) reference `observation_key`, not point IDs, so deleting a stale point cannot
+destroy an examiner's decision — but the deleted observation's key stops resolving to a point.
+When Phase 1b lands, reconciliation must check the labels collection and say so before deleting.
+
 ---
 
 ## 8. Query semantics (Phase 1b+)

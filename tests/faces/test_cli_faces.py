@@ -1,3 +1,4 @@
+import io
 import json
 from unittest.mock import MagicMock, patch
 
@@ -82,6 +83,9 @@ def run_faces_cli(tmp_path, monkeypatch):
         dropped_noncanonical: int = 0,
         review_only_point_ids: list[str] | None = None,
         clear_raises: Exception | None = None,
+        stale: list[dict] | None = None,
+        unreferenced: list[str] | None = None,
+        confirm: str | None = None,
     ):
         _enable_faces(monkeypatch, tmp_path)
         pipeline = MagicMock()
@@ -90,6 +94,12 @@ def run_faces_cli(tmp_path, monkeypatch):
         pipeline.store.collection_is_new.return_value = False
         pipeline.store.check_compat.return_value = []
         pipeline.store.processed_hashes.return_value = set()
+        pipeline.store.stale_face_points.return_value = list(stale or [])
+        pipeline.store.delete_face_points.return_value = PurgeResult(
+            n_points=len(stale or []),
+            chip_hashes=[h for s in (stale or []) for h in (s.get("review_chip_hash"),) if h],
+        )
+        pipeline.store.unreferenced_chip_hashes.return_value = list(unreferenced or [])
         if clear_raises is not None:
             pipeline.store.clear_face_vector.side_effect = clear_raises
         pipeline.process_image.return_value = FaceIndexResult(
@@ -108,6 +118,7 @@ def run_faces_cli(tmp_path, monkeypatch):
             result = runner.invoke(
                 _typer_app(index),
                 [str(img_dir), "--faces", "--report", str(tmp_path / "ingestion.csv")],
+                input=confirm,
             )
         # A run that dies inside the face pass never reaches the index_run
         # append, so the log may legitimately not exist.
@@ -211,6 +222,106 @@ def test_cli_marker_is_not_written_when_the_clear_fails(run_faces_cli):
     )
     written = [c.args[0] for c in pipeline.store.upsert_faces.call_args_list]
     assert [pipeline.store.marker_point.return_value] not in written
+
+
+def _stale(pid, **over):
+    rec = {
+        "id": pid,
+        "observation_key": f"{'a' * 64}::10:20:30:40",
+        "embedding_status": "embedded",
+        "pipeline_config_hash": "oldcfg",
+        "indexed_at": "2026-08-01T00:00:00+00:00",
+        "review_chip_hash": f"r{pid}",
+    }
+    rec.update(over)
+    return rec
+
+
+def test_stale_observations_are_shown_before_anything_is_deleted(run_faces_cli):
+    # The operator approves a deletion of biometric data; they must be told
+    # what it is first — how many, of which kind, and under which config hash.
+    result, _, pipeline = run_faces_cli(
+        detected=1,
+        kept=1,
+        stale=[_stale("s1"), _stale("s2", embedding_status="review_only")],
+        confirm="n\n",
+    )
+    assert "2 stale face observation" in result.output
+    assert "1 embedded" in result.output and "1 review-only" in result.output
+    assert "oldcfg" in result.output
+    pipeline.store.delete_face_points.assert_not_called()
+
+
+def test_declining_leaves_the_stale_observations_in_place(run_faces_cli):
+    result, events, pipeline = run_faces_cli(
+        detected=1, kept=1, stale=[_stale("s1")], confirm="n\n"
+    )
+    assert result.exit_code == 0, result.output
+    pipeline.store.delete_face_points.assert_not_called()
+    ev = [e for e in events if e["event"] == "index_run"][-1]
+    assert ev["n_stale_detected"] == 1
+    assert ev["n_stale_removed"] == 0
+    # Declining must not be silent: the run continues, but the collection is
+    # knowingly left holding observations the current config would not produce.
+    assert "still present" in result.output.lower() or "remain" in result.output.lower()
+
+
+def test_confirming_deletes_and_reports_in_summary_and_audit(run_faces_cli):
+    result, events, pipeline = run_faces_cli(
+        detected=1, kept=1, stale=[_stale("s1"), _stale("s2")], confirm="y\n"
+    )
+    assert result.exit_code == 0, result.output
+    pipeline.store.delete_face_points.assert_called_once_with(["s1", "s2"])
+    assert "2 stale removed" in result.output
+    ev = [e for e in events if e["event"] == "index_run"][-1]
+    assert ev["n_stale_detected"] == 2 and ev["n_stale_removed"] == 2
+
+
+def test_stale_chip_files_go_through_the_reference_check(run_faces_cli):
+    # A stale observation may share its review chip with a surviving one.
+    _, _, pipeline = run_faces_cli(
+        detected=1, kept=1, stale=[_stale("s1")], unreferenced=[], confirm="y\n"
+    )
+    pipeline.store.unreferenced_chip_hashes.assert_called_once_with(["rs1"])
+
+
+def test_non_interactive_run_never_deletes(run_faces_cli, monkeypatch):
+    # A scripted run must not abort at the end (every marker is already
+    # written) and must not infer consent from a missing tty.
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    result, events, pipeline = run_faces_cli(detected=1, kept=1, stale=[_stale("s1")])
+    assert result.exit_code == 0, result.output
+    pipeline.store.delete_face_points.assert_not_called()
+    assert "Non-interactive" in result.output
+    assert [e for e in events if e["event"] == "index_run"][-1]["n_stale_removed"] == 0
+
+
+def test_no_prompt_and_no_stale_fields_when_nothing_is_stale(run_faces_cli):
+    result, events, pipeline = run_faces_cli(detected=1, kept=1)
+    # Substring-specific: the tmp_path in this test's own output contains the
+    # word "stale" because of the test name.
+    assert "stale face observation" not in result.output
+    assert "stale removed" not in result.output
+    pipeline.store.delete_face_points.assert_not_called()
+    ev = [e for e in events if e["event"] == "index_run"][-1]
+    assert ev["n_stale_detected"] == 0
+
+
+def test_stale_detection_is_scoped_to_this_run_s_produced_ids(run_faces_cli):
+    ids = ["11111111-1111-1111-1111-111111111111"]
+    _, _, pipeline = run_faces_cli(
+        detected=2,
+        kept=1,
+        review_only=1,
+        review_reasons={"size": 1},
+        review_only_point_ids=ids,
+        stale=[],
+    )
+    # Called with this medium's hash and the ids the run actually wrote, or it
+    # would report freshly written points as stale and offer to delete them.
+    call = pipeline.store.stale_face_points.call_args
+    assert len(call.args[0]) == 64  # the medium's sha256
+    assert isinstance(call.args[1], set)
 
 
 def test_purge_requires_exactly_one_scope(monkeypatch, tmp_path):

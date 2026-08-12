@@ -252,6 +252,61 @@ def test_clear_face_vector_noop_on_empty(store):
     client.delete_vectors.assert_not_called()
 
 
+def test_stale_face_points_excludes_what_this_run_produced(store):
+    s, _ = store
+    fake, calls = _scroll_spy(
+        [
+            _face_rec("keep", {"is_face": True, "observation_key": "k1"}),
+            _face_rec("stale", {"is_face": True, "observation_key": "k2"}),
+        ]
+    )
+    with patch("scalar_forensic.faces.store.qdrant_scroll_all", fake):
+        got = s.stale_face_points("h1", {"keep"})
+    assert [p["id"] for p in got] == ["stale"]
+    # Scoped to this medium, and to faces — a marker or rollup swept up here
+    # would be deleted as "stale" and take the medium's counts with it.
+    conditions = calls[0]["scroll_filter"].must
+    assert [c.key for c in conditions] == ["is_face", "image_hash"]
+    assert conditions[1].match.value == "h1"
+
+
+def test_stale_face_points_projects_the_fields_the_prompt_shows(store):
+    # The operator is asked to approve a deletion on the strength of these
+    # fields; a projection that omitted one would show None and understate
+    # what is about to be removed.
+    s, _ = store
+    fake, calls = _scroll_spy([])
+    with patch("scalar_forensic.faces.store.qdrant_scroll_all", fake):
+        s.stale_face_points("h1", set())
+    assert set(calls[0]["with_payload"]) >= {
+        "observation_key",
+        "embedding_status",
+        "pipeline_config_hash",
+        "indexed_at",
+        "aligned_chip_hash",
+        "review_chip_hash",
+    }
+
+
+def test_delete_face_points_returns_chip_hashes_for_unlinking(store):
+    s, client = store
+    client.retrieve.return_value = [
+        _face_rec("p1", {"aligned_chip_hash": "a1", "review_chip_hash": "r1"}),
+        _face_rec("p2", {"review_chip_hash": "r1"}),  # shared review chip
+    ]
+    result = s.delete_face_points(["p1", "p2"])
+    assert result.n_points == 2
+    assert result.chip_hashes == ["a1", "r1"]  # deduped, order preserving
+    assert client.delete.call_args.kwargs["points_selector"].points == ["p1", "p2"]
+
+
+def test_delete_face_points_on_empty_list_touches_nothing(store):
+    s, client = store
+    result = s.delete_face_points([])
+    assert result.n_points == 0
+    client.delete.assert_not_called()
+
+
 def _scroll_spy(recs):
     """Patch qdrant_scroll_all, recording the kwargs it was called with.
 

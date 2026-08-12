@@ -161,6 +161,32 @@ list would produce). Both fail the test. Worth redoing if anyone refactors
   crops legible at native resolution, both populations distinguishable — is
   folded into the validation run, `SETUP-2026-08-12-face-validation-run.md` §7.
 
+## Task 13 — stale reconciliation (added after the Tasks 6–9 review)
+
+Not in the original plan. The review found that a re-index never removes
+observations the new configuration no longer produces. Point IDs come from the
+bbox, not from thresholds, so a threshold change rewrites in place — but a face
+dropping below the *review* gate produces no point, and a detector change moves
+the bbox onto a new ID. The old point survives, searchable, under thresholds no
+longer in force, and the medium's marker then disagrees with the API.
+
+Maintainer's decision: reconcile automatically **but show the operator what was
+found and ask before deleting**, and report it in both the CLI summary and the
+audit record.
+
+Implemented as `store.stale_face_points()` / `store.delete_face_points()` plus a
+confirmation block at the end of the face pass. Declining is recorded
+(`n_stale_detected` vs `n_stale_removed`, plus the observation keys), so "the
+operator said no" is distinguishable in the audit trail from "nothing was
+stale". A non-interactive run never deletes — click aborts on EOF, which would
+otherwise kill the run after every marker was written.
+
+**Known gap:** if the operator declines and then re-runs with the *same* config
+hash, the medium is skipped by `processed_hashes`, so the stale points are never
+re-offered. The observation keys are in the audit record, which is how you would
+find them. A standalone inspect/purge command would close this; it was considered
+and not built.
+
 ## Plan edits made during execution
 
 The plan document is not as committed at `10ace0d`. Changes:

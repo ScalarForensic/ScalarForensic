@@ -379,6 +379,73 @@ class FaceStore:
         # observation, and the caller's unlink count is audit-facing.
         return [h for h in dict.fromkeys(hashes) if h not in still_referenced]
 
+    _STALE_FIELDS = [
+        "observation_key",
+        "embedding_status",
+        "embedding_exclusion_reason",
+        "pipeline_config_hash",
+        "indexed_at",
+        "bbox",
+        "aligned_chip_hash",
+        "review_chip_hash",
+    ]
+
+    def stale_face_points(self, image_hash: str, produced_ids: set[str]) -> list[dict]:
+        """Face points for one medium that the current run did not produce.
+
+        Point IDs derive from image_hash + timecode + rounded bbox + alignment
+        version — not from any threshold — so a threshold change rewrites a
+        point in place and leaves nothing stale.  Two cases do leave something
+        behind: a face that drops below the review gate produces no point at
+        all, and a detector change shifts bboxes so the new observation lands
+        on a different id.  In both the old point survives, still carrying its
+        old provenance and, if it was embedded, still in the search space.
+
+        Scoped to ``is_face`` deliberately: the medium's marker and any video
+        rollup are not observations, and sweeping them up here would delete the
+        very counts that describe the medium.
+        """
+        flt = Filter(
+            must=[
+                FieldCondition(key="is_face", match=MatchValue(value=True)),
+                FieldCondition(key="image_hash", match=MatchValue(value=image_hash)),
+            ]
+        )
+        return [
+            {"id": rec.id, **(rec.payload or {})}
+            for rec in qdrant_scroll_all(
+                self.client,
+                self.collection,
+                scroll_filter=flt,
+                limit=_SCROLL_LIMIT,
+                with_payload=list(self._STALE_FIELDS),
+            )
+            if rec.id not in produced_ids
+        ]
+
+    def delete_face_points(self, point_ids: list[str]) -> PurgeResult:
+        """Delete named observations, reporting the chip hashes they freed.
+
+        The caller must still filter those hashes through
+        unreferenced_chip_hashes() before unlinking: chips are content
+        addressed and a surviving observation may share one.
+        """
+        if not point_ids:
+            return PurgeResult(n_points=0, chip_hashes=[])
+        chip_hashes: list[str] = []
+        for rec in self.client.retrieve(
+            collection_name=self.collection, ids=list(point_ids), with_payload=True
+        ):
+            payload = rec.payload or {}
+            for key in ("aligned_chip_hash", "review_chip_hash"):
+                chash = payload.get(key)
+                if chash:
+                    chip_hashes.append(chash)
+        self.client.delete(
+            collection_name=self.collection, points_selector=PointIdsList(points=list(point_ids))
+        )
+        return PurgeResult(n_points=len(point_ids), chip_hashes=list(dict.fromkeys(chip_hashes)))
+
     def _purge_by_filter(self, flt: Filter) -> PurgeResult:
         ids: list = []
         chip_hashes: list[str] = []

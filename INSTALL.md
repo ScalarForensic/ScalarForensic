@@ -349,6 +349,20 @@ The review thresholds are clamped so they can never exceed their embedding count
 set them higher, the run prints a note and uses the clamped value. Both are bootstrap numbers
 awaiting the same calibration as the rest.
 
+### Re-indexing after a threshold or detector change
+
+Changing a threshold and re-indexing **rewrites** each affected observation in place — point IDs
+come from the bbox, not from the thresholds — so you do not accumulate duplicates. Two changes
+can leave something behind: a face that drops below the *review* gate produces no point at all,
+and a new detector shifts bboxes onto new IDs. In both cases the old observation survives, still
+searchable if it was embedded, under thresholds you no longer apply.
+
+The face pass detects these, prints what it found (how many, of which kind, under which config
+hash) and asks before deleting anything. Answering no is fine and is recorded in the audit log;
+the observations stay and you will be asked again next time that medium is reprocessed. A
+non-interactive run never deletes. Deletion routes through the same chip reference check as
+purge, so chips shared with surviving observations are kept.
+
 ## Network policy
 
 ScalarForensic is designed for **airgapped / offline environments**.  By default:

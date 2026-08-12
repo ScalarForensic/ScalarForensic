@@ -1580,6 +1580,11 @@ def index(
         _face_review_reasons: dict[str, int] = {}
         _face_dropped_noncanon = 0
         _face_failed = 0
+        # Collected across the run, acted on once at the end: prompting per
+        # medium would ask the same question hundreds of times, and deleting
+        # biometric observations without showing what they are first is not a
+        # decision the tool gets to make on the operator's behalf.
+        _stale_points: list[dict] = []
         _video_rollup: dict[str, dict] = {}
         for _p, _sha, _vmeta in _face_work:
             try:
@@ -1617,6 +1622,18 @@ def index(
             # can raise (delete_vectors 404s on an unknown id, see
             # tests/faces/test_store_integration.py), so the ordering is
             # load-bearing, not stylistic.
+            #
+            # Checked before the upsert, while the collection still holds only
+            # what previous runs wrote: point ids come from the bbox, not from
+            # any threshold, so a threshold change rewrites a point in place
+            # and leaves nothing stale.  What does survive is a face that has
+            # dropped below the review gate (no point produced at all) or an
+            # observation whose bbox moved because the detector changed — in
+            # both cases the old point is still there, still carrying its old
+            # provenance, and if it was embedded it is still searchable.
+            _stale_points.extend(
+                face_pipeline.store.stale_face_points(_sha, {str(p.id) for p in _fres.points})
+            )
             face_pipeline.store.upsert_faces(_fres.points)
             # Every review-only point, not only genuinely demoted ones:
             # delete_vectors is idempotent and ignores absent vectors, so
@@ -1679,6 +1696,86 @@ def index(
                     )
                 ]
             )
+        # ── Stale observations: show, ask, then delete ───────────────────────
+        _n_stale_removed = 0
+        _n_stale_chip_files = 0
+        if _stale_points:
+            _by_status: dict[str, int] = {}
+            _by_cfg: dict[str, int] = {}
+            for _sp in _stale_points:
+                _st = _sp.get("embedding_status") or "embedded"
+                _by_status[_st] = _by_status.get(_st, 0) + 1
+                _cfg_h = _sp.get("pipeline_config_hash") or "unknown"
+                _by_cfg[_cfg_h] = _by_cfg.get(_cfg_h, 0) + 1
+            typer.echo("")
+            typer.secho(
+                f"{len(_stale_points):,} stale face observation(s) found: stored by an earlier "
+                "run and not produced again by this one.",
+                fg=typer.colors.YELLOW,
+            )
+            typer.echo(
+                "  by kind:   "
+                + ", ".join(
+                    f"{_n} {'review-only' if _s == 'review_only' else _s}"
+                    for _s, _n in sorted(_by_status.items())
+                )
+            )
+            typer.echo(
+                "  by config: "
+                + ", ".join(f"{_n} under {_c[:12]}" for _c, _n in sorted(_by_cfg.items()))
+            )
+            if _by_status.get("embedded"):
+                typer.echo(
+                    "  Embedded ones are still returned by similarity search, under thresholds "
+                    "this run no longer applies."
+                )
+            typer.echo(
+                "  Adjudications reference observation_key, not point ids, so they are not "
+                "deleted — but a deleted observation's key stops resolving."
+            )
+            # An unattended run has no answer to give: click aborts on EOF,
+            # which here would kill the run at the very end, after every marker
+            # was already written.  Catch it and leave the observations alone —
+            # deleting biometric data is not something to infer from a closed
+            # stdin, and "not deleted, and here is why" is the safe outcome.
+            try:
+                _do_delete = typer.confirm("Delete these stale observations?", default=False)
+            except (typer.Abort, EOFError):
+                _do_delete = False
+                typer.echo("")
+                typer.secho(
+                    "  Non-interactive run: not deleting. Re-run from a terminal to confirm.",
+                    fg=typer.colors.YELLOW,
+                )
+            if _do_delete:
+                _ids = [str(_sp["id"]) for _sp in _stale_points]
+                _stale_result = face_pipeline.store.delete_face_points(_ids)
+                _n_stale_removed = _stale_result.n_points
+                if settings.face_store_dir is not None:
+                    from scalar_forensic.faces.chips import chip_paths as _chip_paths
+                    from scalar_forensic.faces.chips import (
+                        review_chip_paths as _review_chip_paths,
+                    )
+
+                    for _chash in face_pipeline.store.unreferenced_chip_hashes(
+                        _stale_result.chip_hashes
+                    ):
+                        for _path in dict.fromkeys(
+                            (
+                                *_chip_paths(Path(settings.face_store_dir), _chash),
+                                *_review_chip_paths(Path(settings.face_store_dir), _chash),
+                            )
+                        ):
+                            if _path.exists():
+                                _path.unlink()
+                                _n_stale_chip_files += 1
+            else:
+                typer.secho(
+                    f"  Left in place: {len(_stale_points):,} stale observation(s) remain in "
+                    f"{settings.face_collection}. Re-run and confirm, or purge the media.",
+                    fg=typer.colors.YELLOW,
+                )
+
         # "kept" no longer names one population: a review-only observation is
         # kept on disk and in the collection but is not comparable.  The summary
         # must therefore reconcile — detected = comparable + retained + rejected
@@ -1695,6 +1792,7 @@ def index(
             )
             + (f"  │  {sum(_face_rejected.values()):,} rejected: {_rej_str}" if _rej_str else "")
             + (f"  │  {_face_failed:,} failed" if _face_failed else "")
+            + (f"  │  {_n_stale_removed:,} stale removed" if _n_stale_removed else "")
         )
         face_pipeline.audit.append(
             "index_run",
@@ -1708,6 +1806,15 @@ def index(
             n_rejected=_face_rejected,
             n_dropped_noncanonical=_face_dropped_noncanon,
             n_failed=_face_failed,
+            # Detected and removed are recorded separately on purpose: a run
+            # where the operator declined must be distinguishable in the audit
+            # trail from one where nothing was stale.
+            n_stale_detected=len(_stale_points),
+            n_stale_removed=_n_stale_removed,
+            n_stale_chip_files=_n_stale_chip_files,
+            stale_observation_keys=[
+                _sp.get("observation_key") for _sp in _stale_points if _sp.get("observation_key")
+            ],
             pipeline_config_hash=face_pipeline.cfg.config_hash,
         )
 
