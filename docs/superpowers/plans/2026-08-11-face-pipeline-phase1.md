@@ -1,5 +1,24 @@
 # Face Pipeline Phase 1 Implementation Plan
 
+> **Execution status (2026-08-12):** Tasks 1–16 implemented on branch
+> `feat/face-pipeline-phase1`, one commit per task, suite green (398 passed, 0 skipped) and
+> `ruff check`/`format --check` clean. Deviations and open items:
+> - Task 9 followed its **Interfaces** contract (3 chip artefacts, `write_thumbnail`, q=95,
+>   `SFN_FACE_THUMB_SIZE`); the inline 2-tuple/q=92 code block beside it was a stale pre-amendment
+>   draft. Task 10's `_cfg` test helper was missing four required `PipelineConfig` fields and was
+>   corrected.
+> - The YuNet landmark map **was** derived empirically (identity map confirmed on 10 real faces
+>   from `data/sample_images`); the real-model test runs against a committed sample image, so no
+>   `real_face.jpg` fixture is needed. It skips only when `models/` has no YuNet ONNX.
+> - `scripts/download_models.py --yunet` uses the **git-lfs media host**, not
+>   `raw.githubusercontent.com`, which serves a ~130-byte LFS pointer for this repo.
+> - **Still open — the human half of the UX ground rule (Tasks 14, 16):** the face browser panel
+>   and the pipeline explainer have had no hands-on maintainer testing. Both were landed as first
+>   working versions, per the rule, and expect layout/interaction/copy iteration from feedback.
+>   The explainer has no bbox/landmark canvas overlay yet.
+> - Not exercised end-to-end: a real `--faces` index run (needs a running Qdrant and an
+>   operator-supplied recognition ONNX, neither available here).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement Phase 1 of `docs/specs/face-pipeline.md` — an optional, disabled-by-default face modality that detects, quality-gates, aligns, embeds and stores face observations from indexed media, with a browse-only web UI. **No cross-file face search in this plan** (that is Phase 1b, gated on a calibration record; separate plan).
