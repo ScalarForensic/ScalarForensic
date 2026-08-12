@@ -93,18 +93,19 @@ def test_chip_rejects_invalid_hash(tmp_path):
 def test_chip_serves_png_and_review_jpeg(tmp_path):
     import numpy as np
 
-    from scalar_forensic.faces.chips import write_chips
+    from scalar_forensic.faces.chips import write_aligned_chips
 
     rng = np.random.default_rng(0)
     aligned = rng.integers(0, 255, (112, 112, 3), np.uint8)
     source = rng.integers(0, 255, (480, 640, 3), np.uint8)
-    chash = write_chips(
+    # Aligned PNG and review JPEG live under different hashes (domain-separated).
+    ahash, rhash = write_aligned_chips(
         tmp_path, aligned, source, bbox=(100, 100, 200, 200), dilation=0.15, thumb_size=256
     )
     with patch("scalar_forensic.web.routes.faces.Settings", return_value=_settings(tmp_path)):
-        png = client.get(f"/api/faces/chip/{chash}")
-        review = client.get(f"/api/faces/chip/{chash}/review")
-        thumb = client.get(f"/api/faces/chip/{chash}/thumb")
+        png = client.get(f"/api/faces/chip/{ahash}")
+        review = client.get(f"/api/faces/chip/{rhash}/review")
+        thumb = client.get(f"/api/faces/chip/{rhash}/thumb")
     assert png.status_code == 200 and png.headers["content-type"] == "image/png"
     assert review.status_code == 200 and review.headers["content-type"] == "image/jpeg"
     assert thumb.status_code == 200 and thumb.headers["content-type"] == "image/jpeg"
@@ -113,21 +114,21 @@ def test_chip_serves_png_and_review_jpeg(tmp_path):
 def test_thumb_regenerates_when_missing(tmp_path):
     import numpy as np
 
-    from scalar_forensic.faces.chips import chip_paths, write_chips
+    from scalar_forensic.faces.chips import review_chip_paths, write_aligned_chips
 
     rng = np.random.default_rng(1)
     aligned = rng.integers(0, 255, (112, 112, 3), np.uint8)
     source = rng.integers(0, 255, (480, 640, 3), np.uint8)
-    chash = write_chips(
+    _, rhash = write_aligned_chips(
         tmp_path, aligned, source, bbox=(50, 50, 300, 300), dilation=0.15, thumb_size=128
     )
-    _, _, thumb_path = chip_paths(tmp_path, chash)
+    _, thumb_path = review_chip_paths(tmp_path, rhash)
     thumb_path.unlink()
     with patch(
         "scalar_forensic.web.routes.faces.Settings",
         return_value=_settings(tmp_path, face_thumb_size=128),
     ):
-        resp = client.get(f"/api/faces/chip/{chash}/thumb")
+        resp = client.get(f"/api/faces/chip/{rhash}/thumb")
     assert resp.status_code == 200
     assert thumb_path.exists()  # self-healed, derived artefact
 

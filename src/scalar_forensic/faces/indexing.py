@@ -21,7 +21,7 @@ from qdrant_client.models import PointStruct
 
 from scalar_forensic.faces.align import ALIGNMENT_VERSION, align_face
 from scalar_forensic.faces.audit import AuditLog
-from scalar_forensic.faces.chips import write_chips
+from scalar_forensic.faces.chips import write_aligned_chips
 from scalar_forensic.faces.decode import load_for_detection
 from scalar_forensic.faces.detect import YuNetDetector
 from scalar_forensic.faces.embed import OnnxFaceEmbedder
@@ -178,7 +178,8 @@ class FacePipeline:
         for i, (det, aligned, pre_subs, post_subs) in enumerate(kept):
             chip_hash = None
             if self.store_dir is not None:
-                chip_hash = write_chips(
+                # Task 6 replaces this payload field with the aligned/review pair.
+                chip_hash, _ = write_aligned_chips(
                     self.store_dir,
                     aligned,
                     img,
