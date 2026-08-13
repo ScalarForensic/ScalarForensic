@@ -119,6 +119,18 @@ class Settings:
             "SFN_HASH_CACHE_PATH", _DEFAULT_HASH_CACHE_PATH
         )
 
+        # --- Ingestion reports & per-run manifests ---
+        # CSV ingestion reports and the paired <stem>.manifest.json land here
+        # by default; the CLI's --report flag still overrides the CSV path per
+        # run.  Not disableable: every ingestion run writes its report.
+        report_dir = self._parse_optional_path("SFN_REPORT_DIR", "data/reports")
+        if report_dir is None:
+            raise ValueError(
+                "SFN_REPORT_DIR must not be empty — ingestion reports are always written "
+                "(unset it to use the default data/reports)"
+            )
+        self.report_dir: Path = report_dir
+
         # --- SSCD multi-crop ensemble ---
         # SFN_SSCD_N_CROPS controls how many spatial crops are taken per image when
         # embedding with SSCD.  Allowed values:
