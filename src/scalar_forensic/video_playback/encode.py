@@ -13,13 +13,13 @@ disclosure.
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from scalar_forensic.config import Settings
+from scalar_forensic.video_playback.cache import part_path, publish
 from scalar_forensic.video_playback.capability import (
     TONEMAP_CHAIN,
     Capability,
@@ -160,7 +160,7 @@ def encode(
     name the encoder that actually ran (§7.2).
     """
     pipeline = select(settings, cap, hdr=hdr)
-    part = dst.with_name(f"{dst.name}.{os.getpid()}.part")
+    part = part_path(dst)
     part.parent.mkdir(parents=True, exist_ok=True)
     fell_back = False
     reason: str | None = None
@@ -195,7 +195,7 @@ def encode(
             _run(cmd, settings.video_job_timeout)
         if not part.exists() or part.stat().st_size == 0:
             raise EncodeError("ffmpeg exited 0 but produced no output", command=cmd)
-        os.replace(part, dst)
+        publish(part, dst)
     except BaseException:
         part.unlink(missing_ok=True)
         raise

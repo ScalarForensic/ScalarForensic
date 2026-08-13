@@ -13,13 +13,17 @@ the suite stays hermetic and needs neither Qdrant nor sample media on disk.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import dataclasses
+import hashlib
 import json
 import os
 import shutil
 import struct
 import subprocess
 import threading
+import time
 from fractions import Fraction
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -516,9 +520,10 @@ class TestVideoPlayback:
         assert r.headers["x-sfn-playback-mode"] == "rewrap"
         assert r.headers["content-type"] == "video/mp4"
         assert r.content != mov.read_bytes()
-        cached = list(cache_dir.glob("*.mp4"))
+        cached = list(cache_dir.glob("*/*.mp4"))
         assert len(cached) == 1
-        assert cached[0].stem == hash_file(mov)
+        assert cached[0].name == "rewrap.mp4"
+        assert cached[0].parent.name == hash_file(mov)
 
     def test_second_request_serves_the_cached_copy(self, client, mov):
         assert client.get(f"/api/video-playback?path={mov}").status_code == 200
@@ -725,7 +730,7 @@ class TestVideoDownload:
         # the original container, not the cached MP4.
         _, cache_dir = roots
         client.get(f"/api/video-playback?path={mov}")  # populate the rewrap cache
-        assert list(cache_dir.glob("*.mp4"))
+        assert list(cache_dir.glob("*/*.mp4"))
         r = client.get(f"/api/video-download?path={mov}")
         assert r.content == mov.read_bytes()
 
@@ -942,69 +947,361 @@ class TestStaleEvidence:
 # ---------------------------------------------------------------------------
 
 
-class TestCacheEviction:
-    def _entry(self, cache_dir: Path, name: str, size: int, mtime: float) -> Path:
-        p = cache_dir / name
-        p.write_bytes(b"\0" * size)
-        os.utime(p, (mtime, mtime))
-        return p
+DIGEST_A = "a" * 64
+DIGEST_B = "b" * 64
+DIGEST_C = "c" * 64
+FINGERPRINT = "f" * 64
 
-    def test_oldest_entries_are_evicted_first(self, tmp_path):
+
+@pytest.fixture(autouse=True)
+def _clean_cache_state():
+    """Module-level lease, pin and sweep state outlives a test (CLAUDE.md)."""
+    vp_cache.reset_leases()
+    vp_cache.artifact_locks.reset()
+    vp_cache._reset_sweep()
+    yield
+    vp_cache.reset_leases()
+    vp_cache.artifact_locks.reset()
+    vp_cache._reset_sweep()
+
+
+def _pipeline(**kw) -> vp_capability.Pipeline:
+    base = vp_capability.select(Settings(), _capability(), hdr=False)
+    return dataclasses.replace(base, **kw) if kw else base
+
+
+def _video(cache_dir: Path, digest: str, *, size: int, mtime: float, name: str = "rewrap.mp4"):
+    """Write one artifact under a per-video directory and date it."""
+    p = cache_dir / digest / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"\0" * size)
+    os.utime(p, (mtime, mtime))
+    return p
+
+
+class TestCacheKey:
+    def test_key_is_the_hash_of_both_halves(self):
+        expected = hashlib.sha256(f"source={DIGEST_A}\npipeline={FINGERPRINT}".encode()).hexdigest()
+        assert vp_cache.cache_key(DIGEST_A, FINGERPRINT) == expected
+
+    def test_two_sources_under_one_pipeline_are_two_keys(self):
+        assert vp_cache.cache_key(DIGEST_A, FINGERPRINT) != vp_cache.cache_key(
+            DIGEST_B, FINGERPRINT
+        )
+
+    def test_two_pipelines_over_one_source_are_two_keys(self):
+        # The §6.1 defect this exists to prevent: one key holding two pictures.
+        other = "e" * 64
+        assert vp_cache.cache_key(DIGEST_A, FINGERPRINT) != vp_cache.cache_key(DIGEST_A, other)
+
+    def test_the_two_halves_are_not_interchangeable(self):
+        assert vp_cache.cache_key(DIGEST_A, FINGERPRINT) != vp_cache.cache_key(
+            FINGERPRINT, DIGEST_A
+        )
+
+    @pytest.mark.parametrize("bad", ["", "zz", "A" * 64, "a" * 63])
+    def test_a_non_digest_half_is_rejected(self, bad):
+        with pytest.raises(ValueError):
+            vp_cache.cache_key(bad, FINGERPRINT)
+        with pytest.raises(ValueError):
+            vp_cache.cache_key(DIGEST_A, bad)
+
+    def test_a_real_pipeline_fingerprint_keys_an_artifact_dir(self, tmp_path):
+        pipeline = _pipeline()
+        d = vp_cache.artifact_dir(tmp_path, DIGEST_A, pipeline.fingerprint())
+        assert d.parent == tmp_path / DIGEST_A
+        assert d.name == vp_cache.cache_key(DIGEST_A, pipeline.fingerprint())
+
+    def test_the_gpu_fallback_lands_in_a_different_artifact_dir(self, tmp_path):
+        gpu = _pipeline(hwaccel="cuda", encoder="h264_nvenc")
+        cpu = _pipeline()
+        assert vp_cache.artifact_dir(
+            tmp_path, DIGEST_A, gpu.fingerprint()
+        ) != vp_cache.artifact_dir(tmp_path, DIGEST_A, cpu.fingerprint())
+
+
+class TestPlaybackLease:
+    def test_an_unregistered_video_is_none_not_expired(self):
+        # Three-state on purpose: "never registered here" is not "the heartbeat
+        # stopped", and a boolean would report both as "not being watched".
+        assert vp_cache.lease_state(DIGEST_A).state == "none"
+
+    def test_a_renewed_lease_is_held(self):
+        state = vp_cache.renew_lease(DIGEST_A, 60)
+        assert state.state == "held"
+        assert 0 < state.seconds_remaining <= 60
+
+    def test_a_lapsed_heartbeat_expires_the_lease(self, monkeypatch):
+        base = time.monotonic()
+        monkeypatch.setattr(vp_cache.time, "monotonic", lambda: base)
+        vp_cache.renew_lease(DIGEST_A, 10)
+        monkeypatch.setattr(vp_cache.time, "monotonic", lambda: base + 11)
+        assert vp_cache.lease_state(DIGEST_A).state == "expired"
+        assert DIGEST_A not in vp_cache.protected_videos()
+
+    def test_release_drops_the_lease(self):
+        vp_cache.renew_lease(DIGEST_A, 60)
+        assert vp_cache.release_lease(DIGEST_A).state == "none"
+
+    def test_a_zero_ttl_is_rejected(self):
+        with pytest.raises(ValueError):
+            vp_cache.renew_lease(DIGEST_A, 0)
+
+    def test_a_pin_protects_and_unwinds(self):
+        with vp_cache.pin(DIGEST_A):
+            assert DIGEST_A in vp_cache.protected_videos()
+        assert DIGEST_A not in vp_cache.protected_videos()
+
+    def test_nested_pins_refcount(self):
+        with vp_cache.pin(DIGEST_A), vp_cache.pin(DIGEST_A):
+            pass
+        assert vp_cache._pins == {}
+
+
+class TestLeaseEndpoint:
+    def test_the_endpoint_registers_and_refreshes(self, client, mov):
+        r = client.post(f"/api/video-lease?path={mov}")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["video_sha256"] == hash_file(mov)
+        assert body["state"] == "held"
+        assert body["lease_seconds"] == 120
+
+    def test_release_reports_none(self, client, mov):
+        client.post(f"/api/video-lease?path={mov}")
+        assert client.post(f"/api/video-lease?path={mov}&release=true").json()["state"] == "none"
+
+    def test_a_path_outside_the_allowed_roots_is_rejected(self, client, roots, tmp_path):
+        outside = tmp_path / "outside.mov"
+        outside.write_bytes(b"\0")
+        assert client.post(f"/api/video-lease?path={outside}").status_code == 403
+
+    def test_playback_takes_a_lease_before_it_serves(self, client, mov):
+        assert client.get(f"/api/video-playback?path={mov}").status_code == 200
+        assert vp_cache.lease_state(hash_file(mov)).state == "held"
+
+
+class TestCacheEviction:
+    def test_oldest_videos_are_evicted_first(self, tmp_path):
         cache_dir = tmp_path / "cache"
-        cache_dir.mkdir()
-        old = self._entry(cache_dir, "a" * 64 + ".mp4", 100, 1_000)
-        mid = self._entry(cache_dir, "b" * 64 + ".mp4", 100, 2_000)
-        new = self._entry(cache_dir, "c" * 64 + ".mp4", 100, 3_000)
-        deleted = vp_cache._evict_cache(cache_dir, 150, keep=new)
-        assert deleted == 2
+        old = _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
+        mid = _video(cache_dir, DIGEST_B, size=100, mtime=2_000)
+        new = _video(cache_dir, DIGEST_C, size=100, mtime=3_000)
+        report = vp_cache.evict(cache_dir, 150, protect=set())
+        assert report.videos_removed == 2
+        assert report.bytes_freed == 200
+        assert report.bytes_after == 100
         assert not old.exists() and not mid.exists() and new.exists()
 
-    def test_the_file_being_served_is_never_evicted(self, tmp_path):
+    def test_a_whole_video_goes_never_one_chunk(self, tmp_path):
+        # The §6.2 defect #148 contained rather than fixed: a *.mp4 glob picks
+        # single files, and a video that loses one chunk mid-play is broken
+        # playback rather than a freed byte.
         cache_dir = tmp_path / "cache"
-        cache_dir.mkdir()
-        keep = self._entry(cache_dir, "d" * 64 + ".mp4", 500, 1_000)
-        other = self._entry(cache_dir, "e" * 64 + ".mp4", 100, 2_000)
-        vp_cache._evict_cache(cache_dir, 10, keep=keep)
-        assert keep.exists()
-        assert not other.exists()
+        key = vp_cache.cache_key(DIGEST_A, FINGERPRINT)
+        c0 = _video(cache_dir, DIGEST_A, size=100, mtime=1_000, name=f"{key}/c0.000.mp4")
+        c1 = _video(cache_dir, DIGEST_A, size=100, mtime=1_000, name=f"{key}/c30.000.mp4")
+        keeper = _video(cache_dir, DIGEST_B, size=100, mtime=3_000)
+        vp_cache.evict(cache_dir, 150, protect=set())
+        assert not c0.exists() and not c1.exists()
+        assert not (cache_dir / DIGEST_A).exists()
+        assert keeper.exists()
 
-    def test_only_this_functions_own_rewraps_are_candidates(self, tmp_path):
-        # Later phases park chunks and full copies in the same store; a bare
-        # *.mp4 glob would delete a video's own artifacts mid-play (spec §6.2).
+    def test_recency_is_the_newest_file_in_the_video(self, tmp_path):
+        # One chunk served now makes the whole video recently played.
         cache_dir = tmp_path / "cache"
-        cache_dir.mkdir()
-        rewrap = self._entry(cache_dir, "a" * 64 + ".mp4", 100, 1_000)
-        full = self._entry(cache_dir, "full.mp4", 100, 500)
-        init = self._entry(cache_dir, "init.mp4", 100, 500)
-        per_video = cache_dir / ("b" * 64)
-        per_video.mkdir()
-        chunk = self._entry(per_video, "c0.mp4", 100, 500)
-        vp_cache._evict_cache(cache_dir, 10, keep=cache_dir / "nothing.mp4")
-        assert not rewrap.exists()
-        assert full.exists() and init.exists() and chunk.exists()
+        stale = _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
+        _video(cache_dir, DIGEST_B, size=100, mtime=500, name="k/c0.000.mp4")
+        fresh = _video(cache_dir, DIGEST_B, size=100, mtime=9_000, name="k/c30.000.mp4")
+        vp_cache.evict(cache_dir, 250, protect=set())
+        assert not stale.exists()
+        assert fresh.exists()
+
+    def test_a_leased_video_is_never_evicted(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        watched = _video(cache_dir, DIGEST_A, size=500, mtime=1_000)
+        other = _video(cache_dir, DIGEST_B, size=100, mtime=2_000)
+        vp_cache.renew_lease(DIGEST_A, 60)
+        report = vp_cache.evict(cache_dir, 10)
+        assert watched.exists()
+        assert not other.exists()
+        assert report.protected == (DIGEST_A,)
+        assert report.over_ceiling is True
+
+    def test_an_expired_lease_stops_protecting(self, tmp_path, monkeypatch):
+        cache_dir = tmp_path / "cache"
+        watched = _video(cache_dir, DIGEST_A, size=500, mtime=1_000)
+        base = time.monotonic()
+        monkeypatch.setattr(vp_cache.time, "monotonic", lambda: base)
+        vp_cache.renew_lease(DIGEST_A, 10)
+        monkeypatch.setattr(vp_cache.time, "monotonic", lambda: base + 11)
+        vp_cache.evict(cache_dir, 10)
+        assert not watched.exists()
+
+    def test_a_pinned_video_is_never_evicted(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        writing = _video(cache_dir, DIGEST_A, size=500, mtime=1_000)
+        with vp_cache.pin(DIGEST_A):
+            vp_cache.evict(cache_dir, 10)
+        assert writing.exists()
+
+    def test_part_files_count_against_the_ceiling(self, tmp_path):
+        # §6.3: an in-flight .part is bytes on disk.  Left out of the accounting
+        # the store here would measure 150 against a 950 ceiling and evict
+        # nothing while holding 1000.
+        cache_dir = tmp_path / "cache"
+        old = _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
+        _video(cache_dir, DIGEST_B, size=50, mtime=2_000)
+        _video(cache_dir, DIGEST_B, size=850, mtime=2_000, name="full.mp4.999999.part")
+        report = vp_cache.evict(cache_dir, 950, protect=set())
+        assert report.bytes_before == 1000
+        assert report.videos_removed == 1
+        assert not old.exists()
+
+    def test_an_unevictable_overshoot_is_reported_not_forced(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        _video(cache_dir, DIGEST_A, size=500, mtime=1_000)
+        vp_cache.renew_lease(DIGEST_A, 60)
+        report = vp_cache.evict(cache_dir, 100)
+        assert report.over_ceiling is True
+        assert report.bytes_after == 500
+        assert report.videos_removed == 0
 
     def test_zero_ceiling_disables_eviction(self, tmp_path):
         cache_dir = tmp_path / "cache"
-        cache_dir.mkdir()
-        p = self._entry(cache_dir, "a" * 64 + ".mp4", 100, 1_000)
-        assert vp_cache._evict_cache(cache_dir, 0, keep=cache_dir / "x.mp4") == 0
+        p = _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
+        report = vp_cache.evict(cache_dir, 0)
+        assert report.videos_removed == 0
+        assert report.over_ceiling is False
         assert p.exists()
+
+    def test_a_legacy_top_level_rewrap_is_accounted_and_evictable(self, tmp_path):
+        # The layout before the per-video directories.  Still a valid rewrap, so
+        # it retires by LRU rather than being deleted on sight.
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        legacy = cache_dir / (DIGEST_A + ".mp4")
+        legacy.write_bytes(b"\0" * 100)
+        os.utime(legacy, (1_000, 1_000))
+        keeper = _video(cache_dir, DIGEST_B, size=100, mtime=3_000)
+        report = vp_cache.evict(cache_dir, 150, protect=set())
+        assert report.bytes_before == 200
+        assert not legacy.exists() and keeper.exists()
+
+    def test_foreign_files_are_neither_counted_nor_deleted(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        stray = cache_dir / "notes.txt"
+        stray.write_bytes(b"\0" * 5000)
+        _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
+        report = vp_cache.evict(cache_dir, 50, protect=set())
+        assert report.bytes_before == 100
+        assert stray.exists()
+
+    def test_a_missing_cache_dir_is_not_an_error(self, tmp_path):
+        assert vp_cache.evict(tmp_path / "nope", 100).bytes_before == 0
 
     def test_cache_stays_under_the_ceiling_after_a_rewrap(self, client, mov, roots):
         _, cache_dir = roots
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        filler = cache_dir / ("f" * 64 + ".mp4")
-        filler.write_bytes(b"\0" * 4096)
+        filler = _video(cache_dir, DIGEST_A, size=4096, mtime=1_000)
         settings = MagicMock()
         settings.video_cache_dir = cache_dir
         settings.video_cache_max_bytes = 2048
-        settings.hash_cache_path = tmp_path_db = cache_dir.parent / "hash_cache.db"
-        assert tmp_path_db.parent.exists()
+        settings.video_lease_seconds = 120
+        settings.hash_cache_path = cache_dir.parent / "hash_cache.db"
         with patch.object(vp_routes, "Settings", return_value=settings):
             r = client.get(f"/api/video-playback?path={mov}")
         assert r.status_code == 200
         assert not filler.exists()
-        assert sum(f.stat().st_size for f in cache_dir.glob("*.mp4")) <= 2048
+        assert sum(f.stat().st_size for f in cache_dir.rglob("*.mp4")) <= 2048
+
+
+class TestArtifactLocks:
+    def test_the_lock_table_does_not_accumulate(self):
+        # §10.4: locks must not accumulate unboundedly.  The dict this replaced
+        # grew one entry per source digest ever seen and was never cleared.
+        async def run():
+            for i in range(50):
+                async with vp_cache.artifact_locks.hold(f"{i:064x}"):
+                    pass
+
+        asyncio.run(run())
+        assert len(vp_cache.artifact_locks) == 0
+
+    def test_concurrent_holders_share_one_lock_and_serialise(self):
+        order = []
+
+        async def run():
+            async def worker(n):
+                async with vp_cache.artifact_locks.hold(DIGEST_A):
+                    order.append(("in", n))
+                    await asyncio.sleep(0)
+                    order.append(("out", n))
+
+            await asyncio.gather(*(worker(n) for n in range(3)))
+
+        asyncio.run(run())
+        assert [k for k, _ in order] == ["in", "out"] * 3
+        assert len(vp_cache.artifact_locks) == 0
+
+    def test_a_raising_holder_still_releases_the_entry(self):
+        async def run():
+            with contextlib.suppress(RuntimeError):
+                async with vp_cache.artifact_locks.hold(DIGEST_A):
+                    raise RuntimeError("boom")
+
+        asyncio.run(run())
+        assert len(vp_cache.artifact_locks) == 0
+
+
+class TestAtomicPublication:
+    def test_publish_renames_and_survives(self, tmp_path):
+        part = tmp_path / "x.mp4.1.part"
+        part.write_bytes(b"payload")
+        dst = tmp_path / "x.mp4"
+        vp_cache.publish(part, dst)
+        assert not part.exists()
+        assert dst.read_bytes() == b"payload"
+
+    def test_a_part_file_from_a_dead_writer_is_swept(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        d = cache_dir / DIGEST_A
+        d.mkdir(parents=True)
+        dead = d / "full.mp4.999999.part"
+        dead.write_bytes(b"\0")
+        assert vp_cache.sweep_orphaned_parts(cache_dir) == 1
+        assert not dead.exists()
+
+    def test_a_part_file_from_a_live_writer_is_left_alone(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        d = cache_dir / DIGEST_A
+        d.mkdir(parents=True)
+        live = d / f"full.mp4.{os.getpid()}.part"
+        live.write_bytes(b"\0")
+        assert vp_cache.sweep_orphaned_parts(cache_dir) == 0
+        assert live.exists()
+
+    def test_a_published_artifact_is_not_swept(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        p = _video(cache_dir, DIGEST_A, size=10, mtime=1_000)
+        assert vp_cache.sweep_orphaned_parts(cache_dir) == 0
+        assert p.exists()
+
+    def test_the_sweep_runs_once_per_process(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(vp_cache, "sweep_orphaned_parts", lambda d: calls.append(d))
+        vp_cache.ensure_swept(tmp_path)
+        vp_cache.ensure_swept(tmp_path)
+        assert calls == [tmp_path]
+
+    def test_playback_sweeps_the_store_on_first_use(self, client, mov, roots):
+        _, cache_dir = roots
+        d = cache_dir / DIGEST_A
+        d.mkdir(parents=True)
+        orphan = d / "full.mp4.999999.part"
+        orphan.write_bytes(b"\0")
+        assert client.get(f"/api/video-playback?path={mov}").status_code == 200
+        assert not orphan.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1016,10 +1313,12 @@ class TestPlaybackSettings:
     def test_defaults(self, monkeypatch):
         monkeypatch.delenv("SFN_VIDEO_CACHE_DIR", raising=False)
         monkeypatch.delenv("SFN_VIDEO_CACHE_MAX_BYTES", raising=False)
+        monkeypatch.delenv("SFN_VIDEO_LEASE_SECONDS", raising=False)
         s = Settings()
         assert s.video_cache_dir is not None
         assert s.video_cache_dir.name == "video_cache"
         assert s.video_cache_max_bytes == 8 * 1024 * 1024 * 1024
+        assert s.video_lease_seconds == 120
 
     def test_env_override(self, monkeypatch, tmp_path):
         monkeypatch.setenv("SFN_VIDEO_CACHE_DIR", str(tmp_path / "elsewhere"))
@@ -1035,6 +1334,12 @@ class TestPlaybackSettings:
     def test_negative_ceiling_is_rejected(self, monkeypatch):
         monkeypatch.setenv("SFN_VIDEO_CACHE_MAX_BYTES", "-1")
         with pytest.raises(ValueError, match="SFN_VIDEO_CACHE_MAX_BYTES"):
+            Settings()
+
+    @pytest.mark.parametrize("value", ["0", "3601"])
+    def test_an_out_of_range_lease_is_rejected(self, monkeypatch, value):
+        monkeypatch.setenv("SFN_VIDEO_LEASE_SECONDS", value)
+        with pytest.raises(ValueError, match="SFN_VIDEO_LEASE_SECONDS"):
             Settings()
 
 

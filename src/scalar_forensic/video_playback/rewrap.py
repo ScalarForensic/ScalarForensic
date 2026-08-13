@@ -8,11 +8,11 @@ ever grow into an encoder.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import av
 
+from scalar_forensic.video_playback.cache import part_path, publish
 from scalar_forensic.video_playback.codecs import _MP4_LEGAL_CODECS
 
 
@@ -56,7 +56,7 @@ def _remux_to_mp4(src: Path, dst: Path) -> dict:
     """
     skipped: list[str] = []
     repaired = 0
-    part = dst.with_name(f"{dst.name}.{os.getpid()}.part")
+    part = part_path(dst)
     part.parent.mkdir(parents=True, exist_ok=True)
     try:
         with (
@@ -93,7 +93,7 @@ def _remux_to_mp4(src: Path, dst: Path) -> dict:
                 # them onto its own when the packet is written.
                 packet.stream = mapping[index]
                 out.mux(packet)
-        os.replace(part, dst)
+        publish(part, dst)
     except BaseException:
         part.unlink(missing_ok=True)
         raise

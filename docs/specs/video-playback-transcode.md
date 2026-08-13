@@ -387,30 +387,61 @@ silent cache-wide invalidation, and the §7.2 label is derived from the same fie
 set — a label that named fewer fields than the key hashes would describe a
 pipeline it does not fully describe.
 
-**Left for phase 5 to decide deliberately:** `chunk_seconds` is pixel-affecting
-for a *chunk* — it moves every encode boundary — but not for the §4.3 full-file
-artifact, which is one encode of the whole source however long a chunk is. One
-fingerprint for both artifact kinds therefore means changing
-`SFN_VIDEO_CHUNK_SECONDS` needlessly invalidates every cached `full.mp4`. That is
-the conservative direction and it stands for now; phase 5, which owns the cache,
-should choose between keeping it and splitting the fingerprint per artifact kind
-rather than rediscovering the question.
+**Decided in phase 5: `chunk_seconds` stays in the key for both artifact kinds.**
+It is pixel-affecting for a *chunk* — it moves every encode boundary — and not
+for the §4.3 full-file artifact, which is one encode of the whole source however
+long a chunk is, so one fingerprint means changing `SFN_VIDEO_CHUNK_SECONDS`
+needlessly re-encodes every cached `full.mp4`. That cost was weighed and
+accepted: it is paid rarely (§16 forecloses changing chunk length without
+revisiting the resolution cap in the same change) and it is recoverable by
+re-encoding. The alternative — a fingerprint covering different fields per
+artifact kind — replaces `Pipeline`'s one rule ("every field is hashed", with no
+third answer to "is this in the key?") with a per-kind table someone has to keep
+correct forever, and a wrong entry in that table is the §6.1 defect itself. A
+rare recoverable cost beats a permanent second rule. The reasoning is repeated
+next to `cache_key()` in `video_playback/cache.py`.
+
+**The key's other half is a directory.** Artifacts live at
+`{cache_dir}/{source_digest}/{key}/…`, with the lossless rewrap at
+`{cache_dir}/{source_digest}/rewrap.mp4` — a rewrap runs no pipeline, so its only
+identity is the source's. Nesting under the source digest is what makes §6.2's
+"evict whole videos" a directory removal rather than an inference over opaque key
+names; a video rendered by two pipelines holds two `{key}/` subdirectories and is
+still one eviction unit.
 
 ### 6.2 Eviction, corrected
 
-`_evict_cache` (`routes/video.py:327`) globs `*.mp4`. Extending it as-is is unsafe:
-it would not see files under per-video directories in its size accounting, and it
-**would** match and delete a video's own artifacts while it is being watched. The
-rewrite must:
+The `*.mp4` glob `#148` narrowed as containment could not see files under
+per-video directories in its size accounting, and would have matched and deleted
+a video's own artifacts while it was being watched. **Rewritten in phase 5**
+(`video_playback/cache.py`, `evict()`):
 
-- account for the whole cache tree, not one glob;
-- evict **whole videos**, least-recently-played first, never single chunks from a
-  video currently being watched;
-- hold a **playback lease** — HTTP is stateless, so "the video being played" must
-  be an explicit, heartbeat-refreshed registration with an expiry, not the
-  single-call `keep` argument. Without a lease, eviction can drop a video between
-  two of its own chunk requests.
-- never evict an artifact with an open reader or an in-flight job.
+- it accounts for the **whole cache tree**, `.part` files included (§6.3);
+- it removes **whole videos**, least-recently-played first — recency is the newest
+  mtime anywhere under the video, so serving one chunk makes the whole video
+  recent, which is what "least-recently-*played*" means when a play touches one
+  file out of forty;
+- a **playback lease** protects the video on screen. HTTP is stateless, so the
+  player registers the video explicitly (`POST /api/video-lease`) and refreshes it
+  on a heartbeat; the lease expires on its own (`SFN_VIDEO_LEASE_SECONDS`, §12) so
+  a closed tab cannot pin the cache forever. Lease state is **three-valued** —
+  `held`, `expired` (the heartbeat stopped) and `none` (never registered in this
+  process, which is what a second worker says about a video the first is serving).
+  A boolean would collapse the last two into "nobody is watching";
+- an in-flight write holds a **pin** (`pin()`), a refcount covering the `.part`
+  the lease cannot: `FileResponse` streams its body after the handler returns, so
+  the lease is the readers' mechanism and the pin is the writers'.
+
+**The bounded overshoot, stated rather than discovered.** When every unprotected
+video is gone and the store is still over the ceiling, `evict()` reports
+`over_ceiling` and logs it; it does not delete a leased video. §6.3 is what keeps
+the ceiling an invariant — by refusing jobs that would not fit *before* they run —
+and breaking a playback in progress to recover bytes from a residue of a smaller
+ceiling is the worse trade.
+
+Legacy top-level `{sha256}.mp4` files from the pre-directory layout are counted
+and evictable as their own entry rather than deleted on sight: they are still
+valid rewraps, and a layout change should not throw away a warm cache.
 
 ### 6.3 When one video exceeds the ceiling
 
@@ -526,6 +557,7 @@ lever on both cost and disclosure, and v1 never mentioned it. It is now settled:
 | `GET /api/video-job-status` | progress, rate, ETA, terminal state |
 | `GET /api/video-download` | original bytes, `Content-Disposition`, verified digest |
 | `GET /api/video-playback` | unchanged — `original` and `rewrap` modes |
+| `POST /api/video-lease` | register/refresh the §6.2 playback lease; `release=true` drops it |
 
 **Every path-bearing route reuses the existing resolution flow** — absolute path,
 `resolve()`, extension check, `_check_allowed_path`, regular-file check. No route
@@ -550,10 +582,21 @@ mid-session; malformed duration metadata; queue full. Nothing may retry-storm.
 
 ### 10.2 Atomic publication
 
-Mandatory, matching the existing rewrap (`routes/video.py:278`): encode to a
-PID-scoped `.part`, `fsync`, atomic rename on success, remove on any failure.
-**A truncated artifact must never become a cache hit.** Startup sweeps orphaned
-`.part` files left by SIGKILL or host crash.
+Mandatory. **Implemented in phase 5** as one function, `cache.publish()`, used by
+both writers (`encode.py` and `rewrap.py`): write to a PID-scoped `.part`, `fsync`
+the file, `os.replace` onto the final name, `fsync` the directory, and remove the
+`.part` on any failure. **A truncated artifact must never become a cache hit** —
+without the file fsync the rename can reach the disk before the data does, and a
+host crash in between leaves a file that *looks* finished under a name callers
+treat as verified; without the directory fsync the rename itself is not durable.
+
+`cache.sweep_orphaned_parts()` removes `.part` files left by SIGKILL or a host
+crash. The pid in the name is what separates them from a live sibling process's
+in-flight encode, which must not be touched; pid reuse delays a delete by one
+sweep and is documented rather than engineered away. It runs **once per process on
+first cache use** (`ensure_swept`) rather than in `app.py`'s lifespan, because the
+subsystem owns its store (`CLAUDE.md`) and the cache directory is a request-time
+setting — a deployment that never plays a video has none to sweep.
 
 ### 10.3 Subprocess lifecycle
 
@@ -571,6 +614,14 @@ concatenation of user input.
 - Locks must not accumulate unboundedly, and the design must state whether it
   assumes a single ASGI worker process — if not, cross-process deduplication is
   required, since the current in-process dict does not provide it.
+  **Done in phase 5**: `cache.KeyedLocks` holds one `asyncio.Lock` per key only
+  while a caller wants it, refcounting waiters and deleting the entry when the
+  last one leaves, so the table's size is exactly the number of in-flight callers.
+  It replaces `_remux_locks`, a dict that grew one entry per source digest ever
+  seen and was never cleared. **It deduplicates within one ASGI worker process
+  only.** Two worker processes can both encode the same artifact; both publish
+  atomically to the same path (§10.2), so the cost is wasted CPU, never a corrupt
+  file. Cross-process deduplication, if it is ever wanted, is phase 7's.
 - Cache accounting must be serialised, or a bounded overshoot documented.
 
 ---
@@ -650,9 +701,10 @@ convention is false for the life of that PR.
 
 Every setting needs a name, default and validation rule (`config.py` validates
 aggressively; `face-pipeline.md` §13 is the template):
-`SFN_VIDEO_CACHE_DIR`, `SFN_VIDEO_CACHE_MAX_BYTES`, `SFN_VIDEO_CHUNK_SECONDS`,
-`SFN_VIDEO_HWACCEL`, `SFN_VIDEO_MAX_WORKERS`, `SFN_VIDEO_QUEUE_MAX`,
-`SFN_VIDEO_JOB_TIMEOUT`, `SFN_VIDEO_OUTPUT_HEIGHT`, `SFN_FFMPEG_PATH`.
+`SFN_VIDEO_CACHE_DIR`, `SFN_VIDEO_CACHE_MAX_BYTES`, `SFN_VIDEO_LEASE_SECONDS`,
+`SFN_VIDEO_CHUNK_SECONDS`, `SFN_VIDEO_HWACCEL`, `SFN_VIDEO_MAX_WORKERS`,
+`SFN_VIDEO_QUEUE_MAX`, `SFN_VIDEO_JOB_TIMEOUT`, `SFN_VIDEO_OUTPUT_HEIGHT`,
+`SFN_FFMPEG_PATH`.
 
 **Settled defaults**, each tied to a §3.5 number rather than to taste:
 
@@ -660,6 +712,7 @@ aggressively; `face-pipeline.md` §13 is the template):
 |---|---|---|
 | `SFN_VIDEO_MAX_WORKERS` | `2` | Aggregate throughput is flat from k=1 to k=8 (§3.5), so extra workers buy no capacity and cost per-job latency directly: 8.08 s at k=1, 16.35 s at k=2, 32.47 s at k=4. 2 is the highest k that keeps a queued chunk near §4.2's 6–10 s assumption. |
 | `SFN_VIDEO_OUTPUT_HEIGHT` | `1080` | Operator ruling (§16), and §3.5 measures the cost of the alternative: 4K first-play is 33.73 s and 4K CPU tone-map encoding is 0.879×, below realtime. Never upscale — a source shorter than 1080 is passed through at its own height. |
+| `SFN_VIDEO_LEASE_SECONDS` | `120` | Four missed 30 s heartbeats — long enough that a chunk encode at §3.5's 8.21 s never drops the lease under §4.2's margin, short enough that a crashed browser stops protecting a video within a couple of minutes (§6.2). |
 | `SFN_VIDEO_CHUNK_SECONDS` | `30` | Valid **only under the 1080p cap**: a 30 s chunk lands in 8.21 s at 1080p (§3.5), inside §4.2's margin. At 4K the same chunk takes 33.73 s, so raising `SFN_VIDEO_OUTPUT_HEIGHT` above 1080 requires revisiting this value in the same change. |
 
 ---
