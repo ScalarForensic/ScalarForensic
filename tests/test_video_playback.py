@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import errno
 import hashlib
 import json
 import os
@@ -45,6 +46,7 @@ from scalar_forensic.video_playback import digest as vp_digest
 from scalar_forensic.video_playback import encode as vp_encode
 from scalar_forensic.video_playback import rewrap as vp_rewrap
 from scalar_forensic.video_playback import routes as vp_routes
+from scalar_forensic.video_playback import states as vp_states
 from scalar_forensic.web.app import app
 from scalar_forensic.web.routes import _shared as shared_routes
 
@@ -131,13 +133,15 @@ def mp4(roots):
     return _write_clip(input_dir / "clip.mp4", "mp4")
 
 
-def _write_encoded(path: Path, container_format: str, encoder: str, pix_fmt: str) -> Path:
+def _write_encoded(
+    path: Path, container_format: str, encoder: str, pix_fmt: str, *, frames: int = 6
+) -> Path:
     """Encode a tiny clip with *encoder* at *pix_fmt* — codec-detection fixtures."""
     with av.open(str(path), "w", format=container_format) as c:
         stream = c.add_stream(encoder, rate=10)
         stream.width, stream.height = 64, 48
         stream.pix_fmt = pix_fmt
-        for i in range(6):
+        for i in range(frames):
             arr = np.full((48, 64, 3), (i * 24) % 256, dtype=np.uint8)
             for packet in stream.encode(av.VideoFrame.from_ndarray(arr, format="rgb24")):
                 c.mux(packet)
@@ -957,14 +961,26 @@ FINGERPRINT = "f" * 64
 
 @pytest.fixture(autouse=True)
 def _clean_cache_state():
-    """Module-level lease, pin and sweep state outlives a test (CLAUDE.md)."""
+    """Module-level lease, pin, sweep, probe and admission state (CLAUDE.md).
+
+    Autouse because every one of these is silent when it leaks: an inherited
+    lease changes what a later eviction test evicts, an inherited probe answer
+    decides a pipeline nobody selected, and an admission counter left above zero
+    turns a later chunk request into a spurious 503.  All three read as flakes.
+    """
     vp_cache.reset_leases()
     vp_cache.artifact_locks.reset()
     vp_cache._reset_sweep()
+    vp_capability.reset_cache()
+    vp_routes.admission.reset()
+    vp_routes.reset_substitutions()
     yield
     vp_cache.reset_leases()
     vp_cache.artifact_locks.reset()
     vp_cache._reset_sweep()
+    vp_capability.reset_cache()
+    vp_routes.admission.reset()
+    vp_routes.reset_substitutions()
 
 
 def _pipeline(**kw) -> vp_capability.Pipeline:
@@ -1977,3 +1993,517 @@ class TestGpuFallback:
         )
         cpu = vp_capability.select(Settings(), _capability(), hdr=True)
         assert gpu.fingerprint() != cpu.fingerprint()
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — chunk playback (§4.2), player states (§5), failure matrix (§10.1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def hevc_long_mov(roots):
+    """A 6 s HEVC 10-bit .MOV — long enough to hold several chunks."""
+    input_dir, _ = roots
+    return _write_encoded(input_dir / "IMG_0020.MOV", "mov", "libx265", "yuv420p10le", frames=60)
+
+
+@pytest.fixture()
+def short_chunks(monkeypatch):
+    """2 s chunks, so a 6 s fixture is a multi-chunk video without a slow encode."""
+    monkeypatch.setenv("SFN_VIDEO_CHUNK_SECONDS", "2")
+
+
+class TestChunkSnapping:
+    """A timecode names a chunk; it never names a new encode (§4.2)."""
+
+    def test_a_timecode_maps_to_the_start_of_its_chunk(self):
+        assert vp_routes.chunk_start_for(41.2, 30) == 30.0
+        assert vp_routes.chunk_start_for(47.9, 30) == 30.0
+
+    def test_the_first_chunk_starts_at_zero(self):
+        assert vp_routes.chunk_start_for(0.0, 30) == 0.0
+        assert vp_routes.chunk_start_for(29.999, 30) == 0.0
+
+    def test_a_boundary_belongs_to_the_chunk_it_opens(self):
+        assert vp_routes.chunk_start_for(30.0, 30) == 30.0
+
+    def test_two_scrubs_inside_one_chunk_share_one_encode(self):
+        # The property, not the arithmetic: this is why two analysts watching
+        # the same moment do not produce two artifacts under two keys.
+        assert vp_routes.chunk_start_for(41.2, 30) == vp_routes.chunk_start_for(47.9, 30)
+
+
+@requires_ffmpeg
+class TestChunkPlayback:
+    def test_a_chunk_is_encoded_and_then_served(self, client, hevc_10bit_mov):
+        r = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["player_state"] == "chunk-ready"
+        assert body["cached"] is False
+        assert body["chunk_start"] == 0.0
+
+        served = client.get(body["chunk_url"])
+        assert served.status_code == 200
+        assert served.headers["content-type"] == "video/mp4"
+        assert served.headers["X-SFN-Playback-Mode"] == "transcode"
+        assert len(served.content) > 0
+
+    def test_the_second_request_is_a_cache_hit_and_does_not_re_encode(self, client, hevc_10bit_mov):
+        first = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+        assert first["cached"] is False
+        with patch.object(vp_encode, "_run", side_effect=AssertionError("re-encoded a hit")):
+            second = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+        assert second["cached"] is True
+        assert second["encode_seconds"] is None
+        assert second["chunk_url"] == first["chunk_url"]
+
+    def test_a_get_never_encodes_a_missing_chunk(self, client, hevc_10bit_mov):
+        # The double-buffered player fetches bytes with a plain GET; if that
+        # could trigger an encode, a preload would start work nobody asked for.
+        prepared = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+        fp = prepared["pipeline_fingerprint"]
+        r = client.get(f"/api/video-chunk?path={hevc_10bit_mov}&start=999.000&fp={fp}")
+        assert r.status_code == 404
+        assert "POST" in r.json()["detail"]
+
+    def test_seeking_to_a_new_position_encodes_a_chunk_there(
+        self, client, hevc_long_mov, short_chunks
+    ):
+        first = client.post(f"/api/video-chunk?path={hevc_long_mov}&t=0.5").json()
+        assert first["chunk_start"] == 0.0
+        seek = client.post(f"/api/video-chunk?path={hevc_long_mov}&t=4.3").json()
+        assert seek["chunk_start"] == 4.0
+        assert seek["cached"] is False
+        assert seek["chunk_url"] != first["chunk_url"]
+        assert client.get(seek["chunk_url"]).status_code == 200
+
+    def test_the_next_chunk_start_is_stated_so_the_player_need_not_compute_it(
+        self, client, hevc_long_mov, short_chunks
+    ):
+        body = client.post(f"/api/video-chunk?path={hevc_long_mov}&t=0").json()
+        assert body["next_chunk_start"] == 2.0
+        assert body["final_chunk"] is False
+
+    def test_the_final_chunk_states_that_there_is_no_next_one(self, client, hevc_10bit_mov):
+        # A prefetch of a chunk past the end would encode nothing and look like
+        # a failure; the server says where the video stops instead.
+        body = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+        assert body["next_chunk_start"] is None
+        assert body["final_chunk"] is True
+
+    def test_a_chunk_request_holds_the_playback_lease(self, client, hevc_10bit_mov):
+        body = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+        assert vp_cache.lease_state(body["video_sha256"]).state == "held"
+
+    def test_serving_a_chunk_renews_the_lease(self, client, hevc_10bit_mov):
+        body = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+        vp_cache.release_lease(body["video_sha256"])
+        assert vp_cache.lease_state(body["video_sha256"]).state == "none"
+        client.get(body["chunk_url"])
+        assert vp_cache.lease_state(body["video_sha256"]).state == "held"
+
+    def test_the_chunk_is_filed_under_the_pipeline_that_ran(self, client, hevc_10bit_mov):
+        body = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+        settings = Settings()
+        expected = vp_cache.artifact_dir(
+            settings.video_cache_dir, body["video_sha256"], body["pipeline_fingerprint"]
+        ) / vp_cache.chunk_name(0.0)
+        assert expected.is_file()
+
+    def test_a_source_with_no_audio_track_is_not_a_failure(self, client, hevc_10bit_mov):
+        # §10.1 lists "missing audio track"; the encode answers it with `-an`.
+        assert (
+            client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()["player_state"]
+            == "chunk-ready"
+        )
+
+
+class TestChunkKeyingOnFallback:
+    """§6.1: the artifact belongs to the pipeline that ran, not the one asked for."""
+
+    def test_a_gpu_fallback_relocates_the_chunk_under_the_cpu_key(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        gpu_fp = "1" * 64
+        cpu_fp = "2" * 64
+        wrong = vp_cache.artifact_dir(cache_dir, DIGEST_A, gpu_fp) / "c0.000.mp4"
+        wrong.parent.mkdir(parents=True)
+        wrong.write_bytes(b"chunk")
+
+        landed = vp_routes._relocate_on_fallback(wrong, cache_dir, DIGEST_A, cpu_fp, "c0.000.mp4")
+
+        assert landed == vp_cache.artifact_dir(cache_dir, DIGEST_A, cpu_fp) / "c0.000.mp4"
+        assert landed.read_bytes() == b"chunk"
+        assert not wrong.exists()
+
+    def test_no_fallback_leaves_the_chunk_where_it_is(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        fp = "3" * 64
+        p = vp_cache.artifact_dir(cache_dir, DIGEST_A, fp) / "c0.000.mp4"
+        p.parent.mkdir(parents=True)
+        p.write_bytes(b"chunk")
+        assert vp_routes._relocate_on_fallback(p, cache_dir, DIGEST_A, fp, "c0.000.mp4") == p
+        assert p.read_bytes() == b"chunk"
+
+
+class TestPlayerStatesOnPlaybackInfo:
+    """§5's states are decided by the server; the client never infers one."""
+
+    def test_a_source_the_browser_decodes_is_playable(self, client, mp4):
+        body = client.get(f"/api/video-playback-info?path={mp4}").json()
+        assert body["mode"] == "original"
+        assert body["player_state"] == "playable"
+
+    def test_a_rewrapped_container_is_still_playable(self, client, mov):
+        body = client.get(f"/api/video-playback-info?path={mov}").json()
+        assert body["mode"] == "rewrap"
+        assert body["player_state"] == "playable"
+
+    def test_an_out_of_allowlist_codec_needs_a_transcode(self, client, hevc_10bit_mov):
+        body = client.get(f"/api/video-playback-info?path={hevc_10bit_mov}").json()
+        assert body["mode"] == "transcode"
+        assert body["player_state"] == "needs-transcode"
+
+    def test_an_unprobeable_container_is_unknown_and_not_needs_transcode(self, client, roots):
+        # THE three-state case.  A file that will not open has said nothing
+        # about whether it plays.  `#147` shipped "unknown displayed as
+        # mismatch" in an evidence viewer; this is the same defect one layer up.
+        input_dir, _ = roots
+        broken = input_dir / "truncated.mov"
+        broken.write_bytes(b"\x00" * 64)
+        body = client.get(f"/api/video-playback-info?path={broken}").json()
+        assert body["mode"] == "unknown"
+        assert body["player_state"] == "unknown"
+        assert body["player_state"] not in ("playable", "needs-transcode")
+
+    def test_a_transcode_with_no_cache_configured_is_cache_disabled(
+        self, client, hevc_10bit_mov, monkeypatch
+    ):
+        monkeypatch.delenv("SFN_VIDEO_CACHE_DIR", raising=False)
+        monkeypatch.setenv("SFN_VIDEO_CACHE_DIR", "")
+        body = client.get(f"/api/video-playback-info?path={hevc_10bit_mov}").json()
+        assert body["mode"] == "transcode"
+        assert body["player_state"] == "cache-disabled"
+        assert "SFN_VIDEO_CACHE_DIR" in body["player_state_reason"]
+
+    def test_every_state_the_server_can_report_is_a_declared_state(self):
+        # A state the UI has no branch for is a state the analyst never sees.
+        assert set(vp_states.MODE_TO_STATE.values()) <= vp_states.PLAYER_STATES
+
+    def test_the_full_job_states_are_named_as_phase_sevens_not_shipped_empty(self):
+        assert not (vp_states.PHASE_7_STATES & vp_states.PLAYER_STATES)
+        assert vp_states.PHASE_7_STATES == {
+            "full-job-running",
+            "full-job-done",
+            "full-job-failed",
+        }
+
+
+class TestFailureMatrix:
+    """Every §10.1 condition, mapped to a status, a §5 state and a retry rule."""
+
+    def test_every_failure_maps_to_a_declared_player_state(self):
+        rows = [
+            v
+            for k, v in vars(vp_states).items()
+            if isinstance(v, vp_states.Failure) and k.isupper()
+        ]
+        assert rows, "the matrix is empty"
+        for row in rows:
+            assert row.state in vp_states.PLAYER_STATES, row.kind
+
+    def test_a_retryable_failure_says_how_long_to_wait(self):
+        # §10.1: "nothing may retry-storm".  A retryable failure without a delay
+        # is an invitation to loop as fast as the network allows.
+        rows = [
+            v
+            for k, v in vars(vp_states).items()
+            if isinstance(v, vp_states.Failure) and k.isupper() and v.retryable
+        ]
+        assert rows
+        for row in rows:
+            assert row.retry_after_seconds, row.kind
+
+    def test_a_non_retryable_failure_carries_no_retry_delay(self):
+        assert vp_states.SOURCE_CHANGED.retry_after_seconds is None
+        assert vp_states.SOURCE_CHANGED.retryable is False
+
+    def test_the_response_body_names_the_condition_and_the_state(self):
+        detail = vp_states.QUEUE_FULL.as_detail()
+        assert detail["error"] == "queue-full"
+        assert detail["player_state"] == "capacity-exhausted"
+        assert detail["retryable"] is True
+        assert detail["retry_after_seconds"] == 15
+
+    def test_a_retryable_failure_sets_retry_after(self):
+        assert vp_states.DISK_FULL.as_http().headers["Retry-After"] == "60"
+
+    # --- the rows only ffmpeg can report ---------------------------------
+
+    def test_ffmpeg_non_zero_exit_is_a_non_retryable_encode_failure(self):
+        f = vp_states.classify(
+            vp_encode.EncodeError("moov atom not found", command=["ffmpeg"], returncode=1)
+        )
+        assert (f.kind, f.status, f.state, f.retryable) == (
+            "encode-failed",
+            422,
+            "chunk-failed",
+            False,
+        )
+        assert "moov atom not found" in f.reason
+
+    def test_a_job_timeout_is_a_504_and_retryable(self):
+        f = vp_states.classify(
+            vp_encode.EncodeError(
+                "encode timed out after 3600s", command=["ffmpeg"], timed_out=True
+            )
+        )
+        assert (f.kind, f.status, f.state, f.retryable) == (
+            "job-timeout",
+            504,
+            "chunk-failed",
+            True,
+        )
+
+    def test_an_oom_killed_encoder_is_capacity_exhausted_not_a_bad_file(self):
+        # SIGKILL with no stderr is what the OOM killer leaves.  Reporting it as
+        # "this file cannot be encoded" would tell the analyst to stop asking
+        # about a video that is fine.
+        f = vp_states.classify(
+            vp_encode.EncodeError("ffmpeg exited -9", command=["ffmpeg"], returncode=-9)
+        )
+        assert (f.kind, f.status, f.state, f.retryable) == (
+            "encoder-killed",
+            507,
+            "capacity-exhausted",
+            True,
+        )
+
+    def test_another_signal_is_reported_by_name_and_not_as_an_oom(self):
+        f = vp_states.classify(
+            vp_encode.EncodeError("ffmpeg exited -15", command=["ffmpeg"], returncode=-15)
+        )
+        assert f.kind == "encode-failed"
+        assert "SIGTERM" in f.reason
+
+    def test_a_full_filesystem_is_capacity_exhausted_and_retryable(self):
+        f = vp_states.classify(OSError(errno.ENOSPC, "No space left on device"))
+        assert (f.kind, f.status, f.state, f.retryable) == (
+            "disk-full",
+            507,
+            "capacity-exhausted",
+            True,
+        )
+
+    def test_an_unwritable_cache_directory_is_cache_disabled_not_disk_full(self):
+        f = vp_states.classify(OSError(errno.EACCES, "Permission denied"))
+        assert (f.kind, f.status, f.state, f.retryable) == (
+            "cache-unwritable",
+            503,
+            "cache-disabled",
+            False,
+        )
+
+    def test_a_vanished_source_is_a_404(self):
+        f = vp_states.classify(FileNotFoundError(errno.ENOENT, "No such file"))
+        assert (f.kind, f.status, f.state) == ("source-disappeared", 404, "chunk-failed")
+
+    def test_a_host_with_no_usable_pipeline_says_so_in_its_own_words(self):
+        f = vp_states.classify(RuntimeError("This ffmpeg build cannot tone-map HDR"))
+        assert (f.kind, f.status, f.retryable) == ("no-encode-pipeline", 503, False)
+        assert "tone-map" in f.reason
+
+    def test_an_unrecognised_exception_still_gets_a_row(self):
+        f = vp_states.classify(ValueError("something nobody anticipated"))
+        assert f.state in vp_states.PLAYER_STATES
+        assert "something nobody anticipated" in f.reason
+
+    def test_a_gpu_failure_is_not_in_the_matrix_because_it_falls_back(self):
+        # §8: a GPU that fails at job time retries on CPU and produces a chunk.
+        # A table that invented a `gpu-failed` state would show the analyst a
+        # failure for a request that succeeded.
+        kinds = {
+            v.kind
+            for k, v in vars(vp_states).items()
+            if isinstance(v, vp_states.Failure) and k.isupper()
+        }
+        assert "gpu-failed" not in kinds
+        assert "no-audio-track" not in kinds
+
+
+class TestFailureMatrixOverHttp:
+    """The same rows, reached through the endpoint rather than through classify."""
+
+    def test_a_corrupt_container_is_422_and_unknown(self, client, roots):
+        input_dir, _ = roots
+        broken = input_dir / "broken.mov"
+        broken.write_bytes(b"\x00" * 64)
+        r = client.post(f"/api/video-chunk?path={broken}&t=0")
+        assert r.status_code == 422
+        assert r.json()["detail"]["player_state"] == "unknown"
+        assert r.json()["detail"]["error"] == "corrupt-input"
+
+    def test_a_source_that_needs_no_transcode_is_refused_with_409(self, client, mp4):
+        r = client.post(f"/api/video-chunk?path={mp4}&t=0")
+        assert r.status_code == 409
+        assert r.json()["detail"]["error"] == "not-a-transcode"
+        assert r.json()["detail"]["player_state"] == "playable"
+
+    def test_a_timecode_past_the_end_is_refused_before_any_encode(self, client, hevc_10bit_mov):
+        with patch.object(vp_encode, "_run", side_effect=AssertionError("encoded anyway")):
+            r = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=99999")
+        assert r.status_code == 422
+        assert r.json()["detail"]["error"] == "timecode-out-of-range"
+
+    def test_a_negative_timecode_is_refused(self, client, hevc_10bit_mov):
+        r = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=-1")
+        assert r.status_code == 422
+        assert r.json()["detail"]["error"] == "timecode-out-of-range"
+
+    def test_an_unset_cache_dir_is_503_cache_disabled(self, client, hevc_10bit_mov, monkeypatch):
+        monkeypatch.setenv("SFN_VIDEO_CACHE_DIR", "")
+        r = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        assert r.status_code == 503
+
+    def test_a_changed_source_is_409_and_never_encoded(self, client, hevc_10bit_mov):
+        with patch.object(vp_encode, "_run", side_effect=AssertionError("encoded a stale file")):
+            r = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0&video_hash={'0' * 64}")
+        assert r.status_code == 409
+        assert r.json()["detail"]["error"] == "source-changed"
+
+    def test_a_missing_source_is_404(self, client, roots):
+        input_dir, _ = roots
+        r = client.post(f"/api/video-chunk?path={input_dir / 'never_existed.mov'}&t=0")
+        assert r.status_code == 404
+
+    def test_a_path_outside_the_allowed_roots_is_403(self, client, roots, tmp_path):
+        outside = tmp_path / "elsewhere.mov"
+        outside.write_bytes(b"\x00")
+        assert client.post(f"/api/video-chunk?path={outside}&t=0").status_code == 403
+        assert (
+            client.get(f"/api/video-chunk?path={outside}&start=0&fp={'a' * 64}").status_code == 403
+        )
+
+    def test_a_fingerprint_is_never_accepted_as_the_identity_of_a_file(
+        self, client, hevc_10bit_mov
+    ):
+        # §9: a key never names a file.  A bad fp cannot reach outside the
+        # video's own directory, and a non-hex one is refused outright.
+        r = client.get(f"/api/video-chunk?path={hevc_10bit_mov}&start=0&fp=../../etc/passwd")
+        assert r.status_code == 422
+
+    def test_the_queue_refuses_rather_than_growing_without_limit(
+        self, client, hevc_10bit_mov, monkeypatch
+    ):
+        monkeypatch.setenv("SFN_VIDEO_QUEUE_MAX", "1")
+        monkeypatch.setenv("SFN_VIDEO_MAX_WORKERS", "1")
+        vp_routes.admission.admitted = 1  # one encode already in flight
+        try:
+            r = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        finally:
+            vp_routes.admission.admitted = 0
+        assert r.status_code == 503
+        assert r.json()["detail"]["error"] == "queue-full"
+        assert r.json()["detail"]["player_state"] == "capacity-exhausted"
+        assert r.headers["Retry-After"] == "15"
+
+    def test_the_admission_counter_is_released_after_a_failure(self, client, hevc_10bit_mov):
+        with patch.object(
+            vp_encode, "_run", side_effect=vp_encode.EncodeError("boom", command=["ffmpeg"])
+        ):
+            assert client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").status_code == 422
+        assert vp_routes.admission.admitted == 0
+
+
+class TestEncodeFallbackLimits:
+    """§8's CPU fallback answers a GPU fault — and only a GPU fault."""
+
+    def test_a_timeout_on_the_gpu_is_not_retried_on_the_cpu(self, tmp_path):
+        cap = _capability(encoder="h264_nvenc", hwaccel="cuda")
+        calls = []
+
+        def _boom(cmd, timeout):
+            calls.append(cmd)
+            raise vp_encode.EncodeError("timed out", command=cmd, timed_out=True)
+
+        with patch.object(vp_encode, "_run", _boom), pytest.raises(vp_encode.EncodeError):
+            vp_encode.encode(Settings(), cap, tmp_path / "src.mov", tmp_path / "out.mp4", hdr=False)
+        assert len(calls) == 1, "the CPU path is slower; retrying spends the timeout twice"
+
+    def test_an_oom_kill_on_the_gpu_is_not_retried_on_the_cpu(self, tmp_path):
+        cap = _capability(encoder="h264_nvenc", hwaccel="cuda")
+        calls = []
+
+        def _boom(cmd, timeout):
+            calls.append(cmd)
+            raise vp_encode.EncodeError("killed", command=cmd, returncode=-9)
+
+        with patch.object(vp_encode, "_run", _boom), pytest.raises(vp_encode.EncodeError):
+            vp_encode.encode(Settings(), cap, tmp_path / "src.mov", tmp_path / "out.mp4", hdr=False)
+        assert len(calls) == 1, "a second encoder under memory pressure makes it worse"
+
+
+class TestFallbackCacheLookup:
+    """A host whose GPU fails at job time must still hit its own cache."""
+
+    def test_a_chunk_produced_by_the_fallback_is_found_again(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        gpu = _pipeline(encoder="h264_nvenc", hwaccel="cuda")
+        cpu = _pipeline()
+        name = vp_cache.chunk_name(0.0)
+        landed = vp_cache.artifact_dir(cache_dir, DIGEST_A, cpu.fingerprint()) / name
+        landed.parent.mkdir(parents=True)
+        landed.write_bytes(b"chunk")
+
+        # Nothing recorded yet: selecting the GPU pipeline misses, which is what
+        # made every chunk re-encode forever before the substitution table.
+        assert vp_routes._cached_chunk(cache_dir, DIGEST_A, gpu, name) is None
+
+        vp_routes._substitutions[gpu.fingerprint()] = cpu
+        hit = vp_routes._cached_chunk(cache_dir, DIGEST_A, gpu, name)
+        assert hit is not None
+        assert hit.path == landed
+
+    def test_the_hit_is_labelled_with_the_pipeline_that_produced_it(self, tmp_path):
+        # §7.2: the label names the encoder that ran. Reporting the GPU's fields
+        # over a file libx264 wrote is the defect the fingerprint exists to stop.
+        cache_dir = tmp_path / "cache"
+        gpu = _pipeline(encoder="h264_nvenc", hwaccel="cuda")
+        cpu = _pipeline()
+        name = vp_cache.chunk_name(0.0)
+        p = vp_cache.artifact_dir(cache_dir, DIGEST_A, cpu.fingerprint()) / name
+        p.parent.mkdir(parents=True)
+        p.write_bytes(b"chunk")
+        vp_routes._substitutions[gpu.fingerprint()] = cpu
+
+        hit = vp_routes._cached_chunk(cache_dir, DIGEST_A, gpu, name)
+        assert hit.fingerprint == cpu.fingerprint()
+        assert hit.describe["encoder"] == "libx264"
+        assert hit.describe["fingerprint"] == cpu.fingerprint()
+
+    def test_a_substitution_never_serves_another_videos_chunk(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        gpu = _pipeline(encoder="h264_nvenc", hwaccel="cuda")
+        cpu = _pipeline()
+        name = vp_cache.chunk_name(0.0)
+        p = vp_cache.artifact_dir(cache_dir, DIGEST_B, cpu.fingerprint()) / name
+        p.parent.mkdir(parents=True)
+        p.write_bytes(b"chunk")
+        vp_routes._substitutions[gpu.fingerprint()] = cpu
+        assert vp_routes._cached_chunk(cache_dir, DIGEST_A, gpu, name) is None
+
+    def test_the_direct_key_wins_when_both_exist(self, tmp_path):
+        # The GPU recovered: the next genuine miss encodes on it again, and the
+        # substitution must not keep the analyst on the older rendering.
+        cache_dir = tmp_path / "cache"
+        gpu = _pipeline(encoder="h264_nvenc", hwaccel="cuda")
+        cpu = _pipeline()
+        name = vp_cache.chunk_name(0.0)
+        for pipe, payload in ((gpu, b"gpu"), (cpu, b"cpu")):
+            q = vp_cache.artifact_dir(cache_dir, DIGEST_A, pipe.fingerprint()) / name
+            q.parent.mkdir(parents=True)
+            q.write_bytes(payload)
+        vp_routes._substitutions[gpu.fingerprint()] = cpu
+        hit = vp_routes._cached_chunk(cache_dir, DIGEST_A, gpu, name)
+        assert hit.path.read_bytes() == b"gpu"
+        assert hit.fingerprint == gpu.fingerprint()

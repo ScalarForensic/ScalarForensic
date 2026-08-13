@@ -15,9 +15,14 @@ and every UI surface that offers playback says so.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import mimetypes
+import os
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
@@ -26,25 +31,32 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
 from scalar_forensic.config import Settings
+from scalar_forensic.video_playback import states
 from scalar_forensic.video_playback.cache import (
     _cache_dir_or_503,
     _touch,
+    artifact_dir,
     artifact_locks,
     check_ceiling,
+    chunk_name,
     evict,
     pin,
     release_lease,
     renew_lease,
     rewrap_path,
 )
+from scalar_forensic.video_playback.capability import Pipeline, capability, is_hdr, select
 from scalar_forensic.video_playback.codecs import _needs_remux, _playback_mode, _stream_report
 from scalar_forensic.video_playback.digest import _cached_source_digest, _source_digest
+from scalar_forensic.video_playback.encode import encode_chunk
 from scalar_forensic.video_playback.rewrap import _remux_to_mp4
 from scalar_forensic.web.routes._shared import _resolve_video_path
 
 _log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
 def _stale_evidence_report(computed: str, indexed: str | None) -> dict:
@@ -267,5 +279,346 @@ async def video_playback_info(path: str, video_hash: str | None = None) -> JSONR
             "limit_bytes": verdict.limit_bytes,
             "reason": verdict.reason,
         }
+        info["cache_enabled"] = settings.video_cache_dir is not None
+        info["chunk_seconds"] = settings.video_chunk_seconds
+    # The §5 state is decided here, server-side, from the same `mode` the label
+    # is drawn from — so "what does the analyst see" has one implementation and
+    # cannot drift from "what did the server conclude".  Four modes map onto four
+    # states, `unknown` included: a container that would not open has said
+    # nothing about whether it plays, and reporting that as `needs-transcode`
+    # would be a claim about a stream nobody read (`#147`'s defect class).
+    info["player_state"] = states.MODE_TO_STATE[info["mode"]]
+    if info["player_state"] == "needs-transcode" and not info.get("cache_enabled"):
+        # There is a transcode to do and nowhere to put it (§5 `cache-disabled`).
+        info["player_state"] = "cache-disabled"
+        info["player_state_reason"] = states.CACHE_UNSET.reason
     info.update(_stale_evidence_report(info["video_sha256"], video_hash))
     return JSONResponse(info)
+
+
+# ---------------------------------------------------------------------------
+# Chunk playback (spec §4.2, §5, §9, §10.1)
+# ---------------------------------------------------------------------------
+
+
+class _Admission:
+    """The bound on concurrent chunk encodes, and on how many may wait (§10.4).
+
+    Two numbers, not one.  ``SFN_VIDEO_MAX_WORKERS`` caps how many encoders run
+    — §3.5 measured aggregate throughput flat from k=1 to k=8, so more is only
+    latency.  ``SFN_VIDEO_QUEUE_MAX`` caps *admitted* requests, running plus
+    waiting, because an unbounded wait queue is the same unbounded resource with
+    a slower fuse: a LAN host that opens forty videos would otherwise hold forty
+    requests until each one times out.  Over the cap the request is refused with
+    §10.1's ``queue-full`` row, which says how long to wait, rather than joining
+    a line nobody is told the length of.
+
+    Deliberately not a job runner.  Phase 7's ``jobs.py`` owns the worker pool,
+    cancellation and refcounts; this is the admission gate the synchronous chunk
+    path needs in the meantime, and it is replaced wholesale rather than grown.
+    """
+
+    def __init__(self) -> None:
+        self._sem: asyncio.Semaphore | None = None
+        self._limit = 0
+        self.admitted = 0
+
+    def _semaphore(self, workers: int) -> asyncio.Semaphore:
+        if self._sem is None or self._limit != workers:
+            self._sem = asyncio.Semaphore(workers)
+            self._limit = workers
+        return self._sem
+
+    @asynccontextmanager
+    async def enter(self, settings: Settings) -> AsyncIterator[None]:
+        if self.admitted >= settings.video_queue_max:
+            raise states.QUEUE_FULL.as_http()
+        self.admitted += 1
+        try:
+            async with self._semaphore(settings.video_max_workers):
+                yield
+        finally:
+            self.admitted -= 1
+
+    def reset(self) -> None:
+        """Test hook: the counter is process-wide, like every other bound here."""
+        self._sem = None
+        self._limit = 0
+        self.admitted = 0
+
+
+admission = _Admission()
+
+
+def chunk_start_for(t: float, chunk_seconds: int) -> float:
+    """The start of the chunk containing timecode *t*.
+
+    Snapping on the server is what makes a seek idempotent: two analysts who
+    scrub to 41.2 s and 47.9 s of a 30 s-chunked video both get the chunk at
+    30.000 and share one encode, instead of producing two nearly identical
+    artifacts under two keys.
+    """
+    return float(int(t // chunk_seconds) * chunk_seconds)
+
+
+@dataclass(frozen=True)
+class _CachedChunk:
+    path: Path
+    fingerprint: str
+    describe: dict
+
+
+# Which pipeline last *actually produced* a chunk when a given pipeline was
+# selected.  Normally the same fingerprint on both sides; they differ only after
+# a §8 GPU fallback.
+#
+# Without this, a host whose GPU probes clean and then fails at job time never
+# hits its own cache: `select()` keeps returning the GPU pipeline, the lookup
+# keeps missing the CPU key the artifact actually landed under, and every chunk
+# is re-encoded forever — the cache silently stops being one.  (Found by
+# `test_the_second_request_is_a_cache_hit_and_does_not_re_encode` on a host
+# where the probe passes and `h264_nvenc` then writes no packets.)
+#
+# It is a **lookup hint and nothing else**: selection is unchanged, so a GPU that
+# recovers encodes on the GPU at the next genuine miss, and what is reported is
+# always the pipeline that made the file being served (§7.2) — which is why the
+# table holds whole `Pipeline` objects and not just their fingerprints. A label
+# carrying the GPU's fields under the CPU's key would be the §7.2 defect in
+# miniature. One entry per selected pipeline — a handful per process, not per
+# video.
+_substitutions: dict[str, Pipeline] = {}
+
+
+def _cached_chunk(
+    cache_dir: Path, digest: str, selected: Pipeline, name: str
+) -> _CachedChunk | None:
+    """The chunk on disk for this window, under the selected key or its substitute."""
+    fp = selected.fingerprint()
+    direct = artifact_dir(cache_dir, digest, fp) / name
+    if direct.is_file():
+        return _CachedChunk(direct, fp, selected.describe())
+    alt = _substitutions.get(fp)
+    if alt is not None and alt.fingerprint() != fp:
+        candidate = artifact_dir(cache_dir, digest, alt.fingerprint()) / name
+        if candidate.is_file():
+            return _CachedChunk(candidate, alt.fingerprint(), alt.describe())
+    return None
+
+
+def reset_substitutions() -> None:
+    """Test hook — the table is process-wide, like every other bound here."""
+    _substitutions.clear()
+
+
+def _duration_seconds(info: dict) -> float | None:
+    ms = info.get("duration_ms")
+    return ms / 1000.0 if ms else None
+
+
+async def _prepare_chunk(p: Path, settings: Settings, t: float, *, video_hash: str | None) -> dict:
+    """Encode (or find) the chunk containing timecode *t* and describe it.
+
+    Every §10.1 condition that can be decided without ffmpeg is decided here,
+    before anything is queued or encoded (§9), and each one raises the
+    :class:`~.states.Failure` row that names it — so the analyst is told which
+    thing went wrong, not that "playback failed".
+    """
+    info = await asyncio.to_thread(_stream_report, p)
+    if "probe_error" in info:
+        raise states.PROBE_FAILED.as_http()
+    if info.get("video_codec") is None:
+        raise states.NO_VIDEO_TRACK.as_http()
+
+    mode, mode_reason = _playback_mode(info, _needs_remux(p))
+    if mode != "transcode":
+        raise states.NOT_A_TRANSCODE.as_http()
+
+    duration = _duration_seconds(info)
+    if duration is None or duration <= 0:
+        raise states.BAD_DURATION.as_http()
+    if not (0 <= t < duration):
+        raise states.TIMECODE_OUT_OF_RANGE.as_http()
+
+    cache_dir = _cache_dir_or_503(settings)
+    digest = await asyncio.to_thread(_source_digest, p, settings)
+    if video_hash and _HEX64.fullmatch(video_hash) and video_hash != digest:
+        # §7.1: the file changed under the session.  Encoding a chunk from it
+        # would hand the analyst pixels that no timecode in the UI describes.
+        raise states.SOURCE_CHANGED.as_http()
+
+    start = chunk_start_for(t, settings.video_chunk_seconds)
+    hdr = is_hdr(info)
+    cap = await asyncio.to_thread(capability, settings)
+    try:
+        selected = select(settings, cap, hdr=hdr)
+    except RuntimeError as exc:
+        raise states.classify(exc).as_http() from exc
+
+    # The lease goes in before the work: a `FileResponse` streams after the
+    # handler returns, so nothing else can tell eviction this video is on
+    # screen (§6.2).  The player refreshes it on a heartbeat from here.
+    renew_lease(digest, settings.video_lease_seconds)
+
+    report: dict = {
+        "video_sha256": digest,
+        "chunk_start": start,
+        "chunk_seconds": settings.video_chunk_seconds,
+        "duration_ms": info["duration_ms"],
+        "mode_reason": mode_reason,
+        "hdr": hdr,
+    }
+    next_start = start + settings.video_chunk_seconds
+    report["next_chunk_start"] = next_start if next_start < duration else None
+    report["final_chunk"] = report["next_chunk_start"] is None
+
+    name = chunk_name(start)
+    hit = _cached_chunk(cache_dir, digest, selected, name)
+    if hit is not None:
+        await asyncio.to_thread(_touch, hit.path)
+        report.update(
+            cached=True,
+            pipeline_fingerprint=hit.fingerprint,
+            pipeline=hit.describe,
+            fell_back=hit.fingerprint != selected.fingerprint(),
+            fallback_reason=None,
+            encode_seconds=None,
+        )
+        return report
+
+    dst = artifact_dir(cache_dir, digest, selected.fingerprint()) / name
+    async with admission.enter(settings):
+        # Dedup on the artifact, not on the video: two analysts on the same
+        # chunk share one encode, two analysts on different chunks of the same
+        # video do not queue behind each other (§10.4).
+        async with artifact_locks.hold(f"{digest}:{selected.fingerprint()}:{name}"):
+            again = _cached_chunk(cache_dir, digest, selected, name)
+            if again is not None:  # published while we waited for the lock
+                await asyncio.to_thread(_touch, again.path)
+                report.update(
+                    cached=True,
+                    pipeline_fingerprint=again.fingerprint,
+                    pipeline=again.describe,
+                    fell_back=again.fingerprint != selected.fingerprint(),
+                    fallback_reason=None,
+                    encode_seconds=None,
+                )
+                return report
+            with pin(digest):
+                try:
+                    result = await asyncio.to_thread(
+                        encode_chunk,
+                        settings,
+                        cap,
+                        p,
+                        dst,
+                        hdr=hdr,
+                        start=start,
+                        has_audio=info.get("audio_codec") is not None,
+                    )
+                except Exception as exc:
+                    failure = states.classify(exc)
+                    _log.warning("chunk %s of %s failed (%s): %s", start, p, failure.kind, exc)
+                    raise failure.as_http() from exc
+                published = _relocate_on_fallback(
+                    result.path, cache_dir, digest, result.pipeline.fingerprint(), name
+                )
+                _substitutions[selected.fingerprint()] = result.pipeline
+            await asyncio.to_thread(evict, cache_dir, settings.video_cache_max_bytes)
+
+    report.update(
+        cached=False,
+        pipeline_fingerprint=result.pipeline.fingerprint(),
+        pipeline=result.pipeline.describe(),
+        fell_back=result.fell_back,
+        fallback_reason=result.fallback_reason,
+        encode_seconds=round(result.wall_seconds, 3),
+        artifact_path=str(published),
+    )
+    return report
+
+
+def _relocate_on_fallback(
+    published: Path, cache_dir: Path, digest: str, fingerprint: str, name: str
+) -> Path:
+    """Move a chunk under the key of the pipeline that **ran** (§6.1).
+
+    The destination has to be chosen before the encode, and a §8 GPU fallback
+    changes the pipeline mid-encode — so a chunk can land under the key of a
+    pipeline that did not produce it, which is precisely "one key holding two
+    pictures".  The move is a same-directory ``os.replace``, so it is atomic and
+    a reader either sees the old name or the new one.
+    """
+    correct = artifact_dir(cache_dir, digest, fingerprint) / name
+    if correct == published:
+        return published
+    correct.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(published, correct)
+    with contextlib.suppress(OSError):
+        published.parent.rmdir()  # empty unless something else published there
+    return correct
+
+
+@router.post("/api/video-chunk")
+async def video_chunk_prepare(
+    path: str, t: float = 0.0, video_hash: str | None = None
+) -> JSONResponse:
+    """Produce the chunk containing timecode *t* and say where to fetch it (§4.2).
+
+    **Preparing and serving are two requests on purpose.**  A ``<video>`` element
+    issues a ``GET`` with ``Range`` headers and nothing else; it cannot POST, and
+    it cannot wait ten seconds for an encode without the browser's own media
+    stack deciding the source is broken.  So the POST does the work and returns
+    JSON, and the GET below serves bytes out of the cache and never encodes.
+    That also keeps §9's rule intact — the GET is idempotent and cacheable, and
+    a request that changes the machine's state is not disguised as a fetch.
+
+    ``player_state`` is the §5 state this response puts the player in.  It is
+    stated by the server rather than inferred by the client, so the failure
+    matrix (§10.1) has exactly one implementation.
+    """
+    p = _resolve_video_path(path)
+    settings = Settings()
+    report = await _prepare_chunk(p, settings, t, video_hash=video_hash)
+    report["player_state"] = "chunk-ready"
+    report["chunk_url"] = (
+        f"/api/video-chunk?path={quote(str(p))}"
+        f"&start={report['chunk_start']:.3f}&fp={report['pipeline_fingerprint']}"
+    )
+    return JSONResponse(report)
+
+
+@router.get("/api/video-chunk")
+async def video_chunk_get(path: str, start: float, fp: str) -> FileResponse:
+    """Serve an already-encoded chunk.  Never encodes; 404 when it is not there.
+
+    ``fp`` selects *which rendering* of this video to serve — a video encoded on
+    two hosts has two pipelines and two pictures (§6.1) — and it is never the
+    identity of the file: ``path`` is, through the same resolution flow as every
+    other route (§9).  A cache key that named a file on its own would let a
+    caller read anything the store happens to hold.
+    """
+    p = _resolve_video_path(path)
+    if not _HEX64.fullmatch(fp or ""):
+        raise HTTPException(status_code=422, detail="fp is not a pipeline fingerprint")
+    settings = Settings()
+    cache_dir = _cache_dir_or_503(settings)
+    digest = await asyncio.to_thread(_source_digest, p, settings)
+    chunk = artifact_dir(cache_dir, digest, fp) / chunk_name(start)
+    if not chunk.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "That chunk is not in the cache. It was never encoded, or it was "
+                "evicted; POST to this endpoint to produce it."
+            ),
+        )
+    renew_lease(digest, settings.video_lease_seconds)
+    await asyncio.to_thread(_touch, chunk)
+    return FileResponse(
+        chunk,
+        media_type="video/mp4",
+        headers={
+            "X-SFN-Playback-Mode": "transcode",
+            "X-SFN-Chunk-Start": f"{start:.3f}",
+        },
+    )
