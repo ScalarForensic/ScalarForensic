@@ -1195,3 +1195,105 @@ untouched; store-integration tests legitimately skipped (store code untouched).
 **Queued (c2's successor rec, HELD like the benchmarker):** parallelize the residual face
 pass (thread pool + per-thread YuNet, audit §4 fix 1) for the remaining ~12 min — only
 worth measuring after the before/after bench on the subset, post-campaign-run. c2 retired.
+
+## CAMPAIGN RUN COMPLETE — 2026-08-13 (operator-triggered, finished during this window)
+
+Operator numbers (g1 relay): 8,137 indexed, 5,052 frames, faces 10,040 detected →
+2,592 comparable / 3,655 review-only / 3,793 rejected, 76 unsupported, 2 stale removed
+(operator confirmed). Report CSV:
+`created_by_scalar/reports/iphone_campaign_20260813_125534.csv` (13,278 rows).
+Campaign Qdrant (`localhost:6333`) is now **read-only for all workers** — operator starts
+interactive UI testing against it.
+
+### CSV analysis (mine, from the report + face audit log + code)
+
+- **The "3 embed-failed" are not failures.** `IMG_1232.MOV`, `IMG_1665.MOV`,
+  `IMG_3734.MOV`: every extracted frame (2/3/2) is byte-identical (same SHA-256) to a
+  frame of its numeric-neighbor video (`IMG_1233.MOV` / `IMG_1664.MOV` / `IMG_3735.MOV`)
+  and was deduplicated in-run. The finalizer (`cli.py:1762-1767`) treats only
+  Qdrant-skips as benign, so all-frames-in-run-duplicate videos land in the
+  `_S_FAIL_EMB` else-branch. Face audit log `index_run` confirms `n_failed: 0`.
+- **76 unsupported = 75 × `.aae`** (Apple edit sidecars, non-media, correctly skipped)
+  **+ 1 × `mapping.csv`** (operator's own file inside `input_scalar`). No media type
+  went unprocessed — that is the file-type-coverage answer.
+- Face audit detail worth keeping: review-only reasons split
+  confidence 1728 / pose 819 / size 757 / sharpness 351; rejected split
+  confidence 2017 / size 1776; `n_dropped_noncanonical` 96 over 12,693 media.
+
+### Dispatched (GPU free)
+
+- `scalarforensic-cfm-b1` — before/after ingest bench of #118 on `input_scalar_bench10`:
+  before = worktree at `0df8035` (+ models/ symlink), after = shared checkout main
+  (`bb4cf41` code, no branch switch). Throwaway Qdrant on a non-6333 port, fresh
+  collection + hash cache + face store per arm, campaign `.env` leak fenced by explicit
+  command-line overrides. Deliverable `docs/fleet/bench-face-integration-20260813.md`.
+- `scalarforensic-cfm-c5` — residual face-pass threading (per-thread YuNet, store I/O
+  main-thread, thread-safe fences). Owns `cli.py`, `faces/indexing.py`,
+  `tests/faces/test_indexing.py`. Told not to pull the shared checkout while b1 times it.
+
+### c5 + b1 DONE — threading #120, bench #121; both verified
+
+- **#120 `b4582a9` residual face-pass threading** (c5): per-thread YuNet (diff shows the
+  not-thread-safe comment + construction), embed lock protecting the embedder's
+  instance-state write/read pair, sequential fallback, store I/O main-thread,
+  `store.py` untouched. Threads default `min(8, cpu)`=8, no env knob (audit names none).
+  Measured 20.8 s → 6.4 s (3.2×) on 120 images, identical 53 detections.
+- **#121 `478c131` bench report** (b1): `docs/fleet/bench-face-integration-20260813.md`.
+  #118 on the 814-file subset: **183.20 s → 168.08 s (−8.3%)** mean of 2 runs/arm,
+  max RSS **10.4 GB → 6.0 GB (−42%)**, identical output counts across all 4 runs.
+  Throwaway Qdrant :6335 deleted, campaign :6333 untouched.
+- **Bar re-measured by me at `478c131`: 598 passed / 5 skipped**, coverage 67.53%, ruff
+  check+format rc=0 (tree dirty only with this runbook entry). Both PRs 8/8 CI green.
+  c5 and b1 retired. c5's parting note: audit §4 fix 2 (single decode faces+embeddings)
+  stays ruled poor-value; optional benchmarker re-run of the full-corpus projection at
+  `b4582a9` is available on request.
+
+### Operator UI loop open — c4 (frontend tester, operator-spawned) + c6 (UI coder)
+
+c4 sits in the operator's live Chrome session on `iphone_campaign_2026`; its 4-item
+change-set spec (header FACE badge; sectioned query controls; face selection basket with
+3-state rows/ctrl-click/HQ crop/cross-highlight/symmetric boxes; aggregated many-to-many
+face search ordered by max-score-per-hit) is at c4's scratchpad
+`ui-changeset-2026-08-13-faces.md`, verified against live DOM + `faces.js`. Dispatched
+`scalarforensic-cfm-c6` on it (owns `index.html`, `style.css`, `web/static/js/`,
+`routes/faces.py`, `test_static_wiring.py`): PRs sequenced 1+2 → 3 → 4, uncalibrated-score
+and vectorless-review-only rules restated, c4 verifies each deploy in live Chrome
+(force-refetch, not cachebust), I pull the shared checkout to deploy static files,
+`routes/faces.py` changes flagged for operator-timed server restart.
+
+### UI loop progress + one policy correction (mine)
+
+- **#122 `860bee5` (items 1+2: FACE header pill, sectioned query controls) merged and
+  DEPLOYED** — shared checkout pulled, statics live, c4 verifying in the operator's
+  Chrome. Bar re-measured by me at `860bee5`: **600 passed / 5 skipped**, ruff rc=0
+  (c6's worktree 599/6 reconciles: no models/ there).
+- **c7 dispatched** on c4's HEIC defect: `routes/files.py:41` local `_IMAGE_EXTENSIONS`
+  drifted from `scanner.py` (no `.heic/.heif`) so /api/hit-image and /api/metadata 400
+  on HEIC hits — verified in code before dispatch. Fix = derive extensions from the
+  scanner's sets + HEIC→JPEG transcode on serve (Chrome renders no image/heic).
+  Restart-flagged; c6's backend PR (compare endpoint + point_id probes) is also
+  restart-flagged — the two restarts get batched into one operator interruption.
+- **Model-policy violation, mine, corrected going forward:** the operator's policy
+  (memory `fleet-model-policy`) is Opus for coders (`com-c`), Fable CTO-only. My
+  dispatch instruction said `cfm-c` — inherited drift, and I spawned all coders on it
+  (c1,c2,c3,c5,c6,c7 all Fable). Live workers c6/c7 run to completion (mid-task kills
+  waste more than they recover); every subsequent worker spawns as `com-c`/`csm-b`.
+
+### Queued UX/correctness items (unassigned)
+
+1. Stale-observation prompt should NAME the files it counts, not just count them (g1).
+2. Kalman-formula ETA line in the CLI is decoration by project rule — simplify (g1).
+3. Relabel all-frames-in-run-duplicate videos (`cli.py:1762-1767`) — currently
+   misreported as "no new vectors were indexed" (found in the CSV analysis above).
+4. Qdrant client 1.19.0 vs server 1.17.1 skew warning — align (carried).
+
+### cfm-m2 window CLOSES — 2026-08-13, retiring at ~204k (operator-caught; watcher broken)
+
+#123 (HEIC serving, c7) + #124 (compare endpoint + point_id probes, c6) verified and
+pulled; **bar at `e66fa78`: 618 passed / 5 skipped**, both PRs 8/8 CI green. c7 retired.
+Both PRs need the one batched operator-timed sfn-web restart. The retirement watcher is
+BROKEN (`cx w` reads every live session as dead/CTX-0 — no nudge ever fired; filed high
+via `cx f`); the operator caught my overrun by hand. c6 ordered to hand off items 3+4
+(at 186.3k) and cx q; its successor spawns as `com-c` per model policy. Successor manager
+`scalarforensic-cfm-m3` is live; full handoff:
+`docs/handoffs/scalarforensic-cfm-m2-20260813-121206.md`.
