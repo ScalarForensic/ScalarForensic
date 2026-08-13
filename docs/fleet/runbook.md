@@ -1325,3 +1325,131 @@ to reap.
   `b4582a9`.
 - Known-broken tooling (m2, filed high): `cx w` misreads live sessions as dead/CTX 0 —
   no automatic retirement nudges; size workers off `cx s` by hand.
+
+### #126 verified — UI items 3+4 live; com-c6 rolled onto c4's frame-display defect
+
+- **PR #126 `6010a10` (face basket + aggregated face search) verified by me**: MERGED,
+  8/8 CI SUCCESS, diff reviewed (index.html/style.css/js parts/wiring tests; "0.363"
+  appears only in the wiring test asserting its absence; both basket add-paths refuse
+  review-only faces). Bar **re-measured by me at `935c014` (main = #126 + #127):
+  628 passed / 5 skipped**, coverage 67.94%. Statics live (checkout pulled); c4
+  verification requested by com-c6. Merge order note: #126 landed before #127.
+- **c4 defect dispatched to com-c6** (verified in code first): video-frame hits show the
+  128×96 thumbnail in the match pane — `selectHit` (analysis.js:263-265) and
+  `selectMatchedFrame` (analysis.js:248-250) use `/api/thumbnail/<sha>` where
+  `/api/hit-image` already serves the stored 1440×1080 frame JPEG. Evidence file in c4's
+  scratchpad (`defect-frame-thumbnail-matchsrc.md`). Briefed to stop and report if the
+  fix needs a backend file outside its ownership.
+- **DISCUSS escalated to operator (not built)**: in-browser playback of source videos
+  from a frame hit — campaign videos are iPhone HEVC/.MOV, Chrome plays HEVC only with
+  hardware decode; would need a range-request file endpoint + <video> element.
+
+### #128 verified — selectHit fixed; selectMatchedFrame routed to backend per operator ruling
+
+- **Operator ruling (g1 relay), standing rule**: never paper over missing data in the UI —
+  if stored data is insufficient, fix the ingest data model and drop+reingest (reingest is
+  cheap and always acceptable). g1's own ingest audit + mine agree the video data model is
+  SOUND (native-res frames on disk, Qdrant frame points carry video_hash/frame_timecode_ms
+  etc.) — no reingest needed anywhere yet. g1 filed cx f (low): `config.frame_store_size`
+  is dead config with a docstring falsely claiming a 512px cap.
+- **PR #128 `9c4cad8` verified by me**: MERGED, CI green, statics deployed. selectHit now
+  serves the stored frame via /api/hit-image (hit.path IS the frame JPEG for frame hits).
+  selectMatchedFrame is NOT frontend-fixable — MatchedVideoFrame payload
+  (`web/pipeline/query.py:26`) carries only timecode_ms/frame_hash/scores; com-c6
+  correctly pinned a strict xfail instead of a workaround. Bar **re-measured by me at
+  `9c4cad8`: 629 passed / 5 skipped / 1 xfailed**.
+- **com-c6 dispatched on the backend half**: frame path into the MatchedVideoFrame
+  payload (claims query.py + any routes file it needs, told to keep exposed paths inside
+  the /api/hit-image allowed-path set), xfail flips to pass. Restart-flagged — joins the
+  #123/#124 batched operator restart.
+
+### #129 + #130 verified — frame path in payload, error surfaces fixed; restart batch now 3 PRs
+
+- **#130 `7c2ab7b` (MatchedVideoFrame.path)**: both constructor sites populated from the
+  point's own `image_path` (same locator Hit.path uses — inside the allowed-path set, no
+  constructed paths); each frame carries its OWN file, not the group representative's
+  (test asserts they differ); missing path → placeholder, never a thumbnail fallback.
+  xfail from #128 flipped to a passing test. NEEDS RESTART (pipeline+routes).
+- **#129 `d39e5d7` (c4 follow-ups, routed c4→c6 directly — accepted once, process note
+  issued)**: FastAPI 422 detail flattened on all five face error surfaces (was
+  `[object Object]`); multi-root `x-for` silently dropped every matched-frame score —
+  fixed + page-wide x-for root-count test. The 422 root cause itself heals on restart
+  (`faces.py:678` already ships `face_indices: str = Form("")`).
+- Both MERGED, CI green, diffs reviewed, statics deployed. Bar **re-measured by me at
+  `7c2ab7b`: 636 passed / 5 skipped**, coverage 67.92% (worktree-measured 635/6/0
+  reconciles). com-c6 ownership extended (its cx o claims): `web/pipeline/query.py`,
+  `web/routes/analyze.py`, `tests/test_video_pipeline.py`.
+- **Batched operator restart now activates: #123 (HEIC serving), #124 (compare/point_id),
+  #130 (frame paths) + heals the 422.** c4 verifies #129's rendering now; everything else
+  in one post-restart pass.
+
+### Operator rulings landed — restart is a standing grant; sfn_tags dropped; playback held open
+
+- **sfn-web restarts: STANDING GRANT** (operator, via g1) — no per-restart approval needed
+  again. My restart attempt was still blocked by this session's permission classifier
+  (the kill; the m2 handoff predicted this class) — one-liner sent to the operator's hand
+  via g1, per the sfn_tags precedent. Server facts at time of writing: PID 2698671,
+  0.0.0.0:8080, detached under a tmux-spawn scope from c4's pane (dies with that pane —
+  the sent one-liner re-launches it nohup-detached).
+- **sfn_tags CLOSED**: operator authorized, g1 executed the DELETE from the operator's
+  session (result true). All rulings on the m1-era DECIDE list are now closed.
+- **Playback DECIDE reopened as "operator evaluating"** (interested, not vetoing;
+  g1 answers streaming-vs-download mechanics from the operator's session).
+- Operator context: campaign DBs are testing-only right now; drop+reingest is a freely
+  available move (10% dataset ≈ 3 min). Faces ingest confirmed fully scriptable
+  (SFN_EXAMINER_ID/SFN_FACES_ENABLED are plain env; config.py:261).
+- **Dispatched**: `scalarforensic-com-c7` (Opus) — three CLI items: truthful relabel of
+  all-frames-in-run-duplicate videos (cli.py ~:1767, court-facing label), stale-observation
+  prompt names files (cli.py:1826-1831), Kalman ETA estimator removal (cli.py:121-185,
+  decoration rule). Owns cli.py.
+- **com-c6 GO** on c4's verified finding: faceSearchError/faceCompareError have 0 bindings
+  in index.html (errors render NOWHERE; #129 flattened text that reaches no surface for
+  search/compare). Statics-only + mandatory binding-existence test per face error surface.
+  com-c6 self-reported ~115k ctx (estimate; no tool reports it — filed observation).
+
+### RESTART EXECUTED (operator session, standing grant) — #123/#124/#130 LIVE
+
+New server PID 3148868, 0.0.0.0:8080, nohup-detached (survives pane closure; log
+/tmp/sfn-web-restart.log). My read-only check: `/` 200, /openapi.json carries
+/api/faces/compare + /api/hit-image (44 paths). c4 dispatched on the single post-restart
+verification pass: HEIC serving (#123), compare/point_id probes (#124, basket UI stops
+soft-degrading), frame-path payloads (#130), 422 heal (judged separately from #129's
+rendering fix). c4 told the restart reset in-browser session state — reload + re-run
+open analyses before judging.
+
+### Post-restart PASS; CLI trio + error surfaces landed; cropper subproject dispatched
+
+- **c4 post-restart pass: ALL FOUR PASS** (#123 HEIC 200 at 3024×4032; #124 compare 200 +
+  cross-highlight, self-pair 1.0; 422 heal: point-only basket → 200/10 hits; #130 matched
+  frame serves the stored 1440×1080 JPEG). Evidence: c4 scratchpad
+  `verify-pr126-results.md`. Watch item: one unrelated query-chip 404 (reqid 690).
+- **com-c7 DONE, verified, retiring**: #131 `e99adf8` (all-frames-in-run-duplicate videos
+  now `skipped_frames_dup_run` / "Skipped — all frames dup in run", three-way split
+  tested), #132 `e3c50f6` (stale prompt names source files, most-affected first, cap 20),
+  #134 `cb8f641` (Kalman ETA estimator deleted, −139 lines, plain counters kept).
+- **com-c6 #133 `e44f1bb` verified, retiring at 179k**: error strips for
+  faceSearchError/faceCompareError (each states the list below is NOT a result / NOT a
+  no-match finding); binding-existence test DERIVES the surface list from faces.js
+  assignments with its own deriver guard — future surfaces auto-covered. c4 verifying live.
+- **Bar re-measured by me at `cb8f641` (main): 647 passed / 5 skipped, coverage 68.44%.**
+- **OPERATOR FEATURE dispatched — `scalarforensic-com-c8` (Opus)**: standalone
+  `/portable_face_cropper/` subproject (input folder → HQ_full_picture/ +
+  cropped_HQ_face/ + 8-column mapping CSV, face-bearing inputs only, sha256 chain,
+  forensic README for reviewer/court, zippable, no scalar_forensic imports, no Qdrant).
+
+### UI-loop phase CLOSED — #133 PASS, c6/c7 retired clean, cropper running
+
+- **c4 PASS on #133** at `cb8f641`: both strips bound, hidden when clean, correct text on
+  error, clear correctly; verified by read-only state-injection, operator state left
+  clean. Query-chip 404 watch item: no recurrence. **The whole operator UI change-set +
+  defect loop is now verified live end-to-end.**
+- c6 + c7 `cx q` filed and windows closed; every ownership row released at kill (reap had
+  nothing to do). Stale squash-merged local branches `ui/face-basket` /
+  `ui/face-legend-sections` deleted from the shared checkout (content in main).
+- c6's parting correction, adopted as manager rule here: **an agent has no reliable view
+  of its own context size — size workers off `cx s`, never off self-estimates** (its
+  ~130k±20k estimate was 50k low). Successor-coder note for future face-UI work: keep the
+  derived-surface test pattern when adding any error/status surface.
+- Operator supplied cropper test paths: input `input_scalar` (READ-ONLY), output
+  `/media/.../portable_face_cropper_scalar/` (the one writable /media path, relayed to
+  com-c8 with bench10-first advice).
