@@ -315,3 +315,39 @@ def test_server_error_detail_is_flattened_before_display():
         assert assigned, surface
         for a in assigned:
             assert "faceErrText(body.detail" in a, f"{surface}: {a}"
+
+
+def _face_error_surfaces() -> set[str]:
+    """Every `this.<name>Error` the face component assigns a server message to.
+
+    Derived from the JS rather than hard-coded so a newly added surface is
+    covered the day it appears, instead of the day someone remembers.
+    """
+    js = (STATIC / "js" / "faces.js").read_text()
+    return set(re.findall(r"this\.(\w+Error)\s*=", js))
+
+
+def test_every_face_error_surface_is_rendered_somewhere():
+    # c4, 2026-08-13: faceSearchError and faceCompareError had zero bindings in
+    # index.html, so a failed face search was completely silent — the hits list
+    # kept the previous result and read as a current one.  #129 flattened the
+    # text for surfaces that nothing displayed, and a green suite missed it
+    # because no test asserted the text ever reaches the page.
+    html = (STATIC / "index.html").read_text()
+    surfaces = _face_error_surfaces()
+    # Guard the deriver: if the regex ever stops matching, every assertion
+    # below passes vacuously.
+    assert {"faceSearchError", "faceCompareError", "queryFacesError"} <= surfaces
+    unbound = [s for s in sorted(surfaces) if f'x-text="{s}"' not in html]
+    assert not unbound, f"face error surfaces assigned but never displayed: {unbound}"
+
+
+def test_the_two_list_surfaces_say_the_list_is_not_a_result():
+    # A failed search or compare leaves a list on screen.  Naming the failure is
+    # not enough — the strip must say the list below does not answer the
+    # question, or a stale list still reads as a finding.
+    html = (STATIC / "index.html").read_text()
+    for surface in ("faceSearchError", "faceCompareError"):
+        start = html.index(f'x-show="{surface}"')
+        strip = html[start : html.index("</div>", start)]
+        assert "faces-error-note" in strip, surface

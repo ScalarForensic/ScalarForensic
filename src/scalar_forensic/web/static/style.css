@@ -2555,6 +2555,34 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   font-style: italic;
 }
 
+/* Failure strip for the face surfaces that render a *list* rather than a
+   sentence: a silent failure there leaves stale results on screen looking
+   current.  Solid danger fill, not the uncal banner's left rule — the banner
+   is a standing caveat, this is "what you are looking at is wrong". */
+.faces-error-strip {
+  padding: 4px 8px;
+  margin-bottom: 6px;
+  border-left: 3px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  font-size: 10px;
+  color: var(--text2);
+}
+.faces-error-label {
+  font-family: var(--display);
+  font-weight: 600;
+  color: var(--danger);
+  margin-right: 4px;
+}
+.faces-error-detail {
+  word-break: break-word;
+}
+.faces-error-note {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-style: italic;
+}
+
 .faces-caveat {
   margin: 6px 0 0;
   font-size: 9px;
