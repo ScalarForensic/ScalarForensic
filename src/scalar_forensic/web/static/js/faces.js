@@ -106,18 +106,31 @@
     // The vectors stay in the server-side Session; the browser only ever holds
     // face *indices*.  A face that failed the embedding gate is vectorless and
     // therefore cannot be a probe — toggleQueryFace refuses it.
+    // Every detection carries the file it ran on and a request ordinal.  Two
+    // files in one session means two POSTs in flight, and the first one can
+    // land last: applying it would leave the earlier file's faces on screen
+    // while the chip URLs address the file now selected — a 404 when the new
+    // file has fewer faces, and another person's crop when it has more.
     async loadQueryFaces() {
       if (!this.facesAvailable || !this.sessionId || !this.selectedFileId) return;
+      const fileId = this.selectedFileId;
+      const seq = ++this._queryFacesSeq;
+      // Superseded = a newer request exists, which now owns the loading flag
+      // and the panel.  Current also requires the file to still be selected.
+      const superseded = () => seq !== this._queryFacesSeq;
+      const current = () => !superseded() && fileId === this.selectedFileId;
       this.queryFacesLoading = true;
       this.queryFacesError = '';
       this.queryFaces = [];
+      this.queryFacesStale = {};
       this.queryFacesTruncated = false;
       try {
         const fd = new FormData();
         fd.append('session_id', this.sessionId);
-        fd.append('file_id', this.selectedFileId);
+        fd.append('file_id', fileId);
         const resp = await fetch('/api/faces/query-faces', { method: 'POST', body: fd });
         const body = await resp.json();
+        if (!current()) return;
         if (!resp.ok) {
           this.queryFacesError = this.faceErrText(body.detail, 'face detection failed');
           return;
@@ -131,16 +144,28 @@
         this.faceBasket = this.faceBasket.filter(r => r.side !== 'query');
         for (const f of this.queryFaces) if (f.searchable) this._basketAddQuery(f);
       } catch (e) {
-        this.queryFacesError = String(e);
+        if (current()) this.queryFacesError = String(e);
       } finally {
-        this.queryFacesLoading = false;
+        if (!superseded()) this.queryFacesLoading = false;
       }
+      // A dropped response must not drive the searches either: they read the
+      // basket, which still describes the file that is actually selected.
+      if (!current()) return;
       this.runFaceSearch();
       this.runFaceCompare(this.selectedHit?.image_hash);
     },
 
-    queryFaceChipUrl(index) {
-      return `/api/faces/query-chip/${this.sessionId}/${this.selectedFileId}/${index}`;
+    // The server stamps each chip URL with the file and the detection
+    // generation it was issued under.  Rebuilding it here from the *current*
+    // selection is what let a stale index address the wrong file's faces.
+    queryFaceChipUrl(face) {
+      return face?.chip_url || '/static/vector-fallback.svg';
+    },
+
+    // A chip that fails to load is either gone (404) or superseded (409).
+    // Either way the tile must not stay blank next to a live identity label.
+    markQueryFaceStale(face) {
+      if (face && face.index != null) this.queryFacesStale[face.index] = true;
     },
 
     queryFaceSelected(index) {
@@ -159,8 +184,8 @@
       this.faceBasket.push({
         key, side: 'query', fileId: this.selectedFileId, faceIndex: face.index,
         pointId: null, imageHash: null,
-        thumbUrl: this.queryFaceChipUrl(face.index),
-        reviewUrl: this.queryFaceChipUrl(face.index),
+        thumbUrl: this.queryFaceChipUrl(face),
+        reviewUrl: this.queryFaceChipUrl(face),
         label: `query · face ${face.index + 1}`,
         selected: true,
       });

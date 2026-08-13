@@ -29,6 +29,11 @@
 
     // Query-side faces (session-scoped; detected on upload, never indexed)
     queryFaces: [],
+    // Ordinal of the most recent query-faces request; a response from an older
+    // one is dropped rather than applied over a newer file's faces.
+    _queryFacesSeq: 0,
+    // {face_index: true} for chips the server refused as stale (409) or gone.
+    queryFacesStale: {},
     queryFacesLoading: false,
     queryFacesError: '',
     queryFacesTruncated: false,

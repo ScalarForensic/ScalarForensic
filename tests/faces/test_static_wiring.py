@@ -197,7 +197,9 @@ def test_plain_click_opens_the_hq_crop_on_both_sides():
     html = (STATIC / "index.html").read_text()
     qstart = html.index('<div class="query-faces"')
     qblock = html[qstart : qstart + 3000]
-    assert ':href="queryFaceChipUrl(face.index)"' in qblock
+    # The whole face is passed, not its index: the URL is the server-stamped
+    # one (see test_static_wiring_web), which an index alone cannot rebuild.
+    assert ':href="queryFaceChipUrl(face)"' in qblock
     assert 'target="_blank"' in qblock
 
 
