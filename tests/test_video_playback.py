@@ -3,7 +3,8 @@
 Covered:
   GET /api/video-playback?path=…
   GET /api/video-playback-info?path=…
-  the rewrap/cache helpers in scalar_forensic.web.routes.video
+  GET /api/video-download?path=…
+  the rewrap/cache/digest helpers in the scalar_forensic.video_playback package
   the SFN_VIDEO_CACHE_* settings
 
 Fixtures are generated with PyAV at test time (a handful of 64×48 frames), so
@@ -26,8 +27,13 @@ from fastapi.testclient import TestClient
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import hash_file
 from scalar_forensic.video import VIDEO_EXTENSIONS
+from scalar_forensic.video_playback import cache as vp_cache
+from scalar_forensic.video_playback import codecs as vp_codecs
+from scalar_forensic.video_playback import digest as vp_digest
+from scalar_forensic.video_playback import rewrap as vp_rewrap
+from scalar_forensic.video_playback import routes as vp_routes
 from scalar_forensic.web.app import app
-from scalar_forensic.web.routes import video as video_routes
+from scalar_forensic.web.routes import _shared as shared_routes
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -65,10 +71,10 @@ def roots(tmp_path, monkeypatch):
     # Keep the persistent hash cache inside the tmp dir: the default
     # (data/hash_cache.db, relative to CWD) would write into the checkout.
     monkeypatch.setenv("SFN_HASH_CACHE_PATH", str(tmp_path / "hash_cache.db"))
-    video_routes._reset_hash_cache()
+    vp_digest._reset_hash_cache()
     yield input_dir, cache_dir
     # The handle points into tmp_path; never let the next test inherit it.
-    video_routes._reset_hash_cache()
+    vp_digest._reset_hash_cache()
 
 
 @pytest.fixture()
@@ -148,23 +154,23 @@ def _packet_payloads(path: Path) -> list[bytes]:
 
 class TestContainerClassification:
     def test_quicktime_mov_needs_rewrap(self, mov):
-        assert video_routes._ftyp_brand(mov) == "qt  "
-        assert video_routes._needs_remux(mov) is True
+        assert vp_codecs._ftyp_brand(mov) == "qt  "
+        assert vp_codecs._needs_remux(mov) is True
 
     def test_mp4_is_served_as_is(self, mp4):
-        assert video_routes._ftyp_brand(mp4) != "qt  "
-        assert video_routes._needs_remux(mp4) is False
+        assert vp_codecs._ftyp_brand(mp4) != "qt  "
+        assert vp_codecs._needs_remux(mp4) is False
 
     def test_file_without_ftyp_box_needs_rewrap(self, tmp_path):
         p = tmp_path / "clip.avi"
         p.write_bytes(b"RIFF____AVI LIST")
-        assert video_routes._ftyp_brand(p) is None
-        assert video_routes._needs_remux(p) is True
+        assert vp_codecs._ftyp_brand(p) is None
+        assert vp_codecs._needs_remux(p) is True
 
     def test_webm_is_served_as_is(self, tmp_path):
         p = tmp_path / "clip.webm"
         p.write_bytes(b"\x1a\x45\xdf\xa3")
-        assert video_routes._needs_remux(p) is False
+        assert vp_codecs._needs_remux(p) is False
 
 
 # ---------------------------------------------------------------------------
@@ -175,22 +181,22 @@ class TestContainerClassification:
 class TestRemux:
     def test_rewrap_preserves_the_video_bitstream(self, mov, tmp_path):
         dst = tmp_path / "copy.mp4"
-        report = video_routes._remux_to_mp4(mov, dst)
+        report = vp_rewrap._remux_to_mp4(mov, dst)
         assert report == {"skipped_streams": [], "timestamp_repairs": 0}
         assert _packet_payloads(dst) == _packet_payloads(mov)
 
     def test_rewrap_keeps_the_codec_and_produces_an_mp4(self, mov, tmp_path):
         dst = tmp_path / "copy.mp4"
-        video_routes._remux_to_mp4(mov, dst)
+        vp_rewrap._remux_to_mp4(mov, dst)
         assert dst.read_bytes()[4:8] == b"ftyp"
-        assert video_routes._ftyp_brand(dst) != "qt  "
+        assert vp_codecs._ftyp_brand(dst) != "qt  "
         with av.open(str(mov)) as a, av.open(str(dst)) as b:
             assert a.streams.video[0].codec_context.name == b.streams.video[0].codec_context.name
 
     def test_the_source_codec_tag_survives(self, mov, tmp_path):
         """Left alone the muxer relabels Apple's hvc1 as hev1."""
         dst = tmp_path / "copy.mp4"
-        video_routes._remux_to_mp4(mov, dst)
+        vp_rewrap._remux_to_mp4(mov, dst)
         with av.open(str(mov)) as a, av.open(str(dst)) as b:
             assert b.streams.video[0].codec_context.codec_tag == (
                 a.streams.video[0].codec_context.codec_tag
@@ -198,33 +204,33 @@ class TestRemux:
 
     def test_moov_precedes_mdat_for_progressive_playback(self, mov, tmp_path):
         dst = tmp_path / "copy.mp4"
-        video_routes._remux_to_mp4(mov, dst)
+        vp_rewrap._remux_to_mp4(mov, dst)
         data = dst.read_bytes()
         assert 0 <= data.index(b"moov") < data.index(b"mdat")
 
     def test_no_part_file_survives_a_failed_rewrap(self, mov, tmp_path):
         dst = tmp_path / "copy.mp4"
         with (
-            patch.object(video_routes.av, "open", side_effect=OSError("boom")),
+            patch.object(vp_rewrap.av, "open", side_effect=OSError("boom")),
             pytest.raises(OSError),
         ):
-            video_routes._remux_to_mp4(mov, dst)
+            vp_rewrap._remux_to_mp4(mov, dst)
         assert list(tmp_path.glob("*.part")) == []
         assert not dst.exists()
 
     def test_lpcm_audio_is_named_not_dropped_silently(self, mov_with_pcm, tmp_path):
         """Apple Live-Photo .MOV carries LPCM, which has no MP4 mapping."""
         dst = tmp_path / "copy.mp4"
-        report = video_routes._remux_to_mp4(mov_with_pcm, dst)
+        report = vp_rewrap._remux_to_mp4(mov_with_pcm, dst)
         assert report["skipped_streams"] == ["audio:pcm_s16le"]
         with av.open(str(dst)) as c:
             assert len(c.streams.audio) == 0
         assert _packet_payloads(dst) == _packet_payloads(mov_with_pcm)
 
     def test_source_with_no_mp4_compatible_stream_raises(self, mov, tmp_path):
-        with patch.object(video_routes, "_MP4_LEGAL_CODECS", frozenset()):
+        with patch.object(vp_rewrap, "_MP4_LEGAL_CODECS", frozenset()):
             with pytest.raises(ValueError, match="no MP4-compatible stream"):
-                video_routes._remux_to_mp4(mov, tmp_path / "copy.mp4")
+                vp_rewrap._remux_to_mp4(mov, tmp_path / "copy.mp4")
 
 
 class TestTimestampRepair:
@@ -237,25 +243,25 @@ class TestTimestampRepair:
 
     def test_untouched_when_timestamps_are_already_muxable(self):
         p = self._packet(100, 90)
-        assert video_routes._repair_timestamps(p, 80) is False
+        assert vp_rewrap._repair_timestamps(p, 80) is False
         assert (p.pts, p.dts) == (100, 90)
 
     def test_decode_stamp_after_display_stamp_is_pulled_back(self):
         p = self._packet(600, 640)
-        assert video_routes._repair_timestamps(p, 560) is True
+        assert vp_rewrap._repair_timestamps(p, 560) is True
         assert (p.pts, p.dts) == (600, 600)
 
     def test_stalled_decode_stamp_is_nudged_past_its_predecessor(self):
         p = self._packet(500, 500)
-        assert video_routes._repair_timestamps(p, 500) is True
+        assert vp_rewrap._repair_timestamps(p, 500) is True
         assert p.dts == 501
         assert p.pts >= p.dts
 
     def test_repairs_are_counted_in_the_rewrap_report(self, mov, tmp_path):
-        original = video_routes._repair_timestamps
-        with patch.object(video_routes, "_repair_timestamps", side_effect=original) as spy:
+        original = vp_rewrap._repair_timestamps
+        with patch.object(vp_rewrap, "_repair_timestamps", side_effect=original) as spy:
             spy.side_effect = lambda packet, last: True
-            report = video_routes._remux_to_mp4(mov, tmp_path / "copy.mp4")
+            report = vp_rewrap._remux_to_mp4(mov, tmp_path / "copy.mp4")
         assert report["timestamp_repairs"] == len(_packet_payloads(mov))
 
 
@@ -294,7 +300,7 @@ class TestPathSafety:
         for ext in VIDEO_EXTENSIONS:
             p = input_dir / f"probe{ext}"
             p.write_bytes(b"x")
-            assert video_routes._resolve_video_path(str(p)) == p
+            assert shared_routes._resolve_video_path(str(p)) == p
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +330,7 @@ class TestVideoPlayback:
     def test_second_request_serves_the_cached_copy(self, client, mov):
         assert client.get(f"/api/video-playback?path={mov}").status_code == 200
         with patch.object(
-            video_routes, "_remux_to_mp4", side_effect=AssertionError("rewrapped twice")
+            vp_routes, "_remux_to_mp4", side_effect=AssertionError("rewrapped twice")
         ):
             r = client.get(f"/api/video-playback?path={mov}")
         assert r.status_code == 200
@@ -405,15 +411,15 @@ class TestPixelProfile:
         ],
     )
     def test_bit_depth_and_chroma_are_read_from_the_pixel_format(self, pix_fmt, expected):
-        assert video_routes._pixel_profile(pix_fmt, None) == expected
+        assert vp_codecs._pixel_profile(pix_fmt, None) == expected
 
     def test_the_profile_settles_it_when_the_pixel_format_is_missing(self):
-        assert video_routes._pixel_profile(None, "Main 10") == (10, None)
-        assert video_routes._pixel_profile(None, "High 4:4:4 Predictive") == (None, "444")
+        assert vp_codecs._pixel_profile(None, "Main 10") == (10, None)
+        assert vp_codecs._pixel_profile(None, "High 4:4:4 Predictive") == (None, "444")
 
     def test_neither_available_is_undetermined_not_a_guess(self):
-        assert video_routes._pixel_profile(None, None) == (None, None)
-        assert video_routes._pixel_profile(None, "High") == (None, None)
+        assert vp_codecs._pixel_profile(None, None) == (None, None)
+        assert vp_codecs._pixel_profile(None, "High") == (None, None)
 
 
 class TestDecodeVerdict:
@@ -422,48 +428,48 @@ class TestDecodeVerdict:
         return {**base, **kw}
 
     def test_h264_8bit_is_playable(self):
-        assert video_routes._decode_verdict(self._info())[0] is True
+        assert vp_codecs._decode_verdict(self._info())[0] is True
 
     def test_h264_10bit_is_not(self):
-        verdict, reason = video_routes._decode_verdict(self._info(video_pix_fmt="yuv420p10le"))
+        verdict, reason = vp_codecs._decode_verdict(self._info(video_pix_fmt="yuv420p10le"))
         assert verdict is False
         assert "H.264 10-bit" in reason
 
     def test_h264_444_is_not(self):
-        verdict, reason = video_routes._decode_verdict(self._info(video_pix_fmt="yuv444p"))
+        verdict, reason = vp_codecs._decode_verdict(self._info(video_pix_fmt="yuv444p"))
         assert verdict is False
         assert "4:4:4" in reason
 
     def test_vp9_10bit_is_playable(self):
         info = self._info(video_codec="vp9", video_pix_fmt="yuv420p10le")
-        assert video_routes._decode_verdict(info)[0] is True
+        assert vp_codecs._decode_verdict(info)[0] is True
 
     def test_av1_and_vp8_are_on_the_allowlist(self):
         for codec in ("av1", "vp8"):
-            assert video_routes._decode_verdict(self._info(video_codec=codec))[0] is True
+            assert vp_codecs._decode_verdict(self._info(video_codec=codec))[0] is True
 
     def test_hevc_is_not_on_the_allowlist_at_any_depth(self):
         # §16: Chrome advertises HEVC and then fails. The allowlist decides.
-        verdict, reason = video_routes._decode_verdict(self._info(video_codec="hevc"))
+        verdict, reason = vp_codecs._decode_verdict(self._info(video_codec="hevc"))
         assert verdict is False
         assert "HEVC" in reason
 
     def test_prores_names_itself_in_the_reason(self):
-        verdict, reason = video_routes._decode_verdict(self._info(video_codec="prores"))
+        verdict, reason = vp_codecs._decode_verdict(self._info(video_codec="prores"))
         assert verdict is False
         assert "Apple ProRes" in reason
 
     def test_an_unprobeable_container_is_undetermined(self):
-        verdict, reason = video_routes._decode_verdict({"probe_error": "moov atom not found"})
+        verdict, reason = vp_codecs._decode_verdict({"probe_error": "moov atom not found"})
         assert verdict is None
         assert "moov atom not found" in reason
 
     def test_no_video_stream_is_undetermined(self):
-        assert video_routes._decode_verdict({"video_codec": None})[0] is None
+        assert vp_codecs._decode_verdict({"video_codec": None})[0] is None
 
     def test_an_unreadable_pixel_format_is_undetermined_not_a_transcode(self):
         info = self._info(video_pix_fmt=None, video_profile=None)
-        verdict, reason = video_routes._decode_verdict(info)
+        verdict, reason = vp_codecs._decode_verdict(info)
         assert verdict is None
         assert "pixel format" in reason
 
@@ -545,7 +551,7 @@ class TestVideoDownload:
         # The escape route must start streaming now: a cold multi-GB source would
         # otherwise be read whole before the first byte moved.  An absent header
         # is "not computed", never "unverified".
-        with patch.object(video_routes, "hash_file", side_effect=AssertionError("hashed!")):
+        with patch.object(vp_digest, "hash_file", side_effect=AssertionError("hashed!")):
             with patch("scalar_forensic.embedder.hash_file_both", side_effect=AssertionError):
                 r = client.get(f"/api/video-download?path={mov}")
         assert r.status_code == 200
@@ -554,7 +560,7 @@ class TestVideoDownload:
 
     def test_a_disabled_hash_cache_still_serves_the_bytes(self, client, mov, monkeypatch):
         monkeypatch.setenv("SFN_HASH_CACHE_PATH", "")
-        video_routes._reset_hash_cache()
+        vp_digest._reset_hash_cache()
         r = client.get(f"/api/video-download?path={mov}")
         assert r.status_code == 200
         assert "x-sfn-source-sha256" not in r.headers
@@ -620,79 +626,79 @@ class TestVideoDownload:
 
 class TestSourceDigest:
     def test_digest_matches_a_direct_hash(self, mov):
-        assert video_routes._source_digest(mov) == hash_file(mov)
+        assert vp_digest._source_digest(mov) == hash_file(mov)
 
     def test_second_call_is_served_from_the_cache(self, mov):
-        video_routes._source_digest(mov)
-        with patch.object(video_routes, "hash_file") as direct:
+        vp_digest._source_digest(mov)
+        with patch.object(vp_digest, "hash_file") as direct:
             with patch("scalar_forensic.embedder.hash_file_both") as both:
-                assert video_routes._source_digest(mov) == hash_file(mov)
+                assert vp_digest._source_digest(mov) == hash_file(mov)
         direct.assert_not_called()
         both.assert_not_called()
 
     def test_the_cache_survives_a_new_process(self, mov, roots):
         _, _ = roots
-        video_routes._source_digest(mov)
-        video_routes._reset_hash_cache()  # as a restart would
+        vp_digest._source_digest(mov)
+        vp_digest._reset_hash_cache()  # as a restart would
         with patch("scalar_forensic.embedder.hash_file_both") as both:
-            assert video_routes._source_digest(mov) == hash_file(mov)
+            assert vp_digest._source_digest(mov) == hash_file(mov)
         both.assert_not_called()
 
     def test_a_changed_file_is_rehashed(self, mov):
-        first = video_routes._source_digest(mov)
+        first = vp_digest._source_digest(mov)
         os.utime(mov, (2_000_000, 2_000_000))
         mov.write_bytes(mov.read_bytes() + b"tampered")
-        second = video_routes._source_digest(mov)
+        second = vp_digest._source_digest(mov)
         assert second != first
         assert second == hash_file(mov)
 
     def test_disabled_cache_still_answers(self, mov, monkeypatch):
         monkeypatch.setenv("SFN_HASH_CACHE_PATH", "")
-        video_routes._reset_hash_cache()
-        assert video_routes._hash_cache_for(Settings()) is None
-        assert video_routes._source_digest(mov) == hash_file(mov)
+        vp_digest._reset_hash_cache()
+        assert vp_digest._hash_cache_for(Settings()) is None
+        assert vp_digest._source_digest(mov) == hash_file(mov)
 
     def test_unwritable_db_falls_back_to_a_direct_hash(self, mov, tmp_path, monkeypatch):
         # A directory where the DB file should be: SQLite cannot open it.
         db = tmp_path / "unwritable.db"
         db.mkdir()
         monkeypatch.setenv("SFN_HASH_CACHE_PATH", str(db))
-        video_routes._reset_hash_cache()
-        assert video_routes._source_digest(mov) == hash_file(mov)
+        vp_digest._reset_hash_cache()
+        assert vp_digest._source_digest(mov) == hash_file(mov)
 
     def test_a_broken_cache_is_not_reopened_per_request(self, mov, tmp_path, monkeypatch):
         db = tmp_path / "unwritable.db"
         db.mkdir()
         monkeypatch.setenv("SFN_HASH_CACHE_PATH", str(db))
-        video_routes._reset_hash_cache()
-        with patch.object(video_routes, "HashCache", side_effect=OSError("nope")) as ctor:
-            video_routes._source_digest(mov)
-            video_routes._source_digest(mov)
+        vp_digest._reset_hash_cache()
+        with patch.object(vp_digest, "HashCache", side_effect=OSError("nope")) as ctor:
+            vp_digest._source_digest(mov)
+            vp_digest._source_digest(mov)
         assert ctor.call_count == 1
 
     def test_a_failing_lookup_falls_back_instead_of_raising(self, mov):
         cache = MagicMock()
         cache.get_or_hash.side_effect = OSError("disk gone")
-        with patch.object(video_routes, "_hash_cache_for", return_value=cache):
-            assert video_routes._source_digest(mov) == hash_file(mov)
+        with patch.object(vp_digest, "_hash_cache_for", return_value=cache):
+            assert vp_digest._source_digest(mov) == hash_file(mov)
 
     def test_a_failing_flush_does_not_fail_the_digest(self, mov):
         cache = MagicMock()
         cache.get_or_hash.return_value = ("a" * 64, False)
         cache.flush.side_effect = OSError("read-only")
-        with patch.object(video_routes, "_hash_cache_for", return_value=cache):
-            assert video_routes._source_digest(mov) == "a" * 64
+        with patch.object(vp_digest, "_hash_cache_for", return_value=cache):
+            assert vp_digest._source_digest(mov) == "a" * 64
 
     def test_the_request_path_does_not_block_the_event_loop(self, client, mov):
         # The digest is computed in a worker thread, never inline in the handler.
         calls: list[str] = []
-        real = video_routes._source_digest
+        real = vp_digest._source_digest
 
         def spy(p, settings=None):
             calls.append(threading.current_thread().name)
             return real(p, settings)
 
-        with patch.object(video_routes, "_source_digest", spy):
+        with patch.object(vp_routes, "_source_digest", spy):
             assert client.get(f"/api/video-playback-info?path={mov}").status_code == 200
         assert calls and all(name != "MainThread" for name in calls)
 
@@ -722,7 +728,7 @@ class TestStaleEvidence:
 
     def test_a_file_edited_after_indexing_is_caught(self, client, mov):
         indexed = hash_file(mov)
-        video_routes._source_digest(mov)  # warm the cache, as a first view would
+        vp_digest._source_digest(mov)  # warm the cache, as a first view would
         mov.write_bytes(mov.read_bytes() + b"tampered")
         body = client.get(f"/api/video-playback-info?path={mov}&video_hash={indexed}").json()
         assert body["stale_evidence"] is True
@@ -756,7 +762,7 @@ class TestCacheEviction:
         old = self._entry(cache_dir, "a" * 64 + ".mp4", 100, 1_000)
         mid = self._entry(cache_dir, "b" * 64 + ".mp4", 100, 2_000)
         new = self._entry(cache_dir, "c" * 64 + ".mp4", 100, 3_000)
-        deleted = video_routes._evict_cache(cache_dir, 150, keep=new)
+        deleted = vp_cache._evict_cache(cache_dir, 150, keep=new)
         assert deleted == 2
         assert not old.exists() and not mid.exists() and new.exists()
 
@@ -765,7 +771,7 @@ class TestCacheEviction:
         cache_dir.mkdir()
         keep = self._entry(cache_dir, "d" * 64 + ".mp4", 500, 1_000)
         other = self._entry(cache_dir, "e" * 64 + ".mp4", 100, 2_000)
-        video_routes._evict_cache(cache_dir, 10, keep=keep)
+        vp_cache._evict_cache(cache_dir, 10, keep=keep)
         assert keep.exists()
         assert not other.exists()
 
@@ -780,7 +786,7 @@ class TestCacheEviction:
         per_video = cache_dir / ("b" * 64)
         per_video.mkdir()
         chunk = self._entry(per_video, "c0.mp4", 100, 500)
-        video_routes._evict_cache(cache_dir, 10, keep=cache_dir / "nothing.mp4")
+        vp_cache._evict_cache(cache_dir, 10, keep=cache_dir / "nothing.mp4")
         assert not rewrap.exists()
         assert full.exists() and init.exists() and chunk.exists()
 
@@ -788,7 +794,7 @@ class TestCacheEviction:
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
         p = self._entry(cache_dir, "a" * 64 + ".mp4", 100, 1_000)
-        assert video_routes._evict_cache(cache_dir, 0, keep=cache_dir / "x.mp4") == 0
+        assert vp_cache._evict_cache(cache_dir, 0, keep=cache_dir / "x.mp4") == 0
         assert p.exists()
 
     def test_cache_stays_under_the_ceiling_after_a_rewrap(self, client, mov, roots):
@@ -801,7 +807,7 @@ class TestCacheEviction:
         settings.video_cache_max_bytes = 2048
         settings.hash_cache_path = tmp_path_db = cache_dir.parent / "hash_cache.db"
         assert tmp_path_db.parent.exists()
-        with patch.object(video_routes, "Settings", return_value=settings):
+        with patch.object(vp_routes, "Settings", return_value=settings):
             r = client.get(f"/api/video-playback?path={mov}")
         assert r.status_code == 200
         assert not filler.exists()
