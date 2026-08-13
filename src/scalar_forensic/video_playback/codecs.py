@@ -11,8 +11,11 @@ import logging
 from pathlib import Path
 
 import av
+from av.video.reformatter import ColorPrimaries, ColorTrc
 
 _log = logging.getLogger(__name__)
+
+_COLOR_ENUMS = {"color_trc": ColorTrc, "color_primaries": ColorPrimaries}
 
 
 # Codecs that are legal in an MP4 box structure.  A stream outside this set
@@ -68,6 +71,27 @@ def _needs_remux(p: Path) -> bool:
     return brand is None or brand == _QUICKTIME_BRAND
 
 
+def _codec_attr(stream: av.stream.Stream, name: str) -> str | None:
+    """Read a colour enum off a stream as ffmpeg's own spelling, or None.
+
+    PyAV hands these back as plain ints; the enums in ``av.video.reformatter``
+    name them in upper snake case (``ARIB_STD_B67``) where ffmpeg, ffprobe and
+    every filter argument spell them lower and hyphenated (``arib-std-b67``).
+    Normalising here means the rest of the subsystem compares one spelling.
+    ``None`` is "the container did not say" — a real answer, not a default
+    (§5), and :func:`~.capability.is_hdr` treats it as not-HDR rather than
+    guessing an interpretation onto the picture.
+    """
+    raw = getattr(stream.codec_context, name, None)
+    if raw is None:
+        return None
+    enum = _COLOR_ENUMS.get(name)
+    try:
+        return enum(raw).name.lower().replace("_", "-") if enum else None
+    except (ValueError, KeyError):  # pragma: no cover - value outside the enum
+        return None
+
+
 def _stream_report(p: Path) -> dict:
     """Container/codec summary used by the playback label and the rewrap filter.
 
@@ -82,6 +106,8 @@ def _stream_report(p: Path) -> dict:
         "audio_codec": None,
         "video_pix_fmt": None,
         "video_profile": None,
+        "video_color_trc": None,
+        "video_color_primaries": None,
     }
     skipped: list[str] = []
     try:
@@ -97,6 +123,11 @@ def _stream_report(p: Path) -> dict:
                     # decoded, which is what keeps opening a hit cheap (§5).
                     info["video_pix_fmt"] = s.codec_context.pix_fmt
                     info["video_profile"] = s.codec_context.profile
+                    # Transfer and primaries decide whether the encode path has
+                    # to tone-map (capability.is_hdr).  Container metadata, no
+                    # frame decoded — same cheapness rule as the fields above.
+                    info["video_color_trc"] = _codec_attr(s, "color_trc")
+                    info["video_color_primaries"] = _codec_attr(s, "color_primaries")
                 elif s.type == "audio" and info["audio_codec"] is None:
                     info["audio_codec"] = s.codec_context.name
                 if s.type in ("video", "audio") and s.codec_context.name not in _MP4_LEGAL_CODECS:

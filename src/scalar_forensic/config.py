@@ -94,6 +94,39 @@ class Settings:
         if self.video_cache_max_bytes < 0:
             raise ValueError("SFN_VIDEO_CACHE_MAX_BYTES must be >= 0 (0 disables the ceiling)")
 
+        # --- Transcoded playback (spec docs/specs/video-playback-transcode.md §12) ---
+        # ffmpeg is a declared external dependency (§8): the rewrap above is PyAV,
+        # but a re-encode shells out to the binary named here.  A bare name is
+        # resolved on PATH; an absolute path pins a specific build.
+        self.ffmpeg_path: str = os.environ.get("SFN_FFMPEG_PATH", "ffmpeg")
+        # auto  — probe at startup, use the GPU encoder if a real encode succeeds
+        # cuda  — require it; a probe failure is reported, not silently downgraded
+        # none  — never touch the GPU
+        self.video_hwaccel: str = os.environ.get("SFN_VIDEO_HWACCEL", "auto").strip().lower()
+        if self.video_hwaccel not in ("auto", "cuda", "none"):
+            raise ValueError(
+                f"SFN_VIDEO_HWACCEL={self.video_hwaccel!r} is invalid. "
+                "Allowed values: auto, cuda, none"
+            )
+        # Output height cap for viewing copies.  1080 by operator ruling (§16):
+        # a 30 s chunk lands in 8.21 s at 1080p and 33.73 s at 4K (§3.5), and
+        # full quality is served by Download original rather than by the
+        # rendering.  Sources shorter than this are never upscaled.
+        self.video_output_height: int = self._parse_int("SFN_VIDEO_OUTPUT_HEIGHT", 1080)
+        if self.video_output_height < 144:
+            raise ValueError("SFN_VIDEO_OUTPUT_HEIGHT must be >= 144")
+        # Chunk length in seconds.  30 is valid only under the 1080p cap above
+        # (§3.5); raising the cap requires revisiting this in the same change.
+        self.video_chunk_seconds: int = self._parse_int("SFN_VIDEO_CHUNK_SECONDS", 30)
+        if not (1 <= self.video_chunk_seconds <= 600):
+            raise ValueError("SFN_VIDEO_CHUNK_SECONDS must be between 1 and 600")
+        # Concurrent encode jobs.  2, not a throughput knob: §3.5 measured
+        # aggregate throughput flat from k=1 to k=8, so extra workers buy no
+        # capacity and cost per-job latency directly (8.08 s → 67.34 s).
+        self.video_max_workers: int = self._parse_int("SFN_VIDEO_MAX_WORKERS", 2)
+        if self.video_max_workers < 1:
+            raise ValueError("SFN_VIDEO_MAX_WORKERS must be >= 1")
+
         # --- Network policy ---
         # Default: offline — no outward connections to HuggingFace or any other service.
         # Set to true (or pass --allow-online) only for first-time model downloads.
