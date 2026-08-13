@@ -271,8 +271,9 @@ def _playback_mode(info: dict, needs_remux: bool) -> tuple[str, str]:
         return "unknown", f"{reason} Playback cannot be judged from here — download the original."
     if decodable is False:
         return "transcode", (
-            f"{reason} A transcoded viewing copy is required; "
-            "encoding is not available yet — download the original to view it."
+            f"{reason} A transcoded viewing copy is required. It is produced one "
+            "window at a time as you watch, so the original is never re-encoded "
+            "whole; the original is also always downloadable as it lies on disk."
         )
     if needs_remux:
         return "rewrap", (

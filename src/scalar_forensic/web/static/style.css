@@ -1283,6 +1283,16 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .vc-label-hdr { display: flex; align-items: center; gap: 6px; color: var(--text2); }
 .vc-label-body { margin-top: 3px; color: var(--muted); }
 .vc-warn { color: var(--accent); }
+/* Chunk playback (spec §4.2).  Both <video> buffers are always in the DOM; the
+   hidden one is holding the prefetched next chunk, so it must not be display:none
+   away in a way that stops the browser preloading it — x-show toggles it. */
+.vc-chunk { margin-top: 6px; }
+.vc-encoding {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px; font-size: 10px; color: var(--muted);
+  border-left: 2px solid var(--accent-dim); background: rgba(255,255,255,0.02);
+}
+.vc-elapsed { margin-left: auto; font-variant-numeric: tabular-nums; }
 /* Wrapper that keeps each mode's badge and score pill one x-for root. */
 .hit-frame-score { display: inline-flex; align-items: center; gap: 3px; }
 
