@@ -21,3 +21,15 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # The Python minor version is pinned by requires-python = "==3.12.*", which
+      # in turn is pinned by the cp312 pytorch-triton-rocm direct-URL workaround
+      # (pyproject.toml). Moving it means touching the triton URL, run.sh's
+      # hardcoded site-packages path, the CI matrix, uv.lock, the Dockerfile and
+      # the regenerated vendor/ airgap bundle in lockstep — see CLAUDE.md.
+      # Reopening it as a base-image bump just re-litigates a settled decision
+      # (PR #100, closed 2026-08-13). Patch bumps of 3.12-slim still come through.
+      - dependency-name: "python"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
