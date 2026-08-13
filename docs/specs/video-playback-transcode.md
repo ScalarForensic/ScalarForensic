@@ -1,270 +1,406 @@
 # Spec: On-demand video transcoding for in-browser playback
 
-Status: **draft v1** · 2026-08-13 · author `scalarforensic-cfm-g1` (CTO)
+Status: **draft v2, post-review** · 2026-08-13 · author `scalarforensic-cfm-g1` (CTO)
 Supersedes the "HEVC remedy" pending decision carried in `docs/CTO_LEDGER.md`.
-All performance figures below are **measured on this machine**, not estimated; the
-method is recorded in §3 so they can be re-run on the real server.
+v1 proposed a lazy-HLS segment engine. Two independent adversarial design reviews
+(Codex, Opus) rejected it as unproven and materially underspecified; the operator
+then chose a simpler shape that removes most of the objections by construction
+rather than answering them. §3 records what was measured and, explicitly, what
+was not.
 
 ---
 
 ## 1. What this feature is
 
-The analyst clicks a frame hit — "this face appears at 02:31 in `IMG_3274.MOV`" — and
-wants to see what happened around that moment. Today that fails for most of the corpus:
-the source is HEVC 10-bit HDR, which the browser cannot decode, so playback soft-fails.
+The analyst clicks a frame hit — "this face appears at 02:31 in `IMG_3274.MOV`" —
+and wants to see what happened around that moment. Today that fails for most of
+the corpus: the source is HEVC 10-bit HDR, which browsers cannot decode, so
+playback soft-fails.
 
-This feature makes any indexed video playable in the browser by transcoding **only the
-parts the analyst actually watches**, on demand, into a bounded cache.
+This feature makes any indexed video watchable in the browser by transcoding
+**only what the analyst asks for**, on demand, into a bounded cache.
 
 ### The deployment it must survive
 
-Not the test corpus. The real one:
+Not the development corpus. The real one:
 
-- **Machine 1** holds the evidence and runs the server. **Machine 2** is an analyst's
-  browser on an isolated LAN. Files never live on machine 2.
-- Corpora of **several terabytes**; individual videos of **several gigabytes**, possibly
-  hours long.
+- **Machine 1** holds the evidence and runs the server. **Machine 2** is an
+  analyst's browser on an isolated LAN.
+- Corpora of **several terabytes**; individual videos of **several gigabytes**,
+  possibly hours long.
 - Server hardware is **not fixed** — a GPU may or may not be present.
 - **Fully offline.** No CDN, no external player, no network calls of any kind.
 
-Every design choice below follows from those four facts. In particular: **any approach
-whose cost scales with source file length is rejected**, because it makes opening one hit
-in a 4-hour recording a multi-minute wait.
+Any approach whose *interactive* cost scales with source length is rejected: it
+makes opening one hit in a 4-hour recording a multi-minute wait.
 
 ### Non-goals
 
-- Re-encoding the corpus ahead of time. Storage cost at TB scale is unjustifiable and
-  most of it would never be watched.
-- Replacing or modifying originals. Sources are opened read-only, always.
-- Making the viewing copy an evidential artifact. It is a **rendering for human review**,
-  labelled as such (§7). The original file and its SHA-256 remain the forensic object.
-- Serving HEVC to browsers that can decode it natively. Deliberately out of scope: the
-  operator's own Chrome *advertises* HEVC support and then fails to decode
-  (`VideoDecoderPipeline`, no VAAPI), so advertised capability is not trustworthy input.
+- Re-encoding the corpus ahead of time. Unjustifiable at TB scale, and most of it
+  would never be watched.
+- Modifying originals. Sources are opened read-only, always.
+- Treating a viewing copy as evidence. It is a **rendering for human review**
+  (§7). The original file and its verified SHA-256 remain the forensic object.
+- Serving HEVC to browsers that could decode it natively. Out of scope on
+  purpose: the operator's own Chrome *advertises* HEVC and then fails
+  (`VideoDecoderPipeline`, no VAAPI), so advertised capability is not trustworthy
+  input.
+- **Seamless multi-segment streaming (HLS/DASH/MSE).** Rejected in v2; see §4.
 
 ---
 
 ## 2. What already exists
 
-`#136` built most of the surrounding machinery, and this spec reuses all of it:
+`#136` built machinery this spec reuses:
 
-| Existing | Location | Reused as-is |
+| Existing | Location | Status |
 |---|---|---|
-| Path containment (403 outside allowed roots) | `routes/_shared.py:12` | yes |
-| Source digest keyed to the indexer's `video_hash` | `routes/video.py:203` | **with a fix, §8** |
-| Per-source async lock (N clicks → 1 job) | `routes/video.py:398` | extended per segment |
-| Bounded LRU cache + eviction | `routes/video.py:327` | extended, §6 |
-| Lossless rewrap for wrong-container/right-codec | `routes/video.py:269` | yes, unchanged |
-| Honest playback label + stream report | `routes/video.py:442` | extended, §7 |
+| Path containment (403 outside allowed roots) | `routes/_shared.py:12` | reused unchanged |
+| Absolute-path + extension + regular-file resolution | `routes/video.py:36` | **moves to `_shared.py`, §12** |
+| Source digest | `routes/video.py:203` | **replaced, §7.1** |
+| Per-source async lock (N clicks → 1 job) | `routes/video.py:398` | extended per artifact |
+| Bounded LRU cache + eviction | `routes/video.py:327` | **rewritten, §6** |
+| Atomic `.part` write + rename | `routes/video.py:278` | **made mandatory, §10.2** |
+| Lossless rewrap (wrong container, right codec) | `routes/video.py:269` | reused unchanged |
+| Playback label + stream report | `routes/video.py:442` | extended, §7 |
+| Honest rate/ETA display (`_RateTracker`) | `cli.py`, `#139` | reused for job progress, §5 |
 
-The gap is stated by the code itself, at `routes/video.py:191`:
+The gap is stated by the code itself at `routes/video.py:191`:
 
-> *"Container-level judgement only — no codec is inspected, because nothing here can fix a
-> codec the browser lacks: a rewrap moves the same bitstream."*
+> *"Container-level judgement only — no codec is inspected, because nothing here
+> can fix a codec the browser lacks: a rewrap moves the same bitstream."*
 
-That boundary is exactly right for a rewrap. This spec adds the third mode beyond it.
+Correct for a rewrap. This spec adds the mode beyond it.
 
 **Playback modes after this feature:**
 
 ```
-original    source container and codec are browser-safe  -> serve source bytes untouched
-rewrap      container wrong, codec fine                  -> cached lossless MP4 (exists)
-transcode   codec unplayable                             -> cached HLS segments  (NEW)
+original    container and codec are browser-safe   -> serve source bytes untouched
+rewrap      container wrong, codec fine            -> cached lossless MP4  (exists)
+transcode   codec unplayable                       -> cached re-encode     (NEW)
 ```
 
 ---
 
 ## 3. Measured evidence
 
-Sample: `IMG_3274.MOV`, 147 MB, 133.87 s, 1920×1080, `hevc` / `yuv420p10le`,
-`bt2020` primaries, `arib-std-b67` (HLG) transfer — i.e. 10-bit HDR, representative of
-the corpus (95% of a 60-file sample is HEVC). Host: RTX 4060 Ti, 24 cores, ffmpeg 6.1.1.
+**Method.** Sample `IMG_3274.MOV` from the development corpus: 147 MB, 133.87 s,
+1920×1080, `hevc` / `yuv420p10le`, `bt2020` primaries, `arib-std-b67` (HLG) — 10-bit
+HDR. Host: RTX 4060 Ti, 24 cores, idle, ffmpeg 6.1.1. Timings are `/usr/bin/time`
+wall clock, single job, no concurrency. The tone-map chain used throughout is:
 
-**Full-file transcode, four pipelines:**
+```
+zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,
+tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p
+```
 
-| Pipeline | Speed | Orientation | Colour |
+Codec distribution: 57 of a 60-file sample (`find`-ordered, not randomised) are
+HEVC; 509 video files total, 5.7 GB, median duration 2.0 s, p90 28 s, max 318 s.
+
+### 3.1 Pipeline comparison (full-file encode)
+
+| Pipeline | Speed | Orientation | Colour tags |
 |---|---|---|---|
-| `scale_cuda` + `h264_nvenc` | 12.9× | **BROKEN — rotation lost** | untone-mapped |
-| CPU tonemap + `h264_nvenc` | 6.1× | correct | correct |
-| CPU tonemap + `libx264` | 4.7× | correct | correct |
-| CPU naive + `libx264` | 10.7× | correct | **wrong tags** |
+| `scale_cuda` + `h264_nvenc` | 12.9× | **BROKEN — rotation lost** | `bt2020`/HLG (wrong) |
+| CPU tonemap + `h264_nvenc` | 6.1× | correct | `bt709`/`bt709` |
+| CPU tonemap + `libx264` | 4.7× | correct | `bt709`/`bt709` |
+| CPU naive + `libx264` | 10.7× | correct | `bt2020`/HLG (wrong) |
 
 Two findings that decide the pipeline:
 
-1. **The GPU-filtered path loses rotation.** Source carries `rotation=-90` side data;
-   `-hwaccel_output_format cuda` bypasses ffmpeg's autorotate, so output is 1920×1080 with
-   no rotation data and every portrait clip plays on its side. Confirmed by `ffprobe` on
-   both outputs and visually on extracted stills. A sideways video in an evidence viewer is
-   a worse defect than a colour shift.
+1. **The GPU-filtered path silently loses rotation.** Source carries
+   `rotation=-90` side data; `-hwaccel_output_format cuda` bypasses ffmpeg's
+   autorotate, so output is 1920×1080 with no rotation data and every portrait
+   clip plays on its side. Verified by `ffprobe` on both outputs and visually on
+   extracted stills. **A test must pin this** (§14).
 2. **Naive 8-bit conversion mis-tags colour.** Output is 8-bit but still tagged
-   `arib-std-b67`/`bt2020`; the browser renders it washed out with lifted blacks. The
-   tone-mapped path emits correct `bt709`/`bt709`. For a tool where clothing or vehicle
-   colour can matter, this is the same class of problem as an uncalibrated number on
-   screen. Tone-mapping costs ~2.3× and is worth it.
+   `arib-std-b67`/`bt2020`, which browsers render washed out with lifted blacks.
+   The tone-mapped path emits `bt709`/`bt709`. Tone-mapping costs ~2.3× and is
+   required.
 
-**Segment-level transcode — the load-bearing measurement:**
+### 3.2 Seek cost
 
-Input seeking (`-ss` *before* `-i`) uses the container index, so cost depends on window
-length, not file length or offset:
+Input seeking (`-ss` *before* `-i`) uses the container index:
 
 | Encode | Wall |
 |---|---|
 | 20 s window at offset 0 | 4.46 s |
 | 20 s window at offset 100 s | 4.53 s |
 
-Three adjacent 6 s segments, each encoded as an independent process:
+**What this does and does not establish.** It shows seek cost is not proportional
+to offset *within a 134 s, well-indexed, short-GOP file*. It does **not** establish
+constant cost for multi-hour sources, long-GOP or VFR content, or damaged indexes,
+where `-ss` must decode forward from a distant keyframe. v1 generalised this to
+"cost independent of source size"; that claim is withdrawn. §14 requires the
+measurement on real hardware against a long source before §15 phase 4 is accepted.
 
-| Segment | Wall | Duration | First frame | Timeline start |
+### 3.3 Chunk independence
+
+Three adjacent 6 s chunks, each an independent ffmpeg invocation, inspected at
+**frame level** (v1 cited container duration, which does not prove alignment):
+
+| Chunk | Wall | Frames | First PTS | Last PTS |
 |---|---|---|---|---|
-| 6 | 1.51 s | 6.037 s | keyframe | 35.98 s |
-| 7 | 1.50 s | 6.037 s | keyframe | 41.98 s |
-| 8 | 1.51 s | 6.037 s | keyframe | 47.98 s |
+| 6 | 1.51 s | 180 | 36.000 | 41.967 |
+| 7 | 1.50 s | 180 | 42.000 | 47.967 |
+| 8 | 1.51 s | 180 | 48.000 | 53.967 |
 
-Independently produced, yet the timeline positions are exactly 6.000 s apart. That is what
-`-force_key_frames` plus `-output_ts_offset` buys, and it is what makes seamless stitching
-in the player possible.
+180 frames at 30 fps is exactly 6.000 s, and chunk *n*+1 begins on the frame
+immediately after chunk *n* ends. **The frames tile exactly — no overlap, no gap,
+no duplicated frames.** (The 6.037 s figure a container-level probe reports is
+MPEG-TS packetisation padding, not content.)
 
-**Conclusion: 1.5 s of CPU produces 6 s of playable video — ~4× realtime headroom with no
-GPU at all, at a cost independent of source size.** This is the whole basis of the design.
+### 3.4 What has NOT been measured
+
+Stated so no later phase treats these as settled:
+
+- **4K.** Every figure above is 1080p. §3.1 rates will be materially worse at 4K
+  and the CPU path may fall below realtime.
+- **Long sources.** Nothing longer than 318 s was encoded; the §3.2 caveat stands.
+- **Concurrency.** All timings are a single job on an idle 24-core host. *k*
+  concurrent jobs divide those cores.
+- **Minimum hardware.** No floor is established. §14 requires one.
 
 ---
 
 ## 4. Architecture
 
-Lazy HLS: a playlist describing the *whole* timeline, whose segments are transcoded only
-when requested.
+Two artifacts, both **single-encode MP4 files**. There is no segment format, no
+playlist, no shared initialisation data, and no media-source stitching.
 
 ```
-analyst clicks hit at 02:31
+analyst opens a frame hit
         |
         v
-GET /api/video-playback-info      -> mode=transcode, reason, duration, source sha256
+GET /api/video-playback-info    mode=transcode, reason, duration, verified sha256
+        |                       (probe only — no encoding)
+        v
+[play]  -> encode chunk at T, 30 s        ~6-10 s   -> plays
+        |                                   |
+        |                                   +-> chunk T+30 starts encoding
+        |                                       immediately, not at the boundary
+        |
+        |  reaching chunk end  -> next chunk already encoded and preloaded
+        |  seeking to a new T  -> encode a chunk there
+        v
+[request full video] -> background job, whole file, progress + ETA
         |
         v
-[Prepare for playback]  (§5)      -> eager jobs for the segments around 02:31
-        |
-        v
-GET .../index.m3u8                -> virtual playlist, all N segments advertised
-        |
-        v
-hls.js requests segment 25        -> cached? serve : transcode(25) then serve
-        |                              1.5 s
-        v
-playback starts; prefetch keeps [playhead-X, playhead+X] warm
+   complete -> notify; switch to the full file at the current timestamp
 ```
 
-Because the playlist is virtual, **seeking anywhere is free**: the analyst drags to
-1:40:00 and the player requests only that segment. Segments never watched are never
-produced. Hit-anchored viewing is not a separate feature — it is what happens when the
-player starts at the hit's segment and no earlier segment is ever requested.
+### 4.1 Why not seamless streaming
 
-### Prefetch and job control
+v1 specified lazy HLS with CMAF segments. The reviews established that its
+central assumption was unproven — independently encoded fragments sharing one
+initialisation segment require matching track IDs, timescales, codec
+configuration and **decode-time** continuity (`tfdt`), none of which
+`-output_ts_offset` establishes, and §3.3's evidence was gathered in MPEG-TS
+where each segment is self-contained. Audio is worse: encoder priming recurs at
+every independent encode, accumulating drift across thousands of restarts.
 
-- A **bounded worker pool** runs segment jobs; a per-`(digest, index)` lock deduplicates,
-  reusing the `_remux_locks` pattern already in `video.py`.
-- **Priority**: a segment the player is blocking on always preempts prefetch work.
-- **Seek cancels stale prefetch.** Without this, an analyst scrubbing across a 4-hour
-  recording queues hundreds of dead jobs and starves the segment actually being waited on.
-  This is the single most important piece of the job logic.
-- Prefetch depth `X` is configurable and small by default.
+The chunk design removes those failure modes rather than solving them. It also
+removes the playlist, the job-priority scheduler, prefetch-cancellation
+ownership, the vendored player library, and segment-index validation.
 
-### Segment format
+**Cost accepted:** chunk boundaries are visible as a brief glitch. The operator
+has explicitly accepted this ("if there is a minimal glitch that is ok for easy
+buffering"). Boundaries stop entirely once the full-video job lands.
 
-**fMP4 / CMAF**, HLS v7: one init segment plus media segments per video. Avoids MPEG-TS
-90 kHz timestamp quirks, supports the widest codec set, and the same fragments could serve
-DASH later without re-cutting.
+### 4.2 Chunk playback
 
-### Player
+`SFN_VIDEO_CHUNK_SECONDS` (default 30). Playback uses **two `<video>` elements**:
+while one plays, the next chunk loads hidden in the other; at the boundary they
+swap. Each chunk remains an ordinary independent MP4 served by the existing
+`FileResponse` range handling. No MSE.
 
-`hls.js`, **vendored into `web/static/`** (Apache-2.0). No CDN — the deployment is offline
-and the CSP forbids external hosts. It follows the existing frontend convention: player
-code goes in the matching Alpine part file under `web/static/js/`, never into `app.js`.
+**Prefetch depth is exactly one.** The next chunk is queued the moment the current
+one finishes encoding — not when playback reaches the boundary — so by the time
+the analyst crosses it, the next chunk is already encoded and preloaded. With a
+30 s chunk taking ~6–10 s to produce (§3.1, 1080p), that leaves ample margin, and
+depth 1 keeps a bounded amount of speculative work: at most one wasted chunk if
+the analyst stops or seeks.
+
+A prefetch made useless by a seek is **left to finish** rather than cancelled. It
+is one small job, it is cached if the analyst returns to that position, and
+cancellation of speculative work is precisely the ownership problem that made the
+v1 scheduler complex (§4.1). Explicit cancellation exists only for the
+full-video job (§4.3), where the cost actually justifies it.
+
+Seeking outside the loaded chunk requests a chunk at the new position. This is
+what gives random access before the full file exists.
+
+### 4.3 Full-video job
+
+Explicit, operator-initiated (§5), and long: at §3.1's 1080p CPU rate a 4-hour
+source is ~51 minutes, ~39 on GPU, **and 4K is unmeasured (§3.4)**. It runs in
+the background; nothing blocks on it.
+
+- Progress and ETA come from ffmpeg's own frame-level progress output, rendered
+  with `_RateTracker` and `#139`'s honest labelling — *"~4 min remaining at
+  current rate"*, never a calibrated-uncertainty claim.
+- Cancellable explicitly; navigating away prompts.
+- On completion: notification, and if the analyst is still watching chunks, the
+  player switches to the full file **at the current timestamp**.
 
 ---
 
-## 5. Trigger
+## 5. Trigger and player states
 
-Transcoding is **operator-initiated, then automatic within the session**:
+**Opening a hit costs no encoding.** `/api/video-playback-info` probes the
+container and reports `mode: "transcode"` with a human reason — *"HEVC 10-bit:
+this browser cannot decode it"*. (It is not free: it opens the container and
+reads stream metadata. The defensible claim is "no transcoding on open", not
+"zero compute" — v1 overstated this.)
 
-1. Opening a hit costs **zero** compute. `/api/video-playback-info` reports
-   `mode: "transcode"` with a human reason — *"HEVC 10-bit: this browser cannot decode
-   it"* — and the UI shows a **Prepare for playback** control.
-2. On click, the first 1–2 segments around the hit timecode are transcoded eagerly, so
-   playback begins after ~1.5 s rather than after a full-file encode.
-3. From then on the sliding prefetch window keeps playback smooth without further asking.
-4. A **Download original** control sits alongside, always available (§9).
+Every state below must be represented in the UI. `#139` removed a fake error band
+from the ingestion display; nothing here may invent a state it cannot observe.
 
-Rationale: nothing derived from evidence is written to disk without a deliberate act, and
-that act is attributable. It also means a server is never made to transcode videos that
-were merely glanced at — which matters when the corpus is terabytes.
+| State | Analyst sees |
+|---|---|
+| `playable` | plays directly, no controls added |
+| `needs-transcode` | reason + **Play** + **Request full video** + **Download original** |
+| `chunk-encoding` | spinner with elapsed time; no fabricated percentage |
+| `chunk-ready` | plays |
+| `chunk-failed` | the failure reason, and Download original as the escape route |
+| `full-job-running` | progress bar, rate, ETA, **Cancel** |
+| `full-job-done` | sound + animation; button becomes **Open**; auto-switch if watching |
+| `full-job-failed` | reason; chunk playback continues to work |
+| `cache-disabled` | `SFN_VIDEO_CACHE_DIR` unset — explain, offer Download original |
+| `capacity-exhausted` | queue or cache full; explain, offer Download original |
 
 ---
 
-## 6. Cache: three mechanisms, three distinct jobs
+## 6. Cache
 
-These were chosen separately and must not be conflated:
+Two artifact kinds share one bounded store: **chunks** (`{key}/c{start}.mp4`) and
+**full copies** (`{key}/full.mp4`), plus existing rewraps.
 
-| Mechanism | Governs | Setting |
-|---|---|---|
-| **Sliding window** | what is *produced* ahead of the playhead | `SFN_VIDEO_PREFETCH_SEGMENTS` |
-| **TTL sweep** | when *idle* segments are reclaimed on a long-running server | `SFN_VIDEO_SEGMENT_TTL` |
-| **LRU ceiling** | the hard cap that must never be exceeded | `SFN_VIDEO_CACHE_MAX_BYTES` |
+### 6.1 The cache key must include the pipeline
 
-- The **LRU ceiling is the invariant.** When the cache exceeds it, whole least-recently-
-  played *videos* are evicted — never individual segments out of the middle of a video,
-  which would leave holes that re-transcode mid-playback and stutter.
-- The **TTL sweep is hygiene, not capacity.** A case machine left running for days should
-  not accumulate derived renderings of evidence indefinitely. The sweep is what makes the
-  cache's contents roughly track current work rather than everything ever opened.
-- **Eviction never touches the video being played.** The existing `keep` parameter in
-  `_evict_cache` already encodes this and is extended to the segment directory.
+Not just the source. Key = `sha256(source identity ‖ pipeline fingerprint)`, where
+the fingerprint covers hwaccel selection, encoder and rate control, the tone-map
+chain, output resolution policy and chunk length. Otherwise flipping
+`SFN_VIDEO_HWACCEL`, changing chunk length, or a driver upgrade that flips the
+probe yields a cache holding artifacts from two pipelines **inside one video** — a
+visible quality shift under a label naming one pipeline. This mirrors the existing
+rule that model hashes must match what a collection recorded (`CLAUDE.md`).
 
-**Cache location is a mount point, not a feature.** `SFN_VIDEO_CACHE_DIR` pointed at
-`/dev/shm/...` makes the whole cache RAM-backed with no code change, since tmpfs is a
-filesystem and `FileResponse`, range serving and eviction all work unchanged. Deployments
-that want derived copies to never touch persistent storage get that by configuration. An
-in-process bytes cache was considered and rejected: it means hand-rolling HTTP 206
-partial-content handling that Starlette currently provides correctly for free.
+### 6.2 Eviction, corrected
+
+`_evict_cache` (`routes/video.py:327`) globs `*.mp4`. Extending it as-is is unsafe:
+it would not see files under per-video directories in its size accounting, and it
+**would** match and delete a video's own artifacts while it is being watched. The
+rewrite must:
+
+- account for the whole cache tree, not one glob;
+- evict **whole videos**, least-recently-played first, never single chunks from a
+  video currently being watched;
+- hold a **playback lease** — HTTP is stateless, so "the video being played" must
+  be an explicit, heartbeat-refreshed registration with an expiry, not the
+  single-call `keep` argument. Without a lease, eviction can drop a video between
+  two of its own chunk requests.
+- never evict an artifact with an open reader or an in-flight job.
+
+### 6.3 When one video exceeds the ceiling
+
+`SFN_VIDEO_CACHE_MAX_BYTES` defaults to 8 GiB (`config.py:91`). A long 4K full copy
+can exceed that alone, at which point "never exceed the ceiling", "evict whole
+videos" and "never evict the video being played" cannot all hold. Resolution:
+
+- **The ceiling is the invariant.** A full-video job whose *estimated* output does
+  not fit is **refused before it starts**, with the estimate shown and Download
+  original offered. Estimating from measured bitrate is required, not optional.
+- Chunk playback is unaffected: chunks are small and bounded.
+- In-flight `.part` files count against the ceiling.
+
+### 6.4 Retention
+
+The LRU ceiling is the only automatic retention mechanism. v1 also proposed a TTL
+sweep; it is **dropped** — its only distinct job was hygiene, which is better
+served by an explicit `sfn-video purge` mirroring `sfn-faces purge` (§13). "Derived
+renderings were deleted at time X by examiner Y" is a statement that survives a
+courtroom; a background clock is not.
+
+**Cache location is a mount point.** `SFN_VIDEO_CACHE_DIR` on `/dev/shm` makes the
+store RAM-backed with no code change. Caution: tmpfs defaults to half of RAM and
+shares the box with torch models, so ENOSPC can precede the LRU — the ceiling must
+be set below the tmpfs size.
 
 ---
 
 ## 7. Forensic discipline
 
-- The viewing copy is a **rendering, not evidence**, and the UI says so. The existing
-  playback label is extended to state the mode, the reason, that colour has been
-  tone-mapped from HDR, and the **source SHA-256** — the same value the indexer stored as
-  `video_hash`, so a rendering is always tied back to the point that produced the hit.
-- **Originals are opened read-only and never modified.** All output goes to the cache dir.
-- `skipped_streams` reporting (from `#136`, e.g. Live-Photo LPCM audio that has no MP4
-  mapping) carries over, so a silent viewing copy is never mistaken for a silent original.
-- Tone-mapping is **declared, not silent**. An HDR→SDR conversion is an interpretation;
-  the label names the operator (`tonemap=hable`) so a reviewer can reproduce it.
+### 7.1 Provenance must be verified, not remembered
+
+v1 proposed replacing byte-hashing with a lookup of the `video_hash` recorded at
+index time. **Rejected**: it would print, as provenance, a hash of the file *as
+indexed* beside a rendering of the file *as it is now*. If the source changed,
+the label is a false statement in an evidence viewer.
+
+Instead, back the digest with the existing **`HashCache`** (`embedder.py:169`),
+which is keyed on `(normalised real path, mtime_ns, size)`, persists across
+restarts, needs no Qdrant — important, since the app boots without it — and
+**revalidates against the current file**. Full re-hash only on a cache miss.
+
+If the computed digest differs from the indexed `video_hash`, that is a
+**stale-evidence condition**: surface it prominently, do not silently serve.
+
+### 7.2 The rendering must be reproducible
+
+v1 said the label "never learns" whether GPU or CPU ran, while also promising
+tone-mapping is "declared, not silent". Contradictory, and §3.1 shows the paths
+differ materially. The label records the **actual pipeline**: hwaccel used,
+decoder, full filter chain with parameters, encoder and rate control, output
+resolution, ffmpeg version, and any audio transformation or omission.
+
+`sfn-video render --path X --at T` must print the exact invocation that produced a
+given rendering, so a reviewer can reproduce it.
+
+### 7.3 Attribution
+
+v1 claimed the trigger was "attributable" while recording nothing. Every
+transcode — chunk or full — writes an audit record with `SFN_EXAMINER_ID`,
+timestamp, source path and verified digest, requested timecode, pipeline
+fingerprint, and outcome. `faces/audit.py` and `faces/provenance.py` are the
+pattern; this must not invent a second one.
+
+### 7.4 Fidelity disclosure
+
+The label states plainly: this is a **lossy re-encode**, tone-mapped from HDR to
+BT.709 (an interpretation, not a measurement), possibly rescaled, with audio
+re-encoded or dropped; **fine detail and exact colour must be judged from the
+original, not from this rendering**. `skipped_streams` reporting from `#136`
+carries over so a silent viewing copy is never mistaken for a silent original.
+
+### 7.5 Download original
+
+`/api/video-download` serves untouched source bytes with the verified digest
+displayed. Note the tension with §1: this places a copy of evidence on machine 2.
+That is the analyst's deliberate act, it is audited like any other, and the
+deployment's handling policy governs it — but the spec must not pretend the
+transfer is invisible.
 
 ---
 
-## 8. Hardware capability
+## 8. Pipeline and hardware
 
-One pipeline; encoder and decoder chosen by a **startup capability probe**, with
-`SFN_VIDEO_HWACCEL=auto|cuda|none` as an explicit override.
+**ffmpeg is a declared external dependency** (operator ruling, 2026-08-13). The
+project currently depends on **PyAV only** (`pyproject.toml:16`), and no ffmpeg
+binary is invoked anywhere in `src/` or installed by the Dockerfile — v1 assumed
+one silently. Adding it requires: the Dockerfile, the airgap `vendor/` bundle,
+`INSTALL.md`, and a documented minimum build (`--enable-libzimg` for `zscale`,
+plus NVENC/NVDEC where the GPU path is wanted).
 
-- **GPU present**: NVDEC decode, GPU tone-map, NVENC encode. **The rotation defect in §3
-  must be fixed and pinned by a test** — this is the one place the fast path is known to
-  produce wrong output.
-- **No GPU**: `zscale`/`tonemap` + `libx264`. Measured at ~4× realtime headroom for 1080p,
-  which the segment design absorbs; at 4K the GPU path matters much more, which is why the
-  probe exists.
+Selection is by **startup capability probe** with `SFN_VIDEO_HWACCEL=auto|cuda|none`
+override. The probe must exercise a real decode→tone-map→encode→mux of a few
+frames, not merely check that an encoder is listed: decoder, transfer, filter,
+pixel format and encoder can each fail independently across driver and build
+combinations. A GPU failure at job time falls back to CPU, records the fallback in
+the label (§7.2), and never fails the request outright.
 
-The output contract is identical either way, so the cache, the player and the label never
-learn which ran.
-
-### A scale defect to fix first
-
-`_source_digest` (`video.py:203`) SHA-256s the **entire** source file to key the cache. On
-a multi-GB video that is a full read before playback can start, and its
-`lru_cache(maxsize=256)` will thrash against a TB corpus. The indexer already computed and
-stored this value as `video_hash`; the playback path should look it up and only fall back
-to hashing when it is absent. This should land before the transcode work, since the
-transcode path inherits the same key.
+Output resolution policy must be stated explicitly — it is the largest single
+lever on both cost and disclosure, and v1 never mentioned it.
 
 ---
 
@@ -272,117 +408,200 @@ transcode path inherits the same key.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/video-playback-info` | extended: `mode`, reason, duration, segment count, sha256 |
-| `POST /api/video-playback/prepare` | start eager jobs around a timecode |
-| `GET /api/video-hls/{digest}/index.m3u8` | virtual playlist over the whole timeline |
-| `GET /api/video-hls/{digest}/init.mp4` | CMAF init segment |
-| `GET /api/video-hls/{digest}/{n}.m4s` | segment; transcodes on demand if absent |
-| `GET /api/video-download` | **original bytes**, `Content-Disposition`, sha256 shown |
+| `GET /api/video-playback-info` | extended: mode, reason, duration, verified digest, job state |
+| `POST /api/video-chunk` | encode/serve a chunk at a timecode |
+| `POST /api/video-full` | start the background full-video job |
+| `DELETE /api/video-full` | cancel it |
+| `GET /api/video-job-status` | progress, rate, ETA, terminal state |
+| `GET /api/video-download` | original bytes, `Content-Disposition`, verified digest |
 | `GET /api/video-playback` | unchanged — `original` and `rewrap` modes |
 
-`/api/video-download` is deliberately the untouched source: for serious review the analyst
-opens it in VLC or mpv locally, where codec support is a non-issue, and can verify the hash
-against the one the indexer recorded.
+**Every path-bearing route reuses the existing resolution flow** — absolute path,
+`resolve()`, extension check, `_check_allowed_path`, regular-file check. No route
+accepts a cache key as its only source identity; a key is never trusted to name a
+file. Timecodes are validated against the probed duration, and chunk requests are
+bounded, before any queueing or encoding.
+
+Evidence mounts should be **read-only**, closing the window between path
+validation and the encoder opening the file.
 
 ---
 
-## 10. Code layout: a self-contained subsystem
+## 10. Failure and lifecycle
 
-**Operator ruling, 2026-08-13:** this ships as a *plugin* — one folder owning the whole
-concern, integrated at a few explicit seams — rather than logic spread across the existing
-route and pipeline modules. The goal is readability and maintainability: a reviewer should
-be able to read video playback in one place, and the subsystem should be removable or
-replaceable without archaeology.
+### 10.1 Failure matrix
+
+Each of these needs a defined HTTP status, log record, player state (§5) and
+retryability: corrupt input; missing video or audio track; unsupported decoder;
+ffmpeg non-zero exit; job timeout; GPU failure or saturation; OOM; disk or tmpfs
+full; cache directory unwritable or unset; source disappeared or changed
+mid-session; malformed duration metadata; queue full. Nothing may retry-storm.
+
+### 10.2 Atomic publication
+
+Mandatory, matching the existing rewrap (`routes/video.py:278`): encode to a
+PID-scoped `.part`, `fsync`, atomic rename on success, remove on any failure.
+**A truncated artifact must never become a cache hit.** Startup sweeps orphaned
+`.part` files left by SIGKILL or host crash.
+
+### 10.3 Subprocess lifecycle
+
+Every ffmpeg invocation carries a timeout; is terminated and reaped on cancel,
+client disconnect or shutdown; runs in its own process group so children die with
+it; and has bounded captured stderr. Argument construction is never string
+concatenation of user input.
+
+### 10.4 Concurrency
+
+- A bounded worker pool, with a **bounded queue** and per-client and per-video
+  caps. A LAN host must not be able to grow the queue without limit.
+- Deduplication by artifact key, with reference counting: a cancel by one analyst
+  must never kill a job another is waiting on.
+- Locks must not accumulate unboundedly, and the design must state whether it
+  assumes a single ASGI worker process — if not, cross-process deduplication is
+  required, since the current in-process dict does not provide it.
+- Cache accounting must be serialised, or a bounded overshoot documented.
+
+---
+
+## 11. Code layout
+
+A self-contained subsystem (operator ruling), following the **existing precedent
+of `src/scalar_forensic/faces/`**, which `docs/specs/face-pipeline.md` §4 argues
+as "plugin shape: optional modality, not a framework".
 
 ```
 src/scalar_forensic/video_playback/
-├── __init__.py      public API — `router`, nothing else imported elsewhere
-├── capability.py    hwaccel probe, encoder/decoder selection (§8)
-├── codecs.py        browser-safe allowlist, mode decision (original|rewrap|transcode)
-├── rewrap.py        lossless MP4 rewrap — moved from routes/video.py, unchanged
-├── segments.py      single-segment transcode: seek, tonemap, keyframe/ts alignment
-├── playlist.py      virtual CMAF playlist over the whole timeline
-├── jobs.py          worker pool, per-(digest,index) locks, prefetch, seek-cancellation
-├── cache.py         TTL sweep + whole-video LRU (§6)
-└── routes.py        the APIRouter — playback, info, prepare, hls, download
+├── __init__.py      public API — `router`
+├── capability.py    hwaccel probe, pipeline selection + fingerprint (§6.1, §8)
+├── codecs.py        browser-safe allowlist, mode decision
+├── encode.py        chunk and full encode; one path, different -ss/-t
+├── jobs.py          worker pool, queue, refcounts, cancellation, lifecycle (§10)
+├── cache.py         keys, leases, eviction, purge (§6)
+├── audit.py         provenance + examiner record (§7.3), wrapping faces/ helpers
+└── routes.py        the APIRouter
 
-src/scalar_forensic/web/static/js/video_playback/
-├── player.js        Alpine part file for the player
-└── vendor/hls.js    vendored, Apache-2.0, offline
+src/scalar_forensic/web/static/js/video_playback/player.js   (double-buffered)
 ```
 
-### The seam
+Honest caveat on the precedent: `faces/` is genuinely optional and env-gated;
+video playback is core UI on the default path, so "removable without archaeology"
+is a weaker claim here. Cohesion is the justification, not optionality.
 
-Integration with the rest of the app is deliberately narrow and enumerable:
+**Seams:** `app.py` includes the router; `config.py` gains `SFN_VIDEO_*`;
+`index.html` loads `player.js` before `app.js`. `_resolve_video_path`
+(`routes/video.py:36`) is **shared with `/api/video-frame` and
+`/api/video-timeline`** — v1's move list omitted it. It moves to
+`routes/_shared.py` beside `_check_allowed_path`, since by the same
+one-implementation rule it is a security control.
 
-1. `app.py` includes `video_playback.router` — the only Python import site.
-2. `config.py` gains the `SFN_VIDEO_*` settings, alongside the existing cache settings.
-3. `index.html` loads `player.js` before `app.js`, per the existing frontend convention.
+`/api/video-frame` and `/api/video-timeline` stay in `routes/video.py`: they serve
+the indexing side, not playback.
 
-### What moves, and what does not
-
-**Moves in:** the playback concern in full — `/api/video-playback`,
-`/api/video-playback-info`, and `#136`'s rewrap machinery (`_needs_remux`, `_remux_to_mp4`,
-`_evict_cache`, `_source_digest`). Splitting "rewrap" from "transcode" across two modules
-would defeat the purpose, since they are two answers to one question: *how do I make this
-source playable?*
-
-**Stays in `routes/video.py`:** `/api/video-frame` and `/api/video-timeline`. These serve
-the *indexing* side — re-extracting a stored frame, describing hit positions — and are
-consumed by the results list, not the player.
-
-**Shared, not duplicated:** `_check_allowed_path` stays in `routes/_shared.py`. Path
-containment is a security control for every file-serving endpoint in the app and must have
-exactly one implementation.
-
-> **Note for reviewers:** `CLAUDE.md` states that web endpoints live in
-> `web/routes/` with an APIRouter per topic. This subsystem is a deliberate,
-> operator-approved deviation for cohesion, and it keeps the convention *internally* —
-> `video_playback/routes.py` is still one APIRouter per topic. Do not "correct" it back
-> without re-reading this section. `CLAUDE.md` should be updated when phase 1 lands.
+**`CLAUDE.md` must be updated in the same PR as the carve**, or the checked-in
+convention is false for the life of that PR.
 
 ---
 
-## 11. Implementation phases
+## 12. Configuration
 
-Each phase is independently shippable and independently reviewable.
-
-0. **Carve the subsystem** — create `video_playback/`, move the existing playback code in
-   unchanged, rewire the single import in `app.py`. Pure refactor: the suite must stay at
-   its current bar with no behavioural change, which is what makes the following phases
-   readable diffs rather than mixed move-and-modify noise.
-1. **Digest fix** (§8) — look up `video_hash`, stop hashing GB files on the request path.
-2. **Download original** (§9) — small, self-contained, immediately useful.
-3. **Codec detection** — `_needs_transcode()` allowlist (H.264 8-bit, VP8, VP9, AV1);
-   `/api/video-playback-info` reports `mode: "transcode"` with a reason. No encoding yet.
-4. **Segment engine** — capability probe, encoder selection, single-segment transcode,
-   keyframe/timestamp alignment pinned by tests against a real HDR sample. **The rotation
-   regression from §3 gets an explicit test.**
-5. **Playlist + cache** — virtual m3u8, per-segment locks, TTL sweep, whole-video LRU.
-6. **Player + prefetch** — vendored `hls.js`, sliding window, seek-cancels-prefetch.
-7. **Label** — extend the playback label with mode, reason, tone-map operator, sha256.
+Every setting needs a name, default and validation rule (`config.py` validates
+aggressively; `face-pipeline.md` §13 is the template):
+`SFN_VIDEO_CACHE_DIR`, `SFN_VIDEO_CACHE_MAX_BYTES`, `SFN_VIDEO_CHUNK_SECONDS`,
+`SFN_VIDEO_HWACCEL`, `SFN_VIDEO_MAX_WORKERS`, `SFN_VIDEO_QUEUE_MAX`,
+`SFN_VIDEO_JOB_TIMEOUT`, `SFN_VIDEO_OUTPUT_HEIGHT`, `SFN_FFMPEG_PATH`.
 
 ---
 
-## 12. Decisions recorded (do not re-litigate)
+## 13. Retention tooling
 
-Made by the operator during the 2026-08-13 design session:
+`sfn-video purge --media <sha256> | --all`, mirroring `sfn-faces purge`. Explicit,
+auditable, and the answer to "what derived renderings exist and when were they
+destroyed".
 
-- Server-side **codec allowlist** decides the mode, not browser-advertised capability —
-  because the advertised capability is demonstrably wrong on the operator's own Chrome.
-- **fMP4/CMAF** segments, not MPEG-TS.
-- **Whole-video LRU** for the ceiling, **plus** a segment TTL; distinct roles per §6.
-- **Eager first 1–2 segments** on an explicit prepare action, then automatic sliding
-  prefetch — not fully automatic on open, and not manual for every segment.
+---
+
+## 14. Test plan
+
+`addopts` carries `--cov-fail-under=65` on every invocation, so a new subsystem
+without tests reds CI; a subset run needs `--no-cov` (`CLAUDE.md`).
+
+**Fixture problem, unresolved and blocking phase 4:** `data/` is gitignored, so a
+real 10-bit HDR sample cannot be committed. Either add a tiny generated HDR
+fixture (preferred — synthesisable by ffmpeg at build time), or gate on an
+env-supplied path and skip, as the YuNet test does. Decide before phase 4.
+
+Required cases: **rotation preserved on both pipelines** (§3.1's defect);
+colour tags are `bt709` on output; chunk frame-tiling (§3.3) at frame level;
+CPU/GPU output equivalence within tolerance; VFR and long-GOP sources; sources
+with no audio, and multi-audio; final partial chunk; odd dimensions; corrupt
+index; job timeout, cancel and disconnect leave no `.part` and no orphan process;
+eviction during playback; cache-full refusal (§6.3); stale-source detection
+(§7.1); every §10.1 failure mapped to its player state; path-containment on every
+new route including rejection of a cache key as source identity.
+
+**Measurements required on real hardware before phase 4 is accepted:** 4K rates,
+a long-source seek measurement (§3.2), concurrent-job scaling, and a stated
+minimum hardware floor with documented degradation below it.
+
+---
+
+## 15. Implementation phases
+
+1. **Digest correctness** — back `_source_digest` with `HashCache`; stale-evidence
+   detection; no whole-file hashing on the request path.
+2. **Download original** — small, self-contained, immediately useful; the escape
+   hatch every later failure state points at.
+3. **Codec detection** — allowlist (H.264 8-bit, VP8, VP9, AV1);
+   `playback-info` reports `mode: "transcode"` with a reason. No encoding yet.
+4. **Encode core** — ffmpeg dependency declared and bundled; capability probe;
+   pipeline fingerprint; chunk encode; rotation and colour tests; the §14
+   measurements.
+5. **Cache** — keyed by pipeline, leases, corrected eviction, ceiling refusal,
+   atomic publication, purge command.
+6. **Chunk playback** — double-buffered player, seek-to-new-chunk, player states.
+7. **Full-video job** — background worker, progress/ETA via `_RateTracker`,
+   cancel, completion notification, auto-switch at timestamp.
+8. **Provenance and audit** — label with full pipeline record, examiner audit,
+   `sfn-video render` reproduction command.
+
+The subsystem carve (§11) happens **between phases 3 and 4**, when there is
+something to carve. v1 put it first, creating mostly-empty modules for code that
+did not exist; the reviews were right that this is premature. Note it is not a
+pure move: `tests/test_video_endpoints.py` and `tests/test_video_playback.py`
+patch `scalar_forensic.web.routes.video.*` by name, and `CLAUDE.md`'s first gotcha
+is that patch targets are per-module.
+
+---
+
+## 16. Decisions taken in the 2026-08-13 design session
+
+Recorded with reasons. These are one session's choices, not precedent with paid
+cost, and may be revisited on evidence.
+
+- **Mode is decided by a server-side codec allowlist**, not browser-advertised
+  capability — the operator's Chrome demonstrably advertises HEVC and fails.
+- **Two single-encode artifacts** (chunk, full file) instead of a segmented
+  stream. Trades background compute for the removal of an entire failure class.
+- **30 s chunks, double-buffered**, with a brief glitch at boundaries explicitly
+  accepted by the operator.
+- **Prefetch depth one**, started when the current chunk finishes encoding rather
+  than when playback reaches the boundary; speculative chunks are never cancelled.
+- **The full-video job is explicit**, cancellable, with progress and ETA, and
+  auto-switches at the current timestamp on completion.
+- **ffmpeg CLI is a declared dependency**; bundling cost accepted.
 - **Must work with and without a GPU**, selected by runtime probe.
 - **Download original** is offered alongside playback.
+- **HLS/MSE is rejected for now** (§4.1) and may be reconsidered only if chunked
+  playback proves insufficient in real use.
 
-## 13. Open questions
+---
 
-1. Segment duration. 6 s is the HLS convention and what §3 measured; shorter improves
-   seek responsiveness and worsens per-segment overhead. Wants one measurement at 2 s and
-   4 s on the real server before being fixed.
-2. Concurrency ceiling for the worker pool — how many analysts a server should serve at
-   once is a deployment question, not a code one, but it needs a default.
-3. Whether an audio-only fallback is worth having for sources whose video stream cannot be
-   decoded at all.
+## 17. Open questions
+
+1. Output resolution policy (§8) — cap at 1080p, match source, or operator choice.
+2. Chunk length: 30 s is chosen, but first-play latency at 4K may argue for less.
+3. Minimum hardware floor and behaviour below it (§14).
+4. HDR fixture strategy for tests (§14) — blocking for phase 4.
+5. Whether the full-video job should be admitted at all on sources whose estimated
+   output exceeds a large fraction of the cache ceiling (§6.3).
