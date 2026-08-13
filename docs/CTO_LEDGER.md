@@ -29,16 +29,18 @@ distributed isolated LAN, fully offline.
 
 ## current state (2026-08-13, late)
 
-- `main` at **`b3a609a`**. Bar **771 passed / 5 skipped**, coverage 70.00%
-  against the 65% floor — **re-measured by `m4` on a clean tree at `b3a609a`**,
-  not taken from the coder's report. Was 710/5 at 69.35%; phases 1–3 added 61
-  tests. **`CLAUDE.md`'s 559/5 line is stale and should be corrected** — good
-  first errand for a coder touching `CLAUDE.md`, and it is now two eras stale.
+- `main` at **`bda812b`**. Bar **771 passed / 5 skipped**, coverage 70.22%
+  against the 65% floor — **re-measured by `m4` on a clean tree at `f6cef02`**,
+  twice, not taken from either coder's report; `#151` is docs-only. Was 710/5 at
+  69.35%; phases 1–3 added 61 tests and the §11 carve added zero, which is what
+  a pure move should show. **`CLAUDE.md`'s stale 559/5 line is now fixed** and
+  cites `f6cef02`.
 - Campaign complete: 8,137 files indexed. Cropper delivered as the standalone
   repo `portable_face_cropper` (8138→4537 crops, 0 failures, 35m01s).
-- **Fleet: manager `com-m4`.** Coder `com-c12` delivered phases 1–3 and was
-  retired at 150.8k rather than started on the §11 carve — see the note below.
-  Two stranded `cfm-g1` ownership rows were reaped at the manager's open.
+- **Fleet: manager `com-m4` only; no live workers.** `com-c12` delivered phases
+  1–3, `com-c13` the carve; both retired with their ownership released. Two
+  stranded `cfm-g1` rows were reaped at the manager's open. **Everything
+  downstream is blocked on the operator** — nothing is left running, on purpose.
 - **The shared checkout is a real constraint, not a formality.** One working
   tree serves every session, so a coder on a feature branch means the manager
   cannot commit its own docs there without riding along in the coder's PR.
@@ -105,6 +107,47 @@ a *failing* playback points at. It now emits the digest header only from a
 `HashCache` hit (new `HashCache.peek()`) and streams immediately on a miss; an
 absent header means "not computed", never "unverified".
 
+### the §11 carve is also DONE — `#150` `f6cef02`, `#151` `bda812b`
+
+`com-c13`, one PR, **zero change in the test count** — the shape a pure move
+should have. Layout as built: `video_playback/{__init__,codecs,digest,rewrap,
+cache,routes}.py`; `routes/video.py` 779 → 106 lines, keeping only the indexing
+side (`/api/video-frame`, `/api/video-timeline`); `_resolve_video_path` moved to
+`routes/_shared.py` beside `_check_allowed_path`. **No compatibility
+re-exports** — a missing name is the signal you want, and `test_video_playback.py`
+reads ten private symbols off the module without patching. `CLAUDE.md` and spec
+§11 updated in the same PR; §11's tree now marks which modules exist and which
+arrive with their phases.
+
+Two module placements were ruled by the manager, not escalated — §11's module
+list was the spec author's drafting, whereas the operator ruled only "a
+self-contained subsystem":
+
+- **`digest.py`** for the source digest and the `HashCache` handle. Folding a
+  *hash* cache into `cache.py`, the *artifact* cache, is the conflation §6.1
+  warns about, and the handle is a process-wide singleton over an open SQLite
+  connection — duplicate it across two modules and phase 1 silently regresses
+  with no failing test.
+- **`rewrap.py`** for `_remux_to_mp4` / `_repair_timestamps`. §2's own table
+  calls this "lossless rewrap … reused unchanged": a PyAV stream copy,
+  deliberately not an encode, and `encode.py` is the ffmpeg path.
+- `_stale_evidence_report` stays in `routes.py` until `audit.py` arrives in
+  phase 8; `audit.py` is not created early for one function.
+
+**A false statement in §11 was corrected in the same PR and is worth naming**:
+v1 said `_resolve_video_path` is "shared with `/api/video-frame` and
+`/api/video-timeline`". The timeline handler takes a `video_hash` only and never
+touches a filesystem path. Caught by the outgoing coder writing its handoff,
+verified by the manager. Same failure mode as the "review floor 36" — a claim
+that lived only in prose.
+
+**The handoff is why the carve cost one PR.** `com-c12` was retired at 150.8k
+*before* starting it, and spent its last turn writing every `mock.patch` target
+string, the symbol placement, and the module-level state that must not be
+duplicated. `test_video_endpoints.py` then needed zero changes, exactly as it
+predicted. Retiring a coder one task early and buying a map is cheaper than
+letting it start a churn-heavy refactor 40k below the retire nudge.
+
 ## the video playback work — READ THE SPEC, IT IS THE PLAN
 
 `docs/specs/video-playback-transcode.md` is **draft v2, post-review**. v1 proposed
@@ -121,23 +164,21 @@ about what was measured and §3.4 lists what was not.
 
 **Sequencing that matters:**
 
-- Phases 1–3 are **DONE and merged** (`#145`, `#147`, `#148`). Next in sequence
-  is the §11 carve, then phase 4.
-- **The §11 carve is the next unblocked unit of work.** A handoff naming every
-  `mock.patch` target string, the symbol placement, `_resolve_video_path`'s
-  callers and the module-level `_hash_cache` state is at
-  `scratchpad/handoff-c12.md` (session-scoped; fold anything durable in here
-  before it is lost). It is not a pure move and `CLAUDE.md` must change in the
-  same PR.
+- Phases 1–3 and the §11 carve are **DONE and merged** (`#145`, `#147`, `#148`,
+  `#150`, `#151`). **Phase 4 is next and there is nothing unblocked before it.**
+- **Phase 5 is blocked behind phase 4, not merely queued**: the cache key is
+  `sha256(source identity ‖ pipeline fingerprint)` (§6.1), and the pipeline
+  fingerprint is produced by phase 4's `capability.py`, which does not exist.
+  Do not start phase 5 "in parallel".
 - Phase 4 is **blocked on two things**: the HDR test-fixture decision (§14 — a
   gitignored `data/` means no committed sample; generate one or gate-and-skip like
   the YuNet test), and the real-hardware measurements §14 requires (4K rates,
   long-source seek, concurrent scaling, minimum hardware floor).
-- The subsystem carve (§11) happens **between phases 3 and 4**, not first. It is
-  not a pure move: `tests/test_video_endpoints.py` and `tests/test_video_playback.py`
-  patch `scalar_forensic.web.routes.video.*` by name, and patch targets are
-  per-module. `CLAUDE.md` must be updated in the *same* PR as the carve.
-- §17 carries five open questions; 1, 3 and 5 are operator calls.
+- §17 carries five open questions; 1, 3 and 5 are operator calls — all three
+  are in "pending user decisions" above with a recommendation.
+- **When phase 4 is unblocked, spawn ONE fresh coder**, not a continuation. It
+  inherits `video_playback/` with `encode.py`, `capability.py`, `jobs.py` and
+  `audit.py` unwritten, and §11's tree marks exactly which modules exist.
 
 The `_evict_cache` `*.mp4` glob defect the spec found is **contained in `#148`**
 and no longer an open item; the full §6.2 rewrite remains phase 5.
@@ -183,6 +224,11 @@ and no longer an open item; the full §6.2 rewrite remains phase 5.
   trusted (the "review floor 36" that never existed in code).
 - **Never quote a test bar against a dirty tree**; `git status --porcelain` must
   be empty first.
+- **Retire a coder one task early and buy a map.** A worker approaching the
+  retire nudge should spend its last turn writing the handoff, not starting the
+  next unit of work. `com-c12`'s handoff is why the §11 carve cost one PR; the
+  alternative this ledger already records is an agent dying holding uncommitted
+  work.
 - **A two-state boolean over a three-state question is a fabricated claim.**
   "Not checked" must never render as "checked and failed". This is the same
   defect class as the uncalibrated face cosine and `#139`'s fake error band,

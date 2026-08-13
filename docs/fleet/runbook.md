@@ -1753,3 +1753,41 @@ lost uncommitted work. Handoff naming the patch targets, symbol placement,
 **Still with the operator, unchanged:** both phase-4 blockers and §17 Q1/Q5 (previous entry),
 plus the 17 CodeQL path-injection false positives. The benchmarker remains held — it is the
 only thing between the project and phase 4, and it must not run while a coder has the box.
+
+### §11 carve DONE — `#150` `f6cef02` + `#151` `bda812b`; fleet drained, phase 4 with the operator
+
+`com-c13`, one PR, **zero change in the test count** — 771/5, coverage 70.00% → 70.22%,
+re-measured by the manager on a clean tree at `f6cef02`. `video_playback/{__init__,codecs,
+digest,rewrap,cache,routes}.py`; `routes/video.py` 779 → 106 lines keeping only
+`/api/video-frame` and `/api/video-timeline`; `_resolve_video_path` in `routes/_shared.py`.
+No compatibility re-exports. `CLAUDE.md` and spec §11 updated in the same PR.
+
+Manager ruled two module placements rather than escalating them: `digest.py` (a *hash*
+cache is not the *artifact* cache — §6.1's conflation warning) and `rewrap.py` (a PyAV
+stream copy is not an encode). §11's module list was the spec author's drafting; the
+operator ruled only "a self-contained subsystem", so this was the manager's call to make.
+`_stale_evidence_report` parked in `routes.py` until phase 8's `audit.py` exists.
+
+`#151` fixed a sha the squash had deleted: `CLAUDE.md` cited a branch commit for the bar.
+Worth the second PR against a "one PR" brief — the constraint scoped the carve, and a wrong
+sha in the line a reader consults to judge whether a bar is trustworthy is the same
+prose-becomes-fact failure this ledger already records twice.
+
+**Two corrections found by agents checking their own inherited claims**, both kept because
+the checking is the point: §11 said `_resolve_video_path` is shared with
+`/api/video-timeline` — it is not, the timeline handler takes a `video_hash` and never
+touches a path (found by c12 writing its handoff, verified by the manager, corrected in
+`#150`). And `test_video_endpoints.py` needed zero rewiring, against both the spec's and the
+manager's brief's assumption that it would.
+
+**Fleet drained deliberately.** c12 and c13 both retired, ownership released, `cx o -l`
+clean for this project. Nothing is left running because nothing downstream is unblocked:
+phase 4 needs the operator's two answers, and phase 5 is blocked *behind* phase 4 rather
+than merely queued — §6.1's cache key embeds the pipeline fingerprint that phase 4's
+`capability.py` produces, and that module does not exist. When phase 4 unblocks, spawn one
+fresh coder; §11's tree marks which modules exist and which arrive with their phases.
+
+**Open with the operator, unchanged and now the only thing between this project and phase
+4:** the HDR fixture strategy, the real-hardware measurements, §17 Q1 and Q5, and the 17
+CodeQL path-injection false positives needing their token scope. All five carry a
+recommendation in `docs/CTO_LEDGER.md` "pending user decisions".
