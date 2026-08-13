@@ -260,11 +260,12 @@
       this.matchZoom = 1.0;
       this.matchMeta = null; this.matchMetaError = null;
       this.videoTimeline = null;
-      if (hit.is_video_frame && hit.image_hash) {
-        this.matchSrc = `/api/thumbnail/${hit.image_hash}`;
-      } else {
-        this.matchSrc = `/api/hit-image?path=${encodeURIComponent(hit.path)}`;
-      }
+      // hit.path is the stored frame JPEG for a video-frame hit (the indexer
+      // indexes the extracted frame file, so image_path *is* the frame), and
+      // the frame store is inside the allowed path set.  /api/thumbnail serves
+      // the 128x96 index thumb — in the big pane that is an upscaled blur of
+      // the very artefact the examiner is being asked to compare.
+      this.matchSrc = `/api/hit-image?path=${encodeURIComponent(hit.path)}`;
       if (hit.is_video_frame && hit.video_hash) {
         await this._loadFrameMeta(hit.video_hash, hit.frame_timecode_ms ?? 0);
         this._loadVideoTimeline(hit.video_hash);
