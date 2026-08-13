@@ -30,6 +30,7 @@ from scalar_forensic.video_playback.cache import (
     _cache_dir_or_503,
     _touch,
     artifact_locks,
+    check_ceiling,
     evict,
     pin,
     release_lease,
@@ -255,5 +256,16 @@ async def video_playback_info(path: str, video_hash: str | None = None) -> JSONR
             cache_dir is not None and rewrap_path(cache_dir, info["video_sha256"]).exists()
         )
         info["cache_enabled"] = cache_dir is not None
+    elif info["mode"] == "transcode":
+        # §6.3: the estimate is shown whether or not it refuses, so the analyst
+        # reads a number rather than only a verdict.  Three-valued, because
+        # "this file would not say how big it is" is not "this video is too big".
+        verdict = check_ceiling(settings, info)
+        info["full_copy"] = {
+            "state": verdict.state,
+            "estimate_bytes": verdict.estimate_bytes,
+            "limit_bytes": verdict.limit_bytes,
+            "reason": verdict.reason,
+        }
     info.update(_stale_evidence_report(info["video_sha256"], video_hash))
     return JSONResponse(info)

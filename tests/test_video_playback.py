@@ -32,7 +32,9 @@ import av
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from typer.testing import CliRunner
 
+from scalar_forensic import cli
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import hash_file
 from scalar_forensic.video import VIDEO_EXTENSIONS
@@ -1214,6 +1216,147 @@ class TestCacheEviction:
         assert r.status_code == 200
         assert not filler.exists()
         assert sum(f.stat().st_size for f in cache_dir.rglob("*.mp4")) <= 2048
+
+
+class TestCeilingRefusal:
+    """§6.3 with the §16 ruling: 50% of SFN_VIDEO_CACHE_MAX_BYTES."""
+
+    def _settings(self, monkeypatch, ceiling: int, height: int = 1080) -> Settings:
+        monkeypatch.setenv("SFN_VIDEO_CACHE_MAX_BYTES", str(ceiling))
+        monkeypatch.setenv("SFN_VIDEO_OUTPUT_HEIGHT", str(height))
+        return Settings()
+
+    def test_estimate_scales_by_the_output_area(self):
+        # The cap is min(ih, H), so a 2160p source loses three quarters of its
+        # pixels at 1080 and a 720p source is passed through untouched.
+        info = {"duration_ms": 10_000, "bit_rate": 8_000_000, "video_height": 2160}
+        assert vp_cache.estimate_full_output_bytes(info, 1080) == 10_000_000 // 4
+        assert (
+            vp_cache.estimate_full_output_bytes({**info, "video_height": 720}, 1080) == 10_000_000
+        )
+
+    @pytest.mark.parametrize("missing", ["duration_ms", "bit_rate", "video_height"])
+    def test_a_missing_input_yields_no_estimate_rather_than_a_guess(self, missing):
+        info = {"duration_ms": 10_000, "bit_rate": 8_000_000, "video_height": 1080}
+        assert vp_cache.estimate_full_output_bytes({**info, missing: None}, 1080) is None
+
+    def test_a_job_that_fits_is_allowed(self, monkeypatch):
+        s = self._settings(monkeypatch, 8 * 1024**3)
+        info = {"duration_ms": 60_000, "bit_rate": 8_000_000, "video_height": 1080}
+        verdict = vp_cache.check_ceiling(s, info)
+        assert verdict.state == "fits"
+        assert verdict.allowed is True
+        assert verdict.limit_bytes == 4 * 1024**3
+
+    def test_a_job_over_half_the_ceiling_is_refused_with_the_estimate(self, monkeypatch):
+        s = self._settings(monkeypatch, 1024**3)
+        info = {"duration_ms": 3_600_000, "bit_rate": 20_000_000, "video_height": 1080}
+        verdict = vp_cache.check_ceiling(s, info)
+        assert verdict.state == "refused"
+        assert verdict.allowed is False
+        assert verdict.estimate_bytes == 9_000_000_000
+        assert "download the original" in verdict.reason.lower()
+
+    def test_the_boundary_is_half_not_all_of_the_ceiling(self, monkeypatch):
+        s = self._settings(monkeypatch, 1000)
+        under = {"duration_ms": 1000, "bit_rate": 3_900, "video_height": 1080}
+        over = {"duration_ms": 1000, "bit_rate": 4_100, "video_height": 1080}
+        assert vp_cache.check_ceiling(s, under).state == "fits"
+        assert vp_cache.check_ceiling(s, over).state == "refused"
+
+    def test_an_unestimable_source_is_unknown_not_refused(self, monkeypatch):
+        # Three-state: "this file would not say how big it is" is a different
+        # sentence from "this video is too big for the cache".
+        s = self._settings(monkeypatch, 8 * 1024**3)
+        verdict = vp_cache.check_ceiling(s, {"duration_ms": None})
+        assert verdict.state == "unknown"
+        assert verdict.allowed is False
+        assert verdict.estimate_bytes is None
+        assert "cannot be estimated" in verdict.reason
+
+    def test_no_ceiling_means_no_invariant_to_protect(self, monkeypatch):
+        s = self._settings(monkeypatch, 0)
+        info = {"duration_ms": 3_600_000, "bit_rate": 100_000_000, "video_height": 1080}
+        assert vp_cache.check_ceiling(s, info).state == "fits"
+
+    def test_the_stream_report_carries_the_estimate_inputs(self, mov):
+        info = vp_codecs._stream_report(mov)
+        assert info["video_height"] == 48
+        assert info["video_width"] == 64
+        assert info["duration_ms"] is not None
+
+
+class TestPurge:
+    def test_purge_one_media_leaves_the_rest(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        gone = _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
+        chunk = _video(cache_dir, DIGEST_A, size=50, mtime=1_000, name="k/c0.000.mp4")
+        kept = _video(cache_dir, DIGEST_B, size=100, mtime=1_000)
+        report = vp_cache.purge(cache_dir, media=DIGEST_A)
+        assert report.videos == 1
+        assert report.files == 2
+        assert report.bytes_freed == 150
+        assert report.digests == (DIGEST_A,)
+        assert not gone.exists() and not chunk.exists() and kept.exists()
+
+    def test_purge_all_empties_the_store(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
+        _video(cache_dir, DIGEST_B, size=100, mtime=1_000)
+        report = vp_cache.purge(cache_dir, all_=True)
+        assert report.videos == 2
+        assert report.bytes_freed == 200
+        assert vp_cache.scan(cache_dir) == []
+
+    def test_a_lease_does_not_stop_an_explicit_purge(self, tmp_path):
+        # A lease bounds *automatic* eviction.  An examiner deleting a rendering
+        # on purpose is the one act §6.4 keeps explicit precisely so it happens.
+        cache_dir = tmp_path / "cache"
+        p = _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
+        vp_cache.renew_lease(DIGEST_A, 60)
+        assert vp_cache.purge(cache_dir, media=DIGEST_A).videos == 1
+        assert not p.exists()
+
+    def test_purging_an_unknown_media_is_a_no_op_not_an_error(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
+        assert vp_cache.purge(cache_dir, media=DIGEST_B).videos == 0
+
+    @pytest.mark.parametrize(
+        "kw", [{}, {"media": DIGEST_A, "all_": True}, {"media": "not-a-digest"}]
+    )
+    def test_an_ambiguous_or_malformed_scope_is_rejected(self, tmp_path, kw):
+        with pytest.raises(ValueError):
+            vp_cache.purge(tmp_path, **kw)
+
+    def test_the_cli_purges_one_media(self, tmp_path, monkeypatch):
+        cache_dir = tmp_path / "cache"
+        p = _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
+        monkeypatch.setenv("SFN_VIDEO_CACHE_DIR", str(cache_dir))
+        result = CliRunner().invoke(cli.video_app, ["purge", "--media", DIGEST_A])
+        assert result.exit_code == 0, result.output
+        assert DIGEST_A in result.output
+        assert not p.exists()
+
+    def test_the_cli_confirms_before_purging_everything(self, tmp_path, monkeypatch):
+        cache_dir = tmp_path / "cache"
+        p = _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
+        monkeypatch.setenv("SFN_VIDEO_CACHE_DIR", str(cache_dir))
+        result = CliRunner().invoke(cli.video_app, ["purge", "--all"], input="n\n")
+        assert result.exit_code == 1
+        assert p.exists()
+
+    def test_the_cli_rejects_both_scopes_at_once(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SFN_VIDEO_CACHE_DIR", str(tmp_path))
+        result = CliRunner().invoke(cli.video_app, ["purge", "--media", DIGEST_A, "--all"])
+        assert result.exit_code == 1
+        assert "exactly one" in result.output
+
+    def test_the_cli_reports_a_disabled_cache(self, monkeypatch):
+        monkeypatch.setenv("SFN_VIDEO_CACHE_DIR", "")
+        result = CliRunner().invoke(cli.video_app, ["purge", "--media", DIGEST_A])
+        assert result.exit_code == 1
+        assert "SFN_VIDEO_CACHE_DIR" in result.output
 
 
 class TestArtifactLocks:
