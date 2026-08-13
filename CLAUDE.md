@@ -6,9 +6,9 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 
 ## Commands
 
-- `uv run pytest -q` — full suite (882 passed / 5 skipped at `6e09097`, 2026-08-14, verified
-  clean tree; coverage 72.20% against the 65% floor — measured *after* video-playback
-  phase 5, so it describes the layout below), needs no Qdrant; the 5 skips need
+- `uv run pytest -q` — full suite (954 passed / 5 skipped at `8af5266`, 2026-08-14, verified
+  clean tree; coverage 73.09% against the 65% floor — measured *after* video-playback
+  phase 6, so it describes the layout below), needs no Qdrant; the 5 skips need
   `SFN_TEST_QDRANT_URL` and are the only tests that can observe the face exclusion
   guarantee against a real store (CI runs them in a separate Qdrant service-container job).
   **No longer fully hermetic:** the video encode tests need `ffmpeg` on `PATH`. Without it
@@ -91,7 +91,16 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
   merged by `static/app.js` via property descriptors. New component code goes into the
   matching part file; computed getters belong in `computed.js`. Never merge parts with
   `Object.assign` — it evaluates getters instead of copying them. Part `<script>` tags
-  in `index.html` must load before `app.js`.
+  in `index.html` must load before `app.js`. Two subsystems own a part file of their
+  own — `js/faces.js` and `js/video_playback/player.js` — for the same cohesion reason
+  their Python packages own a router; they still register on `window.__sfnParts` and
+  still load before `app.js`.
+- **A wiring test cannot tell you the browser can run the file.** `player.js` once
+  shipped a `?? … ||` precedence `SyntaxError` — it did not parse at all — and all
+  fourteen of its text-level wiring tests passed against it. There is no JS test
+  harness here, so browser-side work is finished by starting a server, force-refetching
+  every `<script src>` **and** the stylesheet with `fetch(url, {cache: 'reload'})`,
+  reloading, and driving the component. Spec §14 records the gap.
 
 ## Gotchas
 
