@@ -21,9 +21,16 @@ Seeded 2026-08-12 by cto8 (`21f65f1`). Final fold 2026-08-13 by
 ## what this is
 
 Forensic image-similarity tool: FastAPI UI + CLI over a Qdrant vector store,
-embedding with DINOv2 and SSCD, matching by cosine similarity plus exact and
-perceptual hashing, with an env-gated **face modality** as a second identity
-axis. **Design rule from `CLAUDE.md`: a feature must have forensic value and be
+embedding with DINOv2 and SSCD, matching by cosine similarity plus **exact**
+hashing (SHA-256/MD5), with an env-gated **face modality** as a second identity
+axis. **There is no perceptual hashing** — this line claimed it for two eras and
+no such code has ever existed (`grep -riE 'phash|perceptual|dhash|imagehash'`
+over `src/` returns nothing; `faces/chips.py`'s `ahash` is a SHA of the aligned
+crop, not a perceptual hash). Corrected 2026-08-13 after the operator asked what
+the "perceptual-hash modality" pending item meant — the question exposed the
+claim. Third instance in this ledger of prose outliving the code it described.
+
+**Design rule from `CLAUDE.md`: a feature must have forensic value and be
 legible to a court; decorative features get removed.** Target deployment is a
 distributed isolated LAN, fully offline.
 
@@ -37,10 +44,12 @@ distributed isolated LAN, fully offline.
   cites `f6cef02`.
 - Campaign complete: 8,137 files indexed. Cropper delivered as the standalone
   repo `portable_face_cropper` (8138→4537 crops, 0 failures, 35m01s).
-- **Fleet: manager `com-m4` only; no live workers.** `com-c12` delivered phases
+- **Fleet: manager `com-m4` + benchmarker `csm-b1`.** `com-c12` delivered phases
   1–3, `com-c13` the carve; both retired with their ownership released. Two
-  stranded `cfm-g1` rows were reaped at the manager's open. **Everything
-  downstream is blocked on the operator** — nothing is left running, on purpose.
+  stranded `cfm-g1` rows were reaped at the manager's open. **The operator
+  answered every open question on 2026-08-13 and phase 4 is UNBLOCKED**; `b1` is
+  running the §14 measurements alone, because concurrency scaling is only valid
+  on an otherwise-idle box. The phase-4 coder is spawned after `b1` reports.
 - **The shared checkout is a real constraint, not a formality.** One working
   tree serves every session, so a coder on a feature branch means the manager
   cannot commit its own docs there without riding along in the coder's PR.
@@ -170,7 +179,12 @@ about what was measured and §3.4 lists what was not.
   `sha256(source identity ‖ pipeline fingerprint)` (§6.1), and the pipeline
   fingerprint is produced by phase 4's `capability.py`, which does not exist.
   Do not start phase 5 "in parallel".
-- Phase 4 is **blocked on two things**: the HDR test-fixture decision (§14 — a
+- **Phase 4 is UNBLOCKED** as of the operator's 2026-08-13 rulings below:
+  `test_data/` holds a committed HDR fixture, this PC is the target so its spec
+  is the floor, 1080p is the output cap, and the near-ceiling refusal is
+  approved. What follows is the historical statement of the blockers, kept
+  because §14's *caveats* survive their answers.
+- Phase 4 **was blocked on two things**: the HDR test-fixture decision (§14 — a
   gitignored `data/` means no committed sample; generate one or gate-and-skip like
   the YuNet test), and the real-hardware measurements §14 requires (4K rates,
   long-source seek, concurrent scaling, minimum hardware floor).
@@ -252,43 +266,68 @@ and no longer an open item; the full §6.2 rewrite remains phase 5.
   Recovered as `#140`. A dead agent's owned paths are worth `git diff`-ing
   before the row is reaped.
 
+## operator rulings, 2026-08-13 — PHASE 4 IS UNBLOCKED
+
+All five open items were answered in one pass. Recorded as closed rulings; do
+not re-escalate them.
+
+1. **HDR test fixture — RULED: commit a small public sample under a tracked
+   `test_data/`.** This dissolves the blocker rather than answering it: the
+   constraint was only ever that `data/` is gitignored, and a *new tracked
+   directory* has no such rule. `test_data/` is for fixtures a test needs and a
+   reviewer must be able to see; it is not `data/`, which stays gitignored for
+   evidence. Manager's implementation note: the committed clip must be genuinely
+   10-bit HDR (`yuv420p10le`, `bt2020`, HLG or PQ) and redistributable, and the
+   **rotation** case is derived from it at test time with an `ffmpeg -c copy`
+   metadata add — public HDR clips do not carry the `rotation=-90` side data that
+   is an iPhone artifact, and stream-copying it on costs nothing and stays exact.
+   One committed file covers both §3.1 defects. If no suitable public clip is
+   small and licence-clean, generate one with `ffmpeg -f lavfi` and commit *that*
+   — a generated file in `test_data/` satisfies the ruling's shape and is
+   licence-clean by construction.
+2. **Hardware — RULED: this PC is the deployment target.** Not a proxy for it.
+   That collapses §17 Q3: the **minimum hardware floor is this machine's measured
+   spec**, recorded as a measurement of the target rather than an extrapolation.
+   The §14 measurements run here, and the 4K and multi-hour sources are
+   synthesised because the corpus has none — **which means the seek numbers are a
+   best case and understate the damaged-index, long-GOP and VFR risk §3.2 names.**
+   That caveat travels with the number, in the §3.4 style.
+3. **§17 Q1 output resolution — RULED: 1080p cap.** "Full quality can be achieved
+   by download" — which is exactly §7.4's position, that fine detail is judged
+   from the original and never from the rendering. The cap and the Download-original
+   route are one decision, not two.
+4. **§17 Q5 — RULED as recommended:** refuse a full-video job before start above
+   an estimated 50% of `SFN_VIDEO_CACHE_MAX_BYTES`, showing the estimate and
+   offering Download original.
+5. **CodeQL — RULED: the operator dismisses the 17.** Agents still cannot; it
+   needs their `security_events` scope.
+
 ## pending user decisions
 
-**Phase 4 of the video work is blocked on 1 and 2.** Both are put to the
-operator with a recommendation; the full argument is the `com-m4` runbook entry
-of 2026-08-13.
+Four items the operator asked *about* rather than ruled on. Answers below; none
+blocks any work.
 
-1. **HDR test fixture** (spec §14, §17 Q4) — `data/` is gitignored so no 10-bit
-   HDR sample can be committed, and §14's rotation and `bt709` colour-tag tests
-   are exactly the two defects §3.1 found. *Recommend both, layered*: a
-   generated `ffmpeg -f lavfi` fixture as the CI default (ffmpeg is already a
-   §8 dependency, so this adds none) plus a gate-and-skip on an env-supplied
-   real-corpus path, YuNet-style, for what a synthetic clip cannot honestly
-   assert. Generated-only makes green CI mean less than it looks; gated-only
-   means the assertions never run.
-2. **Real-hardware measurements** (§14, §17 Q3) — every §3 number is 1080p,
-   single-job, on the idle dev host; §3.4 says so. Three questions: is the dev
-   host representative or is there target hardware; are there real 4K and
-   multi-hour sources to point a benchmarker at (§3 saw max 318 s, median
-   2.0 s) or should it synthesise; and what is the minimum hardware floor —
-   that one is a policy statement, not a measurement. *Recommend* holding the
-   `csm` benchmarker until the first two are answered, and scheduling it after
-   phase 3 merges regardless: concurrency scaling is only valid on an
-   otherwise-idle box, so it must not run while a coder is running the suite.
-3. **Spec §17 Q1, output resolution** — *recommend cap at 1080p by default*,
-   never upscale, rescale disclosed per §7.4, operator-overridable. 4K is
-   unmeasured, and §7.4 already says fine detail is judged from the original.
-4. **Spec §17 Q5, full-video job near the ceiling** — *recommend refusing
-   before start* above an estimated 50% of `SFN_VIDEO_CACHE_MAX_BYTES`, showing
-   the estimate and offering Download original. §6.2's lease cannot save the
-   watched video when the overflowing artifact is the job's own output.
-5. **CodeQL dismissals** — 17 verified false positives; one-liner supplied to
-   the operator, needs their token scope.
-6. **`stale-observation-purge.md`**: re-detect vs config-hash diff (carried).
-7. **Audit-button label**: shipped string + subtitle stands unless objected (carried).
-8. **Perceptual-hash modality** absent (carried).
-9. **Cropper `.gif` inputs** — 2 files were skipped on the delivered run; nobody
-   has ruled on whether to re-run including them (carried, low stakes).
+- **`stale-observation-purge.md`** — a design note for a command that does not
+  exist (`docs/specs/stale-observation-purge.md`, status "proposal, not
+  implemented"). The real gap it names: stale face observations are detected
+  only *inside* an index run, and a re-run skips the medium, so the operator is
+  never asked again and the keys survive only in `face_audit.log`. The open fork
+  is how a standalone command would find them — re-detect (faithful, costs a
+  full detection pass) or config-hash diff (cheap, but over-reports, so it is
+  usable for *inspect* and never as a delete predicate). **Nothing is broken
+  today**; this is deferred work, not a defect.
+- **Audit-button label** — not a new feature. It is the shipped `DINO Audit` /
+  `FACE Audit` button pair in the analysis toolbar (`index.html:1055`, `:1067`).
+  An earlier window asked whether the wording should change and got no answer;
+  the string stands. Nothing to review unless the operator dislikes the label.
+- **Perceptual-hash modality** — **there is none, and there never was.** See the
+  correction at the top of this file: the "what this is" line claimed perceptual
+  hashing for two eras against code that has never contained any. Matching is
+  DINOv2/SSCD cosine plus exact SHA-256/MD5. The item was asking whether to
+  *add* a perceptual-hash axis; it remains unbuilt and unproposed.
+- **Cropper `.gif`** — ScalarForensic **does** support GIF (`scanner.py:17`).
+  The skipped files were 2 `.gif` inputs in the separate `portable_face_cropper`
+  run; nobody ruled on re-running to include them. Low stakes, different repo.
 
 Closed since the last fold: **HEVC remedy** — superseded by the `#142` spec. The
 answer is on-demand segment transcoding keyed to what the analyst actually

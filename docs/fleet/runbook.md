@@ -1791,3 +1791,57 @@ fresh coder; §11's tree marks which modules exist and which arrive with their p
 4:** the HDR fixture strategy, the real-hardware measurements, §17 Q1 and Q5, and the 17
 CodeQL path-injection false positives needing their token scope. All five carry a
 recommendation in `docs/CTO_LEDGER.md` "pending user decisions".
+
+## [ScalarForensic, com-m4, 2026-08-13] OPERATOR ANSWERED EVERYTHING — phase 4 unblocked
+
+All five open items ruled in one pass, plus four questions asked back. Rulings are folded
+into `docs/CTO_LEDGER.md` as closed; the reasoning that is not obvious from the ruling text:
+
+**The HDR fixture ruling dissolved the blocker instead of answering it.** The operator's
+"a small public video in a folder `test_data/`" sidesteps the whole constraint: the problem
+was never "fixtures cannot be committed", it was that `data/` is gitignored. A *new tracked
+directory* has no such rule, and separating `test_data/` (fixtures a reviewer must see)
+from `data/` (evidence, gitignored) is a cleaner line than either option the manager
+recommended. Worth recording as a pattern: when a blocker is phrased as a choice between
+two workarounds, check whether the constraint generating it is actually load-bearing.
+
+Two implementation facts the ruling does not settle, decided by the manager and written
+into the ledger so the phase-4 coder does not rediscover them: a public HDR clip will not
+carry `rotation=-90` — that is an iPhone artifact, and it is one of the two defects §3.1
+found — so the rotation case is derived from the committed clip at test time with an
+`ffmpeg -c copy` metadata add, exact and free. And if no small licence-clean public HDR clip
+exists, generating one with `-f lavfi` and committing *that* satisfies the ruling's shape
+while being licence-clean by construction.
+
+**"We test with this pc" collapsed §17 Q3 rather than answering it.** If this machine is the
+deployment target and not a proxy for it, the minimum hardware floor stops being a policy
+statement and becomes a measurement of the target. The benchmarker records the spec.
+
+**The caveat that must survive its own answer:** there is still no real 4K and no real
+multi-hour source, so `b1` synthesises them. A synthesised long source has a clean dense
+index, so the seek numbers are a *best case* and specifically understate the damaged-index,
+long-GOP and VFR risk §3.2 names. That limitation travels next to the number in §3.4 style.
+An answered question is not the same as a measured one.
+
+**`csm-b1` (sonnet, benchmarker — model policy allows sonnet here and only here) spawned
+alone.** No coder runs beside it: a 15 s pytest during a k=8 ffmpeg scaling run perturbs
+exactly the number being measured. Brief at `scratchpad/dispatch-b1.md`. The phase-4 coder
+is spawned when b1 reports.
+
+### A false claim in this project's own ledger, exposed by an operator question
+
+Asked what the "perceptual-hash modality" item meant, the manager went to look — and there
+is no perceptual hashing anywhere in `src/`, and never has been.
+`grep -riE 'phash|perceptual|dhash|imagehash'` returns nothing; `faces/chips.py`'s `ahash`
+is a SHA-256 of the aligned crop, not a perceptual hash. The ledger's own "what this is"
+paragraph had claimed "cosine similarity plus exact and perceptual hashing" for two eras.
+Corrected. **Third instance of prose outliving the code it described** (after "review floor
+36" and §11's non-existent `/api/video-timeline` call) — the standing rule about `git log -S`
+before trusting a prose value is earning its place.
+
+Answers to the other three questions, recorded because they were asked once and will be
+asked again: `stale-observation-purge.md` is a design note for an unimplemented command and
+nothing is broken today; the "audit-button label" is the shipped `DINO Audit`/`FACE Audit`
+pair at `index.html:1055`/`:1067`, not a new feature awaiting review; and ScalarForensic
+does support `.gif` (`scanner.py:17`) — the 2 skipped gifs were in the separate
+`portable_face_cropper` run.
