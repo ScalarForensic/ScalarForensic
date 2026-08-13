@@ -243,6 +243,24 @@ class HashCache:
             self._pending.append((key, mtime_ns, size, sha, md5))
         return sha, md5, False
 
+    def peek(self, path: Path) -> str | None:
+        """Return the cached SHA-256 for *path*, or None — never hashes.
+
+        For callers that want the digest only if it is free: a request handler
+        that must start streaming bytes now cannot afford the whole-file read a
+        miss would cost.  None means "not cached", never "does not match".
+        """
+        entry = self._mem.get(self._cache_key(path))
+        if entry is None:
+            return None
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        if entry[0] != st.st_mtime_ns or entry[1] != st.st_size:
+            return None
+        return entry[2]
+
     def flush(self) -> int:
         """Persist pending entries to SQLite.  Returns the number of rows written."""
         with self._lock:

@@ -145,8 +145,11 @@ def test_the_player_is_labelled_as_a_viewing_copy():
     # rule the uncalibrated face cosine is displayed under.
     html = (STATIC / "index.html").read_text()
     assert "VIEWING COPY" in html
-    assert "streams unmodified" in html
     assert "authoritative artifacts" in html
+    # "streams unmodified, no re-encode" moved into the server's mode_reason so
+    # the label cannot drift from the allowlist verdict; it is pinned in
+    # tests/test_video_playback.py::TestPlaybackMode.
+    assert "videoPlayback.mode_reason" in html
 
 
 def test_the_player_source_is_the_playback_endpoint_and_seeks_to_the_hit():
@@ -204,6 +207,22 @@ def test_a_stale_file_is_called_out_prominently_not_in_a_tooltip():
     html = (STATIC / "index.html").read_text()
     assert "videoPlaybackProvenance === 'stale'" in html
     assert "videoPlaybackStaleReason" in html
+
+
+def test_the_mode_reason_is_the_servers_sentence_not_a_copy_in_the_page():
+    # The verdict comes from the side that probed the stream; a hardcoded
+    # sentence per mode would drift from the allowlist the moment it changes.
+    html = (STATIC / "index.html").read_text()
+    assert "videoPlayback.mode_reason" in html
+    assert "Container rewrap (QuickTime" not in html
+
+
+def test_an_undecodable_stream_gets_a_heading_and_the_escape_route():
+    computed = (STATIC / "js" / "computed.js").read_text()
+    body = _fn_body(computed, "get videoPlaybackModeHeading")
+    assert "transcode" in body and "unknown" in body
+    html = (STATIC / "index.html").read_text()
+    assert "videoPlaybackModeHeading" in html
 
 
 def test_the_player_offers_the_download_escape_route():

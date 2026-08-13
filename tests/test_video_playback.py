@@ -112,6 +112,28 @@ def mp4(roots):
     return _write_clip(input_dir / "clip.mp4", "mp4")
 
 
+def _write_encoded(path: Path, container_format: str, encoder: str, pix_fmt: str) -> Path:
+    """Encode a tiny clip with *encoder* at *pix_fmt* — codec-detection fixtures."""
+    with av.open(str(path), "w", format=container_format) as c:
+        stream = c.add_stream(encoder, rate=10)
+        stream.width, stream.height = 64, 48
+        stream.pix_fmt = pix_fmt
+        for i in range(6):
+            arr = np.full((48, 64, 3), (i * 24) % 256, dtype=np.uint8)
+            for packet in stream.encode(av.VideoFrame.from_ndarray(arr, format="rgb24")):
+                c.mux(packet)
+        for packet in stream.encode():
+            c.mux(packet)
+    return path
+
+
+@pytest.fixture()
+def hevc_10bit_mov(roots):
+    """An HEVC Main-10 .MOV — the iPhone case the whole feature exists for."""
+    input_dir, _ = roots
+    return _write_encoded(input_dir / "IMG_0010.MOV", "mov", "libx265", "yuv420p10le")
+
+
 def _packet_payloads(path: Path) -> list[bytes]:
     """Raw bytes of every video packet in *path*, in demux order."""
     with av.open(str(path)) as c:
@@ -361,8 +383,131 @@ class TestPlaybackInfo:
         broken = input_dir / "broken.mov"
         broken.write_bytes(b"\x00\x00\x00\x14ftypqt  " + b"\x00" * 64)
         body = client.get(f"/api/video-playback-info?path={broken}").json()
-        assert body["mode"] == "rewrap"
+        assert body["mode"] == "unknown"
         assert "probe_error" in body
+
+
+# ---------------------------------------------------------------------------
+# Codec allowlist and playback mode (spec §5, §15.3, ruling §16)
+# ---------------------------------------------------------------------------
+
+
+class TestPixelProfile:
+    @pytest.mark.parametrize(
+        ("pix_fmt", "expected"),
+        [
+            ("yuv420p", (8, "420")),
+            ("yuvj420p", (8, "420")),
+            ("yuv420p10le", (10, "420")),
+            ("yuv422p10le", (10, "422")),
+            ("yuv444p", (8, "444")),
+            ("gray", (8, None)),
+        ],
+    )
+    def test_bit_depth_and_chroma_are_read_from_the_pixel_format(self, pix_fmt, expected):
+        assert video_routes._pixel_profile(pix_fmt, None) == expected
+
+    def test_the_profile_settles_it_when_the_pixel_format_is_missing(self):
+        assert video_routes._pixel_profile(None, "Main 10") == (10, None)
+        assert video_routes._pixel_profile(None, "High 4:4:4 Predictive") == (None, "444")
+
+    def test_neither_available_is_undetermined_not_a_guess(self):
+        assert video_routes._pixel_profile(None, None) == (None, None)
+        assert video_routes._pixel_profile(None, "High") == (None, None)
+
+
+class TestDecodeVerdict:
+    def _info(self, **kw):
+        base = {"video_codec": "h264", "video_pix_fmt": "yuv420p", "video_profile": "High"}
+        return {**base, **kw}
+
+    def test_h264_8bit_is_playable(self):
+        assert video_routes._decode_verdict(self._info())[0] is True
+
+    def test_h264_10bit_is_not(self):
+        verdict, reason = video_routes._decode_verdict(self._info(video_pix_fmt="yuv420p10le"))
+        assert verdict is False
+        assert "H.264 10-bit" in reason
+
+    def test_h264_444_is_not(self):
+        verdict, reason = video_routes._decode_verdict(self._info(video_pix_fmt="yuv444p"))
+        assert verdict is False
+        assert "4:4:4" in reason
+
+    def test_vp9_10bit_is_playable(self):
+        info = self._info(video_codec="vp9", video_pix_fmt="yuv420p10le")
+        assert video_routes._decode_verdict(info)[0] is True
+
+    def test_av1_and_vp8_are_on_the_allowlist(self):
+        for codec in ("av1", "vp8"):
+            assert video_routes._decode_verdict(self._info(video_codec=codec))[0] is True
+
+    def test_hevc_is_not_on_the_allowlist_at_any_depth(self):
+        # §16: Chrome advertises HEVC and then fails. The allowlist decides.
+        verdict, reason = video_routes._decode_verdict(self._info(video_codec="hevc"))
+        assert verdict is False
+        assert "HEVC" in reason
+
+    def test_prores_names_itself_in_the_reason(self):
+        verdict, reason = video_routes._decode_verdict(self._info(video_codec="prores"))
+        assert verdict is False
+        assert "Apple ProRes" in reason
+
+    def test_an_unprobeable_container_is_undetermined(self):
+        verdict, reason = video_routes._decode_verdict({"probe_error": "moov atom not found"})
+        assert verdict is None
+        assert "moov atom not found" in reason
+
+    def test_no_video_stream_is_undetermined(self):
+        assert video_routes._decode_verdict({"video_codec": None})[0] is None
+
+    def test_an_unreadable_pixel_format_is_undetermined_not_a_transcode(self):
+        info = self._info(video_pix_fmt=None, video_profile=None)
+        verdict, reason = video_routes._decode_verdict(info)
+        assert verdict is None
+        assert "pixel format" in reason
+
+
+class TestPlaybackMode:
+    def test_10bit_hevc_mov_reports_transcode(self, client, hevc_10bit_mov):
+        body = client.get(f"/api/video-playback-info?path={hevc_10bit_mov}").json()
+        assert body["mode"] == "transcode"
+        assert "HEVC 10-bit" in body["mode_reason"]
+        # No encoding happens in this phase; the escape route must be offered.
+        assert body["download_url"]
+
+    def test_h264_mp4_reports_original(self, client, mp4):
+        body = client.get(f"/api/video-playback-info?path={mp4}").json()
+        assert body["mode"] == "original"
+        assert "H.264" in body["mode_reason"]
+
+    def test_h264_in_a_quicktime_container_reports_rewrap(self, client, mov):
+        # Right codec, wrong container: the packets move, nothing is re-encoded.
+        body = client.get(f"/api/video-playback-info?path={mov}").json()
+        assert body["mode"] == "rewrap"
+        assert "no re-encode" in body["mode_reason"]
+
+    def test_a_corrupt_container_reports_unknown_not_a_crash(self, client, roots):
+        input_dir, _ = roots
+        broken = input_dir / "broken.mov"
+        broken.write_bytes(b"\x00\x00\x00\x14ftypqt  " + b"\x00" * 64)
+        r = client.get(f"/api/video-playback-info?path={broken}")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["mode"] == "unknown"
+        assert "download the original" in body["mode_reason"]
+
+    def test_the_codec_decides_before_the_container(self, client, roots):
+        # A 10-bit HEVC already in an MP4 box structure still cannot be decoded,
+        # so it must not be reported as playable-as-is.
+        input_dir, _ = roots
+        p = _write_encoded(input_dir / "hevc10.mp4", "mp4", "libx265", "yuv420p10le")
+        assert client.get(f"/api/video-playback-info?path={p}").json()["mode"] == "transcode"
+
+    def test_no_encoding_happens_on_open(self, client, hevc_10bit_mov, roots):
+        _, cache_dir = roots
+        client.get(f"/api/video-playback-info?path={hevc_10bit_mov}")
+        assert not cache_dir.exists() or not list(cache_dir.iterdir())
 
 
 # ---------------------------------------------------------------------------
@@ -391,9 +536,34 @@ class TestVideoDownload:
         assert disposition.startswith("attachment")
         assert "IMG_0001.MOV" in disposition
 
-    def test_the_verified_digest_travels_with_the_bytes(self, client, mov):
+    def test_a_cached_digest_travels_with_the_bytes(self, client, mov):
+        client.get(f"/api/video-playback-info?path={mov}")  # fills the HashCache
         r = client.get(f"/api/video-download?path={mov}")
         assert r.headers["x-sfn-source-sha256"] == hash_file(mov)
+
+    def test_a_cold_cache_omits_the_header_rather_than_stalling(self, client, mov):
+        # The escape route must start streaming now: a cold multi-GB source would
+        # otherwise be read whole before the first byte moved.  An absent header
+        # is "not computed", never "unverified".
+        with patch.object(video_routes, "hash_file", side_effect=AssertionError("hashed!")):
+            with patch("scalar_forensic.embedder.hash_file_both", side_effect=AssertionError):
+                r = client.get(f"/api/video-download?path={mov}")
+        assert r.status_code == 200
+        assert "x-sfn-source-sha256" not in r.headers
+        assert r.content == mov.read_bytes()
+
+    def test_a_disabled_hash_cache_still_serves_the_bytes(self, client, mov, monkeypatch):
+        monkeypatch.setenv("SFN_HASH_CACHE_PATH", "")
+        video_routes._reset_hash_cache()
+        r = client.get(f"/api/video-download?path={mov}")
+        assert r.status_code == 200
+        assert "x-sfn-source-sha256" not in r.headers
+
+    def test_a_stale_cache_entry_is_not_served_as_the_digest(self, client, mov):
+        client.get(f"/api/video-playback-info?path={mov}")  # fills the HashCache
+        mov.write_bytes(mov.read_bytes() + b"tampered")
+        r = client.get(f"/api/video-download?path={mov}")
+        assert "x-sfn-source-sha256" not in r.headers
 
     def test_a_path_outside_the_allowed_roots_is_rejected(self, client, roots, tmp_path):
         outside = tmp_path / "elsewhere.mov"
@@ -425,6 +595,17 @@ class TestVideoDownload:
         d = input_dir / "adir.mov"
         d.mkdir()
         assert client.get(f"/api/video-download?path={d}").status_code == 404
+
+    def test_both_advertised_urls_escape_the_path(self, client, roots):
+        # iPhone corpora carry '#' and spaces in filenames; an unescaped query
+        # string truncates at the '#' and serves — or fails on — another file.
+        input_dir, _ = roots
+        awkward = _write_clip(input_dir / "IMG #7 &b.mov", "mov")
+        body = client.get("/api/video-playback-info", params={"path": str(awkward)}).json()
+        assert "#" not in body["download_url"]
+        assert "#" not in body["playback_url"]
+        assert client.get(body["download_url"]).content == awkward.read_bytes()
+        assert client.get(body["playback_url"]).status_code == 200
 
     def test_playback_info_advertises_the_download(self, client, mov):
         body = client.get(f"/api/video-playback-info?path={mov}").json()
@@ -572,9 +753,9 @@ class TestCacheEviction:
     def test_oldest_entries_are_evicted_first(self, tmp_path):
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
-        old = self._entry(cache_dir, "a.mp4", 100, 1_000)
-        mid = self._entry(cache_dir, "b.mp4", 100, 2_000)
-        new = self._entry(cache_dir, "c.mp4", 100, 3_000)
+        old = self._entry(cache_dir, "a" * 64 + ".mp4", 100, 1_000)
+        mid = self._entry(cache_dir, "b" * 64 + ".mp4", 100, 2_000)
+        new = self._entry(cache_dir, "c" * 64 + ".mp4", 100, 3_000)
         deleted = video_routes._evict_cache(cache_dir, 150, keep=new)
         assert deleted == 2
         assert not old.exists() and not mid.exists() and new.exists()
@@ -582,16 +763,31 @@ class TestCacheEviction:
     def test_the_file_being_served_is_never_evicted(self, tmp_path):
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
-        keep = self._entry(cache_dir, "keep.mp4", 500, 1_000)
-        other = self._entry(cache_dir, "other.mp4", 100, 2_000)
+        keep = self._entry(cache_dir, "d" * 64 + ".mp4", 500, 1_000)
+        other = self._entry(cache_dir, "e" * 64 + ".mp4", 100, 2_000)
         video_routes._evict_cache(cache_dir, 10, keep=keep)
         assert keep.exists()
         assert not other.exists()
 
+    def test_only_this_functions_own_rewraps_are_candidates(self, tmp_path):
+        # Later phases park chunks and full copies in the same store; a bare
+        # *.mp4 glob would delete a video's own artifacts mid-play (spec §6.2).
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        rewrap = self._entry(cache_dir, "a" * 64 + ".mp4", 100, 1_000)
+        full = self._entry(cache_dir, "full.mp4", 100, 500)
+        init = self._entry(cache_dir, "init.mp4", 100, 500)
+        per_video = cache_dir / ("b" * 64)
+        per_video.mkdir()
+        chunk = self._entry(per_video, "c0.mp4", 100, 500)
+        video_routes._evict_cache(cache_dir, 10, keep=cache_dir / "nothing.mp4")
+        assert not rewrap.exists()
+        assert full.exists() and init.exists() and chunk.exists()
+
     def test_zero_ceiling_disables_eviction(self, tmp_path):
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
-        p = self._entry(cache_dir, "a.mp4", 100, 1_000)
+        p = self._entry(cache_dir, "a" * 64 + ".mp4", 100, 1_000)
         assert video_routes._evict_cache(cache_dir, 0, keep=cache_dir / "x.mp4") == 0
         assert p.exists()
 

@@ -275,6 +275,22 @@ def _source_digest(p: Path, settings: Settings | None = None) -> str:
     return digest
 
 
+def _cached_source_digest(p: Path, settings: Settings | None = None) -> str | None:
+    """The digest of *p* if the HashCache already holds a current one, else None.
+
+    Never hashes.  For handlers that must not pay a whole-file read — None is
+    "not computed", not a verdict about the file.
+    """
+    cache = _hash_cache_for(settings if settings is not None else Settings())
+    if cache is None:
+        return None
+    try:
+        return cache.peek(p)
+    except (sqlite3.Error, OSError) as exc:  # pragma: no cover - defensive
+        _log.debug("hash cache peek failed for %s: %s", p, exc)
+        return None
+
+
 def _stale_evidence_report(computed: str, indexed: str | None) -> dict:
     """Compare the digest computed now with the one the index recorded.
 
@@ -306,7 +322,13 @@ def _stream_report(p: Path) -> dict:
     cannot be re-encoded here, so the viewing copy of one is silent.  The label
     says so rather than letting the operator infer a silent original.
     """
-    info: dict = {"container_brand": _ftyp_brand(p), "video_codec": None, "audio_codec": None}
+    info: dict = {
+        "container_brand": _ftyp_brand(p),
+        "video_codec": None,
+        "audio_codec": None,
+        "video_pix_fmt": None,
+        "video_profile": None,
+    }
     skipped: list[str] = []
     try:
         with av.open(str(p)) as container:
@@ -317,6 +339,10 @@ def _stream_report(p: Path) -> dict:
                 if s.type == "video" and info["video_codec"] is None:
                     info["video_codec"] = s.codec_context.name
                     info["video_codec_tag"] = s.codec_context.codec_tag
+                    # Read from the container's codec parameters — no frame is
+                    # decoded, which is what keeps opening a hit cheap (§5).
+                    info["video_pix_fmt"] = s.codec_context.pix_fmt
+                    info["video_profile"] = s.codec_context.profile
                 elif s.type == "audio" and info["audio_codec"] is None:
                     info["audio_codec"] = s.codec_context.name
                 if s.type in ("video", "audio") and s.codec_context.name not in _MP4_LEGAL_CODECS:
@@ -326,6 +352,137 @@ def _stream_report(p: Path) -> dict:
         info["probe_error"] = str(exc)
     info["skipped_streams"] = skipped
     return info
+
+
+# ---------------------------------------------------------------------------
+# Codec allowlist (spec §5, §15.3, ruling §16)
+# ---------------------------------------------------------------------------
+#
+# What the browser can decode is decided HERE, from the stream, and never from
+# what the browser advertises: the operator's Chrome reports HEVC support and
+# then fails to decode an iPhone HEVC file (ruling 2026-08-13).  The allowlist is
+# therefore deliberately narrow — a codec is playable only in the pixel formats
+# every target browser actually decodes.
+#
+# Phase 3 detects and reports.  It never encodes: a stream outside the allowlist
+# is named as needing a transcode, and the analyst is pointed at Download
+# original until the encode path lands (phase 4).
+
+# codec name → maximum bit depth the browsers decode.  4:2:0 chroma is required
+# for all of them; 4:2:2 and 4:4:4 have no browser decoder at any depth.
+_PLAYABLE_CODECS: dict[str, int] = {
+    "h264": 8,  # 8-bit 4:2:0 only — High 10 and 4:4:4 are not decodable
+    "vp8": 8,
+    "vp9": 10,  # profile 0 and profile 2
+    "av1": 10,  # Main profile, 8- and 10-bit
+}
+
+# Display names for the reason string.  A label an analyst reads must name the
+# codec the way the world names it, not the way libavcodec does.
+_CODEC_DISPLAY_NAMES = {
+    "h264": "H.264",
+    "hevc": "HEVC",
+    "vp8": "VP8",
+    "vp9": "VP9",
+    "av1": "AV1",
+    "mpeg4": "MPEG-4 Part 2",
+    "mpeg2video": "MPEG-2",
+    "mjpeg": "Motion JPEG",
+    "prores": "Apple ProRes",
+    "dnxhd": "DNxHD",
+    "vc1": "VC-1",
+    "theora": "Theora",
+}
+
+
+def _codec_label(codec: str | None, bits: int | None, chroma: str | None) -> str:
+    """Human name for a stream: ``"HEVC 10-bit"``, ``"H.264 4:4:4"``."""
+    name = _CODEC_DISPLAY_NAMES.get(codec or "", codec or "unknown codec")
+    parts = [name]
+    if bits is not None and bits != 8:
+        parts.append(f"{bits}-bit")
+    if chroma is not None and chroma != "420":
+        parts.append(f"{chroma[0]}:{chroma[1]}:{chroma[2]}")
+    return " ".join(parts)
+
+
+def _pixel_profile(pix_fmt: str | None, profile: str | None) -> tuple[int | None, str | None]:
+    """Return ``(bit depth, chroma)`` for a stream, without decoding a frame.
+
+    ``pix_fmt`` is what libavformat parsed out of the container's codec
+    parameters, which is enough for every codec in the allowlist.  Where it is
+    absent the profile name still settles the question for the two cases that
+    matter (``"Main 10"``, ``"High 4:4:4 Predictive"``).  ``(None, None)`` means
+    undetermined — reported as such, never guessed.
+    """
+    if pix_fmt:
+        try:
+            fmt = av.VideoFormat(pix_fmt)
+            bits = max(c.bits for c in fmt.components if c.bits)
+        except (ValueError, AttributeError):  # pragma: no cover - unknown format name
+            bits = None
+        for chroma in ("444", "422", "420", "411", "410"):
+            if chroma in pix_fmt:
+                return bits, chroma
+        # Formats with no subsampling digits (gray, rgb…) are not 4:2:0 and no
+        # browser decodes them in these codecs.
+        return bits, None
+    if profile:
+        low = profile.lower()
+        bits = 12 if "12" in low else 10 if "10" in low else None
+        chroma = "444" if "4:4:4" in low else "422" if "4:2:2" in low else None
+        if bits is not None or chroma is not None:
+            return bits, chroma
+    return None, None
+
+
+def _decode_verdict(info: dict) -> tuple[bool | None, str]:
+    """Can a browser decode this video stream?  ``(verdict, human reason)``.
+
+    ``None`` is "cannot tell" — a stream that could not be probed, or a pixel
+    format libavformat did not report.  It is a third answer on purpose: guessing
+    "playable" hides a failure, guessing "transcode" claims work is needed on no
+    evidence, and §5 forbids inventing a state that cannot be observed.
+    """
+    if info.get("probe_error"):
+        return None, f"The container could not be probed ({info['probe_error']})."
+    codec = info.get("video_codec")
+    if not codec:
+        return None, "No video stream was found in this container."
+    bits, chroma = _pixel_profile(info.get("video_pix_fmt"), info.get("video_profile"))
+    label = _codec_label(codec, bits, chroma)
+    max_bits = _PLAYABLE_CODECS.get(codec)
+    if max_bits is None:
+        return False, f"{label}: no browser decoder for this codec."
+    if bits is None and chroma is None:
+        return None, f"{label}: the pixel format could not be read from the container."
+    if chroma is not None and chroma != "420":
+        return False, f"{label}: browsers decode 4:2:0 chroma only."
+    if bits is not None and bits > max_bits:
+        return False, f"{label}: this browser cannot decode it."
+    return True, f"{label}: decodes natively."
+
+
+def _playback_mode(info: dict, needs_remux: bool) -> tuple[str, str]:
+    """Decide ``mode`` and the reason shown to the analyst.
+
+    Codec first, container second: a rewrap moves the same bitstream, so it
+    cannot rescue a stream the browser has no decoder for.
+    """
+    decodable, reason = _decode_verdict(info)
+    if decodable is None:
+        return "unknown", f"{reason} Playback cannot be judged from here — download the original."
+    if decodable is False:
+        return "transcode", (
+            f"{reason} A transcoded viewing copy is required; "
+            "encoding is not available yet — download the original to view it."
+        )
+    if needs_remux:
+        return "rewrap", (
+            f"{reason} The QuickTime container is not one browsers open, so the same "
+            "packets are rewrapped into MP4 — no re-encode."
+        )
+    return "original", f"{reason} The file is streamed as it is stored on disk."
 
 
 def _repair_timestamps(packet: av.Packet, last_dts: int | None) -> bool:
@@ -418,12 +575,21 @@ def _evict_cache(cache_dir: Path, max_bytes: int, keep: Path) -> int:
     Returns the number of files deleted.  *keep* is never evicted — it is the
     copy the current request is about to serve.  Recency is the file mtime,
     which :func:`_touch` refreshes on every cache hit.
+
+    Scope is deliberately narrow: only top-level ``{sha256}.mp4`` rewraps, the
+    artifacts this function created.  A bare ``*.mp4`` glob would match — and
+    delete — the ``full.mp4`` and chunk files later phases put in the same store,
+    including one mid-play.  The whole-tree accounting, per-video eviction and
+    playback leases that store needs are spec §6.2, phase 5; this is containment
+    until then, not that rewrite.
     """
     if max_bytes <= 0:
         return 0
     entries: list[tuple[float, int, Path]] = []
     total = 0
     for f in cache_dir.glob("*.mp4"):
+        if not re.fullmatch(r"[0-9a-f]{64}", f.stem):
+            continue
         try:
             st = f.stat()
         except OSError:
@@ -534,24 +700,34 @@ async def video_download(path: str) -> FileResponse:
     The escape route every playback failure points at: when the browser cannot
     decode a stream, the analyst can still take the original bytes and open them
     in a tool that can.  No viewing copy, no rewrap, no cache — the file as it
-    lies on disk, with the digest computed from it (spec §7.5).
+    lies on disk (spec §7.5).
 
     The same resolution flow as every other path-bearing route: absolute path,
     ``resolve()``, extension check, allowed-root containment, regular file.  A
     cache key is never accepted as the identity of a source file (spec §9).
+
+    ``X-SFN-Source-SHA256`` carries the digest **only when the HashCache already
+    holds it**.  This is the escape route a failing playback points at, so it is
+    the worst place to stall: hashing a cold multi-GB source would read the whole
+    file before the first byte moved, and then read it again to serve.  An absent
+    header means "not computed here", never "unverified" — ``playback-info`` has
+    already computed and displayed the verified digest by the time the analyst
+    clicks, and re-hashing the downloaded file reproduces it.
 
     §1 tension, stated rather than hidden: this places a copy of evidence on the
     analyst's machine.  It is a deliberate act and is audited like any other; the
     deployment's handling policy governs what happens to that copy.
     """
     p = _resolve_video_path(path)
-    digest = await asyncio.to_thread(_source_digest, p)
-    _log.info("video-download: serving %s (sha256=%s)", p, digest)
+    settings = Settings()
+    digest = await asyncio.to_thread(_cached_source_digest, p, settings)
+    headers = {"X-SFN-Source-SHA256": digest} if digest else {}
+    _log.info("video-download: serving %s (sha256=%s)", p, digest or "not cached")
     return FileResponse(
         p,
         media_type=mimetypes.guess_type(p.name)[0] or "application/octet-stream",
         filename=p.name,  # Content-Disposition: attachment, original filename
-        headers={"X-SFN-Source-SHA256": digest},
+        headers=headers,
     )
 
 
@@ -568,6 +744,11 @@ async def video_playback_info(path: str, video_hash: str | None = None) -> JSONR
     file on disk is no longer the one that was indexed, so the frame hits, the
     timeline and any label drawn from them describe a different file.  It is
     reported explicitly (``stale_evidence``) rather than served in silence.
+
+    ``mode`` is decided here, server-side, from the stream itself: ``original``,
+    ``rewrap``, ``transcode`` (a codec outside the allowlist — detected in this
+    phase, encoded in a later one) or ``unknown`` when the container cannot be
+    probed.  ``mode_reason`` is the sentence the analyst reads.
     """
     p = _resolve_video_path(path)
     settings = Settings()
@@ -576,16 +757,19 @@ async def video_playback_info(path: str, video_hash: str | None = None) -> JSONR
         "source_path": str(p),
         "filename": p.name,
         "source_size_bytes": st.st_size,
-        "mode": "original" if not _needs_remux(p) else "rewrap",
-        "playback_url": f"/api/video-playback?path={p}",
+        # Both URLs escape the path the same way.  A filename carrying '#', '?',
+        # '&' or a space — routine in iPhone media — silently truncates an
+        # unescaped query string.
+        "playback_url": f"/api/video-playback?path={quote(str(p))}",
         "download_url": f"/api/video-download?path={quote(str(p))}",
     }
     info.update(await asyncio.to_thread(_stream_report, p))
+    info["mode"], info["mode_reason"] = _playback_mode(info, _needs_remux(p))
     info["video_sha256"] = await asyncio.to_thread(_source_digest, p, settings)
     if info["mode"] == "original":
         # Nothing is left behind when the file is served as it lies on disk.
         info["skipped_streams"] = []
-    else:
+    elif info["mode"] == "rewrap":
         cache_dir = settings.video_cache_dir
         info["cached"] = (
             cache_dir is not None and (cache_dir / f"{info['video_sha256']}.mp4").exists()
