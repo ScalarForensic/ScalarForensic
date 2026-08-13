@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from scalar_forensic.faces.types import FaceDetection
 from scalar_forensic.web.app import app
 from scalar_forensic.web.pipeline.faces_query import detect_query_faces
+from scalar_forensic.web.routes.faces import _detection_token
 
 client = TestClient(app)
 
@@ -215,7 +216,9 @@ def test_query_faces_endpoint_never_returns_a_vector(tmp_path):
     assert body["faces"][0]["searchable"] is True
     assert "vector" not in body["faces"][0]
     assert "review_jpeg" not in body["faces"][0]
-    assert body["faces"][0]["chip_url"].endswith("/query-chip/s/f/0")
+    token = _detection_token([face], result.cfg)
+    assert body["faces"][0]["chip_url"].endswith(f"/query-chip/s/f/{token}/0")
+    assert body["detection_token"] == token
     assert body["n_detected"] == 1
     assert body["truncated"] is False
 
@@ -261,14 +264,28 @@ def test_query_faces_endpoint_marks_review_only_as_not_searchable(tmp_path):
     assert body["n_searchable"] == 0
 
 
-def test_query_chip_serves_the_in_memory_crop_with_no_store(tmp_path):
-    face = _query_face(review_jpeg=b"\xff\xd8jpeg")
-    entry = MagicMock(query_faces=[face])
+def _entry_and_token(faces):
+    """A session entry holding one detection, plus that detection's token.
+
+    ``query_faces_cfg`` is an auto-created MagicMock; ``_detection_token``
+    stringifies its ``config_hash``, which is stable for one mock object — so
+    the token must be computed from the very entry the test patches in.
+    """
+    entry = MagicMock(query_faces=faces)
+    return entry, _detection_token(faces, entry.query_faces_cfg)
+
+
+def _get_chip(entry, token, index):
     with (
         patch("scalar_forensic.web.routes.faces.get_session", return_value=MagicMock()),
         patch("scalar_forensic.web.routes.faces._entry_for", return_value=entry),
     ):
-        resp = client.get("/api/faces/query-chip/s/f/0")
+        return client.get(f"/api/faces/query-chip/s/f/{token}/{index}")
+
+
+def test_query_chip_serves_the_in_memory_crop_with_no_store(tmp_path):
+    entry, token = _entry_and_token([_query_face(review_jpeg=b"\xff\xd8jpeg")])
+    resp = _get_chip(entry, token, 0)
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "image/jpeg"
     assert resp.headers["cache-control"] == "no-store"
@@ -276,10 +293,74 @@ def test_query_chip_serves_the_in_memory_crop_with_no_store(tmp_path):
 
 
 def test_query_chip_404s_on_unknown_index(tmp_path):
-    entry = MagicMock(query_faces=[_query_face()])
-    with (
-        patch("scalar_forensic.web.routes.faces.get_session", return_value=MagicMock()),
-        patch("scalar_forensic.web.routes.faces._entry_for", return_value=entry),
-    ):
-        resp = client.get("/api/faces/query-chip/s/f/7")
+    """Out of bounds *behind* a valid token — the bounds check, not routing."""
+    entry, token = _entry_and_token([_query_face()])
+    resp = _get_chip(entry, token, 7)
     assert resp.status_code == 404
+    assert resp.json()["detail"] == "unknown face index"
+
+
+def test_query_chip_409s_on_a_superseded_detection(tmp_path):
+    """A chip URL issued against an earlier detection is refused, not answered."""
+    entry, _ = _entry_and_token([_query_face()])
+    resp = _get_chip(entry, "0123456789abcdef", 0)
+    assert resp.status_code == 409
+    assert "superseded" in resp.json()["detail"]
+    assert resp.content != b"\xff\xd8"
+
+
+def test_a_stale_chip_url_never_serves_another_persons_crop(tmp_path):
+    """The forensic-integrity case this whole fix exists for.
+
+    Two files in one session: the examiner is looking at file A's faces while
+    the client holds A's chip URLs.  When those indices reach B's detection —
+    B has *more* faces, so the index is in bounds — answering them would put
+    B's face under A's identity label, silently and with no 404 to notice.
+    The token makes that request refusable, and it must be refused.
+    """
+    alice = _query_face(index=0, bbox=(1.0, 2.0, 3.0, 4.0), review_jpeg=b"\xff\xd8alice")
+    bob = _query_face(index=0, bbox=(90.0, 90.0, 50.0, 50.0), review_jpeg=b"\xff\xd8bob")
+    carol = _query_face(index=1, bbox=(10.0, 90.0, 50.0, 50.0), review_jpeg=b"\xff\xd8carol")
+
+    entry_a, token_a = _entry_and_token([alice])
+    entry_b, token_b = _entry_and_token([bob, carol])
+    assert token_a != token_b
+
+    # In bounds for B, so nothing else would have caught it.
+    resp = _get_chip(entry_b, token_a, 0)
+    assert resp.status_code == 409
+    assert b"bob" not in resp.content
+    # B's own token still serves B's own crop.
+    assert _get_chip(entry_b, token_b, 0).content == b"\xff\xd8bob"
+
+
+def test_the_token_changes_when_the_detection_changes(tmp_path):
+    """Every field the index means anything relative to is fingerprinted."""
+    base = [_query_face()]
+    _, token = _entry_and_token(base)
+    cfg = MagicMock()
+    assert _detection_token(base, cfg) != _detection_token(
+        [_query_face(bbox=(9.0, 9.0, 9.0, 9.0))], cfg
+    )
+    assert _detection_token(base, cfg) != _detection_token([_query_face(det_conf=0.5)], cfg)
+    assert _detection_token(base, cfg) != _detection_token(
+        [_query_face(embedding_status="review_only", vector=None)], cfg
+    )
+    assert _detection_token(base, cfg) != _detection_token(base + [_query_face(index=1)], cfg)
+    # A different config over the same faces is a different generation too.
+    assert _detection_token(base, MagicMock(config_hash="a")) != _detection_token(
+        base, MagicMock(config_hash="b")
+    )
+    assert token  # non-empty
+
+
+def test_re_detecting_the_identical_view_reproduces_the_token(tmp_path):
+    """Content-derived, not a counter: an unchanged view keeps live URLs alive.
+
+    Re-running detection on the same frame under the same config must not
+    invalidate the chip URLs the examiner is currently looking at.
+    """
+    cfg = MagicMock(config_hash="9f2c")
+    first = [_query_face(), _query_face(index=1, bbox=(5.0, 6.0, 7.0, 8.0))]
+    second = [_query_face(), _query_face(index=1, bbox=(5.0, 6.0, 7.0, 8.0))]
+    assert _detection_token(first, cfg) == _detection_token(second, cfg)

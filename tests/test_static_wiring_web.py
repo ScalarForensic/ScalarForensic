@@ -181,3 +181,30 @@ def test_opening_the_player_asks_what_would_be_served_first():
 def test_selecting_another_hit_closes_the_open_player():
     js = (STATIC / "js" / "analysis.js").read_text()
     assert "closeVideoPlayback()" in _fn_body(js, "async selectHit")
+
+
+def test_query_face_chips_use_the_server_stamped_url():
+    # The regression that actually bit (2026-08-13): queryFaceChipUrl rebuilt
+    # the URL from the *current* selectedFileId, so a response that resolved
+    # late aimed the earlier file's face indices at the file now selected —
+    # 404 when it had fewer faces, another person's crop when it had more.
+    # The server stamps chip_url with the file and the detection generation;
+    # the client's only correct move is to use it verbatim.
+    js = (STATIC / "js" / "faces.js").read_text()
+    body = _fn_body(js, "queryFaceChipUrl")
+    assert "chip_url" in body
+    assert "selectedFileId" not in body
+    assert "query-chip" not in body  # no hand-built URL anywhere in it
+
+
+def test_a_superseded_query_faces_response_is_dropped():
+    # Two files in one session means two POSTs in flight and the first can
+    # resolve last.  loadQueryFaces pins the file and a request ordinal, and
+    # applies nothing — faces, error, basket or follow-up searches — once a
+    # newer request or a different selection has superseded it.
+    js = (STATIC / "js" / "faces.js").read_text()
+    body = _fn_body(js, "async loadQueryFaces")
+    assert "_queryFacesSeq" in body
+    # The response is gated before it is applied, not after.
+    assert body.index("if (!current()) return;") < body.index("this.queryFaces = Array")
+    assert "_queryFacesSeq" in (STATIC / "js" / "state.js").read_text()

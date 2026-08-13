@@ -115,7 +115,10 @@
       if (!this.facesAvailable || !this.sessionId || !this.selectedFileId) return;
       const fileId = this.selectedFileId;
       const seq = ++this._queryFacesSeq;
-      const current = () => seq === this._queryFacesSeq && fileId === this.selectedFileId;
+      // Superseded = a newer request exists, which now owns the loading flag
+      // and the panel.  Current also requires the file to still be selected.
+      const superseded = () => seq !== this._queryFacesSeq;
+      const current = () => !superseded() && fileId === this.selectedFileId;
       this.queryFacesLoading = true;
       this.queryFacesError = '';
       this.queryFaces = [];
@@ -141,10 +144,13 @@
         this.faceBasket = this.faceBasket.filter(r => r.side !== 'query');
         for (const f of this.queryFaces) if (f.searchable) this._basketAddQuery(f);
       } catch (e) {
-        this.queryFacesError = String(e);
+        if (current()) this.queryFacesError = String(e);
       } finally {
-        this.queryFacesLoading = false;
+        if (!superseded()) this.queryFacesLoading = false;
       }
+      // A dropped response must not drive the searches either: they read the
+      // basket, which still describes the file that is actually selected.
+      if (!current()) return;
       this.runFaceSearch();
       this.runFaceCompare(this.selectedHit?.image_hash);
     },
@@ -178,8 +184,8 @@
       this.faceBasket.push({
         key, side: 'query', fileId: this.selectedFileId, faceIndex: face.index,
         pointId: null, imageHash: null,
-        thumbUrl: this.queryFaceChipUrl(face.index),
-        reviewUrl: this.queryFaceChipUrl(face.index),
+        thumbUrl: this.queryFaceChipUrl(face),
+        reviewUrl: this.queryFaceChipUrl(face),
         label: `query · face ${face.index + 1}`,
         selected: true,
       });
