@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import re
 import uuid
 from pathlib import Path
@@ -21,7 +22,7 @@ from qdrant_client import QdrantClient
 from scalar_forensic.config import Settings
 from scalar_forensic.faces.audit import AuditLog
 from scalar_forensic.faces.chips import chip_paths, write_thumbnail
-from scalar_forensic.faces.store import _HARD_FIELDS, FaceStore
+from scalar_forensic.faces.store import _HARD_FIELDS, FACE_VECTOR_NAME, FaceStore
 from scalar_forensic.video import extract_frame_at
 from scalar_forensic.web.pipeline import (
     MODEL_REFERENCE_NOTE,
@@ -578,6 +579,80 @@ def _parse_face_indices(raw: str, faces: list) -> list[int]:
     return idxs
 
 
+def _parse_point_ids(raw: str) -> list[str]:
+    """Stored point ids used as probes, validated before any store access."""
+    pids: list[str] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            uuid.UUID(part)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"invalid point id {part}") from None
+        pids.append(part)
+    return pids
+
+
+def _stored_vectors(store: FaceStore, point_ids: list[str]) -> dict[str, list[float]]:
+    """The stored face vector of each point that has one.
+
+    A review-only observation is a point *without* an entry here — the vector
+    is structurally absent, not filtered out (see FaceStore.search_faces).
+    """
+    if not point_ids:
+        return {}
+    records = store.client.retrieve(
+        collection_name=store.collection,
+        ids=point_ids,
+        with_payload=False,
+        with_vectors=[FACE_VECTOR_NAME],
+    )
+    out: dict[str, list[float]] = {}
+    for rec in records:
+        vec = rec.vector if isinstance(rec.vector, dict) else {}
+        v = (vec or {}).get(FACE_VECTOR_NAME)
+        if v is not None:
+            out[str(rec.id)] = list(v)
+    return out
+
+
+def _point_probes(store: FaceStore, point_ids: list[str]) -> list[tuple[str, list[float]]]:
+    """Stored points as probes.  A vectorless point is refused, not skipped:
+    quietly dropping it would leave the examiner believing that face was
+    searched and found nothing — the same rule as _parse_face_indices."""
+    records = store.client.retrieve(
+        collection_name=store.collection,
+        ids=point_ids,
+        with_payload=False,
+        with_vectors=[FACE_VECTOR_NAME],
+    )
+    found = {str(rec.id): rec for rec in records}
+    probes: list[tuple[str, list[float]]] = []
+    for pid in point_ids:
+        rec = found.get(pid)
+        if rec is None:
+            raise HTTPException(status_code=400, detail=f"unknown point id {pid}")
+        vec = rec.vector if isinstance(rec.vector, dict) else {}
+        v = (vec or {}).get(FACE_VECTOR_NAME)
+        if v is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"point {pid} is review-only and has no vector; it cannot be searched",
+            )
+        probes.append((f"pt:{pid}", list(v)))
+    return probes
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    num = sum(x * y for x, y in zip(a, b, strict=True))
+    da = math.sqrt(sum(x * x for x in a))
+    db = math.sqrt(sum(y * y for y in b))
+    if da == 0.0 or db == 0.0:
+        return 0.0
+    return num / (da * db)
+
+
 def _compat_block(store: FaceStore, cfg) -> dict:
     """Hard mismatch → 409; soft mismatches ride along as warnings (spec §7.2).
 
@@ -600,15 +675,22 @@ def _compat_block(store: FaceStore, cfg) -> dict:
 def face_search(
     session_id: str = Form(...),
     file_id: str = Form(...),
-    face_indices: str = Form(...),
+    face_indices: str = Form(""),
+    point_ids: str = Form(""),
     limit: int = Form(10, ge=1, le=50),
     threshold: float = Form(0.0, ge=0.0, le=1.0),
     exact: bool = Form(True),
     collapse: bool = Form(True),
 ) -> JSONResponse:
-    """Search the face collection with faces selected in the uploaded image.
+    """Search the face collection with the examiner's selected probe faces.
 
     Sync ``def``: the kNN is a blocking client call.
+
+    Probes come from two origins (change-set 2026-08-13): ``face_indices`` into
+    the session's query faces, and ``point_ids`` of stored observations whose
+    vectors are fetched from the collection.  Both refuse a review-only face
+    with 400 — the vectorless design must look the same at this surface no
+    matter where the probe came from.
 
     ``threshold`` is a *display floor* on the raw cosine and defaults to 0.0.
     It is never seeded from the model authors' 0.363 — this deployment has no
@@ -619,10 +701,15 @@ def face_search(
     _require_faces(settings)
 
     faces = entry.query_faces or []
-    idxs = _parse_face_indices(face_indices, faces)
-    probes = [(i, faces[i].vector) for i in idxs]
+    idxs = _parse_face_indices(face_indices, faces) if face_indices.strip() else []
+    pids = _parse_point_ids(point_ids)
+    if not idxs and not pids:
+        raise HTTPException(status_code=400, detail="no face indices given")
 
     store = _store(settings)
+    probes: list[tuple[int | str, list[float]]] = [(i, faces[i].vector) for i in idxs]
+    probes += _point_probes(store, pids)
+
     cfg = entry.query_faces_cfg
     compat = _compat_block(store, cfg)
 
@@ -647,6 +734,7 @@ def face_search(
         settings.examiner_id,
         probe_hash=entry.file_hash,
         face_indices=idxs,
+        probe_point_ids=pids,
         collection=settings.face_collection,
         pipeline_config_hash=getattr(cfg, "config_hash", None),
         # No calibration record exists (spec §10); recorded as null rather than
@@ -666,6 +754,80 @@ def face_search(
             "search_mode": search_mode,
             "threshold": threshold,
             "limit": limit,
+            "calibration": calibration_block(),
+            "embedder": query_embedder_block(cfg),
+            "compat": compat,
+        }
+    )
+
+
+@router.post("/api/faces/compare")
+def face_compare(
+    session_id: str = Form(...),
+    file_id: str = Form(...),
+    image_hash: str = Form(...),
+) -> JSONResponse:
+    """Pairwise raw cosine: query image's faces × one indexed medium's faces.
+
+    Change-set 2026-08-13: drives the both-sides highlight when a match is
+    selected.  The matrix covers *comparable* faces only — a review-only
+    observation is vectorless on either side and never enters it; the counts
+    report how many were left out so their absence is visible.
+
+    No threshold is applied here (spec §10): every pair ships with its raw
+    cosine, and any floor is an operator-set display control in the UI.
+    """
+    entry = _resolve_entry(session_id, file_id)
+    settings = Settings()
+    _require_faces(settings)
+    image_hash = _require_hash(image_hash)
+
+    faces = entry.query_faces or []
+    query_probes = [(f.index, f.vector) for f in faces if f.vector is not None]
+
+    store = _store(settings)
+    cfg = entry.query_faces_cfg
+    compat = _compat_block(store, cfg)
+
+    try:
+        rows = store.list_faces(image_hash)
+        vectors = _stored_vectors(store, [str(r["id"]) for r in rows])
+    except Exception as exc:
+        _log.warning("face compare failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Face collection unreachable: {exc}") from exc
+
+    keys = {str(r["id"]): r.get("observation_key") for r in rows}
+    pairs = [
+        {
+            "query_face_index": qi,
+            "point_id": pid,
+            "observation_key": keys.get(pid),
+            "score": _cosine(qv, v),
+        }
+        for qi, qv in query_probes
+        for pid, v in vectors.items()
+    ]
+    pairs.sort(key=lambda p: -p["score"])
+
+    _audit_log(settings).append(
+        "compare",
+        settings.examiner_id,
+        probe_hash=entry.file_hash,
+        target_image_hash=image_hash,
+        collection=settings.face_collection,
+        pipeline_config_hash=getattr(cfg, "config_hash", None),
+        face_calibration_id=None,
+        n_pairs=len(pairs),
+        top_scores=[p["score"] for p in pairs[:5]],
+    )
+
+    return JSONResponse(
+        {
+            "pairs": pairs,
+            "n_query_comparable": len(query_probes),
+            "n_query_review_only": len(faces) - len(query_probes),
+            "n_match_comparable": len(vectors),
+            "n_match_review_only": len(rows) - len(vectors),
             "calibration": calibration_block(),
             "embedder": query_embedder_block(cfg),
             "compat": compat,
