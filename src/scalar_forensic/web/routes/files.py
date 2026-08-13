@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import hashlib
 import io
 import logging
@@ -16,6 +17,7 @@ from PIL import Image, ImageDraw, UnidentifiedImageError
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
+from scalar_forensic import scanner
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import (
     _SSCD_INPUT_SIZE,
@@ -38,9 +40,14 @@ _log = logging.getLogger(__name__)
 router = APIRouter()
 
 
-_IMAGE_EXTENSIONS = frozenset(
-    {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp", ".gif", ".jp2", ".ico", ".psd"}
-)
+def _allowed_image_extensions() -> frozenset[str]:
+    """Extensions the file-serving routes accept — derived from the scanner's
+    sets so the two can never drift apart (HEIF only when pillow-heif is up,
+    exactly like indexing)."""
+    return scanner.IMAGE_EXTENSIONS | (
+        scanner._HEIF_EXTENSIONS if scanner._HEIF_AVAILABLE else frozenset()
+    )
+
 
 # ---------------------------------------------------------------------------
 # Image serving
@@ -231,18 +238,38 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
         _log.warning("thumbnail regen: unexpected error for %s: %s", sha256[:12], exc)
 
 
+@functools.lru_cache(maxsize=32)
+def _transcode_heif_to_jpeg(path: str, mtime_ns: int) -> bytes:
+    """Decode a HEIF file and re-encode as JPEG bytes (browsers cannot render
+    image/heic).  Cached on (path, mtime) so repeated views of the same hit
+    don't re-decode."""
+    with Image.open(path) as img:
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=90)
+        return buf.getvalue()
+
+
 @router.get("/api/hit-image")
 async def hit_image(path: str) -> Response:
-    """Serve a hit image or stored video frame JPEG from the server filesystem."""
+    """Serve a hit image or stored video frame JPEG from the server filesystem.
+
+    HEIF sources are transcoded to JPEG on the fly; everything else is served raw.
+    """
     raw = Path(path)
     if not raw.is_absolute():
         raise HTTPException(status_code=400, detail="Invalid path")
     p = raw.resolve()
     _check_allowed_path(p)
-    if p.suffix.lower() not in _IMAGE_EXTENSIONS:
+    if p.suffix.lower() not in _allowed_image_extensions():
         raise HTTPException(status_code=400, detail="Not an image file")
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="File not found")
+    if p.suffix.lower() in scanner._HEIF_EXTENSIONS:
+        try:
+            data = await asyncio.to_thread(_transcode_heif_to_jpeg, str(p), p.stat().st_mtime_ns)
+        except (UnidentifiedImageError, OSError) as exc:
+            raise HTTPException(status_code=422, detail="Cannot decode HEIF file") from exc
+        return Response(content=data, media_type="image/jpeg")
     return FileResponse(p, filename=p.name)
 
 
@@ -493,7 +520,7 @@ async def hit_metadata(path: str) -> JSONResponse:
         return JSONResponse(meta)
 
     # Regular image path
-    if p.suffix.lower() not in _IMAGE_EXTENSIONS:
+    if p.suffix.lower() not in _allowed_image_extensions():
         raise HTTPException(status_code=400, detail="Invalid path")
 
     def _read_and_hash() -> dict:
