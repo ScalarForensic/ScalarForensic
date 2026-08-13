@@ -159,6 +159,15 @@ class TestRemux:
         with av.open(str(mov)) as a, av.open(str(dst)) as b:
             assert a.streams.video[0].codec_context.name == b.streams.video[0].codec_context.name
 
+    def test_the_source_codec_tag_survives(self, mov, tmp_path):
+        """Left alone the muxer relabels Apple's hvc1 as hev1."""
+        dst = tmp_path / "copy.mp4"
+        video_routes._remux_to_mp4(mov, dst)
+        with av.open(str(mov)) as a, av.open(str(dst)) as b:
+            assert b.streams.video[0].codec_context.codec_tag == (
+                a.streams.video[0].codec_context.codec_tag
+            )
+
     def test_moov_precedes_mdat_for_progressive_playback(self, mov, tmp_path):
         dst = tmp_path / "copy.mp4"
         video_routes._remux_to_mp4(mov, dst)

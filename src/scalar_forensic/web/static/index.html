@@ -1499,6 +1499,79 @@
                 </template>
               </div>
 
+              <!-- Source video playback (viewing copy) -->
+              <template x-if="selectedHit.video_path">
+                <div class="vc-block">
+                  <button class="vc-open-btn"
+                          :disabled="videoPlaybackLoading"
+                          @click="videoPlayback
+                            ? closeVideoPlayback()
+                            : openVideoPlayback(selectedHit.video_path, activeHitTimecodeMs)">
+                    <span x-text="videoPlayback ? '▾' : '▶'"></span>
+                    <span x-text="videoPlayback ? 'Close player' : 'Play source video at this frame'"></span>
+                    <span x-show="videoPlaybackLoading" class="vc-spinner">…</span>
+                  </button>
+
+                  <div class="vc-error" x-show="videoPlaybackError" x-text="videoPlaybackError"></div>
+
+                  <template x-if="videoPlayback">
+                    <div>
+                      <video class="vc-player" controls preload="metadata"
+                             :src="videoPlaybackSrc"
+                             @loadedmetadata="seekVideoToHit($el)"
+                             @error="videoPlaybackError = 'The browser could not decode this stream. The stored frame JPEGs remain available.'"></video>
+
+                      <!-- Forensic legibility: what is being watched, and what is not.
+                           Same rule as the uncalibrated face cosine — the artifact is
+                           labelled for what it is, never dressed up as the original. -->
+                      <div class="vc-label">
+                        <div class="vc-label-hdr">
+                          <span class="badge badge-viewing-copy">VIEWING COPY</span>
+                          <span x-show="videoPlayback.mode === 'rewrap'">
+                            Container rewrap (QuickTime&nbsp;→&nbsp;MP4) — streams unmodified, no re-encode.
+                          </span>
+                          <span x-show="videoPlayback.mode === 'original'">
+                            Source file streamed as it is stored on disk.
+                          </span>
+                        </div>
+                        <div class="vc-label-body">
+                          The original file and the stored frame JPEGs remain the
+                          authoritative artifacts. Nothing shown here is an evidential export.
+                        </div>
+                        <div class="vc-label-body vc-warn" x-show="videoPlaybackDroppedNotice"
+                             x-text="videoPlaybackDroppedNotice"></div>
+                      </div>
+
+                      <div class="meta-grid">
+                        <div class="meta-item">
+                          <span class="meta-k">Opened at</span>
+                          <span class="meta-v"
+                                x-text="`t = ${(videoPlaybackTimecodeMs/1000).toFixed(2)} s`"></span>
+                        </div>
+                        <template x-if="videoPlayback.video_codec">
+                          <div class="meta-item">
+                            <span class="meta-k">Streams</span>
+                            <span class="meta-v"
+                                  x-text="[videoPlayback.video_codec, videoPlayback.audio_codec].filter(Boolean).join(' / ')"></span>
+                          </div>
+                        </template>
+                        <template x-if="videoPlayback.video_sha256">
+                          <div class="meta-item"
+                               :class="{'meta-match': videoPlaybackDigestMatchesHit}">
+                            <span class="meta-k">Source SHA-256</span>
+                            <span class="meta-v hash"
+                                  :title="videoPlayback.video_sha256 + (videoPlaybackDigestMatchesHit
+                                    ? ' — matches the video_hash recorded for this frame'
+                                    : ' — does NOT match the video_hash recorded for this frame')"
+                                  x-text="videoPlayback.video_sha256.slice(0,16) + '…'"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </template>
+
               <!-- Timeline bar -->
               <template x-if="videoTimeline && videoTimeline.frames && videoTimeline.frames.length > 0 && matchMeta?.video_duration_s > 0">
                 <div style="margin-top:8px">
@@ -1721,6 +1794,11 @@
                            loading="lazy" alt="">
                       <span class="hit-frame-tc"
                             x-text="`t\u202f=\u202f${(mf.timecode_ms/1000).toFixed(2)}s`"></span>
+                      <button class="hit-frame-play"
+                              x-show="hit.video_path"
+                              title="Play the source video from this frame (viewing copy)"
+                              @click.stop="selectMatchedFrame(hit, mf);
+                                           openVideoPlayback(hit.video_path, mf.timecode_ms)">\u25b6</button>
                       <span class="hit-frame-scores">
                         <!-- One root per x-for: Alpine renders only the first
                              element of a multi-root template and drops the rest,

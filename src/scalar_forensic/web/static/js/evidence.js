@@ -66,6 +66,51 @@
       } catch { this.videoTimeline = null; }
     },
 
+    // ── Source-video playback ─────────────────────────────────────────────
+    // Opening the player asks the server what it would serve *before* asking
+    // for the bytes, so the viewing-copy label is on screen from the first
+    // frame rather than appearing once the rewrap finishes.
+    async openVideoPlayback(videoPath, timecodeMs) {
+      if (!videoPath) return;
+      this.videoPlayback = null;
+      this.videoPlaybackError = null;
+      this.videoPlaybackLoading = true;
+      this.videoPlaybackTimecodeMs = timecodeMs ?? 0;
+      try {
+        const r = await fetch(`/api/video-playback-info?path=${encodeURIComponent(videoPath)}`);
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          this.videoPlaybackError = body.detail ?? `HTTP ${r.status}`;
+        } else {
+          this.videoPlayback = body;
+        }
+      } catch (e) {
+        this.videoPlaybackError = e?.message || 'Playback request failed';
+      } finally {
+        this.videoPlaybackLoading = false;
+      }
+    },
+
+    closeVideoPlayback() {
+      this.videoPlayback = null;
+      this.videoPlaybackError = null;
+      this.videoPlaybackLoading = false;
+    },
+
+    // Deep-link the player to the frame that produced the hit.  Seeking is only
+    // legal once the browser has the duration, which is why this hangs off
+    // loadedmetadata; the seek itself rides a range request against the
+    // faststart MP4, so nothing downloads the whole clip first.
+    seekVideoToHit(el) {
+      const seconds = (this.videoPlaybackTimecodeMs ?? 0) / 1000;
+      if (!el || !Number.isFinite(seconds) || seconds <= 0) return;
+      try {
+        el.currentTime = seconds;
+      } catch {
+        /* Seeking can still be refused on a stream with no seekable range. */
+      }
+    },
+
     // ── Semantic stats ────────────────────────────────────────────────────
     async calcSemanticStats() {
       if (!this.sessionId || !this.selectedFileId) return;

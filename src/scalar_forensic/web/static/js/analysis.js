@@ -264,6 +264,8 @@
       this.matchZoom = 1.0;
       this.matchMeta = null; this.matchMetaError = null;
       this.videoTimeline = null;
+      // The open player belongs to the hit that was selected before this one.
+      this.closeVideoPlayback();
       // hit.path is the stored frame JPEG for a video-frame hit (the indexer
       // indexes the extracted frame file, so image_path *is* the frame), and
       // the frame store is inside the allowed path set.  /api/thumbnail serves

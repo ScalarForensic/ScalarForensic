@@ -120,6 +120,16 @@
     // Video timeline
     videoTimeline: null,
 
+    // Source-video playback.  videoPlayback holds the /api/video-playback-info
+    // payload for the clip currently open in the player; non-null means the
+    // player panel is showing.  What the player receives is a VIEWING COPY —
+    // the authoritative artifacts stay the original file and the stored frame
+    // JPEGs — so the payload is kept around to label it.
+    videoPlayback: null,
+    videoPlaybackError: null,
+    videoPlaybackLoading: false,
+    videoPlaybackTimecodeMs: 0,
+
     // Semantic stats modal
     semanticStats: null,
     semanticStatsLoading: false,

@@ -295,7 +295,14 @@ def _remux_to_mp4(src: Path, dst: Path) -> dict:
                 if codec not in _MP4_LEGAL_CODECS:
                     skipped.append(f"{s.type}:{codec}")
                     continue
-                mapping[s.index] = out.add_stream_from_template(s)
+                out_stream = out.add_stream_from_template(s)
+                # Carry the source's four-character codec tag across.  Left to
+                # itself the muxer relabels Apple's hvc1 as hev1; both decode in
+                # Chrome, but hvc1 is what the source says and the only one
+                # QuickTime and Safari will open.
+                if s.codec_tag:
+                    out_stream.codec_tag = s.codec_tag
+                mapping[s.index] = out_stream
             if not mapping:
                 raise ValueError("no MP4-compatible stream in source")
             last_dts: dict[int, int] = {}

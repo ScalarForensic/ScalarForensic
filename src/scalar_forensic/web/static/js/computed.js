@@ -42,6 +42,40 @@
       }
       return hits[0] ?? null;
     },
+    // ── Source-video playback ─────────────────────────────────────────────
+    // Timecode the player should open at: the matched frame the examiner has
+    // selected, otherwise the frame that produced the hit itself.
+    get activeHitTimecodeMs() {
+      const hit = this.selectedHit;
+      if (!hit) return 0;
+      if (this.selectedMatchedFrameKey) {
+        // Key is `${hit.path}:${mf.timecode_ms}` — the path may itself contain
+        // colons, so take the last segment.
+        const tc = Number(this.selectedMatchedFrameKey.split(':').pop());
+        if (Number.isFinite(tc)) return tc;
+      }
+      return hit.frame_timecode_ms ?? 0;
+    },
+    get videoPlaybackSrc() {
+      const path = this.videoPlayback?.source_path;
+      return path ? `/api/video-playback?path=${encodeURIComponent(path)}` : '';
+    },
+    // True when the digest of the file being played is the same one the index
+    // recorded for this hit — i.e. the operator is watching the clip the frame
+    // actually came from, not a same-named file that has since been replaced.
+    get videoPlaybackDigestMatchesHit() {
+      const served = this.videoPlayback?.video_sha256;
+      const indexed = this.selectedHit?.video_hash;
+      return !!served && !!indexed && served === indexed;
+    },
+    // Streams the rewrap cannot carry into MP4 (Live-Photo LPCM audio, above
+    // all).  Named rather than left for the operator to notice as silence.
+    get videoPlaybackDroppedNotice() {
+      const dropped = this.videoPlayback?.skipped_streams;
+      if (!dropped || dropped.length === 0) return '';
+      return `Not carried into the viewing copy: ${dropped.join(', ')} `
+        + '(no MP4 mapping, and nothing here is re-encoded). Present in the original.';
+    },
     // ── Face basket derivations (change-set 2026-08-13) ───────────────────
     // The basket is the single selection model; the wire formats fall out of
     // it here rather than living as parallel state that could drift.

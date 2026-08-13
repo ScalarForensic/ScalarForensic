@@ -132,3 +132,52 @@ def test_every_x_for_template_has_exactly_one_root_element():
     # roots, so every frame rendered the mode and dropped the number.
     html = (STATIC / "index.html").read_text()
     assert _xfor_multi_roots(html) == []
+
+
+# ---------------------------------------------------------------------------
+# Source-video playback (viewing copy)
+# ---------------------------------------------------------------------------
+
+
+def test_the_player_is_labelled_as_a_viewing_copy():
+    # Forensic legibility is a merge requirement: the operator must never be
+    # able to mistake a rewrapped stream for the evidential artifact.  Same
+    # rule the uncalibrated face cosine is displayed under.
+    html = (STATIC / "index.html").read_text()
+    assert "VIEWING COPY" in html
+    assert "streams unmodified" in html
+    assert "authoritative artifacts" in html
+
+
+def test_the_player_source_is_the_playback_endpoint_and_seeks_to_the_hit():
+    html = (STATIC / "index.html").read_text()
+    assert ':src="videoPlaybackSrc"' in html
+    assert '@loadedmetadata="seekVideoToHit($el)"' in html
+
+
+def test_playback_getters_live_in_computed_js():
+    # Part files are merged by property descriptor; a getter defined in a
+    # non-computed part still works, but the convention keeps them findable.
+    computed = (STATIC / "js" / "computed.js").read_text()
+    for name in (
+        "get videoPlaybackSrc",
+        "get activeHitTimecodeMs",
+        "get videoPlaybackDroppedNotice",
+        "get videoPlaybackDigestMatchesHit",
+    ):
+        assert name in computed, name
+    for part in ("state.js", "evidence.js", "analysis.js", "triage.js"):
+        assert "get videoPlayback" not in (STATIC / "js" / part).read_text(), part
+
+
+def test_opening_the_player_asks_what_would_be_served_first():
+    # The label has to be on screen with the first frame, so the info request
+    # precedes the bytes rather than following them.
+    js = (STATIC / "js" / "evidence.js").read_text()
+    body = _fn_body(js, "async openVideoPlayback")
+    assert "/api/video-playback-info?path=" in body
+
+
+def test_selecting_another_hit_closes_the_open_player():
+    js = (STATIC / "js" / "analysis.js").read_text()
+    assert "closeVideoPlayback()" in _fn_body(js, "async selectHit")
