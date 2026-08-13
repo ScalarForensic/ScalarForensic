@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from qdrant_client import QdrantClient
 
 from scalar_forensic.config import ENV_ALLOW_ONLINE, Settings
+from scalar_forensic.video_playback import router as video_playback_router
 from scalar_forensic.web.routes import analyze as analyze_routes
 from scalar_forensic.web.routes import faces as faces_routes
 from scalar_forensic.web.routes import files as files_routes
@@ -74,6 +75,7 @@ app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 app.include_router(analyze_routes.router)
 app.include_router(files_routes.router)
 app.include_router(video_routes.router)
+app.include_router(video_playback_router)
 app.include_router(tags_routes.router)
 app.include_router(faces_routes.router)
 
