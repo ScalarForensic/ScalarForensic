@@ -107,9 +107,7 @@ async def faces_availability() -> JSONResponse:
             )
     except Exception as exc:  # Qdrant unreachable — degrade, never 500
         _log.warning("face availability check failed: %s", exc)
-        return JSONResponse(
-            {"faces_available": False, "reason": f"Face collection unreachable: {exc}"}
-        )
+        return JSONResponse({"faces_available": False, "reason": "Face collection unreachable"})
     body: dict = {"faces_available": True, "reason": None}
     if settings.face_store_dir is None:
         body["note"] = "degraded-evidence mode: face store disabled, review chips are unavailable"
@@ -900,7 +898,7 @@ def faces_audit(image_hash: str) -> JSONResponse:
         body = face_audit(_store(settings), image_hash)
     except Exception as exc:
         _log.warning("face audit lookup failed for %s: %s", image_hash, exc)
-        raise HTTPException(status_code=503, detail=f"Face collection unreachable: {exc}") from exc
+        raise HTTPException(status_code=503, detail="Face collection unreachable") from exc
     if body is None:
         raise HTTPException(status_code=404, detail="No face observations for this image")
     return JSONResponse(body)
