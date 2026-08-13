@@ -36,21 +36,24 @@ distributed isolated LAN, fully offline.
 
 ## current state (2026-08-14)
 
-- `main` at **`df46e01`**. Bar **821 passed / 5 skipped**, coverage 70.99%
-  against the 65% floor. **Re-measured by `m5` on a clean tree, independently of
-  the coder's report**, in a worktree at `6f5879e`: it read **820/6 at 70.98%**,
-  and the 6th skip is the YuNet test, because *a fresh worktree has no
-  `models/`*. That reconciles the two numbers exactly — quote 821/5 for a
-  checkout with models present, 820/6 for a bare worktree, and always say which
-  you measured. Was 771/5 at 70.22% before phase 4; phase 4 added 50 tests.
+- `main` at **`2dbfea6`**. Bar **882 passed / 5 skipped**, coverage 72.20%
+  against the 65% floor — **re-measured by `m5` at `6e09097`**, in a worktree
+  with `PYTHONPATH=$PWD/src` and `models/` present, no tracked file modified.
+  **A worktree without `models/` reads one extra skip** (the YuNet test), which
+  is how 821/5 and 820/6 reconciled at phase 4; *always say which tree you
+  measured in*, not merely that it was clean. Was 771/5 at 70.22% before phase
+  4: phase 4 added 50 tests, phase 5 added 61.
 - Campaign complete: 8,137 files indexed. Cropper delivered as the standalone
   repo `portable_face_cropper` (8138→4537 crops, 0 failures, 35m01s).
-- **Fleet: manager `com-m5`, one coder `com-c15` on phase 5.** `com-c12`
-  (phases 1–3), `com-c13` (the carve), `csm-b1` (the §14 measurements) and
-  `com-c14` (phase 4) all retired with ownership released. `com-m4` retired at
-  ~210k. Handoffs: `docs/handoffs/scalarforensic-com-m4-20260813-2100.md` and
-  **`docs/handoffs/scalarforensic-com-c14-20260813-220936.md`** — the latter is
-  required reading for anyone touching `video_playback/`.
+- **Fleet: manager `com-m5`, one coder `com-c16` on phase 6.** `com-c12`
+  (phases 1–3), `com-c13` (the carve), `csm-b1` (the §14 measurements),
+  `com-c14` (phase 4) and `com-c15` (phase 5) all retired with ownership
+  released; `com-m4` retired at ~210k. **Three handoffs are required reading
+  for anyone touching `video_playback/`**:
+  `docs/handoffs/scalarforensic-com-c14-20260813-220936.md` (patch targets,
+  module state, the worktree `PYTHONPATH` trap, the encode-path facts),
+  `...-com-c15-20260813-223743.md` (phase 5's cache, and phase 6's four
+  concrete steps in its §3) and `...-com-m4-20260813-2100.md`.
 - **The §14 measurements are safe in git** — `#155` `3ac5442`. They were
   produced into `data/reports/`, which `data/*` gitignores, and lived one `rm`
   from gone; they are now `docs/benchmarks/video-bench-2026-08-13.md`, copied
@@ -60,9 +63,11 @@ distributed isolated LAN, fully offline.
   number, §14 settled the fixture strategy, and **§17 Q1–Q5 are closed into
   §16**. *A benchmarker writing its report under `data/` is a loss risk the
   dispatch should preempt: name a tracked output path when you spawn one.*
-- **PHASE 4 IS DONE** (`#157`/`#158`/`#159`). **Phase 5 is in flight** with
-  `com-c15`. The operator answered every open question on 2026-08-13; nothing is
-  pending with them.
+- **PHASES 4 AND 5 ARE DONE** (`#157`/`#158`/`#159`, `#162`/`#163`). **Phase 6
+  is in flight** with `com-c16`; phases 7–8 remain. The operator answered every
+  open question on 2026-08-13. **Two things now sit with them**: the CodeQL
+  dismissals, and whether to fund a benchmarker for the missing codec factor —
+  both below.
 - **The shared checkout is PARKED at `43a7222` and everyone works in
   worktrees.** `docs/CTO_LEDGER.md` is dirty there with **the operator's own
   handwritten `-->` answers**, and `#153`/`#154`/`#156` all rewrote that file
@@ -221,6 +226,39 @@ libzimg rather than falling back, because encoding HDR without the tone-map chai
 reproduces §3.1's second defect — 8-bit pixels still tagged `bt2020`/HLG. SDR
 still works there. Three-state, deliberately, like `stale_evidence` and `mode`.
 
+### phase 5 is COMPLETE — `#162` `3b191b5`, `#163` `955334c`
+
+Two PRs by `com-c15`, both checks green. Bar 882/5 at 72.20%, re-measured by the
+manager. `cache_key()` is `sha256(source ‖ fingerprint)`; the §6.2 lease/pin/
+whole-video eviction **replaces `#148`'s containment**; `KeyedLocks` replaces the
+unbounded `_remux_locks` (§10.4); `publish()` fsyncs file *and* directory;
+`sweep_orphaned_parts()`; §6.3 ceiling refusal at the operator's 50% ruling; and
+`sfn-video purge --media | --all` per §13.
+
+**`chunk_seconds` stays in the key for both artifact kinds** — `c15`'s call,
+recorded in `cache_key()`'s docstring and §6.1, and the manager agreed. Changing
+`SFN_VIDEO_CHUNK_SECONDS` needlessly re-encodes cached `full.mp4`, a rare
+recoverable cost; the alternative is a per-artifact-kind field table, which is a
+*second* place for the §6.1 defect to live. Cheap side of the trade.
+
+**Eight mutations across the phase, each caught by a named test, each reverted.**
+Single-file eviction, empty keep-set, undeleted lock entry, `.part` excluded from
+accounting, `unknown`→`fits`, `CEILING_FRACTION` 1.0, dropped area scaling, purge
+ignoring `--media`. Combined with `c14`'s `-noautorotate` check, **mutation-proving
+a defect-pinning test is now this project's standing expectation**, and it is
+carried in the dispatch rather than left to be rediscovered.
+
+**THE OPEN FINDING — `estimate_full_output_bytes()` has NO codec factor**, because
+none has ever been measured: §3.5 timed the encodes and recorded no output sizes,
+and §16 forbids inventing one. The error direction is knowable and bad: a CRF-23
+H.264 encode of a 10-bit HEVC source at the same resolution is usually *larger*
+than its source, so the estimate runs **low on exactly the HEVC corpus this
+feature exists for** (57 of a 60-file sample). §6.3 now says plainly that it is a
+screen, not a guarantee, and that **phase 7's job runner must check the growing
+`.part` against the estimate and abort on overshoot**. Closing it properly means
+measuring output sizes for the §3.1 rows against the operator's corpus — a
+benchmarker task, not a coder's, and it needs an otherwise-idle box.
+
 ## the video playback work — READ THE SPEC, IT IS THE PLAN
 
 `docs/specs/video-playback-transcode.md` is **draft v2, post-review**. v1 proposed
@@ -278,7 +316,10 @@ sound, the multi-hour seek figure is a best-case index by construction, and the
   restored it. Do not re-remove. The Kalman ±1σ "calibrated" band stays gone —
   its Q/R were hand-picked constants, which is the same defect class as an
   uncalibrated face cosine.
-- **17 `py/path-injection` CodeQL alerts are false positives**, verified
+- **20 `py/path-injection` CodeQL alerts are false positives** (17 + 3 added by
+  `#162`, when `POST /api/video-lease` became a new source into
+  `_resolve_video_path`; the manager read `_shared.py:53-63` and confirmed the
+  class rather than inheriting the ruling), verified
   independently this session, not inherited: every flagged path passes through
   `_check_allowed_path` (`routes/_shared.py:12`), which calls `resolve()` —
   normalising traversal and symlinks — *before* `relative_to()` against resolved
