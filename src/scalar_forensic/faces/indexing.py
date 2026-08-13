@@ -9,6 +9,7 @@ keeps the core testable without a server.
 from __future__ import annotations
 
 import importlib.metadata
+import io
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import onnxruntime as ort
+from PIL import Image, ImageOps
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 
@@ -32,6 +34,45 @@ from scalar_forensic.faces.embed import OnnxFaceEmbedder
 from scalar_forensic.faces.provenance import PipelineConfig
 from scalar_forensic.faces.quality import post_align_gate, pre_align_gate, review_gate
 from scalar_forensic.faces.store import FACE_VECTOR_NAME, FaceStore
+
+
+def decode_shared(data: bytes, cap: int) -> tuple[np.ndarray, Image.Image | None]:
+    """One native-resolution decode serving face detection AND the embed path.
+
+    Returns ``(native_rgb_array, capped_pil_or_None)``.  The array is
+    pixel-identical to :func:`scalar_forensic.faces.decode.load_for_detection`.
+    The second element is the embedding-path input (what
+    ``preprocess_batch`` would have produced from the same bytes) derived by
+    downscaling the native decode — returned only when that derivation is
+    byte-identical to the ``embedder._open_rgb`` + ``_cap_short_side`` path,
+    so a faces-on run embeds exactly the same pixels as a faces-off run:
+
+    - JPEG: ``None``.  ``_open_rgb`` uses libjpeg ``draft()`` shrink-on-load,
+      whose pixels differ slightly from a full decode + Lanczos; the caller
+      must decode the embed input separately (cheap for JPEG).
+    - Non-JPEG with an EXIF Orientation != 1 in a format ``_open_rgb`` does
+      not orient (e.g. PNG eXIf): ``None`` — detection sees the oriented
+      image, the embed path deliberately keeps its unoriented behaviour.
+    - Everything else (HEIC, PNG, WEBP, …): the derived image, identical.
+    """
+    # Deferred: embedder imports torch; keep the faces module importable
+    # without paying that cost until a shared decode is actually requested.
+    from scalar_forensic.embedder import (
+        _EXIF_ORIENTATION_FORMATS,
+        _EXIF_ORIENTATION_TAG,
+        _cap_short_side,
+    )
+
+    pil = Image.open(io.BytesIO(data))
+    fmt = pil.format
+    orientation = pil.getexif().get(_EXIF_ORIENTATION_TAG, 1)
+    pil = ImageOps.exif_transpose(pil)
+    if pil.mode != "RGB":
+        pil = pil.convert("RGB")
+    arr = np.asarray(pil)
+    if fmt == "JPEG" or (fmt not in _EXIF_ORIENTATION_FORMATS and orientation != 1):
+        return arr, None
+    return arr, _cap_short_side(Image.fromarray(arr), cap)
 
 
 @dataclass
@@ -141,14 +182,19 @@ class FacePipeline:
 
     def process_image(
         self,
-        data: bytes,
+        data: bytes | None,
         image_hash: str,
         image_path: str,
         video_hash: str | None = None,
         video_path: str | None = None,
         frame_timecode_ms: int | None = None,
+        *,
+        img: np.ndarray | None = None,
     ) -> FaceIndexResult:
-        img = load_for_detection(data)
+        # An already-decoded native-resolution RGB array (from decode_shared)
+        # skips the second decode the standalone face pass would pay.
+        if img is None:
+            img = load_for_detection(data)
         # The detector silently drops rows whose landmarks are non-canonical
         # (detect.py), subtracting them from n_detected.  Take the delta so the
         # marker can record it -- a wholesale-wrong landmark map shows up as a
