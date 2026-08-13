@@ -4,8 +4,9 @@ Written by the CTO; rewrite in place, keep it tight, commit every fold.
 `git log -S` on this file is the project's decision history.
 
 Seeded 2026-08-12 by cto8 (`21f65f1`). This fold 2026-08-13 by
-`scalarforensic-cfm-g1` collapses the m1/m2/m3 inbox era (raw record:
-`~/.claude/cx/cto.md` git history and `docs/fleet/runbook.md`).
+`scalarforensic-cfm-g1` replaces a record that had gone two eras stale (it still
+quoted 559/5 at a pre-GitHub-migration sha). Raw record: `docs/fleet/runbook.md`
+and the `~/.claude/cx/cto.md` git history.
 
 ## what this is
 
@@ -14,82 +15,111 @@ embedding with DINOv2 and SSCD, matching by cosine similarity plus exact and
 perceptual hashing, with an env-gated **face modality** as a second identity
 axis. **Design rule from `CLAUDE.md`: a feature must have forensic value and be
 legible to a court; decorative features get removed.** Target deployment is a
-distributed isolated LAN.
+distributed isolated LAN, fully offline.
 
-## current state (2026-08-13)
+## current state (2026-08-13, late)
 
-- **The face pipeline era is MERGED AND SHIPPED.** Phase 1b (query-face strip,
-  FACES fourth mode, face query controls, DINO/FACE audit modals) landed via m3;
-  merge `2933a11`; since then the repo moved to GitHub with PR-only `main`
-  (ruleset "standard", 2 required checks). `main` at `e50fb28`; bar per
-  CLAUDE.md: **559 passed / 5 skipped at `32f3bf9`**, coverage 66.58% vs 65%
-  floor.
-- **Closed maintainer rulings — do NOT re-escalate:** uncalibrated per-face
-  cosine IS displayed (labelled raw, no CI, 0.363 never a threshold;
-  spec §10 divergence recorded in the spec itself); SFace is the embedder
-  (Apache-2.0, OpenCV Zoo); floors lowered `SFN_FACE_MIN_SIZE` 64→40,
-  `SFN_FACE_REVIEW_MIN_SIZE` 48→24 (`b91fd61`); merge done.
-- **Still open from the m3 era:** the `stale-observation-purge.md` re-detect vs
-  config-hash-diff fork (user-owned); the audit-button label shipped as the
-  maintainer's string + subtitle (accepted by silence so far). The
-  "purge --all + rebuild for the danny 40–47px cohort" item is SUPERSEDED by
-  the fresh-start below.
+- `main` at **`cc808b3`**. Bar **710 passed / 5 skipped**, coverage 69.35%
+  against the 65% floor, measured on a clean tree at `ebe3ed6` and unchanged by
+  `#141`. **`CLAUDE.md`'s 559/5 line is stale and should be corrected.**
+- Campaign complete: 8,137 files indexed. Cropper delivered as the standalone
+  repo `portable_face_cropper` (8138→4537 crops, 0 failures, 35m01s).
+- **Fleet is EMPTY.** Managers m1–m3, coders c2–c11 and the frontend-tester c4
+  all retired or dead; their ownership rows were reaped this session. Work is
+  currently driven directly from the CTO session.
 
-## the iPhone test campaign (opened 2026-08-13, operator-directed)
+### shipped and verified in the m3 window
 
-Operator decisions, FINAL:
-- Input (read-only originals, never write there):
-  `/media/user01/SAM_870_SATA/Gitea_Backup/input_scalar` — 8216 files, 20G,
-  HEIC-heavy, some HEIC+JPG pairs, videos included.
-- All derived artifacts to
-  `/media/user01/SAM_870_SATA/Gitea_Backup/created_by_scalar/`
-  ({thumbnails,frames,faces,reports} + hash_cache.db) via `.env`
-  (`SFN_THUMBNAIL_DIR`, `SFN_FRAME_STORE_DIR`, `SFN_FACE_STORE_DIR`,
-  `SFN_HASH_CACHE_PATH`).
-- Old test data (`data/images` 16G, unsplash zips, thumbnails, faces,
-  hash_cache) is deleted; `data/models` and `data/sample_images` KEPT.
-- DB starts fresh: drop image collections + `sfn-faces purge --all`
-  (enablement record survives by design).
-- **No ingestion run until the operator triggers it interactively.** First a
-  MEASURED pipeline-efficiency audit (per-stage wall time on ~50 files incl.
-  HEIC + video, GPU utilization, extrapolation to 8216 files, video frame-rate
-  question) → `docs/fleet/pipeline-efficiency-2026-08-13.md`.
-- Interactive test loop: operator drives a real Chrome
-  (`--remote-debugging-port=9222`); a frontend-tester agent (spawn as `c` with
-  the frontend-tester role file — `cx n` still refuses letter `f`) attaches via
-  chrome-devtools MCP, reports defects to the manager.
-- Known gap found at dispatch: **`pillow_heif` is not installed** — without it
-  `scanner.py` silently classifies all HEIC as unsupported.
+UI items 1–4; frame display at stored resolution end-to-end (`#128`–`#130`);
+HEIC serving (`#123`); compare/point-probes (`#124`); the CLI trio
+(`#131`/`#132`/`#134`); error surfaces (`#133`); in-browser playback of source
+video from a frame hit (`#136`); query-face chip generation race fixed (`#137`,
+proven by a pixel-signature check); runbook (`#138`); run-progress display
+restored (`#139`).
 
-Manager `scalarforensic-cfm-m1` (this fleet's numbering restarted) spawned
-2026-08-13 with the 5-item task + measurement addendum.
+### landed this session
+
+- `#140` — recovered m3's runbook entry, written but never committed before its
+  window closed.
+- `#141` — the 5 **true** CodeQL alerts: `ci.yml` had no `permissions:` block
+  (default token scope), and three handlers interpolated exception text into
+  client responses. The worst was `video.py`'s `get_video_info` returning
+  `{"error": str(exc)}` straight to the browser via `/api/query-metadata`.
+- `#142` (open) — spec: on-demand video transcoding, `docs/specs/video-playback-transcode.md`.
+  **Under two independent design reviews (Codex + Opus)**, per the precedent set
+  for the face-pipeline spec. Do not implement before those land.
+
+## closed rulings — do NOT re-escalate
+
+- Uncalibrated per-face cosine IS displayed, labelled raw; 0.363 is the model
+  authors' reference figure and never a threshold, filter or default
+  (spec `face-pipeline.md` §10).
+- SFace is the embedder (Apache-2.0, OpenCV Zoo). Floors lowered
+  `SFN_FACE_MIN_SIZE` 64→40, `SFN_FACE_REVIEW_MIN_SIZE` 48→24 (`b91fd61`).
+- `purge_all` must never `delete_collection` — the enablement record is an
+  auditable act and survives routine purges.
+- `sfn_tags` collection dropped. DBs are test-only: drop + reingest is free
+  (~3 min for 10%).
+- Restarts are **always** allowed (standing operator grant); canonical recipe
+  (`setsid nohup`) is in the runbook.
+- **Stored-data-first** is standing: never a UI workaround over missing data.
+- **The ingestion run-progress display is an operator exemption from the
+  decoration rule.** `#134` removed it; the operator reversed that and `#139`
+  restored it. Do not re-remove. The Kalman ±1σ "calibrated" band stays gone —
+  its Q/R were hand-picked constants, which is the same defect class as an
+  uncalibrated face cosine.
+- **17 `py/path-injection` CodeQL alerts are false positives**, verified
+  independently this session, not inherited: every flagged path passes through
+  `_check_allowed_path` (`routes/_shared.py:12`), which calls `resolve()` —
+  normalising traversal and symlinks — *before* `relative_to()` against resolved
+  roots, and fails closed when no root is configured. CodeQL does not model
+  `Path.relative_to` as a sanitizer. Dismissal needs `security_events` scope, so
+  it is an operator action; agents cannot do it.
+- Cropper disk-only risk is **CLOSED**: `portable_face_cropper` has a GitHub
+  remote and `main` (`8dc490c`) matches it. The `c58c58f` in older notes is
+  merely an ancestor.
 
 ## standing rules
 
 - **Forensic value is the acceptance test, not feature completeness.**
-- **`purge_all` must never `delete_collection`** — the enablement record is an
-  auditable act and survives routine purges.
-- **`SFN_FACE_STORE_DIR` is set PER CASE** (operator discipline, a decision not
-  an invariant).
+- **`SFN_FACE_STORE_DIR` is set PER CASE** (operator discipline, not an invariant).
 - Commit **explicit paths**, never a broad `git add`.
 - **A default-pinning test must supply its OWN empty env file** — `.env` leaks
   into the process env and `find_dotenv()` fallback pins nothing.
 - A value that appears only in prose and a mock needs `git log -S` before it is
   trusted (the "review floor 36" that never existed in code).
-- Never quote a test bar against a dirty tree; porcelain 0 first.
+- **Never quote a test bar against a dirty tree**; `git status --porcelain` must
+  be empty first.
+- **Verify an inherited verdict before acting on it.** Two claims carried in
+  this ledger turned out stale within one session (the cropper remote, the test
+  bar). Checking cost one command each.
 
 ## how this fleet fails — kept instances
 
 - **cto8 verified the code and INFERRED the author, then ordered on the
   inferred half.** Attribution is load-bearing; `git log -1 --format=%an` costs
-  one command. Subordinates checking orders ("shaky clause") caught it.
-- **m3 published 526/5 against a sha from a dirty-tree run** (parallel worker's
-  uncommitted tests counted). Now a CLAUDE.md gotcha.
+  one command. Subordinates checking orders caught it.
+- **m3 published 526/5 from a dirty-tree run** (a parallel worker's uncommitted
+  tests were counted). Now a `CLAUDE.md` gotcha.
 - **Ad-hoc env exports became "documented facts"** twice (review floor 36;
   `SFN_FACE_COLLECTION` load-bearing but recorded nowhere).
+- **An agent died holding uncommitted work.** m3 wrote a runbook entry and its
+  window closed before it committed; only an ownership-row check found it.
+  Recovered as `#140`. A dead agent's owned paths are worth `git diff`-ing
+  before the row is reaped.
 
 ## pending user decisions
 
-1. Pipeline pre-run speed fixes — waiting on the measured audit's DECIDE lines.
-2. `stale-observation-purge.md`: re-detect vs config-hash diff (carried).
-3. Audit-button label: shipped string+subtitle stands unless objected (carried).
+1. **CodeQL dismissals** — 17 verified false positives; one-liner supplied to
+   the operator, needs their token scope.
+2. **`stale-observation-purge.md`**: re-detect vs config-hash diff (carried).
+3. **Audit-button label**: shipped string + subtitle stands unless objected (carried).
+4. **Perceptual-hash modality** absent (carried).
+5. **Cropper `.gif` inputs** — 2 files were skipped on the delivered run; nobody
+   has ruled on whether to re-run including them (carried, low stakes).
+
+Closed since the last fold: **HEVC remedy** — superseded by the `#142` spec. The
+answer is on-demand segment transcoding keyed to what the analyst actually
+watches, not pre-built viewing copies; the earlier NVENC-transcode
+recommendation was measured and found to silently drop rotation metadata.
+**Cropper remote** — was never actually open; the push had already happened.
