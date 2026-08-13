@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 STATIC = Path("src/scalar_forensic/web/static")
@@ -130,6 +131,36 @@ def test_face_query_controls_sit_with_the_other_sliders():
     assert "faceExactSearch" in block
     assert "0.363" not in block  # never a default in the UI controls
     assert "uncalibrated" in block.lower()
+
+
+def test_header_legend_shows_the_face_modality():
+    # Change-set 2026-08-13 item 1: the post-analysis header legend showed only
+    # EXACT/ALTERED/SEMANTIC; the face modality must appear there too, gated on
+    # availability like every other face surface.
+    html = (STATIC / "index.html").read_text()
+    start = html.index('<div class="analysis-pills"')
+    block = html[start : html.index("</header>", start)]
+    assert "analysis-pill-faces" in block
+    assert "facesAvailable" in block
+    css = (STATIC / "style.css").read_text()
+    pill = css[css.index(".analysis-pill-faces") :].split("}")[0]
+    assert "--success" in pill  # same green as badge-faces: one colour per modality
+
+
+def test_query_controls_are_sectioned_per_search_function():
+    # Change-set 2026-08-13 item 2: the flat slider list is divided into one
+    # section per search function.  Sections gate their rows, so a control can
+    # appear at most once and under its own function's heading.
+    html = (STATIC / "index.html").read_text()
+    start = html.index('<div class="sliders">')
+    block = html[start : html.index('<div class="panel-header section-header">', start)]
+    labels = re.findall(r'class="slider-section-label[^"]*">([^<]+)', block)
+    assert labels == ["General", "SSCD", "DINOv2", "Face"]
+    # Every face control sits under the Face heading, which is the last one.
+    face_at = block.rindex('class="slider-section-label')
+    for control in ("faceLimit", "faceThreshold", "faceExactSearch"):
+        assert control not in block[:face_at]
+        assert control in block[face_at:]
 
 
 def test_query_image_buttons_name_their_model():

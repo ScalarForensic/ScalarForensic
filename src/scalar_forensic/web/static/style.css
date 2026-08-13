@@ -194,6 +194,7 @@ header::after {
 .analysis-pill-exact    { background: rgba(200,207,216,0.12); color: var(--exact);    border: 1px solid rgba(200,207,216,0.25); }
 .analysis-pill-altered  { background: rgba(232,147,32,0.12);  color: var(--altered);  border: 1px solid rgba(232,147,32,0.25); }
 .analysis-pill-semantic { background: rgba(74,158,224,0.12);  color: var(--semantic); border: 1px solid rgba(74,158,224,0.25); }
+.analysis-pill-faces    { background: rgba(46,204,113,0.12);  color: var(--success);  border: 1px solid rgba(46,204,113,0.25); }
 
 /* ── Upload section ── */
 .upload-section {
@@ -432,6 +433,35 @@ header::after {
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+}
+
+/* One section per search function (General / SSCD / DINOv2 / Face). */
+.slider-section {
+  margin-bottom: 10px;
+  padding-bottom: 2px;
+  border-bottom: 1px dotted var(--border);
+}
+.slider-section:last-child { margin-bottom: 0; border-bottom: none; padding-bottom: 0; }
+.slider-section-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text2);
+  margin-bottom: 6px;
+}
+.slider-section-label-altered  { color: var(--altered); }
+.slider-section-label-semantic { color: var(--semantic); }
+.slider-section-label-faces    { color: var(--success); }
+.slider-section-sub {
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--muted);
 }
 
 .slider-row {

@@ -722,6 +722,10 @@
           x-text="mode === 'exact' ? 'Exact' : mode === 'altered' ? 'Altered' : 'Semantic'">
         </span>
       </template>
+      <!-- Faces are not a per-run mode the examiner toggles at upload: the
+           modality exists whenever the collection carries it, so the legend
+           pill is gated on availability, not on analysisRunModes. -->
+      <span class="analysis-pill analysis-pill-faces" x-show="facesAvailable">Face</span>
     </div>
   </header>
 
@@ -816,51 +820,65 @@
 
       <div class="panel-header">Query Controls</div>
       <div class="sliders">
-        <div class="slider-row">
-          <div class="slider-label">
-            <span title="Maximum hits returned per uploaded file">Top K</span>
-            <span class="slider-value" x-text="limit"></span>
+        <!-- One section per search function; each section gates its own rows,
+             so a hidden function takes its heading with it. -->
+        <div class="slider-section">
+          <div class="slider-section-label">General</div>
+          <div class="slider-row">
+            <div class="slider-label">
+              <span title="Maximum hits returned per uploaded file">Top K</span>
+              <span class="slider-value" x-text="limit"></span>
+            </div>
+            <input type="range" min="1" max="50" step="1" x-model.number="limit" @input="debouncedQuery()">
           </div>
-          <input type="range" min="1" max="50" step="1" x-model.number="limit" @input="debouncedQuery()">
         </div>
-        <div class="slider-row" x-show="analysisRunModes.includes('altered')">
-          <div class="slider-label">
-            <span title="Minimum SSCD similarity (copy detection)">SSCD threshold</span>
-            <span class="slider-value altered-val" x-text="thresholdAltered.toFixed(2)"></span>
+        <div class="slider-section" x-show="analysisRunModes.includes('altered')">
+          <div class="slider-section-label slider-section-label-altered">SSCD<span class="slider-section-sub">copy detection</span></div>
+          <div class="slider-row">
+            <div class="slider-label">
+              <span title="Minimum SSCD similarity (copy detection)">SSCD threshold</span>
+              <span class="slider-value altered-val" x-text="thresholdAltered.toFixed(2)"></span>
+            </div>
+            <input type="range" min="0" max="1" step="0.01" x-model.number="thresholdAltered" @input="debouncedQuery()" class="range-altered">
           </div>
-          <input type="range" min="0" max="1" step="0.01" x-model.number="thresholdAltered" @input="debouncedQuery()" class="range-altered">
         </div>
-        <div class="slider-row" x-show="analysisRunModes.includes('semantic')">
-          <div class="slider-label">
-            <span title="Minimum DINOv2 similarity (semantic search)">DINOv2 threshold</span>
-            <span class="slider-value semantic-val" x-text="thresholdSemantic.toFixed(2)"></span>
+        <div class="slider-section" x-show="analysisRunModes.includes('semantic')">
+          <div class="slider-section-label slider-section-label-semantic">DINOv2<span class="slider-section-sub">semantic</span></div>
+          <div class="slider-row">
+            <div class="slider-label">
+              <span title="Minimum DINOv2 similarity (semantic search)">DINOv2 threshold</span>
+              <span class="slider-value semantic-val" x-text="thresholdSemantic.toFixed(2)"></span>
+            </div>
+            <input type="range" min="0" max="1" step="0.01" x-model.number="thresholdSemantic" @input="debouncedQuery()" class="range-semantic">
           </div>
-          <input type="range" min="0" max="1" step="0.01" x-model.number="thresholdSemantic" @input="debouncedQuery()" class="range-semantic">
         </div>
         <!-- Face query controls. The score floor is a *display* floor on a raw,
              uncalibrated cosine — it is not a decision threshold, and it is
              never seeded from the model authors' reference figure. -->
-        <div class="slider-row" x-show="facesAvailable">
-          <div class="slider-label">
-            <span title="Maximum face observations returned per selected query face">Face Top K</span>
-            <span class="slider-value" x-text="faceLimit"></span>
+        <div class="slider-section" x-show="facesAvailable">
+          <div class="slider-section-label slider-section-label-faces">Face<span class="slider-section-sub">raw cosine, uncalibrated</span></div>
+          <div class="slider-row">
+            <div class="slider-label">
+              <span title="Maximum face observations returned per selected query face">Face Top K</span>
+              <span class="slider-value" x-text="faceLimit"></span>
+            </div>
+            <input type="range" min="1" max="50" step="1" x-model.number="faceLimit"
+                   @input="debouncedFaceQuery()">
           </div>
-          <input type="range" min="1" max="50" step="1" x-model.number="faceLimit"
-                 @input="debouncedFaceQuery()">
-        </div>
-        <div class="slider-row" x-show="facesAvailable">
-          <div class="slider-label">
-            <span title="Display floor on the raw cosine. Uncalibrated: this is not a decision threshold.">Face score floor (raw cosine, uncalibrated)</span>
-            <span class="slider-value" x-text="faceThreshold.toFixed(2)"></span>
+          <div class="slider-row">
+            <div class="slider-label">
+              <span title="Display floor on the raw cosine. Uncalibrated: this is not a decision threshold.">Face score floor (raw cosine, uncalibrated)</span>
+              <span class="slider-value" x-text="faceThreshold.toFixed(2)"></span>
+            </div>
+            <input type="range" min="0" max="1" step="0.01" x-model.number="faceThreshold"
+                   @input="debouncedFaceQuery()">
           </div>
-          <input type="range" min="0" max="1" step="0.01" x-model.number="faceThreshold"
-                 @input="debouncedFaceQuery()">
-        </div>
-        <div class="slider-row" x-show="facesAvailable">
-          <label class="slider-label">
-            <input type="checkbox" x-model="faceExactSearch" @change="runFaceSearch()">
-            <span title="Exact kNN. Turning this off uses the approximate index; the mode is recorded in the query log.">Exact face search</span>
-          </label>
+          <div class="slider-row">
+            <label class="slider-label">
+              <input type="checkbox" x-model="faceExactSearch" @change="runFaceSearch()">
+              <span title="Exact kNN. Turning this off uses the approximate index; the mode is recorded in the query log.">Exact face search</span>
+            </label>
+          </div>
         </div>
       </div>
 
