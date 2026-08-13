@@ -31,12 +31,30 @@ _log = logging.getLogger(__name__)
 
 
 class EncodeError(RuntimeError):
-    """An encode that did not produce an output file.  Carries ffmpeg's own words."""
+    """An encode that did not produce an output file.  Carries ffmpeg's own words.
 
-    def __init__(self, message: str, *, command: list[str], stderr: str = "") -> None:
+    ``returncode`` and ``timed_out`` exist so :mod:`.states` can tell §10.1's
+    rows apart without parsing the message: a **negative** returncode is a
+    signal, and ``-9`` with no stderr is what the OOM killer leaves behind —
+    "capacity exhausted, retry later", not "this file cannot be encoded, stop
+    asking". Reading that distinction out of a prose message would break the
+    first time ffmpeg reworded itself.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        command: list[str],
+        stderr: str = "",
+        returncode: int | None = None,
+        timed_out: bool = False,
+    ) -> None:
         super().__init__(message)
         self.command = command
         self.stderr = stderr
+        self.returncode = returncode
+        self.timed_out = timed_out
 
 
 @dataclass(frozen=True)
@@ -125,13 +143,16 @@ def _run(cmd: list[str], timeout: int) -> str:
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.communicate()
-        raise EncodeError(f"encode timed out after {timeout}s", command=cmd) from None
+        raise EncodeError(
+            f"encode timed out after {timeout}s", command=cmd, timed_out=True
+        ) from None
     if proc.returncode != 0:
         detail = (stderr or "").strip().splitlines()
         raise EncodeError(
             detail[-1] if detail else f"ffmpeg exited {proc.returncode}",
             command=cmd,
             stderr=stderr or "",
+            returncode=proc.returncode,
         )
     return stderr or ""
 
@@ -174,6 +195,15 @@ def encode(
             _run(cmd, settings.video_job_timeout)
         except EncodeError as exc:
             if pipeline.hwaccel == "none":
+                raise
+            if exc.timed_out or exc.returncode == -9:
+                # Not a GPU fault to route around.  A timeout means the encode
+                # did not fit in SFN_VIDEO_JOB_TIMEOUT and the CPU path is the
+                # slower one (§3.1: 6.1× vs 2.7×), so the retry would spend the
+                # timeout again and fail again; SIGKILL is the OOM killer, and a
+                # second encoder started under memory pressure is how one refused
+                # request becomes two dead ones.  Both surface as themselves
+                # (§10.1) instead of being reported as a GPU fallback.
                 raise
             # §8: a GPU that probed clean can still fail at job time — a driver
             # reset, or another process holding the encoder session.  Retry on

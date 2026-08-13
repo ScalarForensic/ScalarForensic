@@ -331,6 +331,33 @@ from the ingestion display; nothing here may invent a state it cannot observe.
 | `cache-disabled` | `SFN_VIDEO_CACHE_DIR` unset — explain, offer Download original |
 | `capacity-exhausted` | queue or cache full; explain, offer Download original |
 
+**Three states phase 6 added, because the list above has no answer for "we have
+not asked yet".** v1's table answers one question — *can this play?* — with two
+verdicts, and a verdict is exactly what the player does not have before
+`playback-info` returns, or after a container refuses to open. This subsystem is
+already three-state in four other places (`stale_evidence`, `mode`,
+`Capability`, §6.3's `unknown`/`fits`/refusal) for the same reason.
+
+| State | Analyst sees |
+|---|---|
+| `idle` | no video selected; the player claims nothing |
+| `probing` | `playback-info` in flight — a spinner, **not** a verdict |
+| `unknown` | the container could not be probed: the probe's own words, and Download original |
+
+`unknown` is the one that matters. `#147` shipped "unknown displayed as
+mismatch" in an evidence viewer, and reporting an unprobeable file as
+`needs-transcode` is that defect one layer up — a claim about a stream nobody
+read. `codecs._playback_mode` has returned `unknown` as a fourth mode since
+phase 3; `states.MODE_TO_STATE` carries it through to the UI instead of
+flattening it on the way. A test asserts the state is neither `playable` nor
+`needs-transcode`.
+
+`full-job-running`, `full-job-done` and `full-job-failed` are **phase 7's** and
+are deliberately not in phase 6's set: §5 says nothing here may invent a state
+it cannot observe, and with no job endpoints nothing can enter them.
+`states.PHASE_7_STATES` names them so the omission is visible rather than
+accidental.
+
 ---
 
 ## 6. Cache
@@ -573,13 +600,30 @@ lever on both cost and disclosure, and v1 never mentioned it. It is now settled:
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/video-playback-info` | extended: mode, reason, duration, verified digest, job state |
-| `POST /api/video-chunk` | encode/serve a chunk at a timecode |
+| `POST /api/video-chunk` | encode the chunk at a timecode; returns JSON, not bytes |
+| `GET /api/video-chunk` | serve an already-encoded chunk; **never encodes** |
 | `POST /api/video-full` | start the background full-video job |
 | `DELETE /api/video-full` | cancel it |
 | `GET /api/video-job-status` | progress, rate, ETA, terminal state |
 | `GET /api/video-download` | original bytes, `Content-Disposition`, verified digest |
 | `GET /api/video-playback` | unchanged — `original` and `rewrap` modes |
 | `POST /api/video-lease` | register/refresh the §6.2 playback lease; `release=true` drops it |
+
+**Why the chunk endpoint is two verbs (phase 6).** v1's table had one
+`POST /api/video-chunk` returning the media. A `<video>` element cannot POST —
+it issues a `GET` with `Range` headers and nothing else — and it will not wait
+the §3.5 8.21 s an encode takes without its own media stack concluding the
+source is broken. So the POST does the work and returns JSON (`chunk_url`,
+`next_chunk_start`, the pipeline that ran, the §5 state); the GET serves bytes
+out of the cache through `FileResponse` range handling and 404s on a miss
+instead of encoding. That also keeps the GET idempotent and cacheable, and stops
+a request that starts an encode from being disguised as a fetch.
+
+The GET carries `fp`, the fingerprint of the pipeline whose rendering to serve —
+a video encoded on two hosts has two pictures (§6.1). **It is a selector inside
+that video's directory and never an identity**: `path` is the identity, through
+the same resolution flow, and a non-hex `fp` is refused before any path is
+built.
 
 **Every path-bearing route reuses the existing resolution flow** — absolute path,
 `resolve()`, extension check, `_check_allowed_path`, regular-file check. No route
@@ -601,6 +645,54 @@ retryability: corrupt input; missing video or audio track; unsupported decoder;
 ffmpeg non-zero exit; job timeout; GPU failure or saturation; OOM; disk or tmpfs
 full; cache directory unwritable or unset; source disappeared or changed
 mid-session; malformed duration metadata; queue full. Nothing may retry-storm.
+
+**Implemented in phase 6** as one table, `video_playback/states.py`, beside the
+§5 state list it maps onto — two tables that have to agree, so they live in one
+module. `classify()` turns an exception into a row; every row names an HTTP
+status, a §5 state, a `retryable` flag and, when retryable, a `Retry-After`.
+Phase 7's job runner maps the same conditions onto `full-job-failed` through the
+same function rather than re-deriving them.
+
+| §10.1 condition | kind | status | §5 state | retry |
+|---|---|---|---|---|
+| corrupt input (container will not open) | `corrupt-input` | 422 | `unknown` | no |
+| missing video track | `no-video-track` | 422 | `chunk-failed` | no |
+| **missing audio track** | — | 200 | `chunk-ready` | — |
+| unsupported decoder / no usable pipeline | `no-encode-pipeline` | 503 | `chunk-failed` | no |
+| ffmpeg non-zero exit | `encode-failed` | 422 | `chunk-failed` | no |
+| job timeout | `job-timeout` | 504 | `chunk-failed` | 30 s |
+| **GPU failure or saturation** | — | 200 | `chunk-ready` | — |
+| OOM (encoder killed by SIGKILL) | `encoder-killed` | 507 | `capacity-exhausted` | 60 s |
+| disk or tmpfs full | `disk-full` | 507 | `capacity-exhausted` | 60 s |
+| cache directory unwritable | `cache-unwritable` | 503 | `cache-disabled` | no |
+| cache directory unset | `cache-unset` | 503 | `cache-disabled` | no |
+| source disappeared | `source-disappeared` | 404 | `chunk-failed` | no |
+| source changed mid-session | `source-changed` | 409 | `chunk-failed` | no |
+| malformed duration metadata | `malformed-duration` | 422 | `chunk-failed` | no |
+| queue full | `queue-full` | 503 | `capacity-exhausted` | 15 s |
+
+The two rows with **no kind** are the ones that are not failures by the time a
+caller sees them, and the table says so rather than omitting them: a GPU that
+fails at job time falls back to CPU (§8) and produces a chunk, and a source with
+no audio is encoded with `-an`. A matrix is as wrong when it invents a failure
+as when it drops one, and a test pins that neither kind exists.
+
+**Retryability is advertised, never acted on server-side.** The response states
+whether a retry could help and how long to wait; the player obeys it. That is
+what "nothing may retry-storm" means operationally — a client looping on a
+`retryable: false` row is looping on a condition that will not change.
+
+**Two conditions are decided from the returncode, not from a message.** A
+negative returncode is a signal; `-9` with no stderr is the OOM killer, which is
+`capacity-exhausted, retry later` and emphatically not "this file cannot be
+encoded". Parsing that out of ffmpeg's prose would break the first time it
+reworded itself, so `EncodeError` carries `returncode` and `timed_out`.
+
+**The §8 fallback answers a GPU fault and only a GPU fault.** A timeout is not
+retried on CPU — the CPU path is the slower one (§3.1: 6.1× vs 2.7×), so the
+retry would spend `SFN_VIDEO_JOB_TIMEOUT` again and fail again — and neither is
+a SIGKILL, because a second encoder started under memory pressure turns one
+refused request into two dead ones.
 
 ### 10.2 Atomic publication
 
@@ -664,6 +756,7 @@ src/scalar_forensic/video_playback/
 ├── encode.py        chunk and full encode; one path, different -ss/-t
 ├── jobs.py          worker pool, queue, refcounts, cancellation, lifecycle (§10)
 ├── cache.py         keys, leases, eviction, purge (§6)               [carved]
+├── states.py        §5 player states + the §10.1 failure matrix       [phase 6]
 ├── audit.py         provenance + examiner record (§7.3), wrapping faces/ helpers
 └── routes.py        the APIRouter                                    [carved]
 
@@ -672,6 +765,13 @@ src/scalar_forensic/web/static/js/video_playback/player.js   (double-buffered)
 
 `[carved]` marks what exists as of the phase 1–3 carve; the rest arrive with
 their phases (§15).
+
+`states.py` is a third addition, ruled in during phase 6. §5's state list and
+§10.1's failure matrix are two tables that have to agree — a failure whose state
+the UI has no branch for is a failure the analyst never sees — and keeping them
+in one module is what makes disagreement visible. It is not in `routes.py`
+because phase 7's job runner is its second caller: a full-video job maps the same
+conditions onto `full-job-failed` through the same `classify()`.
 
 Two modules are additions to v1's list, ruled in during the carve:
 
@@ -735,6 +835,7 @@ aggressively; `face-pipeline.md` §13 is the template):
 | `SFN_VIDEO_MAX_WORKERS` | `2` | Aggregate throughput is flat from k=1 to k=8 (§3.5), so extra workers buy no capacity and cost per-job latency directly: 8.08 s at k=1, 16.35 s at k=2, 32.47 s at k=4. 2 is the highest k that keeps a queued chunk near §4.2's 6–10 s assumption. |
 | `SFN_VIDEO_OUTPUT_HEIGHT` | `1080` | Operator ruling (§16), and §3.5 measures the cost of the alternative: 4K first-play is 33.73 s and 4K CPU tone-map encoding is 0.879×, below realtime. Never upscale — a source shorter than 1080 is passed through at its own height. |
 | `SFN_VIDEO_LEASE_SECONDS` | `120` | Four missed 30 s heartbeats — long enough that a chunk encode at §3.5's 8.21 s never drops the lease under §4.2's margin, short enough that a crashed browser stops protecting a video within a couple of minutes (§6.2). |
+| `SFN_VIDEO_QUEUE_MAX` | `8` | Admitted chunk encodes, running **and** waiting — §10.4's "a LAN host must not be able to grow the queue without limit". Four §3.5 chunk times deep at the default 2 workers (8.21 s at k=1, 16.35 s at k=2), so a full queue drains in well under a minute; beyond it the request is refused with a `Retry-After` rather than left hanging. Validated `>= SFN_VIDEO_MAX_WORKERS`. |
 | `SFN_VIDEO_CHUNK_SECONDS` | `30` | Valid **only under the 1080p cap**: a 30 s chunk lands in 8.21 s at 1080p (§3.5), inside §4.2's margin. At 4K the same chunk takes 33.73 s, so raising `SFN_VIDEO_OUTPUT_HEIGHT` above 1080 requires revisiting this value in the same change. |
 
 ---
@@ -819,6 +920,8 @@ long-GOP and damaged-index seek behaviour, and multi-sample confirmation of
 5. **Cache** — keyed by pipeline, leases, corrected eviction, ceiling refusal,
    atomic publication, purge command.
 6. **Chunk playback** — double-buffered player, seek-to-new-chunk, player states.
+   *Server side done*: `POST`/`GET /api/video-chunk`, `states.py`, the admission
+   gate, `SFN_VIDEO_QUEUE_MAX`, and every §10.1 row pinned by a test.
 7. **Full-video job** — background worker, progress/ETA via `_RateTracker`,
    cancel, completion notification, auto-switch at timestamp.
 8. **Provenance and audit** — label with full pipeline record, examiner audit,

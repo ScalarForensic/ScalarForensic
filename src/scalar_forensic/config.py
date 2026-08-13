@@ -135,6 +135,15 @@ class Settings:
         self.video_max_workers: int = self._parse_int("SFN_VIDEO_MAX_WORKERS", 2)
         if self.video_max_workers < 1:
             raise ValueError("SFN_VIDEO_MAX_WORKERS must be >= 1")
+        # Admitted chunk encodes, running *and* waiting.  §10.4: "a LAN host must
+        # not be able to grow the queue without limit".  8 is four §3.5 chunk
+        # times deep at the default 2 workers — 8.21 s each at k=1, 16.35 s at
+        # k=2, so a full queue drains in well under a minute and refusing beyond
+        # it tells the analyst to wait rather than leaving the request hanging
+        # for minutes with nothing to show.
+        self.video_queue_max: int = self._parse_int("SFN_VIDEO_QUEUE_MAX", 8)
+        if self.video_queue_max < self.video_max_workers:
+            raise ValueError("SFN_VIDEO_QUEUE_MAX must be >= SFN_VIDEO_MAX_WORKERS")
         # Wall-clock ceiling on one encode, seconds.  A timed-out encoder is
         # killed and reaped rather than left holding a core and the source file
         # open (§10.3).  3600 is sized for a full-video job, not a chunk: §3.5's
