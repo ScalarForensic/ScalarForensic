@@ -18,6 +18,26 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
   `SFN_EXAMINER_ID`, a YuNet ONNX and an operator-supplied embedder; `uv sync --group faces`).
   Purge via `uv run sfn-faces purge --media <sha256> | --all`
 
+## Contributing workflow
+
+Work goes to `main` through a pull request, never a direct push:
+
+```
+git switch -c fix/short-slug
+gh pr create --fill
+gh pr checks --watch          # lint-and-test (3.12) + qdrant-integration must pass
+gh pr merge --squash --delete-branch
+```
+
+Ruleset "standard" on GitHub enforces this (PR required, 0 approvals, no force-push, both
+CI jobs required). Note it is a **repository ruleset, not classic branch protection** — so
+`gh api repos/.../branches/main/protection` answers "Branch not protected"; look at
+`/rulesets` instead. Org owners retain a break-glass bypass, so a direct push to `main`
+will still succeed for them — treat that as a fire alarm, not a shortcut.
+
+Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr update-branch`
+(the CLI token lacks `workflow` scope) — comment `@dependabot rebase` instead.
+
 ## Architecture decisions (do not re-litigate)
 
 - Target deployment is distributed across an isolated LAN (see `docs/deployment.md`):
@@ -71,6 +91,20 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 - Face search is uncalibrated by deliberate ruling (2026-08-12): the raw cosine is displayed and
   labelled as such. SFace's 0.363 is the model authors' reference figure only — never a default, a
   filter or a deployment threshold. See `docs/specs/face-pipeline.md` §10.
+- **`requires-python = "==3.12.*"` is load-bearing — do not "modernise" it.** `37a8b4b` moved
+  the project *down* from 3.13 to 3.12 because the ROCm path pins `pytorch-triton-rocm` by
+  literal cp312 wheel URL with a `python_version == '3.12'` marker (`pyproject.toml:89`;
+  PyTorch tags that wheel `linux_x86_64`, not manylinux, so uv's index resolver rejects it).
+  cp314 wheels do now exist for torch/triton-rocm/onnxruntime, so a bump is *possible* — but
+  it means touching 7 places (`requires-python`, the triton URL+marker, `run.sh:8`'s hardcoded
+  `.venv/lib/python3.12/...` path, the CI matrix, `uv.lock`, the Dockerfile, and the
+  regenerated `vendor/` airgap bundle). 3.12 is supported to Oct 2028 and the hot paths are
+  torch/Qdrant, not the interpreter. Dependabot reopens this as a docker base-image bump;
+  close it. (Precedent: PR #100, closed 2026-08-13.)
+- Pytest's `addopts` in `pyproject.toml` carries `--cov-fail-under=65`, which applies to
+  **every** invocation. Any CI job or local run of a test *subset* must pass `--no-cov` or it
+  fails on coverage while its tests pass — this silently red-lit `qdrant-integration` for a
+  day (fixed in `ci.yml`, see the comment there).
 - `indexer.py:96-104` claims Qdrant can add a named vector to an existing collection. It cannot
   (`VectorParamsDiff` has no `size`), so `--dino` now and `--sscd` later is impossible — adding a
   modality means dropping the collection and re-indexing.
