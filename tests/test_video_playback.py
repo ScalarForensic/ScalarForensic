@@ -366,6 +366,73 @@ class TestPlaybackInfo:
 
 
 # ---------------------------------------------------------------------------
+# /api/video-download (spec §7.5)
+# ---------------------------------------------------------------------------
+
+
+class TestVideoDownload:
+    def test_serves_the_source_bytes_untouched(self, client, mov):
+        r = client.get(f"/api/video-download?path={mov}")
+        assert r.status_code == 200
+        assert r.content == mov.read_bytes()
+
+    def test_a_mov_is_not_rewrapped_on_the_way_out(self, client, mov, roots):
+        # The download is the escape route from the viewing copy, so it must be
+        # the original container, not the cached MP4.
+        _, cache_dir = roots
+        client.get(f"/api/video-playback?path={mov}")  # populate the rewrap cache
+        assert list(cache_dir.glob("*.mp4"))
+        r = client.get(f"/api/video-download?path={mov}")
+        assert r.content == mov.read_bytes()
+
+    def test_content_disposition_names_the_original_file(self, client, mov):
+        r = client.get(f"/api/video-download?path={mov}")
+        disposition = r.headers["content-disposition"]
+        assert disposition.startswith("attachment")
+        assert "IMG_0001.MOV" in disposition
+
+    def test_the_verified_digest_travels_with_the_bytes(self, client, mov):
+        r = client.get(f"/api/video-download?path={mov}")
+        assert r.headers["x-sfn-source-sha256"] == hash_file(mov)
+
+    def test_a_path_outside_the_allowed_roots_is_rejected(self, client, roots, tmp_path):
+        outside = tmp_path / "elsewhere.mov"
+        outside.write_bytes(b"\0" * 16)
+        assert client.get(f"/api/video-download?path={outside}").status_code == 403
+
+    def test_traversal_out_of_an_allowed_root_is_rejected(self, client, roots, tmp_path):
+        input_dir, _ = roots
+        outside = tmp_path / "secret.mov"
+        outside.write_bytes(b"\0" * 16)
+        traversal = f"{input_dir}/../{outside.name}"
+        assert client.get(f"/api/video-download?path={traversal}").status_code == 403
+
+    def test_a_relative_path_is_rejected(self, client, roots):
+        assert client.get("/api/video-download?path=IMG_0001.MOV").status_code == 400
+
+    def test_a_non_video_extension_is_rejected(self, client, roots):
+        input_dir, _ = roots
+        doc = input_dir / "notes.txt"
+        doc.write_text("not a video")
+        assert client.get(f"/api/video-download?path={doc}").status_code == 400
+
+    def test_a_missing_file_is_404(self, client, roots):
+        input_dir, _ = roots
+        assert client.get(f"/api/video-download?path={input_dir / 'gone.mov'}").status_code == 404
+
+    def test_a_directory_is_not_servable(self, client, roots):
+        input_dir, _ = roots
+        d = input_dir / "adir.mov"
+        d.mkdir()
+        assert client.get(f"/api/video-download?path={d}").status_code == 404
+
+    def test_playback_info_advertises_the_download(self, client, mov):
+        body = client.get(f"/api/video-playback-info?path={mov}").json()
+        assert body["download_url"].startswith("/api/video-download?path=")
+        assert client.get(body["download_url"]).status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # Digest correctness (spec §7.1)
 # ---------------------------------------------------------------------------
 
@@ -440,9 +507,9 @@ class TestSourceDigest:
         calls: list[str] = []
         real = video_routes._source_digest
 
-        def spy(p):
+        def spy(p, settings=None):
             calls.append(threading.current_thread().name)
-            return real(p)
+            return real(p, settings)
 
         with patch.object(video_routes, "_source_digest", spy):
             assert client.get(f"/api/video-playback-info?path={mov}").status_code == 200
