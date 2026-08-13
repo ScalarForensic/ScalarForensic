@@ -292,3 +292,26 @@ def test_face_dist_stats_modal_scopes_the_reference_threshold():
     block = html[start : start + 4000]
     assert "model_reference_note" in block
     assert "review-only" in block  # the population statement
+
+
+def test_server_error_detail_is_flattened_before_display():
+    # c4 caught a 422 whose `detail` is FastAPI's array of validation objects:
+    # assigned straight to the error field it renders as "[object Object]", so
+    # the examiner is told nothing about why the search failed.  Every error
+    # surface must go through the flattener, not `body.detail || '...'`.
+    js = (STATIC / "js" / "faces.js").read_text()
+    assert "faceErrText(" in js
+    assert "body.detail ||" not in js
+    for surface in (
+        "queryFacesError",
+        "faceSearchError",
+        "faceCompareError",
+        "faceStatsError",
+        "faceAuditError",
+    ):
+        # Each surface is assigned more than once (reset to '' on entry, then
+        # the server's message); only the ones carrying `detail` are in scope.
+        assigned = [a for a in re.findall(rf"this\.{surface} = ([^;]+);", js) if "detail" in a]
+        assert assigned, surface
+        for a in assigned:
+            assert "faceErrText(body.detail" in a, f"{surface}: {a}"

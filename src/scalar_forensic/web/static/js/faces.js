@@ -4,6 +4,28 @@
 // face *observations*, never identifications.  Copy in the UI says "face
 // observations" / "similar faces" — never "identified person".
 (window.__sfnParts = window.__sfnParts || []).push({
+    // ── Error text ────────────────────────────────────────────────────────
+    // FastAPI's `detail` is a string for our own HTTPExceptions but an array of
+    // validation objects for a 422, which renders as "[object Object]" — the
+    // examiner is then told nothing at all about why a search failed.  Flatten
+    // both shapes to one line.
+    faceErrText(detail, fallback) {
+      if (typeof detail === 'string' && detail) return detail;
+      if (Array.isArray(detail)) {
+        const parts = detail
+          .map(d => {
+            if (typeof d === 'string') return d;
+            const where = Array.isArray(d?.loc) ? d.loc.filter(x => x !== 'body').join('.') : '';
+            const msg = d?.msg || JSON.stringify(d);
+            return where ? `${where}: ${msg}` : msg;
+          })
+          .filter(Boolean);
+        if (parts.length) return parts.join('; ');
+      }
+      if (detail && typeof detail === 'object') return JSON.stringify(detail);
+      return fallback;
+    },
+
     // ── Availability ──────────────────────────────────────────────────────
     async checkFacesAvailability() {
       try {
@@ -97,7 +119,7 @@
         const resp = await fetch('/api/faces/query-faces', { method: 'POST', body: fd });
         const body = await resp.json();
         if (!resp.ok) {
-          this.queryFacesError = body.detail || 'face detection failed';
+          this.queryFacesError = this.faceErrText(body.detail, 'face detection failed');
           return;
         }
         this.queryFaces = Array.isArray(body.faces) ? body.faces : [];
@@ -229,7 +251,7 @@
         const resp = await fetch('/api/faces/search', { method: 'POST', body: fd });
         const body = await resp.json();
         if (!resp.ok) {
-          this.faceSearchError = body.detail || 'face search failed';
+          this.faceSearchError = this.faceErrText(body.detail, 'face search failed');
           return;
         }
         this.faceHits = Array.isArray(body.hits) ? body.hits : [];
@@ -267,7 +289,7 @@
         const resp = await fetch('/api/faces/compare', { method: 'POST', body: fd });
         const body = await resp.json();
         if (!resp.ok) {
-          this.faceCompareError = body.detail || 'face compare unavailable';
+          this.faceCompareError = this.faceErrText(body.detail, 'face compare unavailable');
           return;
         }
         this.faceComparePairs = Array.isArray(body.pairs) ? body.pairs : [];
@@ -314,7 +336,7 @@
         fd.append('face_index', index);
         const resp = await fetch('/api/faces/dist-stats', { method: 'POST', body: fd });
         const body = await resp.json();
-        if (!resp.ok) { this.faceStatsError = body.detail || 'distribution query failed'; return; }
+        if (!resp.ok) { this.faceStatsError = this.faceErrText(body.detail, 'distribution query failed'); return; }
         this.faceStats = body;
       } catch (e) {
         this.faceStatsError = String(e);
@@ -343,7 +365,7 @@
       try {
         const resp = await fetch(`/api/faces/audit?image_hash=${encodeURIComponent(hash)}`);
         const body = await resp.json();
-        if (!resp.ok) { this.faceAuditError = body.detail || 'audit lookup failed'; return; }
+        if (!resp.ok) { this.faceAuditError = this.faceErrText(body.detail, 'audit lookup failed'); return; }
         this.faceAudit = body;
       } catch (e) {
         this.faceAuditError = String(e);
