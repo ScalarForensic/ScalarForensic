@@ -924,6 +924,31 @@ eviction during playback; cache-full refusal (§6.3); stale-source detection
 (§7.1); every §10.1 failure mapped to its player state; path-containment on every
 new route including rejection of a cache key as source identity.
 
+**There is no JavaScript test harness in this repository, and phase 6 is the
+first phase whose weight is in the browser.** Stated here because it is a
+project-level fact, not a phase-6 caveat, and because the shape of the gap is
+not obvious:
+
+- `player.js` is pinned by **text-level wiring tests** (in
+  `tests/test_video_playback.py`, in the style of `test_static_wiring_web.py`)
+  plus a **manual browser run** recorded in the PR that introduced it.
+- **A wiring test cannot tell you the browser can run the file.** One already
+  slipped through: `player.js` shipped a `?? … ||` precedence `SyntaxError`, so
+  the file did not parse *at all*, and all fourteen wiring tests passed against
+  it. This is the `/?cachebust=N` gotcha generalised — reading a file as text
+  says nothing about executing it — and it is why the live check with a forced
+  re-fetch of every `<script src>` and the stylesheet is **mandatory** for
+  browser-side work here, not a nicety.
+- The markup inside `.vc-block` is **wiring-pinned only**. Rendering it needs a
+  full analysis session — Qdrant and an indexed corpus — so the browser run
+  exercised the component's methods and getters directly rather than through the
+  panel that hosts them.
+
+What would close it is a real JS test runner. That is a new dependency and a
+separate decision with a real cost, so it belongs to the operator and not to any
+phase of this spec; it is named here so the next person weighs it deliberately
+instead of rediscovering the gap.
+
 **Measurements required on real hardware before phase 4 is accepted: satisfied
 by §3.5** (2026-08-13) — 4K rates, long-source seek, concurrent-job scaling and
 the hardware floor are all measured, the last as a policy statement (this host

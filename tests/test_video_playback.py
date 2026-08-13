@@ -2610,3 +2610,56 @@ class TestPlayerWiring:
         body = client.get(f"/api/video-playback-info?path={hevc_10bit_mov}").json()
         assert body["lease_seconds"] == Settings().video_lease_seconds
         assert body["chunk_seconds"] == Settings().video_chunk_seconds
+
+
+class TestRemainingFailureRowsOverHttp:
+    """The two §10.1 rows that need a container the fixtures cannot write."""
+
+    def test_a_container_with_no_video_track_is_422(self, client, hevc_10bit_mov):
+        report = vp_codecs._stream_report(hevc_10bit_mov)
+        report["video_codec"] = None
+        with patch.object(vp_routes, "_stream_report", return_value=report):
+            r = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        assert r.status_code == 422
+        assert r.json()["detail"]["error"] == "no-video-track"
+
+    def test_a_container_with_no_duration_is_refused_before_any_encode(
+        self, client, hevc_10bit_mov
+    ):
+        # A timecode cannot be checked against a duration that is not there, and
+        # a chunk cannot be bounded — so this refuses rather than encoding into
+        # the dark and finding out.
+        report = vp_codecs._stream_report(hevc_10bit_mov)
+        report["duration_ms"] = None
+        with (
+            patch.object(vp_routes, "_stream_report", return_value=report),
+            patch.object(vp_encode, "_run", side_effect=AssertionError("encoded anyway")),
+        ):
+            r = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        assert r.status_code == 422
+        assert r.json()["detail"]["error"] == "malformed-duration"
+
+    def test_the_matrix_covers_every_condition_section_10_1_names(self):
+        # The list in §10.1, as kinds. Two conditions are deliberately absent
+        # because they are not failures by the time a caller sees them; they are
+        # asserted absent by TestFailureMatrix instead.
+        kinds = {
+            v.kind
+            for k, v in vars(vp_states).items()
+            if isinstance(v, vp_states.Failure) and k.isupper()
+        }
+        assert {
+            "corrupt-input",
+            "no-video-track",
+            "no-encode-pipeline",
+            "encode-failed",
+            "job-timeout",
+            "encoder-killed",
+            "disk-full",
+            "cache-unwritable",
+            "cache-unset",
+            "source-disappeared",
+            "source-changed",
+            "malformed-duration",
+            "queue-full",
+        } <= kinds
