@@ -6,9 +6,10 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 
 ## Commands
 
-- `uv run pytest -q` — full suite (478 passed / 5 skipped as of 2026-08-12), hermetic,
+- `uv run pytest -q` — full suite (530 passed / 5 skipped as of 2026-08-13, clean tree), hermetic,
   needs no Qdrant; the 5 skips need `SFN_TEST_QDRANT_URL` and are the only tests that can
-  observe the face exclusion guarantee against a real store
+  observe the face exclusion guarantee against a real store (CI runs them in a separate
+  Qdrant service-container job)
 - `uv run ruff check src tests scripts` and `uv run ruff format --check src tests scripts` — CI runs exactly these
 - `./run.sh sfn-web` — start web UI (wrapper exports venv CUDA libs); boots fine without
   Qdrant and degrades to exact-hash-only mode
