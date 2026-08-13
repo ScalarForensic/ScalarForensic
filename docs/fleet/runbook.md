@@ -1632,3 +1632,82 @@ the Kalman equations after #134 (cli.py:1606). NEW test file test_cli_run_progre
 honesty pins (no std/gain/sigma attrs; eta() scalar; calibration mentioned only to
 disclaim). **Bar re-measured by me at `ebe3ed6`: 710 passed / 5 skipped**, cov 69.35%.
 `--delete-branch` remote-survival: 4th occurrence, c11 cleaned it itself.
+
+## [ScalarForensic, com-m4, 2026-08-13] Manager window opens; phases 1–3 dispatched to c12
+
+CTO role retired — this window escalates directly to the operator. First actions done:
+ledger, spec v2 and `CLAUDE.md` read; `cx o --reap` dropped two stranded `cfm-g1` rows
+(`docs/fleet/runbook.md`, `docs/specs/video-playback-transcode.md`); manager claimed the
+ledger + runbook. `main` at `c6153cf`. Tree carries one untracked
+`docker-compose.override.yml` that is nobody's — not staged, not deleted, noted so no bar
+is quoted against it by accident.
+
+`scalarforensic-com-c12` (opus:medium) dispatched on spec §15 phases 1–3, three separate
+PRs in order, brief at
+`/tmp/claude-1000/-home-user01-Schreibtisch-gitea-ScalarForensic/b70da62a-5aee-45f4-ad0d-c783f885c32e/scratchpad/dispatch-c12.md`.
+Owns `web/routes/video.py`, `tests/test_video_endpoints.py`, `tests/test_video_playback.py`.
+Brief carries the two closed rulings as hard constraints (no HLS/MSE/CMAF; no §11 carve
+before phase 4) and the `_evict_cache` `*.mp4` glob defect as a scoped early fix.
+
+### OPERATOR DECISIONS REQUESTED — phase 4 is blocked on these two
+
+**(A) HDR test fixture (§14, §17 Q4) — blocking.** `data/` is gitignored, so no 10-bit HDR
+sample can be committed, and §14 requires tests that pin rotation survival and `bt709`
+output tags — the two defects §3.1 actually found.
+
+*Recommendation: do both, layered.* Default is a **generated** fixture — a ~2 s
+`ffmpeg -f lavfi` clip encoded `libx265`/`yuv420p10le`, tagged `bt2020`/`arib-std-b67`,
+carrying `rotation=-90` side data, built into `tmp_path` at test time and skipped with an
+explicit reason if the ffmpeg build lacks `libx265` or `libzimg`. ffmpeg is already a
+declared dependency from phase 4 (§8), so this adds no new one, and it makes the rotation
+and colour-tag assertions run in CI on every PR rather than never.
+Layer two is a **gate-and-skip** on an env-supplied real-corpus path (the YuNet pattern),
+for the checks a synthetic clip cannot honestly make: real iPhone HLG, real container
+index, real rotation metadata. Generated-only would let a green CI mean less than it looks;
+gated-only would mean the assertions never run at all. Cost of the pair is one fixture
+module.
+
+**(B) Real-hardware measurements (§14, §17 Q3) — blocking, and needs the operator's
+hardware, not mine.** §14 requires 4K rates, a long-source seek measurement, concurrent-job
+scaling, and a stated minimum hardware floor. Every number in §3 is 1080p, single-job, on
+an idle 24-core dev host with an RTX 4060 Ti — §3.4 says so explicitly. Three questions,
+because the answers change what is worth measuring:
+
+1. **Is the dev host representative of the deployment machine, or is there real target
+   hardware to measure on?** If the dev host is all there is, the resulting floor is a
+   guess dressed as a measurement and the spec should say so.
+2. **Is there a real 4K source and a real multi-hour source in the corpus** to point a
+   benchmarker at (§3 saw max 318 s, median 2.0 s), or should it synthesise them? A
+   synthesised long source has a clean index and will understate the §3.2 risk, which is
+   precisely damaged/long-GOP indexes.
+3. **The minimum hardware floor is a policy statement, not a measurement** — the operator
+   sets it. Measurement can only say what degrades below it.
+
+*Recommendation:* I hold the benchmarker until (1) and (2) are answered. A `csm`
+benchmarker can deliver 4K rates, long-source seek and k=1/2/4/8 concurrency scaling on the
+dev host in one pass, but concurrency numbers are only valid on an otherwise-idle box, so it
+must not run while c12 is running the suite — it is scheduled after phase 3 merges either
+way. Nothing is lost by answering after phases 1–3 land.
+
+### §17 open questions that are operator calls — recommendations
+
+- **Q1, output resolution policy (§8).** *Recommend: cap at 1080p by default*
+  (`SFN_VIDEO_OUTPUT_HEIGHT=1080`), never upscale, aspect and rotation preserved, the
+  rescale disclosed in the label per §7.4; operator-overridable to match-source. 4K is
+  unmeasured and the CPU path may fall below realtime (§3.4), and §7.4 already states that
+  fine detail must be judged from the original — so a cap costs nothing forensically that
+  the disclosure does not already cover, and it is the single largest lever on cost.
+- **Q3, minimum hardware floor.** *Recommend: commit to the shape now, the number after
+  (B).* Shape: cores + free cache bytes, GPU explicitly not required, with the documented
+  degradation being that 1080p chunk encode exceeds the ~10 s prefetch margin (§4.2) and the
+  double-buffer swap stalls at a boundary. Naming a number before measuring would repeat the
+  "review floor 36" failure in the ledger.
+- **Q5, admitting a full-video job near the ceiling (§6.3).** *Recommend: refuse before
+  starting*, threshold at estimated output > 50% of `SFN_VIDEO_CACHE_MAX_BYTES`, showing the
+  estimate and offering Download original. §6.3 already makes the ceiling the invariant;
+  admitting a job that will evict everything else — including the chunks of the video being
+  watched — turns one analyst's request into a fleet-wide cache flush, and the lease in §6.2
+  cannot prevent it because the job's own output is what overflows.
+
+**Not re-investigated, as instructed:** the 17 `py/path-injection` CodeQL alerts remain
+verified false positives awaiting only the operator's `security_events` token scope.
