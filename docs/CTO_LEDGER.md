@@ -34,22 +34,23 @@ claim. Third instance in this ledger of prose outliving the code it described.
 legible to a court; decorative features get removed.** Target deployment is a
 distributed isolated LAN, fully offline.
 
-## current state (2026-08-13, late)
+## current state (2026-08-14)
 
-- `main` at **`3ac5442`** (`#155`, docs-only). Bar **771 passed / 5 skipped**,
-  coverage 70.22% against the 65% floor — **re-measured by `m4` on a clean tree
-  at `f6cef02`**, twice, not taken from either coder's report; `#151`, `#152`,
-  `#153`, `#154` and `#155` are all docs-only, so the bar still stands at
-  `3ac5442`. Was 710/5 at 69.35%; phases 1–3 added 61 tests and the §11 carve
-  added zero, which is what a pure move should show. **`CLAUDE.md`'s stale
-  559/5 line is now fixed** and cites `f6cef02`.
+- `main` at **`df46e01`**. Bar **821 passed / 5 skipped**, coverage 70.99%
+  against the 65% floor. **Re-measured by `m5` on a clean tree, independently of
+  the coder's report**, in a worktree at `6f5879e`: it read **820/6 at 70.98%**,
+  and the 6th skip is the YuNet test, because *a fresh worktree has no
+  `models/`*. That reconciles the two numbers exactly — quote 821/5 for a
+  checkout with models present, 820/6 for a bare worktree, and always say which
+  you measured. Was 771/5 at 70.22% before phase 4; phase 4 added 50 tests.
 - Campaign complete: 8,137 files indexed. Cropper delivered as the standalone
   repo `portable_face_cropper` (8138→4537 crops, 0 failures, 35m01s).
-- **Fleet: manager `com-m5`, one coder `com-c14` on phase 4.** `com-c12`
-  (phases 1–3), `com-c13` (the carve) and `csm-b1` (the §14 measurements)
-  retired with ownership released. `com-m4` retired at ~210k with its rows
-  released on the window close; its handoff is
-  `docs/handoffs/scalarforensic-com-m4-20260813-2100.md`.
+- **Fleet: manager `com-m5`, one coder `com-c15` on phase 5.** `com-c12`
+  (phases 1–3), `com-c13` (the carve), `csm-b1` (the §14 measurements) and
+  `com-c14` (phase 4) all retired with ownership released. `com-m4` retired at
+  ~210k. Handoffs: `docs/handoffs/scalarforensic-com-m4-20260813-2100.md` and
+  **`docs/handoffs/scalarforensic-com-c14-20260813-220936.md`** — the latter is
+  required reading for anyone touching `video_playback/`.
 - **The §14 measurements are safe in git** — `#155` `3ac5442`. They were
   produced into `data/reports/`, which `data/*` gitignores, and lived one `rm`
   from gone; they are now `docs/benchmarks/video-bench-2026-08-13.md`, copied
@@ -59,14 +60,21 @@ distributed isolated LAN, fully offline.
   number, §14 settled the fixture strategy, and **§17 Q1–Q5 are closed into
   §16**. *A benchmarker writing its report under `data/` is a loss risk the
   dispatch should preempt: name a tracked output path when you spawn one.*
-- **PHASE 4 IS IN FLIGHT** with `com-c14`. The operator answered every open
-  question on 2026-08-13; nothing is pending with them.
-- **The shared checkout is a real constraint, not a formality.** One working
-  tree serves every session, so a coder on a feature branch means the manager
-  cannot commit its own docs there without riding along in the coder's PR.
-  `git worktree add` off `origin/main` is the way to commit owned docs while a
-  branch is checked out; do not switch the shared checkout out from under a
-  worker. An untracked `docker-compose.override.yml` is nobody's — leave it,
+- **PHASE 4 IS DONE** (`#157`/`#158`/`#159`). **Phase 5 is in flight** with
+  `com-c15`. The operator answered every open question on 2026-08-13; nothing is
+  pending with them.
+- **The shared checkout is PARKED at `43a7222` and everyone works in
+  worktrees.** `docs/CTO_LEDGER.md` is dirty there with **the operator's own
+  handwritten `-->` answers**, and `#153`/`#154`/`#156` all rewrote that file
+  upstream, so it cannot fast-forward. The substance of those answers is already
+  folded (§16 of the spec, and below); the working-tree edit is the operator's
+  to clear with `git checkout docs/CTO_LEDGER.md && git pull`. **Neither revert
+  it nor commit it.** A preserved copy is in `m5`'s scratchpad. This is not a
+  blocker for anyone: `git worktree add` off `origin/main` is the documented
+  arrangement, and phase 4 was built entirely that way. **From a worktree, the
+  suite needs `PYTHONPATH=$PWD/src`** — the venv is installed editable against
+  the main checkout, so without it you test the *other* checkout's `src/` and do
+  not notice. An untracked `docker-compose.override.yml` is nobody's — leave it,
   never stage it, and remember it makes `--porcelain` non-empty.
 
 ### shipped and verified in the m3 window
@@ -168,6 +176,51 @@ duplicated. `test_video_endpoints.py` then needed zero changes, exactly as it
 predicted. Retiring a coder one task early and buying a map is cheaper than
 letting it start a churn-heavy refactor 40k below the retire nudge.
 
+### landed in the m5 window — PHASE 4 IS COMPLETE
+
+Four PRs by `com-c14`, both required checks green on each. Bar re-measured by the
+manager on a clean tree, not inherited.
+
+- `#155` `3ac5442` — the measurement fold (above).
+- `#157` `952b325` — **`capability.py`**: a real 6-frame decode → tone-map →
+  encode → mux probe, and `Pipeline`, the §6.1 fingerprint over nine fields with
+  the field set pinned by a test. Its docstring records what is deliberately
+  **not** in the key (worker count, cache dir and ceiling, queue/timeout,
+  examiner, source path, chunk timecode) — the half that normally goes unwritten
+  and then gets silently violated. `ffmpeg_version` **is** a field: two builds
+  are two pipelines, and invalidating the cache on upgrade is the conservative
+  direction for a rendering whose label names its pipeline (§7.2).
+- `#158` `57246c4` — **`encode.py`**, ffmpeg declared in CI, the Dockerfile and
+  `INSTALL.md`, and §3.1's two defects pinned by tests.
+- `#159` `6f5879e` — `CLAUDE.md` conventions.
+
+Three findings from this window worth keeping:
+
+- **CI had no ffmpeg, so 5 of the new tests were green-by-skip** (795/11 in CI
+  vs 820/6 local). `c14` raised it rather than shipping the silence. Fixed by
+  declaring the dependency CI already had on paper, plus a guard — `_need_ffmpeg()`
+  **raises** when `CI` is set and skips otherwise, so dropping the install line
+  cannot quietly restore the skip. `qdrant-integration` deliberately has no
+  ffmpeg (it runs one faces test); the workflow says so, and says what to do if
+  its selection widens.
+- **The §14 tests are mutation-verified, not assumed.** Adding `-noautorotate`
+  makes the rotation test fail with "rotation was lost"; `c14` ran that and
+  reverted it. ffmpeg 6 **cannot** write rotation onto an output stream
+  (`-metadata:s:v rotate=` is accepted and silently does nothing) and PyAV
+  exposes no stream-level side data, so the generated fixture carries a real
+  display matrix patched into its `tkhd` box, documented to the byte offset. The
+  assertion was not weakened to fit the tooling. **Do this for any test that
+  pins a defect** — an unproven pin is a claim, not a test.
+- **§8's "GPU path" is not §3.1's fastest row.** The 12.9× `scale_cuda` pipeline
+  is the one that *breaks rotation*, so `hwaccel=cuda` in this codebase means
+  software decode, software filtering, GPU **encoder only** — the 6.1× row. It
+  is in `select()`'s docstring. Do not "optimise" it back.
+
+Also `Capability.unavailable_reason(hdr=True)` **refuses** on a build without
+libzimg rather than falling back, because encoding HDR without the tone-map chain
+reproduces §3.1's second defect — 8-bit pixels still tagged `bt2020`/HLG. SDR
+still works there. Three-state, deliberately, like `stale_evidence` and `mode`.
+
 ## the video playback work — READ THE SPEC, IT IS THE PLAN
 
 `docs/specs/video-playback-transcode.md` is **draft v2, post-review**. v1 proposed
@@ -184,29 +237,27 @@ about what was measured and §3.4 lists what was not.
 
 **Sequencing that matters:**
 
-- Phases 1–3 and the §11 carve are **DONE and merged** (`#145`, `#147`, `#148`,
-  `#150`, `#151`). **Phase 4 is next and there is nothing unblocked before it.**
-- **Phase 5 is blocked behind phase 4, not merely queued**: the cache key is
-  `sha256(source identity ‖ pipeline fingerprint)` (§6.1), and the pipeline
-  fingerprint is produced by phase 4's `capability.py`, which does not exist.
-  Do not start phase 5 "in parallel".
-- **Phase 4 is UNBLOCKED** as of the operator's 2026-08-13 rulings below:
-  `test_data/` holds a committed HDR fixture, this PC is the target so its spec
-  is the floor, 1080p is the output cap, and the near-ceiling refusal is
-  approved. What follows is the historical statement of the blockers, kept
-  because §14's *caveats* survive their answers.
-- Phase 4 **was blocked on two things**: the HDR test-fixture decision (§14 — a
-  gitignored `data/` means no committed sample; generate one or gate-and-skip like
-  the YuNet test), and the real-hardware measurements §14 requires (4K rates,
-  long-source seek, concurrent scaling, minimum hardware floor).
-- §17 carries five open questions; 1, 3 and 5 are operator calls — all three
-  are in "pending user decisions" above with a recommendation.
-- **When phase 4 is unblocked, spawn ONE fresh coder**, not a continuation. It
-  inherits `video_playback/` with `encode.py`, `capability.py`, `jobs.py` and
-  `audit.py` unwritten, and §11's tree marks exactly which modules exist.
+- **Phases 1–5's predecessors are all merged**: phases 1–3 (`#145`, `#147`,
+  `#148`), the §11 carve (`#150`, `#151`), the measurement fold (`#155`) and
+  **phase 4** (`#157`, `#158`, `#159`). **Phase 5 is in flight**; phases 6–8
+  follow in §15's order.
+- **Phase 5 is no longer blocked**: `Pipeline.fingerprint()` exists, and it is
+  the second half of §6.1's cache key `sha256(source identity ‖ pipeline
+  fingerprint)`.
+- **`#148` CONTAINED the `_evict_cache` defect; it did not fix it.** Candidates
+  were narrowed to top-level `{sha256}.mp4` so chunk artifacts could not be
+  deleted mid-play. The §6.2 lease/whole-video rewrite is phase 5's, and the
+  code says so. Do not read the containment as the fix.
+- **`cache.py`'s `_remux_locks` grows without bound** — an `asyncio.Lock` per
+  source digest, never cleared. §10.4 names it; phase 5 owns it.
+- **Spawn ONE fresh coder per phase, not a continuation.** §11's tree marks
+  which modules exist; `jobs.py` is phase 7 and `audit.py` is phase 8, and
+  neither is created early as an empty module.
 
-The `_evict_cache` `*.mp4` glob defect the spec found is **contained in `#148`**
-and no longer an open item; the full §6.2 rewrite remains phase 5.
+`docs/benchmarks/video-bench-2026-08-13.md` is the §14 measurement set, in git
+since `#155`. Read its caveats with its numbers: the concurrency figures are
+sound, the multi-hour seek figure is a best-case index by construction, and the
+4K rows are one sample each.
 
 ## closed rulings — do NOT re-escalate
 

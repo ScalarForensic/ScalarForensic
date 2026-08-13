@@ -1933,3 +1933,55 @@ source 2 of 3, with a `README.md` stating what a dropped clip must carry so the
 operator can add one with no code change, plus the standing prohibition that footage
 from the corpus is never committed — the bench report naming a corpus path is a
 methodology record, not permission to copy case material into a git repo.
+
+## 2026-08-14, phase 4 complete — `com-c14` retired at a phase boundary
+
+Four PRs, both checks green on each: `#155` (measurement fold), `#157`
+`952b325` (`capability.py`, probe + `Pipeline` fingerprint), `#158` `57246c4`
+(`encode.py`, ffmpeg declared, §3.1's defects pinned), `#159` `6f5879e`
+(`CLAUDE.md`). Bar **821/5, cov 70.99%** at `df46e01`.
+
+**The manager re-measured rather than inheriting**, and the two numbers did not
+match at first read: `820/6, 70.98%` in the worktree against `c14`'s `821/5,
+70.99%`. The difference is `models/` — a fresh worktree has none, so the YuNet
+test skips. That reconciles exactly, and it is now a ledger line: **say which
+tree you measured in, not just that it was clean.** The old rule caught dirty
+trees; this is the same rule's next edge.
+
+**Two findings this window that generalise beyond video.**
+
+*Green-by-skip is the new dirty tree.* CI had no ffmpeg, so 5 of 30 new phase-4
+tests skipped there — 795/11 in CI against 820/6 locally — while every check
+reported green. `c14` raised it instead of shipping it. The install alone would
+have been a fix with a half-life: the guard is `_need_ffmpeg()`, which **raises**
+when `CI` is set and skips otherwise, so dropping the install line fails loudly
+instead of quietly restoring the silence. **When a test can skip itself, ask what
+makes the skip impossible in CI.**
+
+*An unproven pin is a claim, not a test.* `c14` mutation-checked the rotation
+test — added `-noautorotate`, watched it fail with "rotation was lost", reverted.
+It also found ffmpeg 6 cannot write rotation onto an output stream at all
+(`-metadata:s:v rotate=` is accepted and does nothing) and that PyAV exposes no
+stream-level side data, so rather than weaken the assertion to fit the tooling it
+patched a real display matrix into the fixture's `tkhd` box, documented to the
+byte offset with both dead ends recorded. That is the standard for a test whose
+whole job is to pin a defect §3.1 measured.
+
+**Retiring one task early paid for the second time.** `c14` hit 194.8k just as
+phase 4 merged; it was stopped there and spent the window on
+`docs/handoffs/scalarforensic-com-c14-20260813-220936.md` instead of opening
+phase 5. It carries three things nobody asked for: the worktree `PYTHONPATH=$PWD/src`
+trap (the venv is editable against the main checkout, so a worktree silently
+tests the *other* tree's `src/` — it lost a run to this), the 820/**6** worktree
+bar, and that §8's "GPU path" is **not** §3.1's fastest row — the 12.9×
+`scale_cuda` pipeline is the one that breaks rotation, so `hwaccel=cuda` here
+means GPU *encoder only*. All 12 ownership rows released before the window closed.
+
+### `com-c15` spawned (opus) on phase 5
+
+Dispatch names the three things the phase turns on: the §6.1 key is
+`sha256(source identity ‖ fingerprint)` and the fingerprint half now exists;
+`#148` **contained** the `_evict_cache` defect and the §6.2 lease rewrite is
+still owed; and `cache.py`'s `_remux_locks` grows unboundedly (§10.4). The
+mutation-check standard was passed on explicitly as an expectation, not left to
+be rediscovered.
