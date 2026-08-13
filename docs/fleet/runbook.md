@@ -1985,3 +1985,51 @@ Dispatch names the three things the phase turns on: the §6.1 key is
 still owed; and `cache.py`'s `_remux_locks` grows unboundedly (§10.4). The
 mutation-check standard was passed on explicitly as an expectation, not left to
 be rediscovered.
+
+## 2026-08-14, phase 5 complete — the cache, and a finding that outlives it
+
+`com-c15`, three PRs: `#162` `3b191b5` (`cache_key()`, the §6.2 lease/pin/
+whole-video eviction, `KeyedLocks`, fsyncing `publish()`, `sweep_orphaned_parts()`),
+`#163` `955334c` (§6.3 ceiling refusal, `sfn-video purge`), `#164` (handoff).
+Bar **882/5, cov 72.20%**, re-measured by the manager in a worktree with
+`PYTHONPATH=$PWD/src` and `models/` present.
+
+**Eight mutations, eight named tests, all reverted.** Two coders in a row have
+now proven their defect-pins instead of asserting them, so it went into `c16`'s
+dispatch as an inherited expectation rather than a nice-to-have. The cost is a
+few minutes per test; the thing it buys is that a pin nobody has broken on
+purpose is a claim, not a test.
+
+**The finding worth more than the phase.** `estimate_full_output_bytes()` applies
+**no codec factor**, because none exists to apply — §3.5 timed encodes and never
+recorded output *sizes*, and §16 forbids inventing a constant. `c15` did not
+invent one. It wrote the direction of the error instead: a CRF-23 H.264 encode of
+a 10-bit HEVC source at equal resolution is usually larger than its source, so
+the estimate runs **low on precisely the HEVC corpus this feature exists for**.
+§6.3 now states it is a screen and not a guarantee, and assigns phase 7's runner
+the job of checking the growing `.part` against the estimate and aborting on
+overshoot. **This is the right shape for an unmeasurable number**: name it, bound
+its direction, put a runtime check behind it, and escalate the measurement as
+what it is — a benchmarker task, not something a coder should guess at.
+
+**A closed ruling grew by three.** `#162` turned CodeQL red with 3 new
+`py/path-injection` alerts, because `POST /api/video-lease` is a new source into
+`_resolve_video_path`. `c15` did not dismiss them and did not suppress them. The
+manager read `_shared.py:53-63` and confirmed the class first-hand rather than
+inheriting the ruling — `resolve()` on both sides, `relative_to()` against
+resolved roots, fails closed with no root configured; CodeQL does not model
+`relative_to` as a sanitizer. The alerts are wrong; the code is not. **The
+standing concern is the accumulation, not the twenty**: CodeQL is red by default
+and not a required check, which is exactly how a real alert eventually gets waved
+through. Escalated to the operator with two options — dismiss, or suppress the
+query at config level and record it.
+
+### `com-c16` spawned (opus) on phase 6
+
+`#165` `2dbfea6` first, as its own small PR: `CLAUDE.md`'s bar line was stale
+(821/5) and now reads 882/5, plus `cache.py`'s public surface and a gotcha
+listing the `video_playback/` process-wide state a fixture must reset. It
+re-measured rather than taking the manager's number. Phase 6 is the first phase
+whose weight is in the browser, so its dispatch carries the Alpine part-file
+rules and the `/?cachebust=N` trap — which busts the HTML and neither the CSS nor
+the JS parts, and has already produced one false RED on this project.
