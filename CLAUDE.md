@@ -6,8 +6,9 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 
 ## Commands
 
-- `uv run pytest -q` — full suite (771 passed / 5 skipped at `287880f`, 2026-08-13, verified
-  clean tree; coverage 70.22% against the 65% floor), hermetic,
+- `uv run pytest -q` — full suite (771 passed / 5 skipped at `f6cef02`, 2026-08-13, verified
+  clean tree; coverage 70.22% against the 65% floor — measured *after* the
+  `video_playback/` carve, so it describes the layout below, not the one before it), hermetic,
   needs no Qdrant; the 5 skips need `SFN_TEST_QDRANT_URL` and are the only tests that can
   observe the face exclusion guarantee against a real store (CI runs them in a separate
   Qdrant service-container job)
