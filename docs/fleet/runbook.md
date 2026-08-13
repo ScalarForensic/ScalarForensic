@@ -967,3 +967,52 @@ rather than starting it at end of day on low context.
 leaving a half-spawned worker at 0 tokens with the prompt never delivered. Filed via `cx f`
 (high). I killed the orphan (`c5`) and implemented the end-of-day tasks inline; no worker
 dispatch is possible until it is fixed.
+
+## [ScalarForensic, cfm-m1, 2026-08-13] iPhone campaign prep — items 1–5 DONE, run NOT started
+
+Main at `26ee1c5`, porcelain clean (untracked: `docker-compose.override.yml`, machine-local,
+intentional). Suite bar at `64908be` verified clean tree: **561 passed / 5 skipped**, ruff
+check+format rc=0 — measured WITH the campaign `.env` present (hermeticity now guaranteed by
+`tests/conftest.py`).
+
+**Landed (all squash-merged via PR, CI green):**
+- `#109` pillow-heif into the default dev group — a plain `uv sync` venv now decodes HEIC;
+  before this the scanner silently classified all 3,098 campaign HEICs as unsupported.
+- `#111` (two commits) **SFace multi-face fix**: the ONNX declares batch dim 1; embed() now
+  chunks to the declared dim. Unfixed, every medium with ≥2 embeddable faces failed face
+  processing forever (16% of a 43-file sample). Plus suite-wide `.env` hermeticity
+  (`tests/conftest.py` no-ops load_dotenv where used and scrubs SFN_* except SFN_TEST_QDRANT_URL).
+- `#112` the efficiency audit: `docs/fleet/pipeline-efficiency-2026-08-13.md`. Headline:
+  ~35 min projected full-corpus wall (upper 45), GPU busy only ~9 min, face pass dominates
+  (~17 min, sequential single-thread), HEIC decode 9× JPEG (171 ms vs 19 ms — no HEIF
+  draft mode), videos need no fps/cap reduction (509 videos, 4,856 s total, cap never binds,
+  ≈4.9k frames). No perceptual hash exists in the codebase (sha256+md5 only).
+
+**Environment state (operator decisions executed):**
+- Old test data deleted: `data/images` (16G), both unsplash zips (16G), `data/thumbnails`,
+  `data/faces`, `data/hash_cache.db`, all `data/reports/*.csv`. Kept: `data/models`,
+  `data/sample_images` (calibration needs it), `data/face_audit.log`.
+- Qdrant fresh: `danny_validation` dropped; `sfn-faces purge --all` removed 17 face points
+  from `faces_danny_validation`; its enablement record survives (verified: 1 point,
+  `is_face_meta`+`enablement`). `sfn_tags` NOT dropped (not an image collection — DECIDE open).
+- Qdrant is now published on `127.0.0.1:6333` via untracked `docker-compose.override.yml`
+  (compose file's own documented pattern); container recreated, volume/data intact. Without
+  the override the container is compose-network-only and `.env`'s localhost URL is dead.
+- New `.env` written (campaign config): collection `iphone_campaign_2026`,
+  `SFN_FACE_COLLECTION=iphone_campaign_2026_faces` (explicit — derived-name split hazard),
+  all derived data on `created_by_scalar/{thumbnails,frames,faces}` + `hash_cache.db`,
+  input pinned to `input_scalar`, faces enabled (m4v1, YuNet+SFace), NORMALIZE 512,
+  SSCD 5-crop, batch 128, video 1 fps / cap 500. Manager call to flag: `SFN_EXTRACT_EXIF=true`.
+  NOTE: previous `.env`'s `SFN_COLLECTION_DINO/SSCD` were dead vars; current code reads
+  `SFN_COLLECTION` (one collection, named vectors dino+sscd).
+
+**Not done / open:**
+- The ingestion run itself — operator triggers interactively:
+  `./run.sh sfn --dino --sscd --faces --report /media/user01/SAM_870_SATA/Gitea_Backup/created_by_scalar/reports/iphone_campaign_$(date +%Y%m%d_%H%M%S).csv`
+  (input dir comes from `.env`; `--report` must be passed per run, no env var — work item).
+- WORK ITEM (unassigned): per-run manifest — config snapshot + model hashes + file list
+  written into `created_by_scalar/` at run start; also fold `--report` into config.
+- WORK ITEM (unassigned, post-run acceptable): parallelize the face pass (buys ~13 min;
+  needs per-thread YuNet instances).
+- DECIDE (g1): drop `sfn_tags` too? It holds tags referencing the deleted
+  `danny_validation` points — dangling either way.
