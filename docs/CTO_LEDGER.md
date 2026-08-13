@@ -29,17 +29,23 @@ distributed isolated LAN, fully offline.
 
 ## current state (2026-08-13, late)
 
-- `main` at **`0dbc1cd`**. Bar **710 passed / 5 skipped**, coverage 69.35%
-  against the 65% floor, measured on a clean tree at `ebe3ed6` and unchanged by
-  `#141`; `#142`/`#143` are docs-only. **`CLAUDE.md`'s 559/5 line is stale and
+- `main` at **`c6153cf`**. Bar **710 passed / 5 skipped**, coverage 69.35%
+  against the 65% floor, measured on a clean tree at `ebe3ed6` and unchanged
+  since; `#142`–`#144` are docs-only. **`CLAUDE.md`'s 559/5 line is stale and
   should be corrected** — good first errand for a coder touching `CLAUDE.md`.
-- **Ownership: all rows are clear.** `cx o -l` shows nothing for this project;
-  the manager claims what it dispatches.
 - Campaign complete: 8,137 files indexed. Cropper delivered as the standalone
   repo `portable_face_cropper` (8138→4537 crops, 0 failures, 35m01s).
-- **Fleet is EMPTY.** Managers m1–m3, coders c2–c11 and the frontend-tester c4
-  all retired or dead; their ownership rows were reaped this session. Work is
-  currently driven directly from the CTO session.
+- **Fleet: manager `com-m4` + coder `com-c12`.** Two stranded `cfm-g1`
+  ownership rows (this file's sibling runbook, and the video spec) were reaped
+  at the manager's open. `m4` owns this ledger and `docs/fleet/runbook.md`;
+  `c12` owns `web/routes/video.py` and the two video test files.
+- **The shared checkout is a real constraint, not a formality.** One working
+  tree serves every session, so a coder on a feature branch means the manager
+  cannot commit its own docs there without riding along in the coder's PR.
+  `git worktree add` off `origin/main` is the way to commit owned docs while a
+  branch is checked out; do not switch the shared checkout out from under a
+  worker. An untracked `docker-compose.override.yml` is nobody's — leave it,
+  never stage it, and remember it makes `--porcelain` non-empty.
 
 ### shipped and verified in the m3 window
 
@@ -156,12 +162,40 @@ the new artifacts, and would match a CMAF-style `init.mp4` and delete it mid-pla
 
 ## pending user decisions
 
-1. **CodeQL dismissals** — 17 verified false positives; one-liner supplied to
+**Phase 4 of the video work is blocked on 1 and 2.** Both are put to the
+operator with a recommendation; the full argument is the `com-m4` runbook entry
+of 2026-08-13.
+
+1. **HDR test fixture** (spec §14, §17 Q4) — `data/` is gitignored so no 10-bit
+   HDR sample can be committed, and §14's rotation and `bt709` colour-tag tests
+   are exactly the two defects §3.1 found. *Recommend both, layered*: a
+   generated `ffmpeg -f lavfi` fixture as the CI default (ffmpeg is already a
+   §8 dependency, so this adds none) plus a gate-and-skip on an env-supplied
+   real-corpus path, YuNet-style, for what a synthetic clip cannot honestly
+   assert. Generated-only makes green CI mean less than it looks; gated-only
+   means the assertions never run.
+2. **Real-hardware measurements** (§14, §17 Q3) — every §3 number is 1080p,
+   single-job, on the idle dev host; §3.4 says so. Three questions: is the dev
+   host representative or is there target hardware; are there real 4K and
+   multi-hour sources to point a benchmarker at (§3 saw max 318 s, median
+   2.0 s) or should it synthesise; and what is the minimum hardware floor —
+   that one is a policy statement, not a measurement. *Recommend* holding the
+   `csm` benchmarker until the first two are answered, and scheduling it after
+   phase 3 merges regardless: concurrency scaling is only valid on an
+   otherwise-idle box, so it must not run while a coder is running the suite.
+3. **Spec §17 Q1, output resolution** — *recommend cap at 1080p by default*,
+   never upscale, rescale disclosed per §7.4, operator-overridable. 4K is
+   unmeasured, and §7.4 already says fine detail is judged from the original.
+4. **Spec §17 Q5, full-video job near the ceiling** — *recommend refusing
+   before start* above an estimated 50% of `SFN_VIDEO_CACHE_MAX_BYTES`, showing
+   the estimate and offering Download original. §6.2's lease cannot save the
+   watched video when the overflowing artifact is the job's own output.
+5. **CodeQL dismissals** — 17 verified false positives; one-liner supplied to
    the operator, needs their token scope.
-2. **`stale-observation-purge.md`**: re-detect vs config-hash diff (carried).
-3. **Audit-button label**: shipped string + subtitle stands unless objected (carried).
-4. **Perceptual-hash modality** absent (carried).
-5. **Cropper `.gif` inputs** — 2 files were skipped on the delivered run; nobody
+6. **`stale-observation-purge.md`**: re-detect vs config-hash diff (carried).
+7. **Audit-button label**: shipped string + subtitle stands unless objected (carried).
+8. **Perceptual-hash modality** absent (carried).
+9. **Cropper `.gif` inputs** — 2 files were skipped on the delivered run; nobody
    has ruled on whether to re-run including them (carried, low stakes).
 
 Closed since the last fold: **HEVC remedy** — superseded by the `#142` spec. The
