@@ -36,13 +36,13 @@ distributed isolated LAN, fully offline.
 
 ## current state (2026-08-14)
 
-- `main` at **`2dbfea6`**. Bar **882 passed / 5 skipped**, coverage 72.20%
-  against the 65% floor — **re-measured by `m5` at `6e09097`**, in a worktree
+- `main` at **`8af5266`**. Bar **954 passed / 5 skipped**, coverage 73.09%
+  against the 65% floor — **re-measured by `m5` at `8af5266`**, in a worktree
   with `PYTHONPATH=$PWD/src` and `models/` present, no tracked file modified.
   **A worktree without `models/` reads one extra skip** (the YuNet test), which
   is how 821/5 and 820/6 reconciled at phase 4; *always say which tree you
   measured in*, not merely that it was clean. Was 771/5 at 70.22% before phase
-  4: phase 4 added 50 tests, phase 5 added 61.
+  4: phase 4 added 50 tests, phase 5 added 61, phase 6 added 72.
 - Campaign complete: 8,137 files indexed. Cropper delivered as the standalone
   repo `portable_face_cropper` (8138→4537 crops, 0 failures, 35m01s).
 - **Fleet: manager `com-m5`, one coder `com-c16` on phase 6.** `com-c12`
@@ -63,8 +63,9 @@ distributed isolated LAN, fully offline.
   number, §14 settled the fixture strategy, and **§17 Q1–Q5 are closed into
   §16**. *A benchmarker writing its report under `data/` is a loss risk the
   dispatch should preempt: name a tracked output path when you spawn one.*
-- **PHASES 4 AND 5 ARE DONE** (`#157`/`#158`/`#159`, `#162`/`#163`). **Phase 6
-  is in flight** with `com-c16`; phases 7–8 remain. The operator answered every
+- **PHASES 4, 5 AND 6 ARE DONE** (`#157`–`#159`, `#162`/`#163`,
+  `#165`/`#168`/`#169`). **Phases 7 and 8 remain**, and `com-c16`'s handoff §3
+  has phase 7's four steps. The operator answered every
   open question on 2026-08-13. **Two things now sit with them**: the CodeQL
   dismissals, and whether to fund a benchmarker for the missing codec factor —
   both below.
@@ -258,6 +259,45 @@ screen, not a guarantee, and that **phase 7's job runner must check the growing
 `.part` against the estimate and abort on overshoot**. Closing it properly means
 measuring output sizes for the §3.1 rows against the operator's corpus — a
 benchmarker task, not a coder's, and it needs an otherwise-idle box.
+
+### phase 6 is COMPLETE — `#168` `b239c51`, `#169` `8af5266`
+
+`com-c16`. `POST`+`GET /api/video-chunk` (a `<video>` cannot POST, so encode and
+serve are two verbs); `states.py` maps all 15 §10.1 rows to status/state/retry,
+each pinned; `SFN_VIDEO_QUEUE_MAX=8` implemented so "queue full" has a subject
+rather than a spec line; the double-buffered player. 13 mutations, each caught by
+a named test, each reverted. **`unknown` is not folded into needs-transcode and a
+test asserts it** — the three-state rule holding under UI pressure.
+
+**The GPU-fallback cache miss** — a host whose GPU probes clean and fails at
+encode time never hit its own cache, so every chunk re-encoded forever. Invisible
+in CI by construction. The fix keeps §6.1 intact and the distinction is worth
+knowing: `_relocate_on_fallback` `os.replace`s the artifact into the key of the
+pipeline that **ran** (same directory, atomic — the GPU key never holds a CPU
+picture), while `_substitutions` is a **lookup hint, not a key**, holding whole
+`Pipeline` objects so a substituted hit labels itself with what produced the bytes
+(§7.2). Selection is unchanged, so a repaired GPU encodes on GPU at the next
+genuine miss; `_substitutions` is process-wide (reset in fixtures) and
+deliberately does **not** survive a restart — persisting it would leave a repaired
+GPU permanently unused. Both properties are in §6.1.
+
+**14 wiring tests passed against a `player.js` that did not parse at all** (a
+`?? … ||` precedence `SyntaxError`), caught only by the live Chrome check with
+every script and the stylesheet force-refetched. **A test that reads a file as
+text cannot tell you the browser can run it.** Live figures: first chunk 454 ms,
+prefetch depth exactly 1, an in-chunk seek issuing no request, `release=true` on
+close, and a served chunk decoding in Chrome from a source Chrome cannot open.
+
+**NEW OPEN ITEM — this repo has no JS test harness** (spec §14). Player logic is
+pinned by text-level wiring tests plus a manual browser run, and we now have
+proof that combination misses a total parse failure. Closing it means adopting a
+real JS test runner: a dependency decision with a cost, for the operator, not
+something a coder slips into a phase.
+
+**Phase 7 must not inherit §4.3's worker contention unaddressed.** A full-video
+job holds one of two workers for ~51 min, putting chunk encoding at k=2 (8.21 s →
+~16.35 s, §3.5) — outside the window the double-buffered swap depends on. §4.3
+names two remedies and rules out leaving it unbounded and invisible.
 
 ## the video playback work — READ THE SPEC, IT IS THE PLAN
 

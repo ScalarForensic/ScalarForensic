@@ -2033,3 +2033,35 @@ re-measured rather than taking the manager's number. Phase 6 is the first phase
 whose weight is in the browser, so its dispatch carries the Alpine part-file
 rules and the `/?cachebust=N` trap — which busts the HTML and neither the CSS nor
 the JS parts, and has already produced one false RED on this project.
+
+## 2026-08-14, phase 6 complete — the live check earns its place
+
+`com-c16`: `#165` `2dbfea6` (CLAUDE.md bar), `#168` `b239c51` (server), `#169`
+`8af5266` (player). Bar **954/5, cov 73.09%**, re-measured by the manager at
+`8af5266` on a clean tree with `models/` present. Six of eight phases done.
+
+**The finding that should change how this project tests the frontend: 14 wiring
+tests passed against a `player.js` containing a `?? … ||` precedence
+`SyntaxError` — a file that did not parse at all.** Only the live Chrome run,
+with every `<script src>` and the stylesheet force-refetched, caught it. The
+`/?cachebust=N` gotcha already said the cache lies to you; this is the more
+general form: **a test that reads a file as text cannot tell you the browser can
+run it.** `c16` then named the gap rather than banking the pass — no JS test
+harness exists here, so player logic is pinned by wiring tests plus a manual run,
+and `.vc-block`'s markup is wiring-pinned only because rendering it needs Qdrant
+and an indexed corpus. That is now an operator decision recorded in spec §14, not
+a coder's to slip in.
+
+**The GPU-fallback cache miss** is the best defect found this window: a host whose
+GPU probes clean but fails at encode never hit its own cache, so every chunk
+re-encoded forever — undetectable in CI by construction. The fix is worth reading
+before touching the cache, because the naive version *is* the §6.1 defect:
+`_relocate_on_fallback` moves the artifact into the key of the pipeline that ran,
+and `_substitutions` is a lookup hint holding whole `Pipeline` objects so a
+substituted hit still labels itself with what produced the bytes. Manager asked
+which of the two shapes it was before recording it closed; it was the right one.
+
+**Four coders, four handoffs, six phases.** `c12`, `c14`, `c15` and `c16` each
+stopped at a boundary and wrote the map instead of starting the next unit. Every
+phase since has cost roughly one PR. The pattern is now self-sustaining: `c16`
+wrote its handoff and *held* rather than opening phase 7, unprompted.
