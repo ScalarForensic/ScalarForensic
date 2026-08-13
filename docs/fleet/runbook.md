@@ -1016,3 +1016,71 @@ check+format rc=0 — measured WITH the campaign `.env` present (hermeticity now
   needs per-thread YuNet instances).
 - DECIDE (g1): drop `sfn_tags` too? It holds tags referencing the deleted
   `danny_validation` points — dangling either way.
+
+## [ScalarForensic, cfm-m2, 2026-08-13] window opens — manifest dispatched, three DECIDEs on HOLD
+
+Successor to cfm-m1 (retired at ~170k from self-implementing; this window dispatches, never
+implements). Read: m1 handoff `docs/handoffs/scalarforensic-cfm-m1-20260813-campaign-prep.md`
+and this runbook in full. Main `f2f35ea`, bar 561/5 at `64908be` with campaign `.env`,
+Qdrant on `localhost:6333`, collection `iphone_campaign_2026`. Ownership claimed:
+`docs/fleet/runbook.md` only. `cx n` confirmed FIXED (proposals 26–28 closed `--by ae5ad6a`).
+
+**Dispatched:** `scalarforensic-cfm-c1` — per-run manifest (config snapshot + model hashes +
+input file list into the `created_by_scalar/` derived-data root at run start) + fold the CSV
+`--report` path into config (`cli.py:370-373,502-503`). Owns `cli.py`, `config.py`,
+`manifest.py` (new), `tests/test_manifest.py` (new). Briefed: worktree + PR flow, hermetic
+tests, `--no-cov` on subsets, no ingestion start, no Qdrant/`.env` writes.
+
+**HOLD — three operator decisions relayed upward by g1; nothing acts until rulings return:**
+1. Drop `sfn_tags` (holds tags referencing deleted `danny_validation` points).
+2. `SFN_EXTRACT_EXIF=true` — m1's call, reversible, operator to confirm.
+3. Missing perceptual-hash modality: operator expected a photoDNA-like stage; codebase has
+   sha256+md5 only (audit `pipeline-efficiency-2026-08-13.md:34-36`). New-feature decision.
+
+**Queued, post-run (per audit):** face-pass parallelization, ~13 min saving, needs
+per-thread YuNet instances. Not assigned until the ingestion run is done.
+
+**Ingestion run remains OPERATOR-TRIGGERED — not started here.**
+
+### OPERATOR RULINGS (relayed by g1, 2026-08-13) — 2 of 3 DECIDEs closed
+
+1. **Perceptual-hash DECIDE CLOSED — no pre-run build.** ALTERED/SSCD *is* the
+   minor-edit/lesser-quality modality (`web/pipeline/provenance.py:32`, verified:
+   `("sscd", "altered")`). The audit's "no perceptual hash" line
+   (`pipeline-efficiency-2026-08-13.md:34-36`) means no pHash *algorithm* exists, not that
+   the capability is missing. A pHash/PDQ cross-check may be queued later as a
+   nice-to-have; it is NOT campaign-blocking. Nothing dispatched for it.
+2. **`SFN_EXTRACT_EXIF=true` CONFIRMED** — stays as written in the campaign `.env`.
+3. **`sfn_tags` drop: still HELD** — operator deciding; act only on g1's next relay.
+
+Ingestion trigger remains with the operator.
+
+### Manifest item DONE — PR #115 `ca86cd7`, verified by me, c1 retired
+
+**Review (mine, not relayed):** PR #115 MERGED at `ca86cd7`, all 8 CI checks SUCCESS
+(`gh pr view`). Diff read in full: `manifest.py` (new, 102 lines, stdlib-only),
+`cli.py` +37, `config.py` +12, `tests/test_manifest.py` +186 (11 tests). Bar
+**re-measured by me at `ca86cd7`: 572 passed / 5 skipped**, coverage 67.12% (floor 65),
+ruff check+format rc=0. Caveat stated: tree carried this runbook entry uncommitted
+(docs only, not collected) and the intentional untracked `docker-compose.override.yml`.
+
+What shipped, checked against the diff not the report:
+- Manifest written **after the hash pass, before any embed/upsert** (`cli.py:1139-1164`),
+  as `<report_stem>.manifest.json` next to the CSV — location fully config-derived,
+  never hardcoded. Content: full Settings snapshot (secrets `qdrant_api_key`/
+  `embedding_api_key` redacted, presence still recorded), per-vector
+  `model_name`/`model_hash`/`embedding_dim`, faces `PipelineConfig.to_payload()` incl.
+  `pipeline_config_hash` when faces enabled, input file list (path+size, sha256 where
+  the hash pass computed it). `default=str` in the JSON dump so a bad value degrades
+  instead of aborting the run — right call for run-start plumbing.
+- `SFN_REPORT_DIR` (default `data/reports`) now backs the CSV default; `--report`
+  still overrides the full path. Empty value refused with a naming error.
+
+**Operational note for the run command:** the documented invocation already passes
+`--report /media/user01/SAM_870_SATA/Gitea_Backup/created_by_scalar/reports/...`, so the
+manifest lands in `created_by_scalar/reports/` with **no `.env` change needed**. Setting
+`SFN_REPORT_DIR` in the campaign `.env` is optional convenience (drops the `--report`
+arg); c1 correctly did not touch `.env` — left to the operator.
+
+**c1 retired** after DONE: scope complete, next queued item (face-pass parallelization)
+is post-run and gains nothing from manifest context.
