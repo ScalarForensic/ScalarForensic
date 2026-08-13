@@ -6,9 +6,9 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 
 ## Commands
 
-- `uv run pytest -q` — full suite (821 passed / 5 skipped at `57246c4`, 2026-08-13, verified
-  clean tree; coverage 70.99% against the 65% floor — measured *after* video-playback
-  phase 4, so it describes the layout below), needs no Qdrant; the 5 skips need
+- `uv run pytest -q` — full suite (882 passed / 5 skipped at `6e09097`, 2026-08-14, verified
+  clean tree; coverage 72.20% against the 65% floor — measured *after* video-playback
+  phase 5, so it describes the layout below), needs no Qdrant; the 5 skips need
   `SFN_TEST_QDRANT_URL` and are the only tests that can observe the face exclusion
   guarantee against a real store (CI runs them in a separate Qdrant service-container job).
   **No longer fully hermetic:** the video encode tests need `ffmpeg` on `PATH`. Without it
@@ -62,7 +62,13 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
   `rewrap.py` (the PyAV stream copy — *not* an encode), `capability.py` (the
   ffmpeg probe and the pipeline fingerprint), `encode.py` (the ffmpeg re-encode
   — *not* a stream copy), `cache.py` (the bounded viewing-copy store) and
-  `routes.py`. `routes/video.py` keeps only the indexing side:
+  `routes.py`. `cache.py`'s public surface is `cache_key`/`artifact_dir`/
+  `chunk_name`/`rewrap_path` (§6.1 layout), `renew_lease`/`release_lease`/
+  `lease_state`/`pin`/`protected_videos` (§6.2 protection), `scan`/`evict`
+  (§6.2 whole-video LRU), `check_ceiling`/`estimate_full_output_bytes` (§6.3),
+  `publish`/`part_path`/`sweep_orphaned_parts`/`ensure_swept` (§10.2),
+  `KeyedLocks` (§10.4, single-worker dedup) and `purge` (§13). Never write into
+  the store by any other route. `routes/video.py` keeps only the indexing side:
   `/api/video-frame` and `/api/video-timeline`. Spec:
   `docs/specs/video-playback-transcode.md` §11.
 - **`rewrap.py` and `encode.py` must never merge.** A rewrap is a PyAV stream
@@ -104,6 +110,13 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
   is gone), so the generated HDR fixture gets a display matrix patched into its `tkhd` box.
   Do not replace that with a weakened assertion — the rotation test is one of the two §14
   tests the whole encode path exists to keep honest.
+- **`video_playback/` holds process-wide state that a test fixture must reset on both
+  sides**, or one test inherits another's answer and it reads as a flake:
+  `capability.reset_cache()` (the probe), `digest._reset_hash_cache()` (the `HashCache`
+  handle), and `cache.reset_leases()` + `cache.artifact_locks.reset()` +
+  `cache._reset_sweep()` (leases, pins, the lock table, the once-per-process `.part`
+  sweep). `tests/test_video_playback.py` has a module-scope **autouse** fixture doing the
+  cache three; keep it autouse.
 - `unittest.mock.patch` targets are per-module: patch where the name is *used*
   (e.g. `scalar_forensic.web.routes.files.Settings`, `...pipeline.query.QdrantClient`),
   not the package that re-exports it.
