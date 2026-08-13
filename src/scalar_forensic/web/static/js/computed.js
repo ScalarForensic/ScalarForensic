@@ -60,13 +60,33 @@
       const path = this.videoPlayback?.source_path;
       return path ? `/api/video-playback?path=${encodeURIComponent(path)}` : '';
     },
-    // True when the digest of the file being played is the same one the index
-    // recorded for this hit — i.e. the operator is watching the clip the frame
-    // actually came from, not a same-named file that has since been replaced.
-    get videoPlaybackDigestMatchesHit() {
-      const served = this.videoPlayback?.video_sha256;
-      const indexed = this.selectedHit?.video_hash;
-      return !!served && !!indexed && served === indexed;
+    // Provenance of the file being played, in the server's three states — it is
+    // the only side that can hash the file as it is now.  'verified' means the
+    // digest matches the video_hash the index recorded for this hit; 'stale'
+    // means the file on disk is no longer the one that was indexed; 'unchecked'
+    // means no indexed hash was available to compare against.  Unchecked is
+    // never rendered as a mismatch: unknown is not a finding.
+    get videoPlaybackProvenance() {
+      const stale = this.videoPlayback?.stale_evidence;
+      if (stale === true) return 'stale';
+      if (stale === false) return 'verified';
+      return 'unchecked';
+    },
+    get videoPlaybackStaleReason() {
+      return this.videoPlayback?.stale_reason ?? '';
+    },
+    get videoPlaybackDigestTitle() {
+      const digest = this.videoPlayback?.video_sha256 ?? '';
+      const suffix = {
+        verified: ' — matches the video_hash recorded for this frame',
+        stale: ' — does NOT match the video_hash recorded for this frame',
+        unchecked: ' — no indexed video_hash to compare against (not checked)',
+      }[this.videoPlaybackProvenance];
+      return digest + suffix;
+    },
+    get videoPlaybackDownloadUrl() {
+      const path = this.videoPlayback?.source_path;
+      return path ? `/api/video-download?path=${encodeURIComponent(path)}` : '';
     },
     // Streams the rewrap cannot carry into MP4 (Live-Photo LPCM audio, above
     // all).  Named rather than left for the operator to notice as silence.

@@ -163,7 +163,8 @@ def test_playback_getters_live_in_computed_js():
         "get videoPlaybackSrc",
         "get activeHitTimecodeMs",
         "get videoPlaybackDroppedNotice",
-        "get videoPlaybackDigestMatchesHit",
+        "get videoPlaybackProvenance",
+        "get videoPlaybackDownloadUrl",
     ):
         assert name in computed, name
     for part in ("state.js", "evidence.js", "analysis.js", "triage.js"):
@@ -176,6 +177,40 @@ def test_opening_the_player_asks_what_would_be_served_first():
     js = (STATIC / "js" / "evidence.js").read_text()
     body = _fn_body(js, "async openVideoPlayback")
     assert "/api/video-playback-info?path=" in body
+
+
+def test_the_indexed_hash_is_sent_so_the_server_can_judge_staleness():
+    # Only the server can hash the file as it is now; the client's job is to
+    # hand over the video_hash the index recorded and render the verdict.
+    js = (STATIC / "js" / "evidence.js").read_text()
+    body = _fn_body(js, "async openVideoPlayback")
+    assert "video_hash=" in body
+
+
+def test_unknown_provenance_is_never_rendered_as_a_mismatch():
+    # The bug this pins: an absent indexed hash used to render the tooltip
+    # "does NOT match the video_hash recorded for this frame" — unknown stated
+    # as a finding, in an evidence viewer.  Three states, decided server-side.
+    computed = (STATIC / "js" / "computed.js").read_text()
+    body = _fn_body(computed, "get videoPlaybackProvenance")
+    assert "stale_evidence" in body
+    assert "'unchecked'" in body
+    assert "videoPlaybackDigestMatchesHit" not in computed
+    html = (STATIC / "index.html").read_text()
+    assert "videoPlaybackDigestMatchesHit" not in html
+
+
+def test_a_stale_file_is_called_out_prominently_not_in_a_tooltip():
+    html = (STATIC / "index.html").read_text()
+    assert "videoPlaybackProvenance === 'stale'" in html
+    assert "videoPlaybackStaleReason" in html
+
+
+def test_the_player_offers_the_download_escape_route():
+    html = (STATIC / "index.html").read_text()
+    assert "videoPlaybackDownloadUrl" in html
+    computed = (STATIC / "js" / "computed.js").read_text()
+    assert "/api/video-download?path=" in _fn_body(computed, "get videoPlaybackDownloadUrl")
 
 
 def test_selecting_another_hit_closes_the_open_player():

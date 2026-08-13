@@ -1523,6 +1523,20 @@
                              @loadedmetadata="seekVideoToHit($el)"
                              @error="videoPlaybackError = 'The browser could not decode this stream. The stored frame JPEGs remain available.'"></video>
 
+                      <!-- Stale evidence: the file on disk is no longer the one that
+                           was indexed. Decided server-side by hashing the file as it is
+                           now, never by trusting the recorded video_hash. Prominent, not
+                           a tooltip — every frame hit shown beside it describes a
+                           different file. -->
+                      <div class="vc-error" x-show="videoPlaybackProvenance === 'stale'">
+                        <strong>⚠ Stale evidence</strong>
+                        <div x-text="videoPlaybackStaleReason"></div>
+                        <div>
+                          <a :href="videoPlaybackDownloadUrl"
+                             x-text="`Download the file as it is now (${videoPlayback.filename})`"></a>
+                        </div>
+                      </div>
+
                       <!-- Forensic legibility: what is being watched, and what is not.
                            Same rule as the uncalibrated face cosine — the artifact is
                            labelled for what it is, never dressed up as the original. -->
@@ -1559,16 +1573,22 @@
                         </template>
                         <template x-if="videoPlayback.video_sha256">
                           <div class="meta-item"
-                               :class="{'meta-match': videoPlaybackDigestMatchesHit}">
+                               :class="{'meta-match': videoPlaybackProvenance === 'verified'}">
                             <span class="meta-k">Source SHA-256</span>
                             <span class="meta-v hash"
-                                  :title="videoPlayback.video_sha256 + (videoPlaybackDigestMatchesHit
-                                    ? ' — matches the video_hash recorded for this frame'
-                                    : ' — does NOT match the video_hash recorded for this frame')"
+                                  :title="videoPlaybackDigestTitle"
                                   x-text="videoPlayback.video_sha256.slice(0,16) + '…'"></span>
                           </div>
                         </template>
                       </div>
+
+                      <!-- The escape route: whatever the player cannot decode, the
+                           original bytes are still one click away. Served untouched,
+                           with the verified digest in the response headers. -->
+                      <a class="vc-open-btn" :href="videoPlaybackDownloadUrl">
+                        <span>⭳</span>
+                        <span x-text="`Download original (${videoPlayback.filename})`"></span>
+                      </a>
                     </div>
                   </template>
                 </div>

@@ -77,7 +77,13 @@
       this.videoPlaybackLoading = true;
       this.videoPlaybackTimecodeMs = timecodeMs ?? 0;
       try {
-        const r = await fetch(`/api/video-playback-info?path=${encodeURIComponent(videoPath)}`);
+        // The indexed video_hash rides along so the server — which is the only
+        // side that can hash the file as it is now — decides whether this is
+        // still the file that was indexed.  The answer comes back as
+        // stale_evidence: true / false / null, and null means "not checked".
+        const indexed = this.selectedHit?.video_hash;
+        const q = indexed ? `&video_hash=${encodeURIComponent(indexed)}` : '';
+        const r = await fetch(`/api/video-playback-info?path=${encodeURIComponent(videoPath)}${q}`);
         const body = await r.json().catch(() => ({}));
         if (!r.ok) {
           this.videoPlaybackError = body.detail ?? `HTTP ${r.status}`;

@@ -12,6 +12,7 @@ import re
 import sqlite3
 import threading
 from pathlib import Path
+from urllib.parse import quote
 
 import av
 from fastapi import APIRouter, HTTPException
@@ -243,7 +244,7 @@ def _hash_cache_for(settings: Settings) -> HashCache | None:
         return cache
 
 
-def _source_digest(p: Path) -> str:
+def _source_digest(p: Path, settings: Settings | None = None) -> str:
     """SHA-256 of the source file *as it is on disk right now*.
 
     Backed by the same persistent :class:`HashCache` the indexer fills — keyed on
@@ -255,7 +256,7 @@ def _source_digest(p: Path) -> str:
     Blocking (a cache miss reads the whole file), so callers must offload it off
     the event loop.
     """
-    cache = _hash_cache_for(Settings())
+    cache = _hash_cache_for(settings if settings is not None else Settings())
     if cache is None:
         return hash_file(p)
     try:
@@ -478,7 +479,7 @@ async def _prepare_viewing_copy(p: Path, settings: Settings) -> tuple[Path, dict
 
     report["mode"] = "rewrap"
     cache_dir = _cache_dir_or_503(settings)
-    digest = await asyncio.to_thread(_source_digest, p)
+    digest = await asyncio.to_thread(_source_digest, p, settings)
     report["video_sha256"] = digest
     dst = cache_dir / f"{digest}.mp4"
 
@@ -526,6 +527,34 @@ async def video_playback(path: str) -> FileResponse:
     )
 
 
+@router.get("/api/video-download")
+async def video_download(path: str) -> FileResponse:
+    """Serve the untouched source file as a download.
+
+    The escape route every playback failure points at: when the browser cannot
+    decode a stream, the analyst can still take the original bytes and open them
+    in a tool that can.  No viewing copy, no rewrap, no cache — the file as it
+    lies on disk, with the digest computed from it (spec §7.5).
+
+    The same resolution flow as every other path-bearing route: absolute path,
+    ``resolve()``, extension check, allowed-root containment, regular file.  A
+    cache key is never accepted as the identity of a source file (spec §9).
+
+    §1 tension, stated rather than hidden: this places a copy of evidence on the
+    analyst's machine.  It is a deliberate act and is audited like any other; the
+    deployment's handling policy governs what happens to that copy.
+    """
+    p = _resolve_video_path(path)
+    digest = await asyncio.to_thread(_source_digest, p)
+    _log.info("video-download: serving %s (sha256=%s)", p, digest)
+    return FileResponse(
+        p,
+        media_type=mimetypes.guess_type(p.name)[0] or "application/octet-stream",
+        filename=p.name,  # Content-Disposition: attachment, original filename
+        headers={"X-SFN-Source-SHA256": digest},
+    )
+
+
 @router.get("/api/video-playback-info")
 async def video_playback_info(path: str, video_hash: str | None = None) -> JSONResponse:
     """Describe what playback of *path* would serve, without serving it.
@@ -549,9 +578,10 @@ async def video_playback_info(path: str, video_hash: str | None = None) -> JSONR
         "source_size_bytes": st.st_size,
         "mode": "original" if not _needs_remux(p) else "rewrap",
         "playback_url": f"/api/video-playback?path={p}",
+        "download_url": f"/api/video-download?path={quote(str(p))}",
     }
     info.update(await asyncio.to_thread(_stream_report, p))
-    info["video_sha256"] = await asyncio.to_thread(_source_digest, p)
+    info["video_sha256"] = await asyncio.to_thread(_source_digest, p, settings)
     if info["mode"] == "original":
         # Nothing is left behind when the file is served as it lies on disk.
         info["skipped_streams"] = []
