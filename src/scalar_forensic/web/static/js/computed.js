@@ -42,6 +42,33 @@
       }
       return hits[0] ?? null;
     },
+    // ── Face basket derivations (change-set 2026-08-13) ───────────────────
+    // The basket is the single selection model; the wire formats fall out of
+    // it here rather than living as parallel state that could drift.
+    get selectedQueryFaceIndices() {
+      return this.faceBasket
+        .filter(r => r.side === 'query' && r.fileId === this.selectedFileId && r.selected)
+        .map(r => r.faceIndex);
+    },
+    get selectedFacePointIds() {
+      return this.faceBasket
+        .filter(r => r.side === 'hit' && r.selected)
+        .map(r => r.pointId);
+    },
+    // Pairs above the operator's floor, as membership sets for the two chip
+    // strips.  Strictly above: at the 0.0 default a zero or negative cosine
+    // does not read as "these match".
+    get faceCrossHighlight() {
+      const queryIndices = new Set();
+      const pointIds = new Set();
+      for (const p of this.faceComparePairs) {
+        if (p.score > this.faceCrossThreshold) {
+          queryIndices.add(p.query_face_index);
+          pointIds.add(String(p.point_id));
+        }
+      }
+      return { queryIndices, pointIds };
+    },
     get mergedHits() {
       // Face hits arrive from a second endpoint; merge them into the image-mode
       // hit list by image_hash so one row is one medium across all four modes.
@@ -85,6 +112,13 @@
       // When a specific query frame child is selected, show only that frame's hits
       if (this.selectedFrameTimecode !== null) {
         hits = hits.filter(h => h.query_timecodes?.includes(this.selectedFrameTimecode));
+      }
+      // Faces-only view: order by the face score — which is already the max
+      // over the hit's observations (the backend collapses to the best one).
+      // The unified view keeps the image-mode order.
+      if (this.hitsFilterFaces && !this.hitsFilterAltered && !this.hitsFilterSemantic) {
+        hits = [...hits].sort(
+          (a, b) => (b.scores.faces ?? -Infinity) - (a.scores.faces ?? -Infinity));
       }
       return hits;
     },

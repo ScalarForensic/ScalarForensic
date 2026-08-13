@@ -163,6 +163,121 @@ def test_query_controls_are_sectioned_per_search_function():
         assert control in block[face_at:]
 
 
+def test_basket_box_sits_in_the_left_panel_with_three_state_rows():
+    # Change-set 2026-08-13 item 3b: scrollable selection basket below the
+    # MATCHED / NOT MATCHED lists; checkmark toggles selected/unselected,
+    # ctrl+click removes the row, Clear empties the basket.
+    html = (STATIC / "index.html").read_text()
+    start = html.index('<div class="face-basket"')
+    assert start > html.index("Not Matched")
+    block = html[start : start + 3000]
+    assert "basketToggleRow(" in block
+    assert "basketRemoveRow(" in block
+    assert "row.selected" in block
+    head = html[html.index("Face Selection") : start]
+    assert "basketClear()" in head
+    css = (STATIC / "style.css").read_text()
+    basket = css[css.index(".face-basket {") :].split("}")[0]
+    assert "overflow-y: auto" in basket  # scrollable
+
+
+def test_ctrl_click_adds_faces_to_the_basket_on_both_sides():
+    html = (STATIC / "index.html").read_text()
+    qstart = html.index('<div class="query-faces"')
+    qblock = html[qstart : qstart + 3000]
+    assert "ctrlKey" in qblock and "toggleQueryFace(" in qblock
+    mstart = html.index('<div class="faces-grid"')
+    mblock = html[mstart : mstart + 3000]
+    assert "ctrlKey" in mblock and "toggleHitFace(" in mblock
+
+
+def test_plain_click_opens_the_hq_crop_on_both_sides():
+    # Item 3c: uniform behaviour — the match side already links to the review
+    # crop; the query side must be an equivalent link, not a selection toggle.
+    html = (STATIC / "index.html").read_text()
+    qstart = html.index('<div class="query-faces"')
+    qblock = html[qstart : qstart + 3000]
+    assert ':href="queryFaceChipUrl(face.index)"' in qblock
+    assert 'target="_blank"' in qblock
+
+
+def test_cross_highlight_is_wired_on_both_sides_with_an_operator_threshold():
+    # Item 3d: pairs above the operator-set floor get the marker on both
+    # sides.  The floor defaults to 0.0 elsewhere (state.js); here we hold the
+    # marker classes and the slider in place — and 0.363 must not appear.
+    html = (STATIC / "index.html").read_text()
+    qstart = html.index('<div class="query-faces"')
+    assert "face-cross-matched" in html[qstart : qstart + 3000]
+    mstart = html.index('<div class="faces-grid"')
+    assert "face-cross-matched" in html[mstart : mstart + 3000]
+    sliders = html[
+        html.index('<div class="sliders">') : html.index(
+            '<div class="panel-header section-header">'
+        )
+    ]
+    assert "faceCrossThreshold" in sliders
+    assert "0.363" not in sliders
+    css = (STATIC / "style.css").read_text()
+    marker = css[css.index(".face-cross-matched") :].split("}")[0]
+    assert "--accent" in marker
+
+
+def test_compare_runs_for_the_already_selected_hit_and_on_change():
+    # Same trap as loadFacesForHit: $watch alone never fires for the hit that
+    # is already selected when the panel mounts.
+    html = (STATIC / "index.html").read_text()
+    init = re.search(r'<div class="faces-panel".*?x-init="([^"]*)"', html, re.S).group(1)
+    assert init.count("runFaceCompare(") == 2
+    assert "$watch('selectedHit'" in init
+
+
+def test_selection_getters_live_in_computed_and_not_in_state():
+    computed = (STATIC / "js" / "computed.js").read_text()
+    for getter in (
+        "get selectedQueryFaceIndices()",
+        "get selectedFacePointIds()",
+        "get faceCrossHighlight()",
+    ):
+        assert getter in computed
+    state = (STATIC / "js" / "state.js").read_text()
+    assert "selectedQueryFaceIndices" not in state  # derived, not stored
+    assert "faceBasket" in state
+    assert "faceCrossThreshold: 0.0" in state  # no manufactured default
+
+
+def test_basket_search_sends_both_probe_origins():
+    js = (STATIC / "js" / "faces.js").read_text()
+    assert "face_indices" in js
+    assert "point_ids" in js
+    for fn in ("toggleHitFace", "basketToggleRow", "basketRemoveRow", "basketClear"):
+        assert fn in js
+    assert "Object.assign" not in js
+
+
+def test_review_only_faces_never_enter_the_basket():
+    # Vectorless faces cannot be probes; both add-paths must refuse them.
+    js = (STATIC / "js" / "faces.js").read_text()
+    toggle_q = js[js.index("toggleQueryFace(") :].split("},")[0]
+    assert "searchable" in toggle_q
+    toggle_h = js[js.index("toggleHitFace(") :].split("},")[0]
+    assert "faceIsReviewOnly" in toggle_h
+
+
+def test_face_chips_render_native_resolution_on_both_sides():
+    # Item 3e: both boxes share the same chip geometry.  contain + auto keeps
+    # the whole crop visible at its true aspect on the match side too.
+    css = (STATIC / "style.css").read_text()
+    block = css[css.index(".face-chip img") :].split("}")[0]
+    assert "object-fit: contain" in block
+    assert "max-width: 72px" in block and "width: auto" in block
+
+
+def test_faces_only_view_orders_hits_by_their_face_score():
+    computed = (STATIC / "js" / "computed.js").read_text()
+    filtered = computed[computed.index("get filteredHits()") :].split("},")[0]
+    assert "scores.faces" in filtered
+
+
 def test_query_image_buttons_name_their_model():
     html = (STATIC / "index.html").read_text()
     assert "DINO Dist Stats" in html

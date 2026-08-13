@@ -32,7 +32,25 @@
     queryFacesLoading: false,
     queryFacesError: '',
     queryFacesTruncated: false,
-    selectedQueryFaceIndices: [],
+
+    // Face selection basket (change-set 2026-08-13).  One row per face the
+    // examiner picked, from either side; a row is selected or unselected, and
+    // removal takes it out of the array — those are the three states.  The
+    // probe lists the search sends are *derived* from this (computed.js).
+    // Row: { key, side ('query'|'hit'), fileId, faceIndex, pointId, imageHash,
+    //        thumbUrl, reviewUrl, label, selected }
+    faceBasket: [],
+
+    // Pairwise compare against the selected match (auto-run on selection).
+    // faceCrossThreshold is the operator's display floor for the both-sides
+    // highlight.  It stays 0.0 for the same reason faceThreshold does: this
+    // deployment has no calibrated threshold, and a non-zero default would
+    // manufacture one (spec §10).
+    faceComparePairs: [],
+    faceCompareCounts: null,
+    faceCompareLoading: false,
+    faceCompareError: '',
+    faceCrossThreshold: 0.0,
 
     // Cross-file face search.  faceThreshold is a *display floor* on the raw
     // cosine and stays 0.0: this deployment has no calibrated threshold, and a
