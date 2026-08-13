@@ -13,6 +13,7 @@ the suite stays hermetic and needs neither Qdrant nor sample media on disk.
 from __future__ import annotations
 
 import os
+from fractions import Fraction
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -71,6 +72,35 @@ def mov(roots):
 
 
 @pytest.fixture()
+def mov_with_pcm(roots):
+    """A .MOV carrying LPCM audio, as Apple's Live Photos do."""
+    input_dir, _ = roots
+    path = input_dir / "IMG_0002.MOV"
+    with av.open(str(path), "w", format="mov") as c:
+        vs = c.add_stream("libx264", rate=10)
+        vs.width, vs.height = 64, 48
+        vs.pix_fmt = "yuv420p"
+        audio = c.add_stream("pcm_s16le", rate=8000)
+        audio.layout = "mono"
+        for i in range(8):
+            arr = np.full((48, 64, 3), (i * 24) % 256, dtype=np.uint8)
+            for packet in vs.encode(av.VideoFrame.from_ndarray(arr, format="rgb24")):
+                c.mux(packet)
+            samples = np.zeros((1, 800), dtype=np.int16)
+            frame = av.AudioFrame.from_ndarray(samples, format="s16", layout="mono")
+            frame.sample_rate = 8000
+            frame.pts = i * 800
+            frame.time_base = Fraction(1, 8000)
+            for packet in audio.encode(frame):
+                c.mux(packet)
+        for packet in vs.encode():
+            c.mux(packet)
+        for packet in audio.encode():
+            c.mux(packet)
+    return path
+
+
+@pytest.fixture()
 def mp4(roots):
     input_dir, _ = roots
     return _write_clip(input_dir / "clip.mp4", "mp4")
@@ -117,8 +147,8 @@ class TestContainerClassification:
 class TestRemux:
     def test_rewrap_preserves_the_video_bitstream(self, mov, tmp_path):
         dst = tmp_path / "copy.mp4"
-        skipped = video_routes._remux_to_mp4(mov, dst)
-        assert skipped == []
+        report = video_routes._remux_to_mp4(mov, dst)
+        assert report == {"skipped_streams": [], "timestamp_repairs": 0}
         assert _packet_payloads(dst) == _packet_payloads(mov)
 
     def test_rewrap_keeps_the_codec_and_produces_an_mp4(self, mov, tmp_path):
@@ -145,10 +175,51 @@ class TestRemux:
         assert list(tmp_path.glob("*.part")) == []
         assert not dst.exists()
 
+    def test_lpcm_audio_is_named_not_dropped_silently(self, mov_with_pcm, tmp_path):
+        """Apple Live-Photo .MOV carries LPCM, which has no MP4 mapping."""
+        dst = tmp_path / "copy.mp4"
+        report = video_routes._remux_to_mp4(mov_with_pcm, dst)
+        assert report["skipped_streams"] == ["audio:pcm_s16le"]
+        with av.open(str(dst)) as c:
+            assert len(c.streams.audio) == 0
+        assert _packet_payloads(dst) == _packet_payloads(mov_with_pcm)
+
     def test_source_with_no_mp4_compatible_stream_raises(self, mov, tmp_path):
         with patch.object(video_routes, "_MP4_LEGAL_CODECS", frozenset()):
             with pytest.raises(ValueError, match="no MP4-compatible stream"):
                 video_routes._remux_to_mp4(mov, tmp_path / "copy.mp4")
+
+
+class TestTimestampRepair:
+    """Real .MOV files carry frames the MP4 muxer refuses; repairs are counted."""
+
+    def _packet(self, pts, dts):
+        p = av.Packet(1)
+        p.pts, p.dts = pts, dts
+        return p
+
+    def test_untouched_when_timestamps_are_already_muxable(self):
+        p = self._packet(100, 90)
+        assert video_routes._repair_timestamps(p, 80) is False
+        assert (p.pts, p.dts) == (100, 90)
+
+    def test_decode_stamp_after_display_stamp_is_pulled_back(self):
+        p = self._packet(600, 640)
+        assert video_routes._repair_timestamps(p, 560) is True
+        assert (p.pts, p.dts) == (600, 600)
+
+    def test_stalled_decode_stamp_is_nudged_past_its_predecessor(self):
+        p = self._packet(500, 500)
+        assert video_routes._repair_timestamps(p, 500) is True
+        assert p.dts == 501
+        assert p.pts >= p.dts
+
+    def test_repairs_are_counted_in_the_rewrap_report(self, mov, tmp_path):
+        original = video_routes._repair_timestamps
+        with patch.object(video_routes, "_repair_timestamps", side_effect=original) as spy:
+            spy.side_effect = lambda packet, last: True
+            report = video_routes._remux_to_mp4(mov, tmp_path / "copy.mp4")
+        assert report["timestamp_repairs"] == len(_packet_payloads(mov))
 
 
 # ---------------------------------------------------------------------------

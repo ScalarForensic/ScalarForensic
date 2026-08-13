@@ -211,8 +211,15 @@ def _source_digest(path_str: str, mtime_ns: int, size: int) -> str:
 
 
 def _stream_report(p: Path) -> dict:
-    """Container/codec summary used by the playback label and the rewrap filter."""
+    """Container/codec summary used by the playback label and the rewrap filter.
+
+    ``skipped_streams`` names the streams a rewrap would have to leave behind —
+    Apple's Live-Photo .MOV files carry LPCM audio, which has no MP4 mapping and
+    cannot be re-encoded here, so the viewing copy of one is silent.  The label
+    says so rather than letting the operator infer a silent original.
+    """
     info: dict = {"container_brand": _ftyp_brand(p), "video_codec": None, "audio_codec": None}
+    skipped: list[str] = []
     try:
         with av.open(str(p)) as container:
             info["format"] = container.format.name
@@ -224,23 +231,55 @@ def _stream_report(p: Path) -> dict:
                     info["video_codec_tag"] = s.codec_context.codec_tag
                 elif s.type == "audio" and info["audio_codec"] is None:
                     info["audio_codec"] = s.codec_context.name
+                if s.type in ("video", "audio") and s.codec_context.name not in _MP4_LEGAL_CODECS:
+                    skipped.append(f"{s.type}:{s.codec_context.name}")
     except (av.FFmpegError, OSError) as exc:
         _log.debug("playback probe failed for %s: %s", p, exc)
         info["probe_error"] = str(exc)
+    info["skipped_streams"] = skipped
     return info
 
 
-def _remux_to_mp4(src: Path, dst: Path) -> list[str]:
-    """Stream-copy *src* into a faststart MP4 at *dst*; return skipped streams.
+def _repair_timestamps(packet: av.Packet, last_dts: int | None) -> bool:
+    """Make *packet*'s timestamps muxable in place; True when something moved.
 
-    Not a re-encode: packets are demuxed and remuxed untouched, so the video and
-    audio bitstreams in *dst* are bit-identical to those in *src*.  Streams whose
-    codec has no MP4 mapping are skipped and named in the return value.
+    Real iPhone .MOV files carry the occasional frame whose stored composition
+    time lands *before* its decode time (measured on the corpus: 1 packet in 18
+    on IMG_3743.MOV).  libavformat's muxer refuses such a packet outright with
+    EINVAL, and refuses a decode time that fails to advance.  Both are repaired
+    the minimal way — pull the decode stamp back to the composition stamp, or
+    nudge it one tick past its predecessor.
+
+    Timing metadata only.  The coded payload never changes, which is the whole
+    point of a rewrap; the count of repairs is reported so the adjustment is
+    never silent.
+    """
+    moved = False
+    if packet.pts is not None and packet.dts is not None and packet.pts < packet.dts:
+        packet.dts = packet.pts
+        moved = True
+    if last_dts is not None and packet.dts is not None and packet.dts <= last_dts:
+        packet.dts = last_dts + 1
+        if packet.pts is not None and packet.pts < packet.dts:
+            packet.pts = packet.dts
+        moved = True
+    return moved
+
+
+def _remux_to_mp4(src: Path, dst: Path) -> dict:
+    """Stream-copy *src* into a faststart MP4 at *dst*; return a rewrap report.
+
+    Not a re-encode: packets are demuxed and remuxed with their payloads
+    untouched, so the video and audio bitstreams in *dst* are bit-identical to
+    those in *src*.  Streams whose codec has no MP4 mapping are left behind and
+    named in the report rather than silently dropped, and any timestamp repair
+    (:func:`_repair_timestamps`) is counted there too.
 
     Writes to a sibling ``.part`` file and renames on success, so a reader can
     never observe a half-written viewing copy.
     """
     skipped: list[str] = []
+    repaired = 0
     part = dst.with_name(f"{dst.name}.{os.getpid()}.part")
     part.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -259,16 +298,23 @@ def _remux_to_mp4(src: Path, dst: Path) -> list[str]:
                 mapping[s.index] = out.add_stream_from_template(s)
             if not mapping:
                 raise ValueError("no MP4-compatible stream in source")
+            last_dts: dict[int, int] = {}
             for packet in inp.demux([s for s in inp.streams if s.index in mapping]):
                 if packet.dts is None:  # flush packet from the demuxer
                     continue
-                packet.stream = mapping[packet.stream.index]
+                index = packet.stream.index
+                if _repair_timestamps(packet, last_dts.get(index)):
+                    repaired += 1
+                last_dts[index] = packet.dts
+                # Timestamps stay in the source time base; the muxer rescales
+                # them onto its own when the packet is written.
+                packet.stream = mapping[index]
                 out.mux(packet)
         os.replace(part, dst)
     except BaseException:
         part.unlink(missing_ok=True)
         raise
-    return skipped
+    return {"skipped_streams": skipped, "timestamp_repairs": repaired}
 
 
 def _evict_cache(cache_dir: Path, max_bytes: int, keep: Path) -> int:
@@ -350,15 +396,13 @@ async def _prepare_viewing_copy(p: Path, settings: Settings) -> tuple[Path, dict
             return dst, report
         report["cached"] = False
         try:
-            skipped = await asyncio.to_thread(_remux_to_mp4, p, dst)
+            report.update(await asyncio.to_thread(_remux_to_mp4, p, dst))
         except (av.FFmpegError, ValueError, OSError) as exc:
             _log.warning("viewing copy: rewrap failed for %s: %s", p, exc)
             raise HTTPException(
                 status_code=422,
                 detail=f"Cannot rewrap this container for playback: {exc}",
             ) from exc
-        if skipped:
-            report["skipped_streams"] = skipped
         await asyncio.to_thread(_evict_cache, cache_dir, settings.video_cache_max_bytes, dst)
     return dst, report
 
@@ -407,7 +451,10 @@ async def video_playback_info(path: str) -> JSONResponse:
         "playback_url": f"/api/video-playback?path={p}",
     }
     info.update(await asyncio.to_thread(_stream_report, p))
-    if info["mode"] == "rewrap":
+    if info["mode"] == "original":
+        # Nothing is left behind when the file is served as it lies on disk.
+        info["skipped_streams"] = []
+    else:
         info["video_sha256"] = await asyncio.to_thread(
             _source_digest, str(p), st.st_mtime_ns, st.st_size
         )
