@@ -30,6 +30,7 @@ sfn-faces = "scalar_forensic.cli:faces_main"
 dev = [
     { include-group = "web" },
     { include-group = "faces" },
+    { include-group = "heif" },
     "pytest>=8.0",
     "pytest-cov>=6.0",
     "ruff>=0.16.2",
