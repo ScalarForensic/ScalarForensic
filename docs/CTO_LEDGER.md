@@ -3,133 +3,93 @@
 Written by the CTO; rewrite in place, keep it tight, commit every fold.
 `git log -S` on this file is the project's decision history.
 
-Seeded 2026-08-12 by cto8 from `docs/survey-2026-08-12-open-work.md` (`21f65f1`),
-the first survey window. Manager `scalarforensic-com-m1`, no worker, no code
-touched.
+Seeded 2026-08-12 by cto8 (`21f65f1`). This fold 2026-08-13 by
+`scalarforensic-cfm-g1` collapses the m1/m2/m3 inbox era (raw record:
+`~/.claude/cx/cto.md` git history and `docs/fleet/runbook.md`).
 
 ## what this is
 
 Forensic image-similarity tool: FastAPI UI + CLI over a Qdrant vector store,
 embedding with DINOv2 and SSCD, matching by cosine similarity plus exact and
-perceptual hashing. An env-gated **face modality** is being added as a second
-identity axis. **Design rule from `CLAUDE.md`: a feature must have forensic
-value and be legible to a court; decorative features get removed.** Target
-deployment is a distributed isolated LAN.
+perceptual hashing, with an env-gated **face modality** as a second identity
+axis. **Design rule from `CLAUDE.md`: a feature must have forensic value and be
+legible to a court; decorative features get removed.** Target deployment is a
+distributed isolated LAN.
 
-## current state
+## current state (2026-08-13)
 
-- **`m1` RETIRED at ~250k** (handoff `docs/handoffs/scalarforensic-com-m1-20260812-194005.md`,
-  `276a944`); **`m2` is live** and holds Phase 1b. `m1` went well beyond its
-  survey brief on the user's direct instruction: **SFace chosen and verified,
-  the validation run executed, a UI panel defect fixed test-first (`b008cf9`)**.
-- **`m1` reported the live bar as 480 passed / 0 skipped** — the 5 Qdrant skips
-  ran for the first time. **I could NOT reproduce it: Qdrant is unreachable
-  again** (`curl` → 000). **That number belongs to the window Qdrant was up in,
-  and is not re-derivable on demand.** Do not quote it as current.
-- **Tree has one in-flight file, `tests/faces/test_config.py` (`m2`).** `m1`'s
-  handoff named `tests/faces/test_store.py` — **wrong file.** A relayed
-  observation, stale by one commit. Re-derive dirty state; never inherit it.
-- **Earlier bar, superseded but still the only reproducible one:** `475 passed,
-  5 skipped` of 480, ruff check + format rc=0, at `b270d47` — RAN by cto8. The 5
-  skips are the Qdrant-backed tests, and **they are precisely the ones that could
-  observe the review-only exclusion guarantee against a real store**, so a green
-  suite says least about the part that matters most **whenever Qdrant is down.**
-- **There is NO check/verify script** (no Makefile/justfile/noxfile/tox; only
-  `.github/workflows/ci.yml`). **pytest + ruff check + ruff format ARE the gate.**
-- **The face pipeline is UNMERGED** on local-only `feat/face-pipeline-phase1`,
-  0 behind `main`, no upstream.
+- **The face pipeline era is MERGED AND SHIPPED.** Phase 1b (query-face strip,
+  FACES fourth mode, face query controls, DINO/FACE audit modals) landed via m3;
+  merge `2933a11`; since then the repo moved to GitHub with PR-only `main`
+  (ruleset "standard", 2 required checks). `main` at `e50fb28`; bar per
+  CLAUDE.md: **559 passed / 5 skipped at `32f3bf9`**, coverage 66.58% vs 65%
+  floor.
+- **Closed maintainer rulings — do NOT re-escalate:** uncalibrated per-face
+  cosine IS displayed (labelled raw, no CI, 0.363 never a threshold;
+  spec §10 divergence recorded in the spec itself); SFace is the embedder
+  (Apache-2.0, OpenCV Zoo); floors lowered `SFN_FACE_MIN_SIZE` 64→40,
+  `SFN_FACE_REVIEW_MIN_SIZE` 48→24 (`b91fd61`); merge done.
+- **Still open from the m3 era:** the `stale-observation-purge.md` re-detect vs
+  config-hash-diff fork (user-owned); the audit-button label shipped as the
+  maintainer's string + subtitle (accepted by silence so far). The
+  "purge --all + rebuild for the danny 40–47px cohort" item is SUPERSEDED by
+  the fresh-start below.
 
-## how this fleet fails — a CTO instance, worth more than the rule it broke
+## the iPhone test campaign (opened 2026-08-13, operator-directed)
 
-**I verified the CODE and INFERRED the AUTHOR, then issued an order built on the
-inferred half.** I read `bb39d0e` in HEAD, concluded "`m1` landed this while
-`m2`'s window was open", and told `m2` to pull its worker off duplicate work.
-**The commit was that very worker's own** (`[scalarforensic-com-c1]`); `m1`
-landed nothing here; `c1` had finished both items and was idle. There was no
-duplicate and nothing to prevent.
-- **The code state I read was real. Only the attribution was invented** — and
-  the attribution was the half the ORDER rested on. Verifying the load-bearing
-  half of a claim and inferring the rest reads exactly like verifying it.
-- **`m2` was right to check instead of obeying a CTO order.** That is the
-  shaky-clause working upward, and it is now eight windows in which it caught
-  what review did not.
-- **COROLLARY, and it is the keeper: when a fact goes stale, check WHO changed
-  it before acting.** `git log -1 --format=%an` plus the trailer costs one
-  command. My "a re-verification is only as fresh as its read" rule stands — it
-  just was not the rule this episode needed.
+Operator decisions, FINAL:
+- Input (read-only originals, never write there):
+  `/media/user01/SAM_870_SATA/Gitea_Backup/input_scalar` — 8216 files, 20G,
+  HEIC-heavy, some HEIC+JPG pairs, videos included.
+- All derived artifacts to
+  `/media/user01/SAM_870_SATA/Gitea_Backup/created_by_scalar/`
+  ({thumbnails,frames,faces,reports} + hash_cache.db) via `.env`
+  (`SFN_THUMBNAIL_DIR`, `SFN_FRAME_STORE_DIR`, `SFN_FACE_STORE_DIR`,
+  `SFN_HASH_CACHE_PATH`).
+- Old test data (`data/images` 16G, unsplash zips, thumbnails, faces,
+  hash_cache) is deleted; `data/models` and `data/sample_images` KEPT.
+- DB starts fresh: drop image collections + `sfn-faces purge --all`
+  (enablement record survives by design).
+- **No ingestion run until the operator triggers it interactively.** First a
+  MEASURED pipeline-efficiency audit (per-stage wall time on ~50 files incl.
+  HEIC + video, GPU utilization, extrapolation to 8216 files, video frame-rate
+  question) → `docs/fleet/pipeline-efficiency-2026-08-13.md`.
+- Interactive test loop: operator drives a real Chrome
+  (`--remote-debugging-port=9222`); a frontend-tester agent (spawn as `c` with
+  the frontend-tester role file — `cx n` still refuses letter `f`) attaches via
+  chrome-devtools MCP, reports defects to the manager.
+- Known gap found at dispatch: **`pillow_heif` is not installed** — without it
+  `scanner.py` silently classifies all HEIC as unsupported.
+
+Manager `scalarforensic-cfm-m1` (this fleet's numbering restarted) spawned
+2026-08-13 with the 5-item task + measurement addendum.
 
 ## standing rules
 
-- **Forensic value is the acceptance test, not feature completeness.** Anything
-  that cannot be explained to a court comes out. This outranks convenience.
+- **Forensic value is the acceptance test, not feature completeness.**
 - **`purge_all` must never `delete_collection`** — the enablement record is an
-  auditable act and has to survive routine purges. The docstring says so; keep
-  it that way.
-- **`SFN_FACE_STORE_DIR` is set PER CASE.** The maintainer chose operator
-  discipline (Option A) over a per-case default subdirectory (Option B). **This
-  is a decision, not an invariant** — purging case A can still unlink a chip
-  case B references. Do not "fix" it without re-opening the decision.
+  auditable act and survives routine purges.
+- **`SFN_FACE_STORE_DIR` is set PER CASE** (operator discipline, a decision not
+  an invariant).
 - Commit **explicit paths**, never a broad `git add`.
-- **A default-pinning test must supply its OWN empty env file.** `.env` puts the
-  value in the process env, and a missing env file makes `load_dotenv` fall back
-  to `find_dotenv()` — so a test that reads the operator's `.env` **pins
-  nothing and stays green**. Found by `c1` against the old `crop_dilation` pin;
-  its replacement passes an empty env file. Signature defect, config-shaped.
+- **A default-pinning test must supply its OWN empty env file** — `.env` leaks
+  into the process env and `find_dotenv()` fallback pins nothing.
+- A value that appears only in prose and a mock needs `git log -S` before it is
+  trusted (the "review floor 36" that never existed in code).
+- Never quote a test bar against a dirty tree; porcelain 0 first.
 
-## verified findings
+## how this fleet fails — kept instances
 
-- **`purge_all()` rollup gap — FOUND, then FIXED by worker `c1` at `bb39d0e`
-  (trailer `[scalarforensic-com-c1]`, 21:46:57). VERIFIED BY cto8:** `is_face_video_rollup` is now in the `should` filter (1 line + 14 test
-  lines), and **`is_face_meta` is still correctly excluded** — the enablement
-  record must survive routine purges. `sfn-faces purge --all` now purges
-  everything biometric-derived. This was decision 4 and it is CLOSED.
-- **Docs disagree with the code in three places, all doc-side:** `CLAUDE.md`
-  says "300 tests" (measured: **480 collected**); it says the face real-model
-  test skips without a YuNet ONNX (the YuNet **is** present at `models/`, so it
-  runs); and the phase-1 plan has **61 unchecked boxes for work that all landed**
-  as commits `d3b96e0`…`c9fbd38`. **That plan is a stale document, not open
-  work** — the most valuable thing the survey found, because unticked boxes read
-  as a backlog.
-- `SFN_FRAME_STORE_SIZE` is parsed at `config.py:74` and **never read**. The
-  spec's claim that it is applied nowhere is correct.
-
-## open threads
-
-- **The `danny*` validation run is DONE** (`m1`, SFace chosen and verified).
-  **Qdrant must be up to reproduce anything it showed.**
-- Task 13 residual: a declined stale-observation prompt is never re-offered
-  (`processed_hashes` skips the medium on re-index). Considered, not built.
-- Phases 1b (calibration record + cross-file face search), 2 (video grouping)
-  and 3 (corpus clustering) are **specified and unstarted**; no `group.py`.
+- **cto8 verified the code and INFERRED the author, then ordered on the
+  inferred half.** Attribution is load-bearing; `git log -1 --format=%an` costs
+  one command. Subordinates checking orders ("shaky clause") caught it.
+- **m3 published 526/5 against a sha from a dirty-tree run** (parallel worker's
+  uncommitted tests counted). Now a CLAUDE.md gotcha.
+- **Ad-hoc env exports became "documented facts"** twice (review floor 36;
+  `SFN_FACE_COLLECTION` load-bearing but recorded nowhere).
 
 ## pending user decisions
 
-**THE SURVEY'S FIVE ARE SUPERSEDED. `m2` reports EIGHT open, ranked with
-defaults in `docs/fleet/runbook.md`.** Of the original five, **1 is answered**
-(SFace chosen, validation run executed) and **4 is CLOSED** (`bb39d0e`). **I
-have not re-derived the current eight and am deliberately not restating them
-here from memory** — a stale decision list is the same defect as a stale plan
-with 61 unticked boxes, which is the worst thing this project's survey found.
-Read the runbook, or ask `m2`.
-
-**THE ONE I HOLD, escalated to the user and blocking `m2`:**
-**Phase 1b evidential posture** — spec §10 gates face search on a
-`face_calibration` record that does not exist. **(A)** calibrate first, gate the
-UI; **(B)** UI first behind an "uncalibrated — not evidential" banner with the
-**number suppressed** (rank + green border; raw cosine confined to
-`/api/faces/explain/` and the audit record; whole path behind an opt-in env
-flag). *Default: (B).*
-**I verified §10 myself:** search IS gated on the record; §10.2 requires the
-calibrated statistic to BE the statistic the UI thresholds; §10.3 makes
-statistical honesty mandatory and prints the CI alongside T. **§10 does not
-literally forbid a per-face score — it forbids one with no CI and no defensible
-threshold**, which pre-calibration is the same thing.
-**The argument against (B), which must be weighed and not skipped: a banner is a
-weaker control than a gate, because a banner is what gets cropped out of a
-screenshot.** §10.5's shadow mode is (B)'s best support. **§11 makes
-jurisdiction-specific legal review an OPERATOR duty — this is the user's call,
-never the CTO's.**
-
-**Unresolved and NOT a maintainer question yet:** the real embedder's licensing
-status. Spec §14.1 names it an operator/legal decision and **no artefact in the
-repo records a choice.** It gates evidential use, not the throwaway validation.
+1. Pipeline pre-run speed fixes — waiting on the measured audit's DECIDE lines.
+2. `stale-observation-purge.md`: re-detect vs config-hash diff (carried).
+3. Audit-button label: shipped string+subtitle stands unless objected (carried).
