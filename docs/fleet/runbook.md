@@ -1606,3 +1606,29 @@ requests, chip fetches only for settled generations, pixel-signature check prove
 cross-file crop under wrong labels, no stale state, single-file unchanged. No 409 even
 needed. Fleet: m3 + c4 (operator's) + g1; no coders. Pending rulings only: HEVC remedy,
 .gif include, CodeQL dismissals, cropper remote.
+
+## [ScalarForensic, cfm-m3, 2026-08-13] OPERATOR EXEMPTION: run-progress display is not decoration
+
+Operator REVERSED #134: restore the ingestion ETA display incl. the progress bar
+("something similar or just the old one" — they liked how it looked and use it during
+runs). **Standing exemption from the decoration rule, do not re-remove: run-progress
+display (bar + ETA) is operational value for operator-triggered campaign runs.** One
+genuine defect to fix in the same PR (operator: "if anything was wrong you can fix it"):
+the ±1σ band was presented as a "calibrated uncertainty estimate" but Q/R are hand-picked
+constants (steady state ≈ gain-½ EWMA) — collides with the no-uncalibrated-numbers ethos
+(face-cosine precedent). Coder's choice within the constraint: drop the band and keep
+bar + "~Xm remaining at current rate", OR keep it visually with honest labelling and the
+"calibrated" claim removed. Counters/rates kept as-is. Normal priority.
+
+### Progress display RESTORED — #139 `ebe3ed6` verified; c11 retiring
+
+Option (a): band dropped. `_ETATracker` → `_RateTracker`, explicit α=½ EWMA (identical
+numbers to what the Kalman converged to, minus the machinery implying a distribution the
+constants never supported). Display: bar + counters + pct + "N img/s · ~Xs remaining at
+current rate", both sites; bar renders before the 2-observation ETA guard (subsumes
+#134's plain counter). Also fixed beyond the brief: the header banner still advertising
+the Kalman equations after #134 (cli.py:1606). NEW test file test_cli_run_progress.py
+(14 tests — #134 had deleted none, so this is coverage the display never had) incl.
+honesty pins (no std/gain/sigma attrs; eta() scalar; calibration mentioned only to
+disclaim). **Bar re-measured by me at `ebe3ed6`: 710 passed / 5 skipped**, cov 69.35%.
+`--delete-branch` remote-survival: 4th occurrence, c11 cleaned it itself.
