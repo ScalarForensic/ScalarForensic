@@ -36,20 +36,30 @@ distributed isolated LAN, fully offline.
 
 ## current state (2026-08-13, late)
 
-- `main` at **`bda812b`**. Bar **771 passed / 5 skipped**, coverage 70.22%
-  against the 65% floor — **re-measured by `m4` on a clean tree at `f6cef02`**,
-  twice, not taken from either coder's report; `#151` is docs-only. Was 710/5 at
-  69.35%; phases 1–3 added 61 tests and the §11 carve added zero, which is what
-  a pure move should show. **`CLAUDE.md`'s stale 559/5 line is now fixed** and
-  cites `f6cef02`.
+- `main` at **`3ac5442`** (`#155`, docs-only). Bar **771 passed / 5 skipped**,
+  coverage 70.22% against the 65% floor — **re-measured by `m4` on a clean tree
+  at `f6cef02`**, twice, not taken from either coder's report; `#151`, `#152`,
+  `#153`, `#154` and `#155` are all docs-only, so the bar still stands at
+  `3ac5442`. Was 710/5 at 69.35%; phases 1–3 added 61 tests and the §11 carve
+  added zero, which is what a pure move should show. **`CLAUDE.md`'s stale
+  559/5 line is now fixed** and cites `f6cef02`.
 - Campaign complete: 8,137 files indexed. Cropper delivered as the standalone
   repo `portable_face_cropper` (8138→4537 crops, 0 failures, 35m01s).
-- **Fleet: EMPTY.** `com-c12` (phases 1–3), `com-c13` (the carve) and `csm-b1`
-  (the §14 measurements) all retired with ownership released. Manager `com-m4`
-  retired at ~186k; its handoff is
-  `docs/handoffs/scalarforensic-com-m4-20260813-2100.md` and **names the next
-  step: one fresh `com` coder on phase 4.**
-- **PHASE 4 IS UNBLOCKED AND UN-STARTED.** The operator answered every open
+- **Fleet: manager `com-m5`, one coder `com-c14` on phase 4.** `com-c12`
+  (phases 1–3), `com-c13` (the carve) and `csm-b1` (the §14 measurements)
+  retired with ownership released. `com-m4` retired at ~210k with its rows
+  released on the window close; its handoff is
+  `docs/handoffs/scalarforensic-com-m4-20260813-2100.md`.
+- **The §14 measurements are safe in git** — `#155` `3ac5442`. They were
+  produced into `data/reports/`, which `data/*` gitignores, and lived one `rm`
+  from gone; they are now `docs/benchmarks/video-bench-2026-08-13.md`, copied
+  verbatim with their caveats. Spec §3.5 carries the load-bearing figures, §3.4
+  was rewritten down to the real residue (VFR, long-GOP, damaged indexes,
+  multi-sample confirmation), §12 gained a defaults table tying each value to a
+  number, §14 settled the fixture strategy, and **§17 Q1–Q5 are closed into
+  §16**. *A benchmarker writing its report under `data/` is a loss risk the
+  dispatch should preempt: name a tracked output path when you spawn one.*
+- **PHASE 4 IS IN FLIGHT** with `com-c14`. The operator answered every open
   question on 2026-08-13; nothing is pending with them.
 - **The shared checkout is a real constraint, not a formality.** One working
   tree serves every session, so a coder on a feature branch means the manager
@@ -252,6 +262,13 @@ and no longer an open item; the full §6.2 rewrite remains phase 5.
 - **Verify an inherited verdict before acting on it.** Two claims carried in
   this ledger turned out stale within one session (the cropper remote, the test
   bar). Checking cost one command each.
+- **The operator annotates their working copy of this file by hand.** Their
+  answers arrive as `-->` margin notes in an uncommitted
+  `docs/CTO_LEDGER.md`. Fold the *substance* into the ledger properly and
+  leave the working-tree edit alone: never commit the margin notes into the
+  decision record, and never `git checkout` them away — reverting a user's
+  edit is not an agent's call. Write your own folds from a `git worktree` off
+  `origin/main` so their working copy is never in your way.
 
 ## how this fleet fails — kept instances
 
@@ -266,6 +283,17 @@ and no longer an open item; the full §6.2 rewrite remains phase 5.
   window closed before it committed; only an ownership-row check found it.
   Recovered as `#140`. A dead agent's owned paths are worth `git diff`-ing
   before the row is reaped.
+- **`m5` opened by ordering its predecessor on two premises it had not
+  checked** — that `m4`'s handoff did not exist, and that a dirty
+  `docs/CTO_LEDGER.md` was `m4`'s uncommitted work. Both were wrong: the
+  handoff was merged in `#154` and the local checkout was two commits behind
+  `origin/main`, and the diff was **the operator's own handwritten answers** in
+  their working copy, already folded properly by `#153`. `m4` refused and
+  corrected it. **A stale `main` makes "the file does not exist" a lie your own
+  tooling tells you — `git fetch origin main` before concluding anything is
+  missing**, and never attribute an uncommitted diff without `git log`/`git
+  diff` first. This ledger's own standing rule ("verify an inherited verdict")
+  applies to verdicts you form yourself in your first five minutes.
 
 ## operator rulings, 2026-08-13 — PHASE 4 IS UNBLOCKED
 
