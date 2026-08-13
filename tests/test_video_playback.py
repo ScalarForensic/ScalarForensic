@@ -13,6 +13,7 @@ the suite stays hermetic and needs neither Qdrant nor sample media on disk.
 from __future__ import annotations
 
 import os
+import threading
 from fractions import Fraction
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -61,8 +62,13 @@ def roots(tmp_path, monkeypatch):
     cache_dir = tmp_path / "video_cache"
     monkeypatch.setenv("SFN_INPUT_DIR", str(input_dir))
     monkeypatch.setenv("SFN_VIDEO_CACHE_DIR", str(cache_dir))
-    video_routes._source_digest.cache_clear()
-    return input_dir, cache_dir
+    # Keep the persistent hash cache inside the tmp dir: the default
+    # (data/hash_cache.db, relative to CWD) would write into the checkout.
+    monkeypatch.setenv("SFN_HASH_CACHE_PATH", str(tmp_path / "hash_cache.db"))
+    video_routes._reset_hash_cache()
+    yield input_dir, cache_dir
+    # The handle points into tmp_path; never let the next test inherit it.
+    video_routes._reset_hash_cache()
 
 
 @pytest.fixture()
@@ -339,10 +345,12 @@ class TestPlaybackInfo:
         assert body["cache_enabled"] is True
         assert body["filename"] == "IMG_0001.MOV"
 
-    def test_mp4_info_reports_original_and_no_digest(self, client, mp4):
+    def test_mp4_info_reports_original_and_the_digest(self, client, mp4):
+        # The digest is reported in every mode: the label must describe the file
+        # on disk, and an untouched original still needs its provenance stated.
         body = client.get(f"/api/video-playback-info?path={mp4}").json()
         assert body["mode"] == "original"
-        assert "video_sha256" not in body
+        assert body["video_sha256"] == hash_file(mp4)
 
     def test_info_reports_a_cached_copy(self, client, mov):
         client.get(f"/api/video-playback?path={mov}")
@@ -355,6 +363,131 @@ class TestPlaybackInfo:
         body = client.get(f"/api/video-playback-info?path={broken}").json()
         assert body["mode"] == "rewrap"
         assert "probe_error" in body
+
+
+# ---------------------------------------------------------------------------
+# Digest correctness (spec §7.1)
+# ---------------------------------------------------------------------------
+
+
+class TestSourceDigest:
+    def test_digest_matches_a_direct_hash(self, mov):
+        assert video_routes._source_digest(mov) == hash_file(mov)
+
+    def test_second_call_is_served_from_the_cache(self, mov):
+        video_routes._source_digest(mov)
+        with patch.object(video_routes, "hash_file") as direct:
+            with patch("scalar_forensic.embedder.hash_file_both") as both:
+                assert video_routes._source_digest(mov) == hash_file(mov)
+        direct.assert_not_called()
+        both.assert_not_called()
+
+    def test_the_cache_survives_a_new_process(self, mov, roots):
+        _, _ = roots
+        video_routes._source_digest(mov)
+        video_routes._reset_hash_cache()  # as a restart would
+        with patch("scalar_forensic.embedder.hash_file_both") as both:
+            assert video_routes._source_digest(mov) == hash_file(mov)
+        both.assert_not_called()
+
+    def test_a_changed_file_is_rehashed(self, mov):
+        first = video_routes._source_digest(mov)
+        os.utime(mov, (2_000_000, 2_000_000))
+        mov.write_bytes(mov.read_bytes() + b"tampered")
+        second = video_routes._source_digest(mov)
+        assert second != first
+        assert second == hash_file(mov)
+
+    def test_disabled_cache_still_answers(self, mov, monkeypatch):
+        monkeypatch.setenv("SFN_HASH_CACHE_PATH", "")
+        video_routes._reset_hash_cache()
+        assert video_routes._hash_cache_for(Settings()) is None
+        assert video_routes._source_digest(mov) == hash_file(mov)
+
+    def test_unwritable_db_falls_back_to_a_direct_hash(self, mov, tmp_path, monkeypatch):
+        # A directory where the DB file should be: SQLite cannot open it.
+        db = tmp_path / "unwritable.db"
+        db.mkdir()
+        monkeypatch.setenv("SFN_HASH_CACHE_PATH", str(db))
+        video_routes._reset_hash_cache()
+        assert video_routes._source_digest(mov) == hash_file(mov)
+
+    def test_a_broken_cache_is_not_reopened_per_request(self, mov, tmp_path, monkeypatch):
+        db = tmp_path / "unwritable.db"
+        db.mkdir()
+        monkeypatch.setenv("SFN_HASH_CACHE_PATH", str(db))
+        video_routes._reset_hash_cache()
+        with patch.object(video_routes, "HashCache", side_effect=OSError("nope")) as ctor:
+            video_routes._source_digest(mov)
+            video_routes._source_digest(mov)
+        assert ctor.call_count == 1
+
+    def test_a_failing_lookup_falls_back_instead_of_raising(self, mov):
+        cache = MagicMock()
+        cache.get_or_hash.side_effect = OSError("disk gone")
+        with patch.object(video_routes, "_hash_cache_for", return_value=cache):
+            assert video_routes._source_digest(mov) == hash_file(mov)
+
+    def test_a_failing_flush_does_not_fail_the_digest(self, mov):
+        cache = MagicMock()
+        cache.get_or_hash.return_value = ("a" * 64, False)
+        cache.flush.side_effect = OSError("read-only")
+        with patch.object(video_routes, "_hash_cache_for", return_value=cache):
+            assert video_routes._source_digest(mov) == "a" * 64
+
+    def test_the_request_path_does_not_block_the_event_loop(self, client, mov):
+        # The digest is computed in a worker thread, never inline in the handler.
+        calls: list[str] = []
+        real = video_routes._source_digest
+
+        def spy(p):
+            calls.append(threading.current_thread().name)
+            return real(p)
+
+        with patch.object(video_routes, "_source_digest", spy):
+            assert client.get(f"/api/video-playback-info?path={mov}").status_code == 200
+        assert calls and all(name != "MainThread" for name in calls)
+
+
+# ---------------------------------------------------------------------------
+# Stale evidence (spec §7.1)
+# ---------------------------------------------------------------------------
+
+
+class TestStaleEvidence:
+    def test_matching_indexed_hash_clears_the_file(self, client, mov):
+        url = f"/api/video-playback-info?path={mov}&video_hash={hash_file(mov)}"
+        body = client.get(url).json()
+        assert body["stale_evidence"] is False
+        assert body["indexed_video_hash"] == hash_file(mov)
+        assert body["stale_reason"] is None
+
+    def test_a_differing_indexed_hash_is_reported_stale(self, client, mov):
+        stale = "b" * 64
+        body = client.get(f"/api/video-playback-info?path={mov}&video_hash={stale}").json()
+        assert body["stale_evidence"] is True
+        assert body["indexed_video_hash"] == stale
+        # The computed digest is the one displayed; the indexed hash never
+        # substitutes for it (spec §7.1).
+        assert body["video_sha256"] == hash_file(mov)
+        assert stale[:12] in body["stale_reason"]
+
+    def test_a_file_edited_after_indexing_is_caught(self, client, mov):
+        indexed = hash_file(mov)
+        video_routes._source_digest(mov)  # warm the cache, as a first view would
+        mov.write_bytes(mov.read_bytes() + b"tampered")
+        body = client.get(f"/api/video-playback-info?path={mov}&video_hash={indexed}").json()
+        assert body["stale_evidence"] is True
+        assert body["video_sha256"] == hash_file(mov)
+
+    def test_no_indexed_hash_means_unchecked_not_clean(self, client, mov):
+        body = client.get(f"/api/video-playback-info?path={mov}").json()
+        assert body["stale_evidence"] is None
+        assert body["indexed_video_hash"] is None
+
+    def test_a_malformed_indexed_hash_is_treated_as_unchecked(self, client, mov):
+        body = client.get(f"/api/video-playback-info?path={mov}&video_hash=nonsense").json()
+        assert body["stale_evidence"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +536,8 @@ class TestCacheEviction:
         settings = MagicMock()
         settings.video_cache_dir = cache_dir
         settings.video_cache_max_bytes = 2048
+        settings.hash_cache_path = tmp_path_db = cache_dir.parent / "hash_cache.db"
+        assert tmp_path_db.parent.exists()
         with patch.object(video_routes, "Settings", return_value=settings):
             r = client.get(f"/api/video-playback?path={mov}")
         assert r.status_code == 200
