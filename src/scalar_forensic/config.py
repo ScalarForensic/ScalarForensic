@@ -73,6 +73,27 @@ class Settings:
         # still producing high-quality thumbnails.  Default: 512.
         self.frame_store_size: int = self._parse_int("SFN_FRAME_STORE_SIZE", 512)
 
+        # --- Playback viewing-copy cache ---
+        # Source videos whose container the browser cannot open (QuickTime .MOV
+        # above all) are losslessly rewrapped into MP4 on demand and parked here,
+        # keyed by the SHA-256 of the source file.  Streams are copied bit for
+        # bit — nothing in this directory is a re-encode, and nothing in it is an
+        # evidential artifact: the original file and the stored frame JPEGs stay
+        # authoritative.  Defaults to data/video_cache (relative to CWD).
+        # Set SFN_VIDEO_CACHE_DIR= (empty) to disable playback of rewrapped
+        # containers entirely.
+        self.video_cache_dir: Path | None = self._parse_optional_path(
+            "SFN_VIDEO_CACHE_DIR", "data/video_cache"
+        )
+        # Size ceiling for that directory, in bytes.  After each new rewrap the
+        # least recently served copies are deleted until the total fits.
+        # Default: 8 GiB.  Set 0 for no ceiling.
+        self.video_cache_max_bytes: int = self._parse_int(
+            "SFN_VIDEO_CACHE_MAX_BYTES", 8 * 1024 * 1024 * 1024
+        )
+        if self.video_cache_max_bytes < 0:
+            raise ValueError("SFN_VIDEO_CACHE_MAX_BYTES must be >= 0 (0 disables the ceiling)")
+
         # --- Network policy ---
         # Default: offline — no outward connections to HuggingFace or any other service.
         # Set to true (or pass --allow-online) only for first-time model downloads.
