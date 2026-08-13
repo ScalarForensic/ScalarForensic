@@ -1,11 +1,12 @@
 import io
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from scalar_forensic.faces.chips import chip_paths, review_chip_paths
-from scalar_forensic.faces.indexing import FacePipeline
+from scalar_forensic.faces.indexing import FacePipeline, decode_shared
 from scalar_forensic.faces.store import FACE_VECTOR_NAME
 from scalar_forensic.faces.types import FaceDetection
 
@@ -251,3 +252,249 @@ def test_detector_without_the_counter_is_tolerated():
     p.detector.detect.return_value = [_det(w=200.0)]
     r = p.process_image(_img_bytes(), image_hash="hash", image_path="path.jpg")
     assert r.n_dropped_noncanonical == 0
+
+
+# ---------------------------------------------------------------------------
+# Decode reuse (in-loop face detection shares the batch loop's decode)
+# ---------------------------------------------------------------------------
+
+
+def test_process_image_accepts_a_predecoded_image_without_touching_data():
+    # The in-loop path hands over the batch loop's native-res decode; data=None
+    # proves no second decode can happen (there are no bytes to decode).
+    from scalar_forensic.faces.decode import load_for_detection
+
+    data = _img_bytes()
+    arr = load_for_detection(data)
+    det = _det(w=200.0)
+
+    from_bytes = _pipeline([det]).process_image(data, image_hash="h1", image_path="/x.png")
+    p = _pipeline([det])
+    from_array = p.process_image(None, image_hash="h1", image_path="/x.png", img=arr)
+
+    np.testing.assert_array_equal(p.detector.detect.call_args.args[0], arr)
+    assert from_array.n_detected == from_bytes.n_detected == 1
+    assert from_array.n_kept == from_bytes.n_kept == 1
+    assert [pt.id for pt in from_array.points] == [pt.id for pt in from_bytes.points]
+    vec_a = from_array.points[0].vector[FACE_VECTOR_NAME]
+    vec_b = from_bytes.points[0].vector[FACE_VECTOR_NAME]
+    assert vec_a == vec_b
+
+
+def test_process_image_without_img_still_decodes_data():
+    p = _pipeline([_det(w=200.0)])
+    with patch("scalar_forensic.faces.indexing.load_for_detection") as load:
+        load.return_value = np.zeros((300, 300, 3), np.uint8)
+        p.process_image(_img_bytes(), image_hash="h1", image_path="/x.png")
+    load.assert_called_once()
+
+
+def _png_bytes(size=(700, 500)) -> bytes:
+    rng = np.random.default_rng(7)
+    buf = io.BytesIO()
+    Image.fromarray(rng.integers(0, 255, (*size, 3), np.uint8)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_decode_shared_derives_the_exact_embed_input_for_png():
+    # The derived image must be byte-identical to what preprocess_batch would
+    # produce, or a faces-on run would embed different pixels than a faces-off
+    # run of the same media — a comparability break, not just a quality nit.
+    from scalar_forensic.embedder import _cap_short_side, _open_rgb
+    from scalar_forensic.faces.decode import load_for_detection
+
+    data = _png_bytes()
+    arr, derived = decode_shared(data, cap=331)
+
+    np.testing.assert_array_equal(arr, load_for_detection(data))
+    assert derived is not None
+    reference = _cap_short_side(_open_rgb(data, 331), 331)
+    assert derived.size == reference.size
+    np.testing.assert_array_equal(np.asarray(derived), np.asarray(reference))
+
+
+def test_decode_shared_declines_to_derive_for_jpeg():
+    # JPEG's draft() decode path produces slightly different pixels than a
+    # full decode + resize; the embed input must come from the normal path.
+    from scalar_forensic.faces.decode import load_for_detection
+
+    rng = np.random.default_rng(9)
+    buf = io.BytesIO()
+    Image.fromarray(rng.integers(0, 255, (500, 700, 3), np.uint8)).save(
+        buf, format="JPEG", quality=90
+    )
+    data = buf.getvalue()
+
+    arr, derived = decode_shared(data, cap=331)
+    assert derived is None
+    np.testing.assert_array_equal(arr, load_for_detection(data))
+
+
+def test_decode_shared_orientation_edge_case_falls_back_but_detects_oriented():
+    # A PNG carrying an eXIf Orientation tag: load_for_detection orients it,
+    # embedder._open_rgb (PNG not in _EXIF_ORIENTATION_FORMATS) does not.
+    # decode_shared must serve detection the oriented array and refuse to
+    # derive the embed input rather than silently change embed pixels.
+    from scalar_forensic.faces.decode import load_for_detection
+
+    rng = np.random.default_rng(11)
+    img = Image.fromarray(rng.integers(0, 255, (400, 600, 3), np.uint8))
+    exif = Image.Exif()
+    exif[0x0112] = 6  # rotate 270° CW on transpose
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", exif=exif)
+    data = buf.getvalue()
+
+    oriented = load_for_detection(data)
+    if oriented.shape[:2] == (400, 600):  # Pillow build without eXIf read support
+        pytest.skip("Pillow did not round-trip the PNG eXIf orientation tag")
+
+    arr, derived = decode_shared(data, cap=331)
+    assert derived is None
+    np.testing.assert_array_equal(arr, oriented)
+
+
+# ---------------------------------------------------------------------------
+# CLI wiring: detection folded into the batch loop, residual pass for the rest
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def inloop_env(tmp_path, monkeypatch):
+    """A real index() invocation (fake Qdrant/embedder, mocked FacePipeline)."""
+    from tests.test_ingest_characterization import (
+        FakeEmbedder,
+        FakeQdrantClient,
+        FakeQdrantStore,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    dummy_model = tmp_path / "dummy-model"
+    dummy_model.touch()
+    det = tmp_path / "yunet.onnx"
+    det.write_bytes(b"x")
+    emb = tmp_path / "emb.onnx"
+    emb.write_bytes(b"x")
+    (tmp_path / "emb.onnx.manifest.json").write_text("{}")
+    monkeypatch.setenv("SFN_MODEL_DINO", str(dummy_model))
+    monkeypatch.setenv("SFN_BATCH_SIZE", "4")
+    monkeypatch.setenv("SFN_NORMALIZE_SIZE", "336")  # must match FakeEmbedder
+    monkeypatch.setenv("SFN_THUMBNAIL_DIR", "")
+    monkeypatch.setenv("SFN_FACES_ENABLED", "true")
+    monkeypatch.setenv("SFN_FACE_DETECTOR_MODEL", str(det))
+    monkeypatch.setenv("SFN_FACE_EMBEDDER_MODEL", str(emb))
+    monkeypatch.setenv("SFN_EXAMINER_ID", "ex1")
+    monkeypatch.setenv("SFN_FACE_STORE_DIR", str(tmp_path / "faces"))
+
+    images = tmp_path / "evidence"
+    images.mkdir()
+    rng = np.random.default_rng(3)
+    for name in ("red.png", "green.png", "blue.png"):
+        Image.fromarray(rng.integers(0, 255, (16, 16, 3), np.uint8)).save(images / name)
+    # exact duplicate → run-duplicate: skipped by the batch loop, so its face
+    # processing must come from the residual pass.
+    (images / "red_copy.png").write_bytes((images / "red.png").read_bytes())
+
+    store = FakeQdrantStore()
+
+    def make_pipeline():
+        from scalar_forensic.faces.indexing import FaceIndexResult
+
+        pipeline = MagicMock()
+        pipeline.cfg.config_hash = "cfg1"
+        pipeline.store.collection_is_new.return_value = False
+        pipeline.store.check_compat.return_value = []
+        pipeline.store.processed_hashes.return_value = set()
+        pipeline.store.stale_face_points.return_value = []
+        pipeline.process_image.return_value = FaceIndexResult()
+        return pipeline
+
+    def run(pipeline):
+        from scalar_forensic.cli import index
+
+        with (
+            patch("scalar_forensic.indexer.QdrantClient", lambda **kw: FakeQdrantClient(store)),
+            patch(
+                "scalar_forensic.cli.load_embedder",
+                lambda model, use_sscd, **kw: FakeEmbedder(dim=4, name="fake-dino"),
+            ),
+            patch(
+                "scalar_forensic.faces.indexing.FacePipeline.from_settings",
+                return_value=pipeline,
+            ),
+        ):
+            index(
+                input_dir=images,
+                dino=True,
+                sscd=False,
+                faces=True,
+                report=tmp_path / "report.csv",
+                allow_online=False,
+                reference=False,
+                ignore_config_mismatch=False,
+            )
+
+    from types import SimpleNamespace
+
+    return SimpleNamespace(run=run, make_pipeline=make_pipeline, store=store, images=images)
+
+
+def test_batch_loop_media_get_faces_from_the_shared_decode(inloop_env):
+    pipeline = inloop_env.make_pipeline()
+    inloop_env.run(pipeline)
+
+    calls = pipeline.process_image.call_args_list
+    assert len(calls) == 4  # 3 unique + 1 run-duplicate
+    inloop = [c for c in calls if c.kwargs.get("img") is not None]
+    residual = [c for c in calls if c.kwargs.get("img") is None]
+    # The three dedup winners ride the batch loop's decode: a pre-decoded
+    # native-res array and NO bytes — a second decode is structurally impossible.
+    assert len(inloop) == 3
+    for c in inloop:
+        assert c.args[0] is None
+        assert isinstance(c.kwargs["img"], np.ndarray)
+        assert c.kwargs["img"].shape == (16, 16, 3)
+    # The run-duplicate never enters the batch loop; the residual pass reads it.
+    assert len(residual) == 1
+    assert isinstance(residual[0].args[0], bytes)
+
+
+def test_inloop_faces_keep_points_clear_marker_ordering(inloop_env):
+    # The marker-last / clear-between guarantee must survive the move into the
+    # batch loop: per medium, points → vector clear → marker, on every path.
+    pipeline = inloop_env.make_pipeline()
+    inloop_env.run(pipeline)
+    order = [
+        c[0] for c in pipeline.store.method_calls if c[0] in ("upsert_faces", "clear_face_vector")
+    ]
+    assert order == ["upsert_faces", "clear_face_vector", "upsert_faces"] * 4
+
+
+def test_already_indexed_media_still_get_faces_via_the_residual_pass(inloop_env):
+    # An already-embedded case is exactly what the old standalone pass existed
+    # for; the batch loop skips everything, so faces must come from residual.
+    first = inloop_env.make_pipeline()
+    inloop_env.run(first)
+
+    second = inloop_env.make_pipeline()
+    inloop_env.run(second)
+    calls = second.process_image.call_args_list
+    assert len(calls) == 4
+    assert all(c.kwargs.get("img") is None for c in calls)
+    assert all(isinstance(c.args[0], bytes) for c in calls)
+
+
+def test_face_marker_skip_set_is_honoured_on_both_paths(inloop_env):
+    # processed_hashes is the idempotency source; a marked medium must be
+    # processed by neither the in-loop nor the residual path.
+    from scalar_forensic.embedder import hash_file
+
+    pipeline = inloop_env.make_pipeline()
+    green_sha = hash_file(inloop_env.images / "green.png")
+    red_sha = hash_file(inloop_env.images / "red.png")  # covers red_copy.png too
+    pipeline.store.processed_hashes.return_value = {green_sha, red_sha}
+    inloop_env.run(pipeline)
+
+    calls = pipeline.process_image.call_args_list
+    assert len(calls) == 1  # only blue.png is unmarked
+    assert calls[0].kwargs["image_hash"] not in {green_sha, red_sha}

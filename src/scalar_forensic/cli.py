@@ -82,7 +82,10 @@ class _BatchCtx:
     to_embed_per_spec: list[list[tuple[Path, str]]]
     exif_data: "dict[Path, ExifInfo] | None"
     paths_to_pre: list[Path]
-    pre_future: "Future[tuple[list, float]] | None"  # tuple[list[Image.Image | Exception], float]
+    # tuple[list[Image.Image | Exception], list[face results], float] — see
+    # _timed_preprocess; face results are (path, sha256, vmeta,
+    # FaceIndexResult | Exception) for this batch's in-loop face detection.
+    pre_future: "Future[tuple[list, list, float]] | None"
 
 
 def _fmt_rate(count: int, seconds: float, unit: str) -> str:
@@ -749,7 +752,9 @@ def index(
         # pre_s is the actual CPU preprocessing time recorded inside the worker;
         # the future itself resolves instantly when GPU is the bottleneck.
         pre_results: list[Image.Image | Exception]
-        pre_results, pre_s = ctx.pre_future.result() if ctx.pre_future is not None else ([], 0.0)
+        pre_results, face_results, pre_s = (
+            ctx.pre_future.result() if ctx.pre_future is not None else ([], [], 0.0)
+        )
 
         pre_by_path: dict[Path, Image.Image] = {}
         for p, result in zip(ctx.paths_to_pre, pre_results, strict=True):
@@ -760,6 +765,16 @@ def index(
                     records[p].reason = f"preprocessing error: {result}"
             else:
                 pre_by_path[p] = result
+
+        # ── Commit this batch's in-loop face results (main thread only) ───────
+        # Before the unique_pairs early-return below: face results are
+        # independent of whether any image survived embed preprocessing.
+        for _fp, _fsha, _fvmeta, _fres in face_results:
+            if isinstance(_fres, Exception):
+                _face_stats["failed"] += 1
+                typer.echo(f"[WARN] Face processing failed for {_fp.name}: {_fres}", err=True)
+            else:
+                _commit_face_result(_fp, _fsha, _fvmeta, _fres)
 
         # ── Thumbnail generation ───────────────────────────────────────────────
         if settings.thumbnail_dir is not None:
@@ -960,11 +975,69 @@ def index(
                         f"  {sep}"
                     )
 
-    def _timed_preprocess(data: list[bytes], cap: int) -> tuple[list, float]:
-        """Run preprocess_batch and return (results, elapsed_s) for display."""
+    def _timed_preprocess(
+        paths: "list[Path]",
+        data_by: "dict[Path, bytes]",
+        cap: int,
+        face_jobs: "list[tuple[Path, str, dict | None, bool]]",
+    ) -> tuple[list, list, float]:
+        """Preprocess for embedding + in-loop face detection in one worker pass.
+
+        For each face job ``(path, sha256, vmeta, want_pre)`` the image is
+        decoded ONCE at native resolution (decode_shared): the array feeds
+        YuNet detection + alignment + SFace embedding, and — where that is
+        byte-identical to the normal preprocess path — the downscaled embed
+        image is derived from it instead of decoding the bytes a second time.
+        Detection runs sequentially here: this pool has one worker, the
+        residual pass only starts after the pool is drained, and OpenCV's
+        YuNet instance is not thread-safe.  Face-store I/O stays with the
+        caller (main thread).
+
+        Returns ``(pre_results_aligned_with_paths, face_results, elapsed_s)``
+        where face results are ``(path, sha256, vmeta, FaceIndexResult |
+        Exception)``.
+        """
         t0 = perf_counter()
-        result = preprocess_batch(data, cap=cap)
-        return result, perf_counter() - t0
+        face_set = {j[0] for j in face_jobs}
+        plain = [p for p in paths if p not in face_set]
+        by_path: dict[Path, object] = dict(
+            zip(plain, preprocess_batch([data_by[p] for p in plain], cap=cap), strict=True)
+        )
+        face_results: list[tuple[Path, str, dict | None, object]] = []
+        for p, sha, vmeta, want_pre in face_jobs:
+            img = None
+            derived: object = None
+            try:
+                img, derived = _face_decode_shared(data_by[p], cap)
+            except Exception as exc:  # noqa: BLE001 — one bad file must not end the run
+                derived = exc
+            if want_pre:
+                if isinstance(derived, Exception):
+                    by_path[p] = derived
+                elif derived is None:
+                    # JPEG (draft() shortcut) or an orientation edge case:
+                    # decode the embed input separately so it stays
+                    # byte-identical to a faces-off run of the same media.
+                    by_path[p] = preprocess_batch([data_by[p]], cap=cap)[0]
+                else:
+                    by_path[p] = derived
+            if img is None:
+                face_results.append((p, sha, vmeta, derived))  # the decode Exception
+                continue
+            try:
+                fres: object = face_pipeline.process_image(
+                    None,
+                    image_hash=sha,
+                    image_path=str(p.resolve()),
+                    video_hash=(vmeta or {}).get("video_hash"),
+                    video_path=(vmeta or {}).get("video_path"),
+                    frame_timecode_ms=(vmeta or {}).get("frame_timecode_ms"),
+                    img=img,
+                )
+            except Exception as exc:  # noqa: BLE001
+                fres = exc
+            face_results.append((p, sha, vmeta, fres))
+        return [by_path[p] for p in paths], face_results, perf_counter() - t0
 
     # ── Persistent hash cache (shared across image and video passes) ─────────
     _hash_cache: HashCache | None = (
@@ -1381,6 +1454,117 @@ def index(
         _needs_per_spec[si] | _frame_needs_per_spec[si] for si in range(len(specs))
     ]
 
+    # ── Face work: in-loop detection + residual pass ──────────────────────────
+    # Media the batch loop visits get their face detection folded into its
+    # background preprocess worker, reusing one native-resolution decode for
+    # detection and (where byte-identical) the embed input.  Media the loop
+    # does not visit — already embedded, run-duplicates, --faces-only runs —
+    # keep the original decode-per-item pass after the loop.  The face markers
+    # remain the sole idempotency mechanism on both paths, and every store
+    # write (points → vector clear → marker) happens on the main thread with
+    # the ordering guarantees unchanged.
+    _face_pending: dict[Path, tuple[str, dict | None]] = {}
+    _face_stats = {"detected": 0, "kept": 0, "review_only": 0, "dropped_noncanon": 0, "failed": 0}
+    _face_rejected: dict[str, int] = {}
+    _face_review_reasons: dict[str, int] = {}
+    # Collected across the run, acted on once at the end: prompting per
+    # medium would ask the same question hundreds of times, and deleting
+    # biometric observations without showing what they are first is not a
+    # decision the tool gets to make on the operator's behalf.
+    _stale_points: list[dict] = []
+    _video_rollup: dict[str, dict] = {}
+    _n_face_media = 0
+    if face_pipeline is not None:
+        from scalar_forensic.faces.indexing import decode_shared as _face_decode_shared
+
+        for _p, _sha in _file_hashes.items():
+            if _sha not in _faces_done:
+                _face_pending[_p] = (_sha, vmeta_by_path.get(_p))
+        _n_face_media = len(_face_pending)
+        typer.echo(
+            f"\nFaces: processing {_n_face_media:,} media item(s)  →  {settings.face_collection}"
+        )
+
+    def _commit_face_result(_p: Path, _sha: str, _vmeta: "dict | None", _fres) -> None:
+        """Store one medium's face results and its marker; update run counters."""
+        _marker = face_pipeline.store.marker_point(
+            _sha,
+            (_vmeta or {}).get("video_hash"),
+            face_pipeline.cfg.config_hash,
+            _fres.n_detected,
+            _fres.n_kept,
+            _fres.rejected,
+            n_review_only=_fres.n_review_only,
+            review_only_reasons=_fres.review_only_reasons,
+            n_dropped_noncanonical=_fres.n_dropped_noncanonical,
+        )
+        # Points first, marker last, with the vector clear between them.
+        # The marker is this medium's idempotency record: once it is
+        # committed for this config hash, the medium is never reprocessed.
+        # Committing it in the same call as the points would make a failed
+        # clear permanent and invisible — a point whose payload says
+        # review-only while its vector is still live in the index, which is
+        # the one state this design exists to prevent.  clear_face_vector
+        # can raise (delete_vectors 404s on an unknown id, see
+        # tests/faces/test_store_integration.py), so the ordering is
+        # load-bearing, not stylistic.
+        #
+        # Checked before the upsert, while the collection still holds only
+        # what previous runs wrote: point ids come from the bbox, not from
+        # any threshold, so a threshold change rewrites a point in place
+        # and leaves nothing stale.  What does survive is a face that has
+        # dropped below the review gate (no point produced at all) or an
+        # observation whose bbox moved because the detector changed — in
+        # both cases the old point is still there, still carrying its old
+        # provenance, and if it was embedded it is still searchable.
+        _stale_points.extend(
+            face_pipeline.store.stale_face_points(_sha, {str(pt.id) for pt in _fres.points})
+        )
+        face_pipeline.store.upsert_faces(_fres.points)
+        # Every review-only point, not only genuinely demoted ones:
+        # delete_vectors is idempotent and ignores absent vectors, so
+        # first-time review-only observations cost nothing.  An upsert with
+        # vector={} must not be trusted to clear a vector a previous run
+        # stored at the same point id -- a review-only point that kept its
+        # vector would still be returned by similarity search.  Only ever
+        # pass review-only ids: clearing an embedded point's vector
+        # destroys data recoverable only by a full re-index.
+        face_pipeline.store.clear_face_vector(_fres.review_only_point_ids)
+        face_pipeline.store.upsert_faces([_marker])
+        _face_stats["detected"] += _fres.n_detected
+        _face_stats["kept"] += _fres.n_kept
+        _face_stats["review_only"] += _fres.n_review_only
+        _face_stats["dropped_noncanon"] += _fres.n_dropped_noncanonical
+        for _reason, _n in _fres.rejected.items():
+            _face_rejected[_reason] = _face_rejected.get(_reason, 0) + _n
+        for _reason, _n in _fres.review_only_reasons.items():
+            _face_review_reasons[_reason] = _face_review_reasons.get(_reason, 0) + _n
+        _vh_roll = (_vmeta or {}).get("video_hash")
+        if _vh_roll:
+            _agg = _video_rollup.setdefault(
+                _vh_roll,
+                {
+                    "n_frames": 0,
+                    "n_detected": 0,
+                    "n_kept": 0,
+                    "rejected": {},
+                    "n_review_only": 0,
+                    "review_only_reasons": {},
+                    "n_dropped_noncanonical": 0,
+                },
+            )
+            _agg["n_frames"] += 1
+            _agg["n_detected"] += _fres.n_detected
+            _agg["n_kept"] += _fres.n_kept
+            _agg["n_review_only"] += _fres.n_review_only
+            _agg["n_dropped_noncanonical"] += _fres.n_dropped_noncanonical
+            for _reason, _n in _fres.rejected.items():
+                _agg["rejected"][_reason] = _agg["rejected"].get(_reason, 0) + _n
+            for _reason, _n in _fres.review_only_reasons.items():
+                _agg["review_only_reasons"][_reason] = (
+                    _agg["review_only_reasons"].get(_reason, 0) + _n
+                )
+
     total_image_count = len(_paths_to_batch)
     if total_image_count > 0:
         n_img_items = len([p for p in _paths_to_batch if p not in vmeta_by_path])
@@ -1467,13 +1651,20 @@ def index(
 
             needs_pre = needs_embed | needs_thumbnail
 
-            # ── Submit preprocessing in background ────────────────────────────
+            # ── Submit preprocessing (+ in-loop face detection) in background ─
             # Cap so DINOv2 gets its configured resolution and SSCD ≥ 331 px.
             paths_to_pre = [p for p, _ in unique_pairs if p in needs_pre]
-            bytes_to_pre = [data_by_path[p] for p in paths_to_pre]
-            pre_future: Future[tuple[list, float]] | None = (
-                _pre_pool.submit(_timed_preprocess, bytes_to_pre, _effective_cap)
-                if paths_to_pre
+            face_jobs: list[tuple[Path, str, dict | None, bool]] = []
+            if face_pipeline is not None:
+                for p, _h in unique_pairs:
+                    _face_info = _face_pending.pop(p, None)
+                    if _face_info is not None:
+                        face_jobs.append((p, _face_info[0], _face_info[1], p in needs_pre))
+            pre_future: Future[tuple[list, list, float]] | None = (
+                _pre_pool.submit(
+                    _timed_preprocess, paths_to_pre, data_by_path, _effective_cap, face_jobs
+                )
+                if paths_to_pre or face_jobs
                 else None
             )
 
@@ -1594,32 +1785,15 @@ def index(
                     records[_p].status = _S_FAIL_PRE
                     records[_p].reason = "duplicate of image that failed preprocessing"
 
-    # ── Face pass (own pass, not a hook in the embedding batch loop) ─────────
-    # The batch loop only iterates *not-yet-embedded* media, so hooking faces
-    # into it would silently yield zero faces on an already-indexed case.  This
-    # pass walks every discovered image plus every stored frame, and uses the
-    # face markers as its own idempotency mechanism.
+    # ── Face residual pass ───────────────────────────────────────────────────
+    # The batch loop only iterates *not-yet-embedded* media, so it cannot be
+    # the only place faces happen — that would silently yield zero faces on an
+    # already-indexed case.  Whatever the loop did not consume from
+    # _face_pending (already-embedded media, run-duplicates, read failures,
+    # --faces-only runs) is processed here exactly as the standalone face pass
+    # always did: read, decode at native resolution, process.
     if face_pipeline is not None:
-        _face_work: list[tuple[Path, str, dict | None]] = []
-        for _p, _sha in _file_hashes.items():
-            if _sha in _faces_done:
-                continue
-            _face_work.append((_p, _sha, vmeta_by_path.get(_p)))
-        typer.echo(
-            f"\nFaces: processing {len(_face_work):,} media item(s)  →  {settings.face_collection}"
-        )
-        _face_detected = _face_kept = _face_review_only = 0
-        _face_rejected: dict[str, int] = {}
-        _face_review_reasons: dict[str, int] = {}
-        _face_dropped_noncanon = 0
-        _face_failed = 0
-        # Collected across the run, acted on once at the end: prompting per
-        # medium would ask the same question hundreds of times, and deleting
-        # biometric observations without showing what they are first is not a
-        # decision the tool gets to make on the operator's behalf.
-        _stale_points: list[dict] = []
-        _video_rollup: dict[str, dict] = {}
-        for _p, _sha, _vmeta in _face_work:
+        for _p, (_sha, _vmeta) in _face_pending.items():
             try:
                 _data = _p.read_bytes()
                 _fres = face_pipeline.process_image(
@@ -1631,86 +1805,10 @@ def index(
                     frame_timecode_ms=(_vmeta or {}).get("frame_timecode_ms"),
                 )
             except Exception as _exc:  # one bad file must not end the run
-                _face_failed += 1
+                _face_stats["failed"] += 1
                 typer.echo(f"[WARN] Face processing failed for {_p.name}: {_exc}", err=True)
                 continue
-            _marker = face_pipeline.store.marker_point(
-                _sha,
-                (_vmeta or {}).get("video_hash"),
-                face_pipeline.cfg.config_hash,
-                _fres.n_detected,
-                _fres.n_kept,
-                _fres.rejected,
-                n_review_only=_fres.n_review_only,
-                review_only_reasons=_fres.review_only_reasons,
-                n_dropped_noncanonical=_fres.n_dropped_noncanonical,
-            )
-            # Points first, marker last, with the vector clear between them.
-            # The marker is this medium's idempotency record: once it is
-            # committed for this config hash, the medium is never reprocessed.
-            # Committing it in the same call as the points would make a failed
-            # clear permanent and invisible — a point whose payload says
-            # review-only while its vector is still live in the index, which is
-            # the one state this design exists to prevent.  clear_face_vector
-            # can raise (delete_vectors 404s on an unknown id, see
-            # tests/faces/test_store_integration.py), so the ordering is
-            # load-bearing, not stylistic.
-            #
-            # Checked before the upsert, while the collection still holds only
-            # what previous runs wrote: point ids come from the bbox, not from
-            # any threshold, so a threshold change rewrites a point in place
-            # and leaves nothing stale.  What does survive is a face that has
-            # dropped below the review gate (no point produced at all) or an
-            # observation whose bbox moved because the detector changed — in
-            # both cases the old point is still there, still carrying its old
-            # provenance, and if it was embedded it is still searchable.
-            _stale_points.extend(
-                face_pipeline.store.stale_face_points(_sha, {str(p.id) for p in _fres.points})
-            )
-            face_pipeline.store.upsert_faces(_fres.points)
-            # Every review-only point, not only genuinely demoted ones:
-            # delete_vectors is idempotent and ignores absent vectors, so
-            # first-time review-only observations cost nothing.  An upsert with
-            # vector={} must not be trusted to clear a vector a previous run
-            # stored at the same point id -- a review-only point that kept its
-            # vector would still be returned by similarity search.  Only ever
-            # pass review-only ids: clearing an embedded point's vector
-            # destroys data recoverable only by a full re-index.
-            face_pipeline.store.clear_face_vector(_fres.review_only_point_ids)
-            face_pipeline.store.upsert_faces([_marker])
-            _face_detected += _fres.n_detected
-            _face_kept += _fres.n_kept
-            _face_review_only += _fres.n_review_only
-            _face_dropped_noncanon += _fres.n_dropped_noncanonical
-            for _reason, _n in _fres.rejected.items():
-                _face_rejected[_reason] = _face_rejected.get(_reason, 0) + _n
-            for _reason, _n in _fres.review_only_reasons.items():
-                _face_review_reasons[_reason] = _face_review_reasons.get(_reason, 0) + _n
-            _vh_roll = (_vmeta or {}).get("video_hash")
-            if _vh_roll:
-                _agg = _video_rollup.setdefault(
-                    _vh_roll,
-                    {
-                        "n_frames": 0,
-                        "n_detected": 0,
-                        "n_kept": 0,
-                        "rejected": {},
-                        "n_review_only": 0,
-                        "review_only_reasons": {},
-                        "n_dropped_noncanonical": 0,
-                    },
-                )
-                _agg["n_frames"] += 1
-                _agg["n_detected"] += _fres.n_detected
-                _agg["n_kept"] += _fres.n_kept
-                _agg["n_review_only"] += _fres.n_review_only
-                _agg["n_dropped_noncanonical"] += _fres.n_dropped_noncanonical
-                for _reason, _n in _fres.rejected.items():
-                    _agg["rejected"][_reason] = _agg["rejected"].get(_reason, 0) + _n
-                for _reason, _n in _fres.review_only_reasons.items():
-                    _agg["review_only_reasons"][_reason] = (
-                        _agg["review_only_reasons"].get(_reason, 0) + _n
-                    )
+            _commit_face_result(_p, _sha, _vmeta, _fres)
 
         # Per-video rollup markers, written once each after their frames.
         for _vh_roll, _agg in _video_rollup.items():
@@ -1816,29 +1914,30 @@ def index(
         _rej_str = ", ".join(f"{_n} {_r}" for _r, _n in sorted(_face_rejected.items()))
         _rev_str = ", ".join(f"{_n} {_r}" for _r, _n in sorted(_face_review_reasons.items()))
         typer.echo(
-            f"faces: {_face_detected:,} detected  │  {_face_kept:,} comparable"
+            f"faces: {_face_stats['detected']:,} detected"
+            f"  │  {_face_stats['kept']:,} comparable"
             + (
-                f"  │  {_face_review_only:,} retained for review"
+                f"  │  {_face_stats['review_only']:,} retained for review"
                 + (f" ({_rev_str})" if _rev_str else "")
-                if _face_review_only
+                if _face_stats["review_only"]
                 else ""
             )
             + (f"  │  {sum(_face_rejected.values()):,} rejected: {_rej_str}" if _rej_str else "")
-            + (f"  │  {_face_failed:,} failed" if _face_failed else "")
+            + (f"  │  {_face_stats['failed']:,} failed" if _face_stats["failed"] else "")
             + (f"  │  {_n_stale_removed:,} stale removed" if _n_stale_removed else "")
         )
         face_pipeline.audit.append(
             "index_run",
             examiner_id=settings.examiner_id,
             input_dir=str(resolved_input),
-            n_media=len(_face_work),
-            n_detected=_face_detected,
-            n_kept=_face_kept,
-            n_review_only=_face_review_only,
+            n_media=_n_face_media,
+            n_detected=_face_stats["detected"],
+            n_kept=_face_stats["kept"],
+            n_review_only=_face_stats["review_only"],
             review_only_reasons=_face_review_reasons,
             n_rejected=_face_rejected,
-            n_dropped_noncanonical=_face_dropped_noncanon,
-            n_failed=_face_failed,
+            n_dropped_noncanonical=_face_stats["dropped_noncanon"],
+            n_failed=_face_stats["failed"],
             # Detected and removed are recorded separately on purpose: a run
             # where the operator declined must be distinguishable in the audit
             # trail from one where nothing was stale.
