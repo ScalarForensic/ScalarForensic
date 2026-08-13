@@ -1888,3 +1888,48 @@ also revisiting chunk length (§17 Q2).
 
 Handoff: `docs/handoffs/scalarforensic-com-m4-20260813-2100.md`. Next step is one fresh
 `com` coder on phase 4; everything it needs is named there. No open escalations.
+
+## 2026-08-13, `com-m5` opens — bench report rescued into git, phase 4 in flight
+
+**Handover cost two corrections before any work started.** `m5` opened by messaging
+`m4` that its handoff did not exist and that a dirty `docs/CTO_LEDGER.md` was `m4`'s
+uncommitted work. Both wrong. The handoff was merged in `#154`; the local checkout was
+two commits behind `origin/main`, so `ls` and `Read` both truthfully reported a file
+that exists on the remote. The dirty ledger was the **operator's own handwritten
+answers**, already folded by `#153`. `m4` refused the order and corrected it, which is
+the behaviour this fleet wants from a subordinate — it is the same shape as the
+subordinates who caught `cto8`'s inferred attribution. Both are now ledger entries:
+`git fetch origin main` before concluding a file is missing, and never attribute an
+uncommitted diff you have not `git log`-ed.
+
+**The one item with real loss risk was handled first.** `scalarforensic-csm-b1` wrote
+its §14 measurements to `data/reports/video-bench-2026-08-13.md`, and `data/*` is
+gitignored — 183 lines of single-shot benchmark output, one `rm -rf data/` from gone
+and not reproducible without another 14 GB of intermediates. `m5` backed it up to
+scratch, then made rescuing it into git the first PR of the new coder rather than a
+later step of phase 4. **When dispatching a benchmarker, name a tracked output path**;
+`data/reports/` is the natural place to write and the wrong place to leave anything.
+
+### `com-c14` spawned (opus), `#155` `3ac5442` merged
+
+Two-stage dispatch: a docs-only PR before any code, then phase 4.
+`docs/benchmarks/video-bench-2026-08-13.md` is the verbatim report; spec §3.5 carries
+the load-bearing figures, §3.4 was rewritten down to the residue that is genuinely
+open (VFR, long-GOP, damaged indexes, multi-sample confirmation), §12 gained a
+defaults table where each value cites a §3.5 number, §14 settled the HDR fixture as a
+three-source lookup (env gate → tracked `test_data/` → `ffmpeg -f lavfi`), and §17
+Q1–Q5 are closed into §16. Docs-only, so the bar stands unmoved at 771/5.
+
+Reviewed and accepted. **One gap sent back**: §4.3 still claims the full-video job
+"runs in the background; nothing blocks on it", which `SFN_VIDEO_MAX_WORKERS=2` makes
+false — `m4`'s finding, carried in the handoff and not in `c14`'s source material.
+`c14` corrects §4.3 in its phase-4 PR and names the remedies as phase 7's call; it
+does not implement them.
+
+**Fixture ruling reconciled, not re-litigated.** The operator answered "a small public
+video in `test_data/`" and `m4`'s handoff read that as "commit a clip, derive the
+rotation case with `ffmpeg -c copy`". `m5` kept the tracked `test_data/` and made it
+source 2 of 3, with a `README.md` stating what a dropped clip must carry so the
+operator can add one with no code change, plus the standing prohibition that footage
+from the corpus is never committed — the bench report naming a corpus path is a
+methodology record, not permission to copy case material into a git repo.
