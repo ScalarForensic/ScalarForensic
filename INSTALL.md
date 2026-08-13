@@ -5,6 +5,9 @@
 - Python 3.12 (required — see [why](#why-python-312-is-required))
 - [uv](https://github.com/astral-sh/uv)
 - Qdrant: `docker run -p 6333:6333 qdrant/qdrant`
+- `ffmpeg` on `PATH` — required only for **transcoded playback** of videos the
+  browser cannot decode; see [Transcoded playback](#transcoded-playback).
+  Indexing and lossless rewrapping do not need it.
 
 ## Setup
 
@@ -410,6 +413,44 @@ Supported containers: `.mp4` `.avi` `.mov` `.mkv` `.wmv` `.flv` `.webm` `.m4v` `
 **Web UI:** upload a video the same way you upload an image. The analysis pipeline extracts frames, embeds each one, and searches with each frame's embedding. Results are grouped by source video — the best-matching frame is shown as the card thumbnail, and a timeline bar in the detail panel marks all indexed and matched frame positions.
 
 **Forensic reproducibility:** the same video file + the same `SFN_VIDEO_FPS` + `SFN_VIDEO_MAX_FRAMES` values always produces the same set of frames with identical SHA-256 hashes. This allows cross-run deduplication and makes results reproducible across re-indexes.
+
+### Transcoded playback
+
+Much of a real corpus is HEVC 10-bit HDR, which no browser decodes. Those files
+are re-encoded on demand into a bounded viewing-copy cache. Spec:
+`docs/specs/video-playback-transcode.md`.
+
+**This is the one part of the project that needs an external `ffmpeg` binary.**
+PyAV covers indexing and the lossless rewrap; the re-encode shells out.
+
+```bash
+sudo apt-get install -y ffmpeg      # Debian/Ubuntu
+```
+
+The build must include `--enable-libzimg` (for the `zscale`/`tonemap` filters).
+Without it an HDR source **cannot be tone-mapped**, and the app refuses to
+encode it rather than producing an 8-bit picture still tagged `bt2020`/HLG —
+which browsers render washed out with lifted blacks, and which would be a
+rendering whose own label misdescribes it. SDR sources still play.
+NVENC is optional: a startup probe runs a real encode and selects `libx264`
+when the GPU path is unavailable or unusable.
+
+A viewing copy is **not evidence**: it is lossy, tone-mapped (an interpretation,
+not a measurement), capped at 1080p and possibly rescaled. The original file and
+its verified SHA-256 remain the forensic object, and **Download original** serves
+the untouched bytes.
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `SFN_FFMPEG_PATH` | `ffmpeg` | Bare name resolved on `PATH`; an absolute path pins a specific build |
+| `SFN_VIDEO_HWACCEL` | `auto` | `auto` probes and uses the GPU encoder if a real encode succeeds; `cuda` requires it; `none` never touches the GPU |
+| `SFN_VIDEO_OUTPUT_HEIGHT` | `1080` | Cap, never a target — a 720p source stays 720p |
+| `SFN_VIDEO_CHUNK_SECONDS` | `30` | Valid under the 1080p cap; raising the cap requires revisiting this |
+| `SFN_VIDEO_MAX_WORKERS` | `2` | Not a throughput knob — measured throughput is flat past k=1, so higher values only add latency |
+| `SFN_VIDEO_JOB_TIMEOUT` | `3600` | Wall-clock ceiling on one encode, in seconds |
+
+Measured behaviour on the reference host is in
+`docs/benchmarks/video-bench-2026-08-13.md`.
 
 ## HEIC/HEIF support
 

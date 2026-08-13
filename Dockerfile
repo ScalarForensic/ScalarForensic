@@ -24,8 +24,16 @@ FROM python:3.12-slim
 # libdrm-amdgpu1 + symlink: suppresses the ROCm runtime warning
 #      "/opt/amdgpu/share/libdrm/amdgpu.ids: No such file or directory" that
 #      appears during model loading when the AMD GPU device IDs file is missing.
+# ffmpeg: declared external dependency of transcoded video playback
+#      (docs/specs/video-playback-transcode.md §8).  PyAV covers the lossless
+#      rewrap; the re-encode shells out to this binary.  The build must carry
+#      zscale/tonemap (Debian's ffmpeg is built --enable-libzimg), or an HDR
+#      source cannot be tone-mapped and the app refuses to encode it rather
+#      than emitting 8-bit pixels still labelled bt2020 — the app reports that
+#      state, it does not work around it.  NVENC is optional: without it the
+#      capability probe selects libx264.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 gcc libdrm-amdgpu1 \
+    && apt-get install -y --no-install-recommends libgomp1 gcc libdrm-amdgpu1 ffmpeg \
     && mkdir -p /opt/amdgpu/share/libdrm \
     && ln -s /usr/share/libdrm/amdgpu.ids /opt/amdgpu/share/libdrm/amdgpu.ids \
     && rm -rf /var/lib/apt/lists/*

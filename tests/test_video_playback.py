@@ -36,6 +36,7 @@ from scalar_forensic.video_playback import cache as vp_cache
 from scalar_forensic.video_playback import capability as vp_capability
 from scalar_forensic.video_playback import codecs as vp_codecs
 from scalar_forensic.video_playback import digest as vp_digest
+from scalar_forensic.video_playback import encode as vp_encode
 from scalar_forensic.video_playback import rewrap as vp_rewrap
 from scalar_forensic.video_playback import routes as vp_routes
 from scalar_forensic.web.app import app
@@ -153,10 +154,33 @@ def hevc_10bit_mov(roots):
 FFMPEG = os.environ.get("SFN_FFMPEG_PATH", "ffmpeg")
 FFPROBE = str(Path(FFMPEG).with_name("ffprobe")) if os.sep in FFMPEG else "ffprobe"
 
-requires_ffmpeg = pytest.mark.skipif(
-    shutil.which(FFMPEG) is None,
-    reason="ffmpeg is not installed; it is a declared dependency (spec §8)",
-)
+# Locally a missing ffmpeg is a skip; in CI it is a FAILURE.  ffmpeg is a
+# declared dependency (§8) and `.github/workflows/ci.yml` installs it, so absent
+# means the install step was dropped or the runner image changed — and a test
+# that answers that by skipping puts the job back to green-by-skip, which is the
+# state this guard exists to end.  A developer without ffmpeg still gets a skip.
+_IN_CI = os.environ.get("CI", "").strip().lower() not in ("", "0", "false")
+
+
+def _need_ffmpeg() -> None:
+    if shutil.which(FFMPEG) is not None:
+        return
+    message = (
+        f"ffmpeg ({FFMPEG!r}) is not installed. It is a declared dependency "
+        "(docs/specs/video-playback-transcode.md §8) and CI installs it; if this "
+        "fires in CI the install step is gone, not the requirement."
+    )
+    if _IN_CI:
+        raise AssertionError(message)
+    pytest.skip(message)
+
+
+@pytest.fixture()
+def ffmpeg_required() -> None:
+    _need_ffmpeg()
+
+
+requires_ffmpeg = pytest.mark.usefixtures("ffmpeg_required")
 
 TEST_DATA_DIR = Path(__file__).resolve().parents[1] / "test_data"
 
@@ -1270,3 +1294,238 @@ class TestCapabilityProbe:
         monkeypatch.setitem(vp_capability._RATE_CONTROL, "not_an_encoder", ())
         err = vp_capability._try_encode(Settings().ffmpeg_path, "not_an_encoder", hdr=False)
         assert err is not None and err.startswith("not_an_encoder:")
+
+
+# ---------------------------------------------------------------------------
+# Chunk encode (spec §4, §10) — the two defects §3.1 found
+# ---------------------------------------------------------------------------
+
+
+class TestEncodeCommand:
+    """Pure argv construction — no ffmpeg needed, so these always run."""
+
+    def _pipeline(self, **kw):
+        return vp_capability.select(Settings(), _capability(**kw), hdr=kw.pop("hdr", True))
+
+    def test_seek_is_an_input_option(self):
+        """`-ss` before `-i` is the whole reason chunk cost is flat (§3.2, §3.5)."""
+        cmd = vp_encode.build_command(
+            Settings(), self._pipeline(), Path("/src.mov"), Path("/out.mp4"), start=90.0
+        )
+        assert cmd.index("-ss") < cmd.index("-i")
+        assert cmd[cmd.index("-ss") + 1] == "90.000"
+
+    def test_output_seeking_is_never_used(self):
+        """A `-ss` after `-i` decodes and discards everything before the window."""
+        cmd = vp_encode.build_command(
+            Settings(), self._pipeline(), Path("/src.mov"), Path("/o.mp4"), start=5, duration=30
+        )
+        assert cmd.count("-ss") == 1
+        assert cmd.index("-t") > cmd.index("-i")
+
+    def test_zero_offset_omits_the_seek(self):
+        cmd = vp_encode.build_command(
+            Settings(), self._pipeline(), Path("/s.mov"), Path("/o.mp4"), start=0
+        )
+        assert "-ss" not in cmd
+
+    def test_tonemapped_output_is_tagged_bt709(self):
+        cmd = vp_encode.build_command(Settings(), self._pipeline(), Path("/s.mov"), Path("/o.mp4"))
+        for flag in ("-colorspace", "-color_primaries", "-color_trc"):
+            assert cmd[cmd.index(flag) + 1] == "bt709"
+
+    def test_an_sdr_source_is_not_relabelled(self):
+        """Stamping bt709 on an untouched SDR source would mislabel a BT.601 one."""
+        pipeline = vp_capability.select(Settings(), _capability(), hdr=False)
+        cmd = vp_encode.build_command(Settings(), pipeline, Path("/s.mp4"), Path("/o.mp4"))
+        assert "-colorspace" not in cmd
+
+    def test_a_source_without_audio_gets_an(self):
+        cmd = vp_encode.build_command(
+            Settings(), self._pipeline(), Path("/s.mov"), Path("/o.mp4"), has_audio=False
+        )
+        assert "-an" in cmd
+        assert "-c:a" not in cmd
+
+    def test_faststart_is_always_set(self):
+        cmd = vp_encode.build_command(Settings(), self._pipeline(), Path("/s.mov"), Path("/o.mp4"))
+        assert cmd[cmd.index("-movflags") + 1] == "+faststart"
+
+
+@requires_ffmpeg
+class TestChunkEncode:
+    """Real encodes.  These are the tests §14 requires; they must not skip in CI."""
+
+    @pytest.fixture()
+    def cap(self, monkeypatch):
+        monkeypatch.setenv("SFN_VIDEO_HWACCEL", "none")
+        vp_capability.reset_cache()
+        yield vp_capability.probe(Settings())
+        vp_capability.reset_cache()
+
+    def test_rotation_survives_the_encode(self, cap, hdr_rotated_mov, tmp_path):
+        """§3.1's first finding, pinned: the GPU-filtered path lost rotation.
+
+        The source carries a real display matrix (ffprobe reports it as side
+        data).  The decided pipeline decodes and filters in software precisely
+        so ffmpeg's autorotate runs, which turns the rotation into *geometry*:
+        a 64×96 portrait source comes out 96×64.  If someone reintroduces
+        `-hwaccel_output_format cuda`, or drops autorotate, the output stays
+        64×96 and this fails.
+        """
+        assert _display_rotation(hdr_rotated_mov) is not None, "fixture carries no rotation"
+        src = _ffprobe_video_stream(hdr_rotated_mov)
+        assert (src["width"], src["height"]) == (64, 96)
+
+        out = tmp_path / "chunk.mp4"
+        vp_encode.encode(Settings(), cap, hdr_rotated_mov, out, hdr=True)
+
+        result = _ffprobe_video_stream(out)
+        assert (result["width"], result["height"]) == (96, 64), (
+            "rotation was lost: the source's display matrix did not become geometry"
+        )
+
+    def test_output_is_tagged_bt709(self, cap, hdr_hlg_mov, tmp_path):
+        """§3.1's second finding, pinned: 8-bit pixels under an HDR label.
+
+        The source is 10-bit, bt2020 primaries, HLG transfer.  A naive
+        conversion produces 8-bit output *still* tagged that way, which browsers
+        render washed out with lifted blacks.  The tone-mapped path must emit
+        bt709 on all three.
+        """
+        assert _ffprobe_video_stream(hdr_hlg_mov)["color_transfer"] == "arib-std-b67"
+
+        out = tmp_path / "chunk.mp4"
+        result = vp_encode.encode(Settings(), cap, hdr_hlg_mov, out, hdr=True)
+
+        probed = _ffprobe_video_stream(out)
+        assert probed["color_transfer"] == "bt709"
+        assert probed["color_primaries"] == "bt709"
+        assert probed["color_space"] == "bt709"
+        assert probed["pix_fmt"] == "yuv420p"
+        assert result.pipeline.describe()["tone_mapped"] is True
+
+    def test_the_cap_downscales_but_never_upscales(self, cap, hdr_hlg_mov, tmp_path):
+        """§16's cap: a 64×96 source is far under 1080 and must come out untouched."""
+        out = tmp_path / "small.mp4"
+        vp_encode.encode(Settings(), cap, hdr_hlg_mov, out, hdr=True)
+        probed = _ffprobe_video_stream(out)
+        assert max(probed["width"], probed["height"]) == 96
+
+    def test_chunk_window_is_bounded_by_the_chunk_length(self, cap, hdr_hlg_mov, tmp_path):
+        monkeypatch_free = Settings()
+        out = tmp_path / "c0.mp4"
+        result = vp_encode.encode_chunk(
+            monkeypatch_free, cap, hdr_hlg_mov, out, hdr=True, start=0.0
+        )
+        assert out.exists()
+        assert result.pipeline.chunk_seconds == 30
+        # The 0.6 s fixture is shorter than the window; ffmpeg ends at the last
+        # frame rather than padding, so the final chunk of a source is short.
+        with av.open(str(out)) as c:
+            assert c.duration / av.time_base < 30
+
+    def test_a_later_chunk_starts_where_it_was_asked_to(self, cap, hdr_hlg_mov, tmp_path):
+        """Input seeking must land on the window, not at the file's start."""
+        monkeypatch_free = Settings()
+        out = tmp_path / "c1.mp4"
+        vp_encode.encode(monkeypatch_free, cap, hdr_hlg_mov, out, hdr=True, start=0.3, duration=0.3)
+        with av.open(str(out)) as c:
+            frames = sum(1 for _ in c.decode(video=0))
+        # 0.3 s at 10 fps is ~3 frames; the whole 0.6 s clip would be ~6.
+        assert 1 <= frames <= 4
+
+    def test_a_negative_chunk_start_is_rejected(self, cap, hdr_hlg_mov, tmp_path):
+        with pytest.raises(ValueError, match="chunk start"):
+            vp_encode.encode_chunk(
+                Settings(), cap, hdr_hlg_mov, tmp_path / "x.mp4", hdr=True, start=-1.0
+            )
+
+    def test_publication_is_atomic(self, cap, hdr_hlg_mov, tmp_path):
+        """§10.2: a reader never sees a half-written viewing copy."""
+        out = tmp_path / "atomic.mp4"
+        vp_encode.encode(Settings(), cap, hdr_hlg_mov, out, hdr=True)
+        assert out.exists()
+        assert list(tmp_path.glob("*.part")) == []
+
+    def test_a_failed_encode_leaves_no_part_file(self, cap, tmp_path, roots):
+        """§10.1/§10.3: a failure must not leave a file that looks like an artifact."""
+        input_dir, _ = roots
+        broken = input_dir / "broken.mov"
+        broken.write_bytes(b"not a video at all")
+        out = tmp_path / "never.mp4"
+        with pytest.raises(vp_encode.EncodeError):
+            vp_encode.encode(Settings(), cap, broken, out, hdr=False)
+        assert not out.exists()
+        assert list(tmp_path.glob("*.part")) == []
+
+    def test_a_timeout_kills_the_encoder(self, cap, hdr_hlg_mov, tmp_path, monkeypatch):
+        monkeypatch.setenv("SFN_VIDEO_JOB_TIMEOUT", "1")
+        real = subprocess.Popen
+
+        def slow(cmd, **kw):
+            return real(["sleep", "30"], **kw)
+
+        monkeypatch.setattr(vp_encode.subprocess, "Popen", slow)
+        with pytest.raises(vp_encode.EncodeError, match="timed out"):
+            vp_encode.encode(Settings(), cap, hdr_hlg_mov, tmp_path / "t.mp4", hdr=False)
+        assert list(tmp_path.glob("*.part")) == []
+
+    def test_the_command_is_recorded_for_reproduction(self, cap, hdr_hlg_mov, tmp_path):
+        """§7.2: `sfn-video render` must be able to print what produced a file."""
+        result = vp_encode.encode(Settings(), cap, hdr_hlg_mov, tmp_path / "r.mp4", hdr=True)
+        assert vp_capability.TONEMAP_CHAIN in " ".join(result.command)
+        assert result.command[0] == Settings().ffmpeg_path
+        assert result.wall_seconds > 0
+        assert result.fell_back is False
+
+
+class TestGpuFallback:
+    """§8: a GPU failure at job time falls back to CPU and says so."""
+
+    @requires_ffmpeg
+    def test_fallback_reencodes_on_cpu_and_records_it(self, hdr_hlg_mov, tmp_path, monkeypatch):
+        monkeypatch.setenv("SFN_VIDEO_HWACCEL", "none")
+        cap = dataclasses.replace(
+            vp_capability.probe(Settings()), encoder="h264_nvenc", hwaccel="cuda"
+        )
+        calls: list[list[str]] = []
+        real_run = vp_encode._run
+
+        def flaky(cmd, timeout):
+            calls.append(cmd)
+            if "h264_nvenc" in cmd:
+                raise vp_encode.EncodeError("no NVENC capable devices found", command=cmd)
+            return real_run(cmd, timeout)
+
+        monkeypatch.setattr(vp_encode, "_run", flaky)
+        out = tmp_path / "fallback.mp4"
+        result = vp_encode.encode(Settings(), cap, hdr_hlg_mov, out, hdr=True)
+
+        assert len(calls) == 2
+        assert result.fell_back is True
+        assert "NVENC" in result.fallback_reason
+        assert result.pipeline.encoder == "libx264"
+        assert out.exists()
+
+    def test_a_cpu_failure_is_not_retried(self, tmp_path, monkeypatch):
+        """Only the GPU path falls back; a CPU failure is the failure."""
+        cap = _capability()
+        calls = []
+
+        def always_fails(cmd, timeout):
+            calls.append(cmd)
+            raise vp_encode.EncodeError("boom", command=cmd)
+
+        monkeypatch.setattr(vp_encode, "_run", always_fails)
+        with pytest.raises(vp_encode.EncodeError, match="boom"):
+            vp_encode.encode(Settings(), cap, Path("/s.mov"), tmp_path / "o.mp4", hdr=True)
+        assert len(calls) == 1
+
+    def test_the_fallback_lands_under_a_different_cache_key(self, tmp_path, monkeypatch):
+        """§6.1: the CPU encode is not the GPU encode, so it is not the same key."""
+        gpu = vp_capability.select(
+            Settings(), _capability(encoder="h264_nvenc", hwaccel="cuda"), hdr=True
+        )
+        cpu = vp_capability.select(Settings(), _capability(), hdr=True)
+        assert gpu.fingerprint() != cpu.fingerprint()

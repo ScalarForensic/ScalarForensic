@@ -126,6 +126,13 @@ class Settings:
         self.video_max_workers: int = self._parse_int("SFN_VIDEO_MAX_WORKERS", 2)
         if self.video_max_workers < 1:
             raise ValueError("SFN_VIDEO_MAX_WORKERS must be >= 1")
+        # Wall-clock ceiling on one encode, seconds.  A timed-out encoder is
+        # killed and reaped rather than left holding a core and the source file
+        # open (§10.3).  3600 is sized for a full-video job, not a chunk: §3.5's
+        # ~51-minute 4-hour export is the case that has to fit under it.
+        self.video_job_timeout: int = self._parse_int("SFN_VIDEO_JOB_TIMEOUT", 3600)
+        if self.video_job_timeout < 1:
+            raise ValueError("SFN_VIDEO_JOB_TIMEOUT must be >= 1")
 
         # --- Network policy ---
         # Default: offline — no outward connections to HuggingFace or any other service.
