@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import functools
+import contextlib
 import io
 import logging
 import mimetypes
 import os
 import re
+import sqlite3
+import threading
 from pathlib import Path
 
 import av
@@ -18,7 +20,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from scalar_forensic.config import Settings
-from scalar_forensic.embedder import hash_file
+from scalar_forensic.embedder import HashCache, hash_file
 from scalar_forensic.indexer import qdrant_scroll_all
 from scalar_forensic.video import VIDEO_EXTENSIONS, extract_frame_at
 from scalar_forensic.web.routes._shared import _check_allowed_path
@@ -200,14 +202,99 @@ def _needs_remux(p: Path) -> bool:
     return brand is None or brand == _QUICKTIME_BRAND
 
 
-@functools.lru_cache(maxsize=256)
-def _source_digest(path_str: str, mtime_ns: int, size: int) -> str:
-    """SHA-256 of the source file, memoised on (path, mtime, size).
+# The persistent hash cache the indexer already fills, opened lazily and shared
+# by every request thread.  Keyed by the configured DB path so a settings change
+# (tests, a relocated cache) opens a new one instead of serving the old.
+_hash_cache_lock = threading.Lock()
+_hash_cache: tuple[str, HashCache | None] | None = None
 
-    This is the same digest the indexer records as ``video_hash``, so a viewing
-    copy can always be tied back to the point that produced the frame hit.
+
+def _reset_hash_cache() -> None:
+    """Drop the process-wide HashCache handle (tests, and a settings change)."""
+    global _hash_cache
+    with _hash_cache_lock:
+        if _hash_cache is not None and _hash_cache[1] is not None:
+            with contextlib.suppress(Exception):
+                _hash_cache[1].close()
+        _hash_cache = None
+
+
+def _hash_cache_for(settings: Settings) -> HashCache | None:
+    """Return the shared HashCache, or None when it is disabled or unusable.
+
+    An unwritable or corrupt DB is not a request failure: the digest is simply
+    computed the slow way.  The failure is remembered (a None entry) so every
+    later request does not retry a broken SQLite file on the request path.
     """
-    return hash_file(Path(path_str))
+    global _hash_cache
+    db_path = settings.hash_cache_path
+    if db_path is None:
+        return None
+    key = str(db_path)
+    with _hash_cache_lock:
+        if _hash_cache is not None and _hash_cache[0] == key:
+            return _hash_cache[1]
+        try:
+            cache: HashCache | None = HashCache(db_path)
+        except (sqlite3.Error, OSError) as exc:
+            _log.warning("hash cache unavailable at %s (%s); hashing directly", db_path, exc)
+            cache = None
+        _hash_cache = (key, cache)
+        return cache
+
+
+def _source_digest(p: Path) -> str:
+    """SHA-256 of the source file *as it is on disk right now*.
+
+    Backed by the same persistent :class:`HashCache` the indexer fills — keyed on
+    ``(resolved path, mtime_ns, size)``, so a touched or rewritten file is
+    re-hashed rather than remembered.  The value is never looked up from the
+    indexed ``video_hash``: a label beside a rendering must describe the file as
+    it is, not as it was indexed (spec §7.1).
+
+    Blocking (a cache miss reads the whole file), so callers must offload it off
+    the event loop.
+    """
+    cache = _hash_cache_for(Settings())
+    if cache is None:
+        return hash_file(p)
+    try:
+        digest, was_cached = cache.get_or_hash(p)
+    except (sqlite3.Error, OSError) as exc:
+        _log.warning("hash cache lookup failed for %s (%s); hashing directly", p, exc)
+        return hash_file(p)
+    if not was_cached:
+        # Persist immediately: unlike an indexing run there is no later flush(),
+        # and the point of the cache is to survive the process.  A write failure
+        # costs a re-hash next time, never the response.
+        try:
+            cache.flush()
+        except (sqlite3.Error, OSError) as exc:
+            _log.warning("hash cache write failed for %s: %s", p, exc)
+    return digest
+
+
+def _stale_evidence_report(computed: str, indexed: str | None) -> dict:
+    """Compare the digest computed now with the one the index recorded.
+
+    ``indexed`` is optional — a caller that does not know the indexed hash gets
+    ``stale_evidence: None``, which is "not checked", not "checked and fine".
+    Only a real comparison can clear a file.
+    """
+    if not indexed or not re.fullmatch(r"[0-9a-f]{64}", indexed):
+        return {"indexed_video_hash": None, "stale_evidence": None, "stale_reason": None}
+    if indexed == computed:
+        return {"indexed_video_hash": indexed, "stale_evidence": False, "stale_reason": None}
+    return {
+        "indexed_video_hash": indexed,
+        "stale_evidence": True,
+        "stale_reason": (
+            "The file on disk no longer matches the file that was indexed: "
+            f"indexed SHA-256 {indexed[:12]}…, file on disk now {computed[:12]}…. "
+            "Frame hits, timecodes and thumbnails describe the indexed file, "
+            "not what plays here. Re-index before relying on this playback."
+        ),
+    }
 
 
 def _stream_report(p: Path) -> dict:
@@ -391,7 +478,7 @@ async def _prepare_viewing_copy(p: Path, settings: Settings) -> tuple[Path, dict
 
     report["mode"] = "rewrap"
     cache_dir = _cache_dir_or_503(settings)
-    digest = await asyncio.to_thread(_source_digest, str(p), st.st_mtime_ns, st.st_size)
+    digest = await asyncio.to_thread(_source_digest, p)
     report["video_sha256"] = digest
     dst = cache_dir / f"{digest}.mp4"
 
@@ -440,12 +527,18 @@ async def video_playback(path: str) -> FileResponse:
 
 
 @router.get("/api/video-playback-info")
-async def video_playback_info(path: str) -> JSONResponse:
+async def video_playback_info(path: str, video_hash: str | None = None) -> JSONResponse:
     """Describe what playback of *path* would serve, without serving it.
 
     Feeds the viewing-copy label in the UI: how the file reaches the player,
-    which codecs it carries, and — for a rewrap — the SHA-256 of the source,
-    which is the same value the indexer stored as ``video_hash``.
+    which codecs it carries, and the SHA-256 of the source *as it is on disk
+    now* — computed, never read back from the index.
+
+    When the caller passes the ``video_hash`` the index recorded for this file,
+    the two are compared.  A difference is a **stale-evidence condition**: the
+    file on disk is no longer the one that was indexed, so the frame hits, the
+    timeline and any label drawn from them describe a different file.  It is
+    reported explicitly (``stale_evidence``) rather than served in silence.
     """
     p = _resolve_video_path(path)
     settings = Settings()
@@ -458,16 +551,15 @@ async def video_playback_info(path: str) -> JSONResponse:
         "playback_url": f"/api/video-playback?path={p}",
     }
     info.update(await asyncio.to_thread(_stream_report, p))
+    info["video_sha256"] = await asyncio.to_thread(_source_digest, p)
     if info["mode"] == "original":
         # Nothing is left behind when the file is served as it lies on disk.
         info["skipped_streams"] = []
     else:
-        info["video_sha256"] = await asyncio.to_thread(
-            _source_digest, str(p), st.st_mtime_ns, st.st_size
-        )
         cache_dir = settings.video_cache_dir
         info["cached"] = (
             cache_dir is not None and (cache_dir / f"{info['video_sha256']}.mp4").exists()
         )
         info["cache_enabled"] = cache_dir is not None
+    info.update(_stale_evidence_report(info["video_sha256"], video_hash))
     return JSONResponse(info)
