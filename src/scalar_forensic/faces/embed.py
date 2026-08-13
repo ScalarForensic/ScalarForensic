@@ -80,6 +80,11 @@ class OnnxFaceEmbedder:
             str(model_path), sess_options=opts, providers=["CPUExecutionProvider"]
         )
         self._validate_session()
+        # Some embedder exports (SFace among them) declare a fixed batch dim
+        # instead of a dynamic one; feeding more crops than declared is an
+        # ONNXRuntime INVALID_ARGUMENT error, so embed() must chunk to this.
+        in_shape = self._session.get_inputs()[0].shape
+        self._max_batch: int | None = in_shape[0] if isinstance(in_shape[0], int) else None
         self.embedding_norms: np.ndarray = np.empty(0, dtype=np.float32)
 
     @property
@@ -109,7 +114,18 @@ class OnnxFaceEmbedder:
         batch = (batch - m.mean) / m.scale
         if m.layout == "NCHW":
             batch = batch.transpose(0, 3, 1, 2)
-        (raw,) = self._session.run([m.output_name], {m.input_name: np.ascontiguousarray(batch)})
+        batch = np.ascontiguousarray(batch)
+        if self._max_batch is not None and len(batch) > self._max_batch:
+            raw = np.vstack(
+                [
+                    self._session.run(
+                        [m.output_name], {m.input_name: batch[i : i + self._max_batch]}
+                    )[0]
+                    for i in range(0, len(batch), self._max_batch)
+                ]
+            )
+        else:
+            (raw,) = self._session.run([m.output_name], {m.input_name: batch})
         norms = np.linalg.norm(raw, axis=1)
         self.embedding_norms = norms.astype(np.float32)
         return (raw / np.clip(norms[:, None], 1e-12, None)).astype(np.float32)

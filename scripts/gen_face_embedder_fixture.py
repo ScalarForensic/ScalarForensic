@@ -54,6 +54,21 @@ def main() -> None:
     Path(str(path) + ".manifest.json").write_text(json.dumps(manifest, indent=2))
     print(f"fixture written to {path}")
 
+    # Fixed-batch-1 variant: same net, no dynamic axes — mirrors real detector
+    # exports like SFace whose input is declared (1, 3, 112, 112).  Used to test
+    # that OnnxFaceEmbedder chunks multi-face batches instead of crashing.
+    path_b1 = OUT / "tiny_face_batch1.onnx"
+    torch.onnx.export(
+        model,
+        (torch.zeros(1, 3, 112, 112),),
+        str(path_b1),
+        input_names=["input"],
+        output_names=["embedding"],
+        external_data=False,
+    )
+    Path(str(path_b1) + ".manifest.json").write_text(json.dumps(manifest, indent=2))
+    print(f"fixture written to {path_b1}")
+
 
 if __name__ == "__main__":
     main()
