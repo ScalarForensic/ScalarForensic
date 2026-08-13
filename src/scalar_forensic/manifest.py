@@ -96,5 +96,7 @@ def write_run_manifest(
     }
     out = manifest_path_for(csv_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    # default=str: an unexpected value type must degrade to its string form,
+    # never abort the ingestion run at manifest time.
+    out.write_text(json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8")
     return out

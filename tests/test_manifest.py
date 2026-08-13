@@ -124,6 +124,20 @@ def test_write_run_manifest_creates_parents_and_round_trips(tmp_path):
     assert data["settings"]["collection"] == "sfn"
 
 
+def test_write_run_manifest_degrades_unexpected_types_to_str(tmp_path):
+    """A non-JSON value (e.g. a Path leaking from a models dict) must not
+    abort the run at manifest time — it degrades to its string form."""
+    out = write_run_manifest(
+        tmp_path / "run.csv",
+        settings=Settings(),
+        target_collection="c",
+        input_root=Path("/in"),
+        files=[],
+        models={"dino": {"model_name": "m", "model_hash": "h", "odd": Path("/p")}},
+    )
+    assert json.loads(out.read_text(encoding="utf-8"))["models"]["dino"]["odd"] == "/p"
+
+
 # ---------------------------------------------------------------------------
 # End-to-end: cli.index() writes the manifest at run start
 # ---------------------------------------------------------------------------
