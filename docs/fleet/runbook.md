@@ -1845,3 +1845,46 @@ nothing is broken today; the "audit-button label" is the shipped `DINO Audit`/`F
 pair at `index.html:1055`/`:1067`, not a new feature awaiting review; and ScalarForensic
 does support `.gif` (`scanner.py:17`) — the 2 skipped gifs were in the separate
 `portable_face_cropper` run.
+
+### §14 measurements delivered — `csm-b1`; and the finding nobody had stated
+
+Report: `data/reports/video-bench-2026-08-13.md` (gitignored — read it before it is lost).
+Floor recorded per the operator's ruling: Ryzen 9 9900X3D 12c/24t, 91 GiB RAM, RTX 4060 Ti
+16 GB (driver 595.84), ffmpeg 6.1.1 with `libzimg`/`libx264`/`libx265` and NVENC.
+
+| Measurement | Result |
+|---|---|
+| 4K CPU tonemap + libx264 | **0.879× — below realtime**, confirming §3.4's prediction |
+| 4K CPU tonemap + nvenc | 1.26×, above realtime |
+| Long-source seek, offsets to 3 h 41 m | flat 5.42–5.97 s, no trend |
+| Concurrency k=1/2/4/8 aggregate | **flat 3.71× → 3.52× — does not rise with k** |
+| Per-job wall k=1/2/4/8 | 8.08 / 16.35 / 32.47 / 67.34 s |
+| First-play, 30 s chunk | 1080p **8.21 s**; 4K **33.73 s** |
+
+b1 disclosed its own limitations rather than being asked to: the box carried ordinary
+desktop background load (other sessions' headless Chrome, a `bitcoind` at ~5%), and the
+long source is a 100× stream-copy concat, so its index is dense and undamaged **by
+construction** — the seek number settles offset-proportionality only and leaves §3.2's
+damaged-index, long-GOP and VFR risks exactly as open as §3.4 left them. That is the
+disclosure discipline this project wants.
+
+**The finding the numbers imply and no document yet states.** Aggregate throughput is flat
+because one job already saturates the box, so per-job latency scales ~linearly with k.
+§4.2's prefetch-depth-1 design needs a 30 s 1080p chunk in 6–10 s and gets 8.21 s — it only
+just fits at k=1. So **`SFN_VIDEO_MAX_WORKERS=2` is not a throughput setting; it is the exact
+shape of a single viewer, the playing chunk plus its one prefetch.** Which means §4.3's
+full-video job — "runs in the background; nothing blocks on it" — **is not free on this
+hardware**: occupying one of two workers doubles chunk latency to ~16 s for its whole
+~51-minute run and blows the margin the double-buffer swap depends on. For phase 7: either
+`nice` it with an explicit `-threads` cap so it yields to chunk work, or say plainly in §4.3
+that chunk playback degrades while a full job runs. It cannot be both unbounded and
+invisible. Not phase 4's problem; raise it to the operator at phase 7.
+
+4K first-play at 33.73 s is ~4× over §4.2's margin, which **confirms the operator's 1080p
+cap is load-bearing rather than a preference**, and forecloses raising the cap later without
+also revisiting chunk length (§17 Q2).
+
+### m4 retiring — fleet empty, phase 4 unblocked and un-started
+
+Handoff: `docs/handoffs/scalarforensic-com-m4-20260813-2100.md`. Next step is one fresh
+`com` coder on phase 4; everything it needs is named there. No open escalations.
