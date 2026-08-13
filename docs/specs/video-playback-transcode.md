@@ -428,6 +428,34 @@ correct forever, and a wrong entry in that table is the §6.1 defect itself. A
 rare recoverable cost beats a permanent second rule. The reasoning is repeated
 next to `cache_key()` in `video_playback/cache.py`.
 
+**Phase 6 correction: keying alone is not enough — the *lookup* has to know
+about the fallback too.** On a host whose GPU probes clean and then fails at
+encode time, `select()` keeps returning the GPU pipeline while every artifact
+lands under the CPU key. The lookup missed forever and every chunk was
+re-encoded: the cache silently stopped being one, on exactly the hardware §8's
+fallback exists for, and no CI run can see it. Two pieces fix it, and the
+distinction between them is load-bearing:
+
+- `routes._relocate_on_fallback` keeps the **artifact** invariant. The encode
+  destination has to be chosen before the encode, so on a fallback the file
+  lands under the selected key and is then `os.replace`d — same directory,
+  atomic — under `result.pipeline`'s key. A GPU key never holds a CPU picture.
+- `routes._substitutions` is a **lookup hint and never a key**: selected
+  fingerprint → the whole `Pipeline` that last actually ran. Selection is
+  unchanged, so a recovered GPU is used again at the next genuine miss, and the
+  direct key wins whenever both artifacts exist. It holds `Pipeline` objects
+  rather than fingerprints so a substituted hit labels itself with the encoder
+  that produced the bytes (§7.2) — a label carrying the GPU's fields over a file
+  libx264 wrote would be this section's defect in miniature.
+
+Two properties of the hint, both deliberate. It is **process-wide state and must
+be reset in test fixtures**, like `capability._cached` and `digest._hash_cache`
+(`CLAUDE.md` names all of them). And it **does not survive a restart**: a
+fallback host pays one wasted GPU attempt before the table repopulates. That is
+the behaviour wanted — the table is bounded by the number of distinct pipelines
+rather than by sources, and re-probing after a restart is how a repaired GPU
+gets used again. Persisting it would make a repaired GPU permanently unused.
+
 **The key's other half is a directory.** Artifacts live at
 `{cache_dir}/{source_digest}/{key}/…`, with the lossless rewrap at
 `{cache_dir}/{source_digest}/rewrap.mp4` — a rewrap runs no pipeline, so its only
@@ -895,6 +923,31 @@ index; job timeout, cancel and disconnect leave no `.part` and no orphan process
 eviction during playback; cache-full refusal (§6.3); stale-source detection
 (§7.1); every §10.1 failure mapped to its player state; path-containment on every
 new route including rejection of a cache key as source identity.
+
+**There is no JavaScript test harness in this repository, and phase 6 is the
+first phase whose weight is in the browser.** Stated here because it is a
+project-level fact, not a phase-6 caveat, and because the shape of the gap is
+not obvious:
+
+- `player.js` is pinned by **text-level wiring tests** (in
+  `tests/test_video_playback.py`, in the style of `test_static_wiring_web.py`)
+  plus a **manual browser run** recorded in the PR that introduced it.
+- **A wiring test cannot tell you the browser can run the file.** One already
+  slipped through: `player.js` shipped a `?? … ||` precedence `SyntaxError`, so
+  the file did not parse *at all*, and all fourteen wiring tests passed against
+  it. This is the `/?cachebust=N` gotcha generalised — reading a file as text
+  says nothing about executing it — and it is why the live check with a forced
+  re-fetch of every `<script src>` and the stylesheet is **mandatory** for
+  browser-side work here, not a nicety.
+- The markup inside `.vc-block` is **wiring-pinned only**. Rendering it needs a
+  full analysis session — Qdrant and an indexed corpus — so the browser run
+  exercised the component's methods and getters directly rather than through the
+  panel that hosts them.
+
+What would close it is a real JS test runner. That is a new dependency and a
+separate decision with a real cost, so it belongs to the operator and not to any
+phase of this spec; it is named here so the next person weighs it deliberately
+instead of rediscovering the gap.
 
 **Measurements required on real hardware before phase 4 is accepted: satisfied
 by §3.5** (2026-08-13) — 4K rates, long-source seek, concurrent-job scaling and

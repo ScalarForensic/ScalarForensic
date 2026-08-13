@@ -98,6 +98,11 @@
     },
 
     closeVideoPlayback() {
+      // Before the payload goes, not after: closeChunkPlayback() releases the
+      // §6.2 lease, and the release needs the source_path that lives on it.
+      // Dropping the payload first would leave the video protected from
+      // eviction until the ttl ran out.
+      this.closeChunkPlayback();
       this.videoPlayback = null;
       this.videoPlaybackError = null;
       this.videoPlaybackLoading = false;

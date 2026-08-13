@@ -281,6 +281,11 @@ async def video_playback_info(path: str, video_hash: str | None = None) -> JSONR
         }
         info["cache_enabled"] = settings.video_cache_dir is not None
         info["chunk_seconds"] = settings.video_chunk_seconds
+        # The player beats the §6.2 lease at a quarter of this, so it has to be
+        # told the value rather than hard-coding the default: a deployment that
+        # lowered SFN_VIDEO_LEASE_SECONDS would otherwise lose the lease
+        # mid-playback and have its video evicted underneath the analyst.
+        info["lease_seconds"] = settings.video_lease_seconds
     # The §5 state is decided here, server-side, from the same `mode` the label
     # is drawn from — so "what does the analyst see" has one implementation and
     # cannot drift from "what did the server conclude".  Four modes map onto four

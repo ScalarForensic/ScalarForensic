@@ -2507,3 +2507,159 @@ class TestFallbackCacheLookup:
         hit = vp_routes._cached_chunk(cache_dir, DIGEST_A, gpu, name)
         assert hit.path.read_bytes() == b"gpu"
         assert hit.fingerprint == gpu.fingerprint()
+
+
+# ---------------------------------------------------------------------------
+# The double-buffered player, read the way the browser reads it
+# ---------------------------------------------------------------------------
+#
+# These cannot execute the JS — there is no JS test harness in this repository —
+# so they pin the wiring and the call sites that a live defect would come from,
+# in the style of `tests/test_static_wiring_web.py`.  Behaviour was verified in
+# a real browser; that check is recorded in the PR, not here.
+
+STATIC = Path(__file__).resolve().parents[1] / "src" / "scalar_forensic" / "web" / "static"
+PLAYER_JS = STATIC / "js" / "video_playback" / "player.js"
+
+
+class TestPlayerWiring:
+    def test_the_player_part_loads_before_the_assembler(self):
+        # A part registered after app.js has already run is a part that never
+        # reaches the component (CLAUDE.md).
+        html = (STATIC / "index.html").read_text()
+        assert html.index("/static/js/video_playback/player.js") < html.index("/static/app.js")
+
+    def test_the_player_registers_itself_as_a_part_and_is_never_object_assigned(self):
+        js = PLAYER_JS.read_text()
+        assert "window.__sfnParts" in js
+        assert "Object.assign(" not in js, "it evaluates getters instead of copying them"
+
+    def test_both_video_buffers_exist_in_the_markup(self):
+        # §4.2 is two elements. One element with a swapped src is a black frame
+        # at every boundary while the browser reloads.
+        html = (STATIC / "index.html").read_text()
+        assert 'x-ref="chunkA"' in html
+        assert 'x-ref="chunkB"' in html
+        assert html.count("advanceToNextChunk(") == 2
+
+    def test_the_hidden_buffer_holds_the_prefetched_chunk(self):
+        html = (STATIC / "index.html").read_text()
+        assert "chunk.buffer === 0 ? chunk.url : chunk.preload.url" in html
+        assert "chunk.buffer === 1 ? chunk.url : chunk.preload.url" in html
+
+    def test_the_player_never_decides_a_state_for_itself(self):
+        # Every §5 state comes off the wire, so the §10.1 matrix has exactly one
+        # implementation. A client that inferred a state from a status code
+        # would be the second, and the two would drift.
+        js = PLAYER_JS.read_text()
+        assert "b.player_state" in js
+        assert "d?.player_state" in js
+
+    def test_the_encoding_state_shows_elapsed_time_and_no_percentage(self):
+        # §5: "spinner with elapsed time; no fabricated percentage".
+        js = PLAYER_JS.read_text()
+        assert "elapsedS" in js
+        assert "%" not in js.split("chunkElapsedLabel")[1].split("},")[0]
+
+    def test_nothing_retries_on_its_own(self):
+        # §10.1: "nothing may retry-storm". The countdown ticks; the analyst
+        # clicks. A setInterval that called playChunkAt would be the storm.
+        js = PLAYER_JS.read_text()
+        countdown = js.split("_startChunkRetryCountdown() {")[-1].split("\n  retryChunk")[0]
+        assert "playChunkAt" not in countdown
+        assert "_requestChunk" not in countdown
+
+    def test_a_failed_prefetch_does_not_change_what_the_analyst_sees(self):
+        # Speculative work (§4.2). Reporting it would put a failure on screen
+        # for a request nobody made.
+        js = PLAYER_JS.read_text()
+        body = js.split("async _prefetchNextChunk()")[1].split("\n  //")[0]
+        assert "chunk.state" not in body
+        assert "prefetchFailed" in body
+
+    def test_the_lease_beats_well_inside_its_ttl_and_is_released_on_close(self):
+        js = PLAYER_JS.read_text()
+        assert "Math.floor(ttl / 4)" in js, "three lost beats must not drop the lease"
+        assert "_beatChunkLease(true)" in js, "closing must release, not wait out the ttl"
+        assert "keepalive: true" in js
+
+    def test_closing_the_player_releases_the_lease_before_dropping_the_payload(self):
+        # The release needs source_path, which lives on the payload.
+        js = (STATIC / "js" / "evidence.js").read_text()
+        body = js.split("closeVideoPlayback()")[1].split("\n    },")[0]
+        assert body.index("closeChunkPlayback()") < body.index("this.videoPlayback = null")
+
+    def test_a_stale_response_cannot_overwrite_a_newer_seek(self):
+        js = PLAYER_JS.read_text()
+        assert "_chunkRequestId" in js
+        assert "if (id !== this._chunkRequestId) return;" in js
+
+    def test_the_player_does_not_reach_for_media_source_extensions(self):
+        # §4.1, twice reviewed and rejected. Phase 6 is where the temptation
+        # returns hardest, so it is pinned rather than trusted.
+        js = PLAYER_JS.read_text()
+        for banned in ("MediaSource", "SourceBuffer", "appendBuffer", ".m3u8", "Hls("):
+            assert banned not in js, banned
+
+    def test_the_lease_interval_comes_from_the_server_not_from_a_constant(self):
+        # A deployment that lowered SFN_VIDEO_LEASE_SECONDS must not lose its
+        # lease mid-playback because the client hard-coded the default.
+        assert "lease_seconds" in PLAYER_JS.read_text()
+
+    def test_playback_info_reports_the_lease_and_chunk_length(self, client, hevc_10bit_mov):
+        body = client.get(f"/api/video-playback-info?path={hevc_10bit_mov}").json()
+        assert body["lease_seconds"] == Settings().video_lease_seconds
+        assert body["chunk_seconds"] == Settings().video_chunk_seconds
+
+
+class TestRemainingFailureRowsOverHttp:
+    """The two §10.1 rows that need a container the fixtures cannot write."""
+
+    def test_a_container_with_no_video_track_is_422(self, client, hevc_10bit_mov):
+        report = vp_codecs._stream_report(hevc_10bit_mov)
+        report["video_codec"] = None
+        with patch.object(vp_routes, "_stream_report", return_value=report):
+            r = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        assert r.status_code == 422
+        assert r.json()["detail"]["error"] == "no-video-track"
+
+    def test_a_container_with_no_duration_is_refused_before_any_encode(
+        self, client, hevc_10bit_mov
+    ):
+        # A timecode cannot be checked against a duration that is not there, and
+        # a chunk cannot be bounded — so this refuses rather than encoding into
+        # the dark and finding out.
+        report = vp_codecs._stream_report(hevc_10bit_mov)
+        report["duration_ms"] = None
+        with (
+            patch.object(vp_routes, "_stream_report", return_value=report),
+            patch.object(vp_encode, "_run", side_effect=AssertionError("encoded anyway")),
+        ):
+            r = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        assert r.status_code == 422
+        assert r.json()["detail"]["error"] == "malformed-duration"
+
+    def test_the_matrix_covers_every_condition_section_10_1_names(self):
+        # The list in §10.1, as kinds. Two conditions are deliberately absent
+        # because they are not failures by the time a caller sees them; they are
+        # asserted absent by TestFailureMatrix instead.
+        kinds = {
+            v.kind
+            for k, v in vars(vp_states).items()
+            if isinstance(v, vp_states.Failure) and k.isupper()
+        }
+        assert {
+            "corrupt-input",
+            "no-video-track",
+            "no-encode-pipeline",
+            "encode-failed",
+            "job-timeout",
+            "encoder-killed",
+            "disk-full",
+            "cache-unwritable",
+            "cache-unset",
+            "source-disappeared",
+            "source-changed",
+            "malformed-duration",
+            "queue-full",
+        } <= kinds

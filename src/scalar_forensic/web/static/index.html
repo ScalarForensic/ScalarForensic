@@ -1518,16 +1518,87 @@
 
                   <template x-if="videoPlayback">
                     <div>
-                      <video class="vc-player" controls preload="metadata"
-                             :src="videoPlaybackSrc"
-                             @loadedmetadata="seekVideoToHit($el)"
-                             @error="videoPlaybackError = 'The browser could not decode this stream. The stored frame JPEGs remain available.'"></video>
+                      <!-- The whole file, when the browser can decode it: modes
+                           `original` and `rewrap`, i.e. player_state `playable`. -->
+                      <template x-if="!chunkPlaybackOffered">
+                        <video class="vc-player" controls preload="metadata"
+                               :src="videoPlaybackSrc"
+                               @loadedmetadata="seekVideoToHit($el)"
+                               @error="videoPlaybackError = 'The browser could not decode this stream. The stored frame JPEGs remain available.'"></video>
+                      </template>
+
+                      <!-- Chunk playback (spec §4.2, §5). TWO <video> elements: while
+                           one plays, the next chunk loads hidden in the other, and at
+                           the boundary they swap. Not Media Source Extensions — §4.1
+                           reviewed and rejected that, and the brief glitch at each
+                           boundary is a cost the operator accepted explicitly. -->
+                      <template x-if="chunkPlaybackOffered">
+                        <div class="vc-chunk">
+                          <!-- state `needs-transcode`: nothing has been encoded yet. -->
+                          <div x-show="chunk.state === 'idle'">
+                            <button class="vc-open-btn"
+                                    @click="playChunkAt(videoPlaybackTimecodeMs / 1000)">
+                              <span>▶</span>
+                              <span>Play from this frame (encodes a
+                                <span x-text="chunkSeconds"></span> s window)</span>
+                            </button>
+                          </div>
+
+                          <!-- state `chunk-encoding`: elapsed seconds, never a
+                               percentage. There is no progress signal to derive one
+                               from, and #139 removed the last invented one. -->
+                          <div class="vc-encoding" x-show="chunkIsEncoding">
+                            <span class="vc-spinner">◐</span>
+                            <span>Encoding a viewing copy of this window…</span>
+                            <span class="vc-elapsed" x-text="chunkElapsedLabel"></span>
+                          </div>
+
+                          <!-- states `chunk-ready` (visible buffer) and the hidden
+                               buffer holding the prefetched next chunk. Both elements
+                               always exist; which one is on screen is chunk.buffer. -->
+                          <video class="vc-player" controls preload="auto"
+                                 x-ref="chunkA"
+                                 x-show="chunkIsPlaying && chunk.buffer === 0"
+                                 :src="chunk.buffer === 0 ? chunk.url : chunk.preload.url"
+                                 @ended="advanceToNextChunk($refs.chunkA, $refs.chunkB)"></video>
+                          <video class="vc-player" controls preload="auto"
+                                 x-ref="chunkB"
+                                 x-show="chunkIsPlaying && chunk.buffer === 1"
+                                 :src="chunk.buffer === 1 ? chunk.url : chunk.preload.url"
+                                 @ended="advanceToNextChunk($refs.chunkB, $refs.chunkA)"></video>
+
+                          <div class="vc-label-body" x-show="chunkIsPlaying">
+                            <span x-text="chunkWindowLabel"></span>
+                            <span x-show="chunkPipelineLabel"> · <span x-text="chunkPipelineLabel"></span></span>
+                            <span x-show="chunk.fellBack"> · encoded on the CPU after the GPU declined</span>
+                            <span x-show="chunk.next === null"> · last window of this video</span>
+                          </div>
+
+                          <!-- states `chunk-failed`, `capacity-exhausted`,
+                               `cache-disabled`, `unknown`. The reason is the server's
+                               own sentence; the state came off the wire. Retry appears
+                               only when the server said one could help, and only once
+                               its Retry-After has run out — §10.1: nothing may
+                               retry-storm, so nothing here retries on its own. -->
+                          <div class="vc-error" x-show="chunkHasFailed">
+                            <strong x-text="`⚠ ${chunk.state}`"></strong>
+                            <div x-text="chunk.reason"></div>
+                            <div x-show="chunkRetryCountdown > 0">
+                              Retry available in <span x-text="chunkRetryCountdown"></span> s.
+                            </div>
+                            <button class="vc-open-btn" x-show="chunkRetryOffered"
+                                    @click="retryChunk()">
+                              <span>↻</span><span>Retry this window</span>
+                            </button>
+                          </div>
+                        </div>
+                      </template>
 
                       <!-- Codec allowlist verdict (spec §5). Decided server-side from
                            the stream, never from what the browser advertises: Chrome
-                           claims HEVC and then fails. Phase 3 detects and explains;
-                           until the encode path lands, Download original is the way
-                           to view it. -->
+                           claims HEVC and then fails. `unknown` is its own verdict and
+                           not a quiet "needs transcoding": a container that would not
+                           open has said nothing about whether it would play. -->
                       <div class="vc-error" x-show="videoPlaybackModeHeading">
                         <strong x-text="`⚠ ${videoPlaybackModeHeading}`"></strong>
                         <div x-text="videoPlayback.mode_reason"></div>
@@ -2376,6 +2447,9 @@
 <script src="/static/js/triage.js"></script>
 <script src="/static/js/reset.js"></script>
 <script src="/static/js/faces.js"></script>
+<!-- The video-playback subsystem owns its part file (spec §11); it must
+     still load before app.js like every other part. -->
+<script src="/static/js/video_playback/player.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

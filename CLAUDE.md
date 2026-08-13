@@ -115,8 +115,9 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
   `capability.reset_cache()` (the probe), `digest._reset_hash_cache()` (the `HashCache`
   handle), and `cache.reset_leases()` + `cache.artifact_locks.reset()` +
   `cache._reset_sweep()` (leases, pins, the lock table, the once-per-process `.part`
-  sweep). `tests/test_video_playback.py` has a module-scope **autouse** fixture doing the
-  cache three; keep it autouse.
+  sweep), and `routes.admission.reset()` + `routes.reset_substitutions()` (the chunk
+  admission counter and the GPU→CPU cache-lookup hint). `tests/test_video_playback.py`
+  has a module-scope **autouse** fixture doing all of them; keep it autouse.
 - `unittest.mock.patch` targets are per-module: patch where the name is *used*
   (e.g. `scalar_forensic.web.routes.files.Settings`, `...pipeline.query.QdrantClient`),
   not the package that re-exports it.
