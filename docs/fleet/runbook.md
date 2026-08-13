@@ -1453,3 +1453,156 @@ open analyses before judging.
 - Operator supplied cropper test paths: input `input_scalar` (READ-ONLY), output
   `/media/.../portable_face_cropper_scalar/` (the one writable /media path, relayed to
   com-c8 with bench10-first advice).
+
+## [ScalarForensic, cfm-m3, 2026-08-13] Playback GO — com-c9 dispatched; 404 stays a watch item
+
+- **Operator ruling: in-browser source-video playback APPROVED** (DECIDE closed). Evidence
+  basis: c4's codec probe in the operator's Chrome (hvc1/hev1 decode "probably", only the
+  QuickTime container fails) + g1's corpus probe (509 videos ≈95% HEVC). Fixed design:
+  lossless remux MOV→MP4 (stream copy +faststart, NO transcoding), on-demand into a
+  bounded env-configurable cache (created_by_scalar-style derived store), HTTP range
+  serving, UI deep-links <video> to frame_timecode_ms, explicit "viewing copy — container
+  rewrap, streams unmodified" labelling (originals + frame JPEGs stay authoritative),
+  playable-type set derived from the scanner (HEIC lesson). Dispatched:
+  `scalarforensic-com-c9` (Opus) — owns web/routes, web/static, config.py.
+- **Query-chip 404 (reqid 690): operator says NO dispatch** on the unreproduced one-off.
+  c4 checks its evidence trail for the response body and now captures the detail string
+  on recurrence — "unknown face index" → query-faces overwrite race (faces.py:498);
+  "no review crop for this face" → review-only path. The string routes the fix.
+- Phase state: runbook committed through #135 `0bb7821`; bar 647/5; live workers com-c8
+  (cropper, mid-build) + com-c9 (playback); c4 in the operator's Chrome.
+
+### Query-chip 404 ROOT-CAUSED (no repro needed) — fix queued NORMAL behind playback
+
+c4 pinned reqid 690 by content-length: the evicted 404 body was 31 bytes, matching exactly
+one candidate — {"detail":"unknown face index"} (the review-crop string is 41) — which per
+the routing table confirms the **query-faces overwrite race** (faces.py:498, two-file
+sessions), not the review-only path. Evidence: c4's verify-pr126-results.md. Operator-side
+ruling: fix at NORMAL priority, queued BEHIND playback, no preemption. Suggested shape
+(coder verifies): tie chip URL/lookup to its detection generation (per-detection token in
+chip_url, 409/refresh on mismatch) or serialize query-faces POSTs per session; session-scope
+rule stays (chips memory-only, no-store). Fix falls inside com-c9's ownership (routes +
+static) — assigned as its NEXT task after playback DONE. c4's watch item drops to
+confirmation-on-recurrence.
+
+### Cropper redirected by operator — standalone repo, not a ScalarForensic subproject
+
+Operator redirected com-c8's deliverable mid-build: no PR into ScalarForensic. Now a
+standalone git repo at `/home/user01/Schreibtisch/gitea/portable_face_cropper`
+(`45c1118`, own README/CLAUDE.md/LICENSE/pyproject). Verified by me on disk:
+ScalarForensic history (`git log --all -- portable_face_cropper`) empty, tree clean,
+feature branch + worktree gone. ScalarForensic bar unaffected (647/5 at `0bb7821`).
+Full input_scalar acceptance run in flight (4,126 crops at report time). My verification
+shifts to: re-run its test suite read-only + README-vs-contract review + run numbers.
+
+### Playback MERGED #136 `9e71a96` — bar 690/5; c9 rolls onto the chip race
+
+- **Verified by me**: required checks green, diff invariants hold (scanner-derived
+  VIDEO_EXTENSIONS, /api/hit-image's `_check_allowed_path` reused, byte-copy rewrap only —
+  no re-encode anywhere, silent-viewing-copy caveat labelled). Remux 348 MB HEVC in
+  0.18 s, packets byte-equal, 200/206 range serving verified by c9 on a scratch server.
+  Bar **re-measured by me at `9e71a96`: 690 passed / 5 skipped, coverage 69.32%** (+43
+  tests). Remote branch survived `--delete-branch` again — deleted by hand, gone.
+- **CodeQL: 6 new py/path-injection alerts on routes/video.py** — same class as the 13
+  dismissed "won't fix — local deployment only"; `_check_allowed_path` not modeled as a
+  sanitizer. Dismissal agent-blocked → with the operator via g1.
+- **Restart one-liner sent to g1** (kill 3148868 + nohup relaunch); after it, c4 does the
+  outstanding VISUAL pass (c9 never got the devtools browser): player, seek-to-timecode,
+  HEVC decode in the operator's Chrome.
+- **com-c9 next task issued**: query-faces overwrite race fix (faces.py:498, generation
+  token or per-session serialization; chips stay memory-only/no-store) + document
+  SFN_VIDEO_CACHE_* in docs/deployment.md (granted).
+- com-c8 interim: README gaps closed at `4c4ff96` (all 27 CSV columns documented, quality
+  score formula explicit + recomputable from own row, verified against 441-row shakedown);
+  full run past 4,207 crops.
+
+### CROPPER ACCEPTED — standalone repo verified, full-corpus run clean; com-c8 retiring
+
+com-c8 DONE, **independently verified by me**: suite 62 passed / 1 skipped + ruff clean
+re-run in `/home/user01/Schreibtisch/gitea/portable_face_cropper` (HEAD `4c4ff96`, clean
+tree); mapping.csv header columns 1–8 exact operator contract in order (9–27 additive per
+operator amendment); 4,538 lines = header + 4,537 rows; HQ_full_picture 2,560 files =
+distinct face-bearing inputs. Full-run numbers: 8,138 scanned (78 skipped non-inputs:
+75 .aae + mapping.csv + 2 .gif), 2,560 with ≥1 face, 4,537 crops (4,143 image + 394
+video), 0 decode failures, 35m01s wall; hash chain re-verified on a 120-row sample, 0
+mismatches; quality_score 16.4/71.4/100.0 min/med/max. README forensic contract complete
+(pinned OpenCV-Zoo model + sha256, formula recomputable per row, 9 stated limitations,
+per-run run_manifest.json). OPERATOR DECIDE (one-liner, non-blocking): 2 .gif inputs
+skipped as unsupported (suffix not in IMAGE_SUFFIXES; Pillow could decode) — include GIF?
+One-line fix if yes.
+
+### Restart 3 executed (operator session) — playback routes LIVE; canonical detach recipe
+
+New server PID 3643292 under **setsid** (session leader, 0.0.0.0:8080). Finding: BOTH
+prior agent-side restart mechanisms left the server tied to something that died later —
+restart 1 ran inside c4's tmux-spawn scope (died with the pane), restart 2's
+nohup-in-tool-shell detach did not survive either (PID 3148868 was already dead at
+restart time). **Canonical recipe from here on:**
+`setsid nohup ./run.sh sfn-web >/tmp/sfn-web.log 2>&1 </dev/null &` — session leader, no
+controlling TTY, survives the launcher. /openapi.json confirms /api/video-playback,
+/api/video-playback-info, /api/video-frame, /api/video-timeline. c4 dispatched on the
+visual pass (HEVC decode, seek/deep-link, viewing-copy label, H.264 no-remux spot check).
+CodeQL ruling pending; g1 independently verified _resolve_video_path's sanitizer chain
+(absolute-only, resolve(), scanner extensions, _check_allowed_path, existence).
+
+### com-c8 retired clean — cropper HEAD is `c58c58f`; repo has NO REMOTE
+
+Corrections from c8's close-out, verified: final HEAD `c58c58f` (not `4c4ff96`) — my own
+verification run dropped uv.lock + .pyc into its tree; c8 hardened .gitignore and
+committed uv.lock (right call: a forensic tool should re-resolve identical versions),
+suite still 62/1. Lesson mine: a read-only verification of someone's repo should set
+UV_NO_SYNC or copy the tree — `uv run` writes. Window closed, ownership row released at
+kill. **RISK for the operator: the cropper repo has NO remote — it exists on this disk
+only** (47 tracked files). One-liner to fix once a gitea remote exists:
+`git remote add origin <url> && git push -u origin main`.
+
+### c9 retired on STOP path; c10 spawned on the handoff; HEVC DECIDE up
+
+- **com-c9 retired clean at 229.7k** (STOP path — right call): chip-race WIP pushed on
+  `fix/query-faces-generation` (`b90cc04` fix + `e7ce9c3` handoff ON THE BRANCH). Root
+  cause NARROWED client-side: `loadQueryFaces` races on `$watch(selectedFileId)`; chip
+  URLs were rebuilt from current selectedFileId instead of the server-stamped chip_url —
+  404 when the new file has fewer faces, **another person's crop under the wrong identity
+  label** when it has more (the forensic reason this fix exists). `scalarforensic-com-c10`
+  spawned on the handoff (2 red tests = TODO + 3 named missing tests + deployment.md);
+  ownership re-claimed after c9's release.
+- **#136 live verdict (c4): feature PASSES, environment does not** — H.264 plays
+  empirically; **HEVC fails to decode in the operator's Linux Chrome**
+  (DECODER_ERROR_NOT_SUPPORTED; the codec probe advertises support but pipeline init
+  fails without working VAAPI). 127/130 corpus videos affected; soft-fail correct.
+  DECIDE with operator via g1: (a) HEVC→H.264 transcode viewing copy (label claim changes
+  per mode; HEIC→JPEG precedent), (b) try VAAPI enablement machine-side, (c) as-is. My
+  default: try (b) once, else rule (a).
+- Note: dependabot #98 (setup-uv 5→7, workflow-only) merged to main by the operator side;
+  main `c6104cd`.
+
+### Chip race FIXED — #137 `2b610a4` verified; restart 4 requested; c10 retiring
+
+- **Verified by me**: MERGED, 6/6 CI, bar **696 passed / 5 skipped at `2b610a4`**,
+  coverage 69.38%; remote branch survived `--delete-branch` a third time, deleted by
+  hand. Diff: per-detection token in chip_url + 409 on mismatch (server), server-stamped
+  chip_url used verbatim client-side + request-ordinal/file guard; chips stay
+  memory-only/no-store; c9's handoff landed on main with the squash.
+- **The forensic case is tested**: `test_a_stale_chip_url_never_serves_another_persons_crop`
+  uses an IN-BOUNDS index (no 404 can mask it) and asserts the other person's crop bytes
+  absent. Plus token-lifecycle tests and two static-wiring pins. c10 also found and fixed
+  two client holes beyond the handoff (basket placeholder; superseded response clearing a
+  newer result's loading/error state).
+- Restart 4 requested from operator side (canonical setsid recipe, PID 3643292); then c4
+  runs the live two-file pass. deployment.md now documents SFN_VIDEO_CACHE_*.
+
+### Restart 4 live (PID 3694573, setsid) — c4 on the two-file pass; HEVC HELD
+
+c4 dispatched on the #137 A/B pass (409-on-superseded is expected behavior, not a
+defect). c10 retired and window closed. HEVC ruling still with the operator; g1
+recommends (a) transcode viewing copies with an NVENC note — RTX 4060 Ti present, no
+VAAPI stack at all, so machine-side enablement (b) is a poor bet and NVENC makes
+per-video transcode seconds. NOTHING dispatched until the ruling relays.
+
+### c4 PASS on #137 live — window's work queue EMPTY; only operator rulings pending
+
+Rapid A/B (2-face vs 1-face, 6 cycles @120ms mid-flight): 13 rounds all 200, 0×404 in 97
+requests, chip fetches only for settled generations, pixel-signature check proves no
+cross-file crop under wrong labels, no stale state, single-file unchanged. No 409 even
+needed. Fleet: m3 + c4 (operator's) + g1; no coders. Pending rulings only: HEVC remedy,
+.gif include, CodeQL dismissals, cropper remote.
