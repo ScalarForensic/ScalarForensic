@@ -106,6 +106,9 @@ def _stream_report(p: Path) -> dict:
         "audio_codec": None,
         "video_pix_fmt": None,
         "video_profile": None,
+        "video_width": None,
+        "video_height": None,
+        "bit_rate": None,
         "video_color_trc": None,
         "video_color_primaries": None,
     }
@@ -113,6 +116,10 @@ def _stream_report(p: Path) -> dict:
     try:
         with av.open(str(p)) as container:
             info["format"] = container.format.name
+            # Container bitrate: the *measured* rate §6.3 requires the full-copy
+            # size estimate to start from.  None on a container that does not
+            # record one, which is a reason to refuse the estimate, not to guess.
+            info["bit_rate"] = container.bit_rate or None
             if container.duration is not None:
                 info["duration_ms"] = int(container.duration / av.time_base * 1000)
             for s in container.streams:
@@ -123,6 +130,11 @@ def _stream_report(p: Path) -> dict:
                     # decoded, which is what keeps opening a hit cheap (§5).
                     info["video_pix_fmt"] = s.codec_context.pix_fmt
                     info["video_profile"] = s.codec_context.profile
+                    # Coded dimensions, for the §6.3 area ratio: the output cap
+                    # scales a 4K source and passes a 720p one through, and the
+                    # two estimates differ by an order of magnitude.
+                    info["video_width"] = s.codec_context.width or None
+                    info["video_height"] = s.codec_context.height or None
                     # Transfer and primaries decide whether the encode path has
                     # to tone-map (capability.is_hdr).  Container metadata, no
                     # frame decoded — same cheapness rule as the fields above.

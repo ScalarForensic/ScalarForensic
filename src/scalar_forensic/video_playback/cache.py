@@ -414,6 +414,169 @@ def evict(cache_dir: Path, max_bytes: int, *, protect: set[str] | None = None) -
 
 
 # ---------------------------------------------------------------------------
+# The ceiling refusal (§6.3)
+# ---------------------------------------------------------------------------
+
+# Operator ruling (§16): a full-video job whose estimated output exceeds half the
+# ceiling is refused before it starts.  Half, not all, because the store has to
+# hold more than one video to be a cache at all.
+CEILING_FRACTION = 0.5
+
+
+@dataclass(frozen=True)
+class CeilingVerdict:
+    """Whether a full-video job may start.  Three-state, and the third matters.
+
+    ``fits`` — the estimate is under the limit.  ``refused`` — it is over.
+    ``unknown`` — the source did not yield the numbers the estimate needs, so
+    there is no verdict to state.
+
+    ``unknown`` **refuses the job too**, and is kept distinct from ``refused``
+    anyway, because the two say different things to the analyst: one is "this
+    video is too big for the cache", the other is "this file would not tell us
+    how big it is". Collapsing them into a boolean would print the first
+    sentence for the second condition — a claim about the video derived from a
+    failure to read it.
+    """
+
+    state: str
+    estimate_bytes: int | None
+    limit_bytes: int
+    reason: str | None
+
+    @property
+    def allowed(self) -> bool:
+        return self.state == "fits"
+
+
+def estimate_full_output_bytes(info: dict, output_height: int) -> int | None:
+    """Estimate the §4.3 full copy's size from the source's measured bitrate.
+
+    ``info`` is a :func:`~.codecs._stream_report`.  ``None`` when the container
+    does not carry the duration, the bitrate or the coded height — the estimate
+    is required (§6.3), so a missing input is reported as "cannot estimate" and
+    never replaced with a guess.
+
+    The scale is the **area** ratio of the §16 output cap, since the cap is
+    ``min(ih, H)`` and never upscales: a 2160p source encoded at 1080p carries a
+    quarter of the pixels, a 720p source is passed through untouched at 1.0.
+
+    **The estimate is uncalibrated and says so.** It assumes the re-encode's
+    bits-per-pixel matches the source's, which is not measured anywhere: §3.5
+    timed the encodes and recorded no output sizes, so there is no ratio in this
+    repository to apply and none is invented here (§16 forbids inventing a floor;
+    the same rule applies to a factor). The direction of the error is knowable
+    even if its size is not — a CRF-23 H.264 encode of a 10-bit HEVC source at
+    the same resolution is usually *larger* than the source, so this estimate
+    runs low on exactly the HEVC corpus this feature exists for. **A job runner
+    must therefore check the growing ``.part`` against this number and abort on
+    overshoot rather than trusting it** (phase 7; nothing in phase 5 runs a job).
+    """
+    duration_ms = info.get("duration_ms")
+    bit_rate = info.get("bit_rate")
+    height = info.get("video_height")
+    if not duration_ms or not bit_rate or not height:
+        return None
+    area_ratio = (min(height, output_height) / height) ** 2
+    return int(bit_rate * area_ratio * (duration_ms / 1000.0) / 8)
+
+
+def check_ceiling(settings: Settings, info: dict) -> CeilingVerdict:
+    """Decide whether a full-video job may start (§6.3, §16).
+
+    The ceiling is the invariant: §6.2 cannot hold "never exceed the ceiling",
+    "evict whole videos" and "never evict the video being played" at once for a
+    single video that does not fit, so the job that would break it is refused
+    *before* it runs rather than resolved afterwards by deleting something in
+    use.  Chunk playback is unaffected — chunks are bounded by
+    ``SFN_VIDEO_CHUNK_SECONDS`` — and Download original (§7.5) is the answer the
+    analyst is given.
+    """
+    ceiling = settings.video_cache_max_bytes
+    if ceiling <= 0:
+        # No ceiling configured means no invariant to protect.
+        return CeilingVerdict("fits", estimate_full_output_bytes(info, 1080), 0, None)
+    limit = int(ceiling * CEILING_FRACTION)
+    estimate = estimate_full_output_bytes(info, settings.video_output_height)
+    if estimate is None:
+        return CeilingVerdict(
+            "unknown",
+            None,
+            limit,
+            (
+                "The size of a full viewing copy cannot be estimated for this file: "
+                "its container does not report a duration, a bitrate and a frame "
+                "height. A full copy is not started without an estimate, because "
+                "one video larger than the cache would evict everything else and "
+                "still not fit. Play it in chunks, or download the original."
+            ),
+        )
+    if estimate > limit:
+        return CeilingVerdict(
+            "refused",
+            estimate,
+            limit,
+            (
+                f"A full viewing copy of this video is estimated at "
+                f"{estimate / 1024**3:.1f} GiB, over the {limit / 1024**3:.1f} GiB "
+                f"a single rendering may occupy ({int(CEILING_FRACTION * 100)}% of "
+                f"SFN_VIDEO_CACHE_MAX_BYTES). It is not started: one video that "
+                "fills the cache would evict every other. Play it in chunks, or "
+                "download the original."
+            ),
+        )
+    return CeilingVerdict("fits", estimate, limit, None)
+
+
+# ---------------------------------------------------------------------------
+# Purge (§13)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PurgeReport:
+    videos: int
+    files: int
+    bytes_freed: int
+    digests: tuple[str, ...]
+
+
+def purge(cache_dir: Path, *, media: str | None = None, all_: bool = False) -> PurgeReport:
+    """Delete derived renderings.  Exactly one of *media* or *all_* (§13).
+
+    The LRU ceiling is the only *automatic* retention mechanism (§6.4); this is
+    the explicit one, mirroring ``sfn-faces purge``.  "Derived renderings for
+    media X were deleted at time T by examiner Y" is a statement that survives a
+    courtroom, which a background TTL sweep is not — which is why v1's TTL was
+    dropped in favour of this.
+
+    Nothing here touches a source file: the store holds only viewing copies, and
+    a viewing copy is never the evidence (§1, §7).
+    """
+    if bool(media) == bool(all_):
+        raise ValueError("specify exactly one of media=<sha256> or all_=True")
+    if media is not None and not _SHA256_RE.fullmatch(media):
+        raise ValueError(f"media is not a sha256 hex digest: {media!r}")
+    targets = [e for e in scan(cache_dir) if all_ or e.video == media]
+    files = 0
+    freed = 0
+    for entry in targets:
+        if entry.legacy:
+            files += 1
+        else:
+            files += sum(len(f) for _d, _sub, f in os.walk(entry.path))
+        freed += entry.size_bytes
+        _remove(entry)
+        _log.info("viewing-copy cache: purged video %s (%d bytes)", entry.video, entry.size_bytes)
+    return PurgeReport(
+        videos=len(targets),
+        files=files,
+        bytes_freed=freed,
+        digests=tuple(e.video for e in targets),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Publication (§10.2)
 # ---------------------------------------------------------------------------
 

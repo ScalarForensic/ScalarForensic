@@ -25,6 +25,7 @@ dependencies = [
 sfn = "scalar_forensic.cli:main"
 sfn-web = "scalar_forensic.web.app:start"
 sfn-faces = "scalar_forensic.cli:faces_main"
+sfn-video = "scalar_forensic.cli:video_main"
 
 [dependency-groups]
 dev = [
