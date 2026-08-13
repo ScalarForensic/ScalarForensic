@@ -3,10 +3,20 @@
 Written by the CTO; rewrite in place, keep it tight, commit every fold.
 `git log -S` on this file is the project's decision history.
 
-Seeded 2026-08-12 by cto8 (`21f65f1`). This fold 2026-08-13 by
-`scalarforensic-cfm-g1` replaces a record that had gone two eras stale (it still
-quoted 559/5 at a pre-GitHub-migration sha). Raw record: `docs/fleet/runbook.md`
-and the `~/.claude/cx/cto.md` git history.
+Seeded 2026-08-12 by cto8 (`21f65f1`). Final fold 2026-08-13 by
+`scalarforensic-cfm-g1`. Raw record: `docs/fleet/runbook.md` and the
+`~/.claude/cx/cto.md` git history.
+
+> ## THE CTO ROLE IS RETIRED (2026-08-13, operator's decision)
+>
+> `scalarforensic-cfm-g1` folded and exited without a successor. **There is no
+> CTO on this project.** The manager owns the work and **escalates directly to
+> the operator**, not upward to a CTO session that does not exist. Nobody should
+> spawn a replacement CTO; if the operator wants one later they will run
+> `cx cto` themselves.
+>
+> This file remains the project's decision record. **The manager now writes it**
+> — same discipline: rewrite in place, keep it tight, commit every fold.
 
 ## what this is
 
@@ -19,9 +29,12 @@ distributed isolated LAN, fully offline.
 
 ## current state (2026-08-13, late)
 
-- `main` at **`cc808b3`**. Bar **710 passed / 5 skipped**, coverage 69.35%
+- `main` at **`0dbc1cd`**. Bar **710 passed / 5 skipped**, coverage 69.35%
   against the 65% floor, measured on a clean tree at `ebe3ed6` and unchanged by
-  `#141`. **`CLAUDE.md`'s 559/5 line is stale and should be corrected.**
+  `#141`; `#142`/`#143` are docs-only. **`CLAUDE.md`'s 559/5 line is stale and
+  should be corrected** — good first errand for a coder touching `CLAUDE.md`.
+- **Ownership: all rows are clear.** `cx o -l` shows nothing for this project;
+  the manager claims what it dispatches.
 - Campaign complete: 8,137 files indexed. Cropper delivered as the standalone
   repo `portable_face_cropper` (8138→4537 crops, 0 failures, 35m01s).
 - **Fleet is EMPTY.** Managers m1–m3, coders c2–c11 and the frontend-tester c4
@@ -45,9 +58,42 @@ restored (`#139`).
   (default token scope), and three handlers interpolated exception text into
   client responses. The worst was `video.py`'s `get_video_info` returning
   `{"error": str(exc)}` straight to the browser via `/api/query-metadata`.
-- `#142` (open) — spec: on-demand video transcoding, `docs/specs/video-playback-transcode.md`.
-  **Under two independent design reviews (Codex + Opus)**, per the precedent set
-  for the face-pipeline spec. Do not implement before those land.
+- `#142` — **spec: on-demand video transcoding** (`0dbc1cd`),
+  `docs/specs/video-playback-transcode.md`. This is the current work queue; §15
+  is the phase plan.
+- `#143` — this ledger's previous fold.
+
+## the video playback work — READ THE SPEC, IT IS THE PLAN
+
+`docs/specs/video-playback-transcode.md` is **draft v2, post-review**. v1 proposed
+a lazy-HLS segment engine; two independent adversarial reviews (Codex + Opus,
+2026-08-13) both returned "do not merge". The operator then chose a simpler shape
+— two single-encode MP4 artifacts, a 30 s chunk on play plus an explicit
+background full-file job — which removes most of the blockers by construction
+instead of answering them.
+
+**Do not re-propose HLS/MSE/CMAF.** §4.1 records why it was rejected and what
+evidence would be needed to revisit it. The reviews are the reason the spec is
+trustworthy; their findings are already integrated, so the spec's §3 is careful
+about what was measured and §3.4 lists what was not.
+
+**Sequencing that matters:**
+
+- Phases 1–3 (digest correctness via `HashCache`, download-original, codec
+  detection) are unblocked and need no operator input. Start there.
+- Phase 4 is **blocked on two things**: the HDR test-fixture decision (§14 — a
+  gitignored `data/` means no committed sample; generate one or gate-and-skip like
+  the YuNet test), and the real-hardware measurements §14 requires (4K rates,
+  long-source seek, concurrent scaling, minimum hardware floor).
+- The subsystem carve (§11) happens **between phases 3 and 4**, not first. It is
+  not a pure move: `tests/test_video_endpoints.py` and `tests/test_video_playback.py`
+  patch `scalar_forensic.web.routes.video.*` by name, and patch targets are
+  per-module. `CLAUDE.md` must be updated in the *same* PR as the carve.
+- §17 carries five open questions; 1, 3 and 5 are operator calls.
+
+**One defect the spec found in shipped code**, worth fixing early regardless:
+`_evict_cache` (`routes/video.py:327`) globs `*.mp4`, so it cannot see or protect
+the new artifacts, and would match a CMAF-style `init.mp4` and delete it mid-play.
 
 ## closed rulings — do NOT re-escalate
 
