@@ -29,16 +29,16 @@ distributed isolated LAN, fully offline.
 
 ## current state (2026-08-13, late)
 
-- `main` at **`c6153cf`**. Bar **710 passed / 5 skipped**, coverage 69.35%
-  against the 65% floor, measured on a clean tree at `ebe3ed6` and unchanged
-  since; `#142`–`#144` are docs-only. **`CLAUDE.md`'s 559/5 line is stale and
-  should be corrected** — good first errand for a coder touching `CLAUDE.md`.
+- `main` at **`b3a609a`**. Bar **771 passed / 5 skipped**, coverage 70.00%
+  against the 65% floor — **re-measured by `m4` on a clean tree at `b3a609a`**,
+  not taken from the coder's report. Was 710/5 at 69.35%; phases 1–3 added 61
+  tests. **`CLAUDE.md`'s 559/5 line is stale and should be corrected** — good
+  first errand for a coder touching `CLAUDE.md`, and it is now two eras stale.
 - Campaign complete: 8,137 files indexed. Cropper delivered as the standalone
   repo `portable_face_cropper` (8138→4537 crops, 0 failures, 35m01s).
-- **Fleet: manager `com-m4` + coder `com-c12`.** Two stranded `cfm-g1`
-  ownership rows (this file's sibling runbook, and the video spec) were reaped
-  at the manager's open. `m4` owns this ledger and `docs/fleet/runbook.md`;
-  `c12` owns `web/routes/video.py` and the two video test files.
+- **Fleet: manager `com-m4`.** Coder `com-c12` delivered phases 1–3 and was
+  retired at 150.8k rather than started on the §11 carve — see the note below.
+  Two stranded `cfm-g1` ownership rows were reaped at the manager's open.
 - **The shared checkout is a real constraint, not a formality.** One working
   tree serves every session, so a coder on a feature branch means the manager
   cannot commit its own docs there without riding along in the coder's PR.
@@ -67,7 +67,43 @@ restored (`#139`).
 - `#142` — **spec: on-demand video transcoding** (`0dbc1cd`),
   `docs/specs/video-playback-transcode.md`. This is the current work queue; §15
   is the phase plan.
-- `#143` — this ledger's previous fold.
+- `#143`, `#144` — the CTO's last two folds.
+
+### landed in the m4 window — spec phases 1–3 are COMPLETE
+
+Three PRs by `com-c12`, in order, both required checks green on each. Bar
+re-measured by the manager at the end, on a clean tree, not inherited.
+
+- `#145` `1a6ad56` — **phase 1, digest correctness.** `_source_digest` is backed
+  by the indexer's persistent `HashCache`, offloaded with `asyncio.to_thread`,
+  and degrades to a direct hash when the DB is missing, disabled or corrupt —
+  never a 500. Stale-evidence detection is **three-state on purpose**:
+  `stale_evidence: None` means *not checked*, and only a real comparison clears
+  a file. 725/5.
+- `#147` `6539abb` — **phase 2, download original.** `/api/video-download`
+  through the same resolution flow as every path-bearing route. Also killed a
+  shipped defect the manager found reviewing `#145`: `videoPlaybackDigestMatchesHit`
+  returned false when the indexed hash was merely *absent*, and the UI rendered
+  that as "does NOT match the video_hash recorded for this frame" — **unknown
+  displayed as mismatch, in an evidence viewer.** The UI now renders the
+  server's three states and a real mismatch gets a banner, not a tooltip. 740/5.
+- `#148` `b3a609a` — **phase 3, codec detection.** Server-side allowlist
+  (`h264` 8-bit, `vp8` 8, `vp9` 10, `av1` 10; 4:2:0 only), `mode` gains
+  `transcode` and `unknown` with a human reason sentence. No encoding.
+  Also took the **`_evict_cache` containment fix**: candidates are restricted to
+  top-level `{sha256}.mp4`, so the `full.mp4` and chunk artifacts later phases
+  add can no longer be deleted mid-play. That is containment, **not** the §6.2
+  lease/whole-video rewrite, which stays in phase 5 — the code says so. 771/5.
+
+Two review findings the manager raised and `c12` folded in, worth keeping as
+the shape of defect this codebase produces: a path interpolated into
+`playback_url` **unquoted, one line above** a correctly `quote()`d
+`download_url` (iPhone filenames contain `#` and `&`); and `video-download`
+blocking on a full-file SHA-256 before the first byte moved — worst possible
+place for a silent multi-minute stall, since that endpoint is the escape route
+a *failing* playback points at. It now emits the digest header only from a
+`HashCache` hit (new `HashCache.peek()`) and streams immediately on a miss; an
+absent header means "not computed", never "unverified".
 
 ## the video playback work — READ THE SPEC, IT IS THE PLAN
 
@@ -85,8 +121,14 @@ about what was measured and §3.4 lists what was not.
 
 **Sequencing that matters:**
 
-- Phases 1–3 (digest correctness via `HashCache`, download-original, codec
-  detection) are unblocked and need no operator input. Start there.
+- Phases 1–3 are **DONE and merged** (`#145`, `#147`, `#148`). Next in sequence
+  is the §11 carve, then phase 4.
+- **The §11 carve is the next unblocked unit of work.** A handoff naming every
+  `mock.patch` target string, the symbol placement, `_resolve_video_path`'s
+  callers and the module-level `_hash_cache` state is at
+  `scratchpad/handoff-c12.md` (session-scoped; fold anything durable in here
+  before it is lost). It is not a pure move and `CLAUDE.md` must change in the
+  same PR.
 - Phase 4 is **blocked on two things**: the HDR test-fixture decision (§14 — a
   gitignored `data/` means no committed sample; generate one or gate-and-skip like
   the YuNet test), and the real-hardware measurements §14 requires (4K rates,
@@ -97,9 +139,8 @@ about what was measured and §3.4 lists what was not.
   per-module. `CLAUDE.md` must be updated in the *same* PR as the carve.
 - §17 carries five open questions; 1, 3 and 5 are operator calls.
 
-**One defect the spec found in shipped code**, worth fixing early regardless:
-`_evict_cache` (`routes/video.py:327`) globs `*.mp4`, so it cannot see or protect
-the new artifacts, and would match a CMAF-style `init.mp4` and delete it mid-play.
+The `_evict_cache` `*.mp4` glob defect the spec found is **contained in `#148`**
+and no longer an open item; the full §6.2 rewrite remains phase 5.
 
 ## closed rulings — do NOT re-escalate
 
@@ -142,6 +183,11 @@ the new artifacts, and would match a CMAF-style `init.mp4` and delete it mid-pla
   trusted (the "review floor 36" that never existed in code).
 - **Never quote a test bar against a dirty tree**; `git status --porcelain` must
   be empty first.
+- **A two-state boolean over a three-state question is a fabricated claim.**
+  "Not checked" must never render as "checked and failed". This is the same
+  defect class as the uncalibrated face cosine and `#139`'s fake error band,
+  and it had shipped in `computed.js` until `#147`. Whenever a UI states a
+  verdict, ask what it shows when the input is *absent*.
 - **Verify an inherited verdict before acting on it.** Two claims carried in
   this ledger turned out stale within one session (the cropper remote, the test
   bar). Checking cost one command each.

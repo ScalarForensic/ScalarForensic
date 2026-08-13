@@ -1711,3 +1711,45 @@ way. Nothing is lost by answering after phases 1–3 land.
 
 **Not re-investigated, as instructed:** the 17 `py/path-injection` CodeQL alerts remain
 verified false positives awaiting only the operator's `security_events` token scope.
+
+### Phases 1–3 COMPLETE — `#145` / `#147` / `#148`, bar 771/5 re-measured at `b3a609a`
+
+`com-c12` delivered all three in order, both required checks green on each, checkout
+returned to `main` clean after every merge. Manager re-ran the suite itself on a clean tree
+at `b3a609a`: **771 passed / 5 skipped, coverage 70.00%** — matches c12's report. 61 tests
+added over the 710/5 baseline. `CLAUDE.md`'s 559/5 line is now two eras stale.
+
+Phase 1 (`1a6ad56`): `_source_digest` backed by the indexer's persistent `HashCache`,
+`asyncio.to_thread`-offloaded, degrading to a direct hash when the DB is absent, disabled
+or corrupt. Stale-evidence detection is deliberately three-state — `None` is *not checked*.
+Phase 2 (`6539abb`): `/api/video-download` through the standard resolution flow.
+Phase 3 (`b3a609a`): server-side allowlist (`h264` 8-bit, `vp8` 8, `vp9` 10, `av1` 10, 4:2:0
+only), `mode` gains `transcode` and `unknown` with a human reason sentence, no encoding.
+`_evict_cache` narrowed to top-level `{sha256}.mp4` so later phases' artifacts survive —
+containment, explicitly not the §6.2 lease rewrite.
+
+**Three defects found in review, all shipped code, all fixed in-window:**
+
+1. `computed.js videoPlaybackDigestMatchesHit` returned false when the indexed hash was
+   merely *absent*, and `index.html` rendered that as "does NOT match the video_hash
+   recorded for this frame". **Unknown displayed as mismatch, in an evidence viewer.** Same
+   defect class as the uncalibrated face cosine and `#134`'s calibrated band — now a
+   standing rule in the ledger: whenever a UI states a verdict, ask what it shows when the
+   input is absent.
+2. `playback_url` interpolated a path unquoted, one line above a correctly `quote()`d
+   `download_url`. iPhone filenames carry `#` and `&`.
+3. `video-download` blocked on a full-file SHA-256 before the first byte moved — the worst
+   place for a silent multi-minute stall, since that endpoint is the escape route a
+   *failing* playback points at. Now emits the header only from a `HashCache` hit (new
+   `HashCache.peek()`); an absent header means "not computed", never "unverified".
+
+**c12 retired at 150.8k without starting the §11 carve.** Deliberate: the carve rewires
+`mock.patch` target strings across two test files and touches `CLAUDE.md` in the same PR, and
+starting a churn-heavy refactor 40k below the retire nudge is how this fleet has previously
+lost uncommitted work. Handoff naming the patch targets, symbol placement,
+`_resolve_video_path`'s callers and the module-level `_hash_cache` state is at
+`scratchpad/handoff-c12.md`.
+
+**Still with the operator, unchanged:** both phase-4 blockers and §17 Q1/Q5 (previous entry),
+plus the 17 CodeQL path-injection false positives. The benchmarker remains held — it is the
+only thing between the project and phase 4, and it must not run while a coder has the box.
