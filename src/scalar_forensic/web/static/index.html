@@ -1282,6 +1282,14 @@
                 <span class="sub-label">Face observations</span>
                 <span class="sub-val" x-text="facesLoading ? 'loading…' : `${facesForHit.length} in this image`"></span>
               </div>
+              <!-- Compare drives the both-sides cross-highlight.  When it fails
+                   the strips render with no markers at all, which is
+                   indistinguishable from "no face pair matched" — say which. -->
+              <div class="faces-error-strip" x-show="faceCompareError" x-cloak>
+                <span class="faces-error-label">Face compare failed</span>
+                <span class="faces-error-detail" x-text="faceCompareError"></span>
+                <span class="faces-error-note">No cross-highlight below — not a finding of "no match".</span>
+              </div>
               <div class="faces-grid" x-show="facesForHit.length">
                 <template x-for="face in facesForHit" :key="face.id">
                   <!-- Plain click keeps the review-crop link; ctrl+click puts the
@@ -1534,6 +1542,15 @@
       <div class="faces-uncal-banner" x-show="faceCalibration">
         <span x-text="faceCalibration?.banner"></span>
         <span class="faces-uncal-note" x-text="faceCalibration?.model_reference_note"></span>
+      </div>
+
+      <!-- A failed face search must never be silent.  Without this the hits
+           list simply keeps the previous result and the examiner reads a stale
+           list as a current one — the worst failure mode this UI has. -->
+      <div class="faces-error-strip" x-show="faceSearchError" x-cloak>
+        <span class="faces-error-label">Face search failed</span>
+        <span class="faces-error-detail" x-text="faceSearchError"></span>
+        <span class="faces-error-note">The list below is not a result for this selection.</span>
       </div>
 
       <!-- Filter pills -->
