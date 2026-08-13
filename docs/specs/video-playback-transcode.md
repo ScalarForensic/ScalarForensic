@@ -152,14 +152,49 @@ MPEG-TS packetisation padding, not content.)
 
 ### 3.4 What has NOT been measured
 
-Stated so no later phase treats these as settled:
+Stated so no later phase treats these as settled. 4K rates, long-source seek,
+concurrency and the hardware floor have since been measured and moved to §3.5.
+What remains open:
 
-- **4K.** Every figure above is 1080p. §3.1 rates will be materially worse at 4K
-  and the CPU path may fall below realtime.
-- **Long sources.** Nothing longer than 318 s was encoded; the §3.2 caveat stands.
-- **Concurrency.** All timings are a single job on an idle 24-core host. *k*
-  concurrent jobs divide those cores.
-- **Minimum hardware.** No floor is established. §14 requires one.
+- **VFR and long-GOP sources.** Every source measured, including §3.5's
+  multi-hour one, is constant-frame-rate short-GOP. `-ss` must decode forward
+  from a distant keyframe on long-GOP content; nothing here bounds that cost.
+- **Damaged or sparse indexes.** §3.5's long source is a stream-copy
+  concatenation of one short file, so it carries a single dense undamaged index
+  by construction — the bench report says so explicitly. A real multi-hour phone
+  or security-camera capture is likely to differ.
+- **Multi-sample confirmation.** §3.5's 4K-rate and seek rows are one sample per
+  cell. The relative ordering is the load-bearing finding; the exact multipliers
+  are not tight.
+
+### 3.5 Real-hardware measurements (2026-08-13)
+
+Method, hardware table and full per-run figures:
+`docs/benchmarks/video-bench-2026-08-13.md`. Same host and ffmpeg build as §3.
+The box carried ordinary desktop background load (headless Chrome, `bitcoind`,
+low single-digit percent), disclosed there rather than claimed idle.
+
+- **4K encode rates.** CPU tone-map + `libx264` — the correct-colour path that
+  requires no GPU — runs at **0.879×, below realtime** on a 4K source
+  (152.30 s wall for 133.869 s of video). CPU tone-map + `h264_nvenc` holds
+  **1.26×**, a thin margin. `scale_cuda` + `h264_nvenc` stays fastest at 4.42×
+  and keeps §3.1's rotation defect. **Single sample per pipeline.**
+- **Long-source seek.** Input seeking against a **3 h 43 m** source is flat at
+  **5.42–5.97 s** across seven offsets out to 3 h 41 m, with no trend. This
+  confirms §3.2 out to multi-hour *on a dense undamaged index only* — see §3.4.
+  **One sample per offset.**
+- **Concurrency.** Aggregate throughput is **flat at ~3.5–3.7× video-seconds per
+  wall-second from k=1 to k=8** (3.71× at k=1, 3.52× at k=8). One job already
+  saturates the box via libx264's own threading, so concurrency divides the same
+  capacity instead of adding any: per-job wall goes 8.08 s → 67.34 s, ~8.3× at
+  k=8. This sizes `SFN_VIDEO_MAX_WORKERS` downward, not upward (§12).
+- **First-play latency, 30 s chunk.** **8.21 s at 1080p** (3 reps, 8.17–8.23)
+  versus **33.73 s at 4K** (3 reps, 32.99–35.19). 1080p sits inside §4.2's
+  assumed 6–10 s margin, tightly. 4K exceeds it by ~4×.
+- **Hardware floor.** The operator has ruled this host **is** the deployment
+  target, not a stand-in (§16). The figures above therefore *are* the floor;
+  no extrapolated floor exists and none should be invented. The host spec is
+  recorded in the bench report's hardware table.
 
 ---
 
@@ -217,7 +252,9 @@ swap. Each chunk remains an ordinary independent MP4 served by the existing
 **Prefetch depth is exactly one.** The next chunk is queued the moment the current
 one finishes encoding — not when playback reaches the boundary — so by the time
 the analyst crosses it, the next chunk is already encoded and preloaded. With a
-30 s chunk taking ~6–10 s to produce (§3.1, 1080p), that leaves ample margin, and
+30 s chunk taking ~6–10 s to produce (§3.1, 1080p; measured at 8.21 s in §3.5,
+inside the window but not amply so — and 33.73 s at 4K, which is why §12 caps
+output height), that leaves margin, and
 depth 1 keeps a bounded amount of speculative work: at most one wasted chunk if
 the analyst stops or seeks.
 
@@ -233,7 +270,10 @@ what gives random access before the full file exists.
 ### 4.3 Full-video job
 
 Explicit, operator-initiated (§5), and long: at §3.1's 1080p CPU rate a 4-hour
-source is ~51 minutes, ~39 on GPU, **and 4K is unmeasured (§3.4)**. It runs in
+source is ~51 minutes, ~39 on GPU. Output is capped at 1080p (§12), so §3.5's
+4K row — which is 4K in *and* 4K out, 0.879× — is an upper bound on the cost,
+not the rate this job will see; downscaling a 4K input to 1080p has not been
+timed separately. It runs in
 the background; nothing blocks on it.
 
 - Progress and ETA come from ffmpeg's own frame-level progress output, rendered
@@ -400,7 +440,8 @@ combinations. A GPU failure at job time falls back to CPU, records the fallback 
 the label (§7.2), and never fails the request outright.
 
 Output resolution policy must be stated explicitly — it is the largest single
-lever on both cost and disclosure, and v1 never mentioned it.
+lever on both cost and disclosure, and v1 never mentioned it. It is now settled:
+**cap 1080p, never upscale** (§12, §16), with the rescale disclosed per §7.4.
 
 ---
 
@@ -543,6 +584,14 @@ aggressively; `face-pipeline.md` §13 is the template):
 `SFN_VIDEO_HWACCEL`, `SFN_VIDEO_MAX_WORKERS`, `SFN_VIDEO_QUEUE_MAX`,
 `SFN_VIDEO_JOB_TIMEOUT`, `SFN_VIDEO_OUTPUT_HEIGHT`, `SFN_FFMPEG_PATH`.
 
+**Settled defaults**, each tied to a §3.5 number rather than to taste:
+
+| Setting | Default | Why |
+|---|---|---|
+| `SFN_VIDEO_MAX_WORKERS` | `2` | Aggregate throughput is flat from k=1 to k=8 (§3.5), so extra workers buy no capacity and cost per-job latency directly: 8.08 s at k=1, 16.35 s at k=2, 32.47 s at k=4. 2 is the highest k that keeps a queued chunk near §4.2's 6–10 s assumption. |
+| `SFN_VIDEO_OUTPUT_HEIGHT` | `1080` | Operator ruling (§16), and §3.5 measures the cost of the alternative: 4K first-play is 33.73 s and 4K CPU tone-map encoding is 0.879×, below realtime. Never upscale — a source shorter than 1080 is passed through at its own height. |
+| `SFN_VIDEO_CHUNK_SECONDS` | `30` | Valid **only under the 1080p cap**: a 30 s chunk lands in 8.21 s at 1080p (§3.5), inside §4.2's margin. At 4K the same chunk takes 33.73 s, so raising `SFN_VIDEO_OUTPUT_HEIGHT` above 1080 requires revisiting this value in the same change. |
+
 ---
 
 ## 13. Retention tooling
@@ -558,10 +607,26 @@ destroyed".
 `addopts` carries `--cov-fail-under=65` on every invocation, so a new subsystem
 without tests reds CI; a subset run needs `--no-cov` (`CLAUDE.md`).
 
-**Fixture problem, unresolved and blocking phase 4:** `data/` is gitignored, so a
-real 10-bit HDR sample cannot be committed. Either add a tiny generated HDR
-fixture (preferred — synthesisable by ffmpeg at build time), or gate on an
-env-supplied path and skip, as the YuNet test does. Decide before phase 4.
+**Fixture strategy (settled, §17 Q4).** `data/` is gitignored, so no 10-bit HDR
+sample can be committed there. The HDR fixture is resolved by a three-source
+lookup, **first hit wins**:
+
+1. `SFN_TEST_VIDEO_HDR` pointing at a real file — an env gate in the style of the
+   YuNet test;
+2. a clip present in the tracked `test_data/` directory. Its `README.md` states
+   what a dropped clip must carry (10-bit, HLG or PQ transfer, rotation side
+   data, a named licence) so the operator can drop one in and the tests pick it
+   up with **no code change**;
+3. otherwise the fixture is **generated at test time** with `ffmpeg -f lavfi`
+   into a tmp dir. ffmpeg is already a §8 dependency, so this adds none.
+
+Tests skip only when ffmpeg itself is absent. **Footage from the operator's
+corpus is never committed** — it is case material. The bench report naming a
+corpus path is a methodology record, not permission to copy the file.
+
+A generated clip cannot honestly assert everything a real capture can; where a
+required assertion needs a property the generator cannot produce, the test is
+gated on sources 1–2 rather than weakened to fit source 3.
 
 Required cases: **rotation preserved on both pipelines** (§3.1's defect);
 colour tags are `bt709` on output; chunk frame-tiling (§3.3) at frame level;
@@ -572,9 +637,13 @@ eviction during playback; cache-full refusal (§6.3); stale-source detection
 (§7.1); every §10.1 failure mapped to its player state; path-containment on every
 new route including rejection of a cache key as source identity.
 
-**Measurements required on real hardware before phase 4 is accepted:** 4K rates,
-a long-source seek measurement (§3.2), concurrent-job scaling, and a stated
-minimum hardware floor with documented degradation below it.
+**Measurements required on real hardware before phase 4 is accepted: satisfied
+by §3.5** (2026-08-13) — 4K rates, long-source seek, concurrent-job scaling and
+the hardware floor are all measured, the last as a policy statement (this host
+*is* the target, §16) rather than an extrapolation, so "degradation below the
+floor" has no subject. The residue is named in §3.4 and stays open: VFR,
+long-GOP and damaged-index seek behaviour, and multi-sample confirmation of
+§3.5's single-sample rows.
 
 ---
 
@@ -631,13 +700,30 @@ cost, and may be revisited on evidence.
 - **HLS/MSE is rejected for now** (§4.1) and may be reconsidered only if chunked
   playback proves insufficient in real use.
 
+### Operator rulings closing §17 Q1–Q5 (2026-08-13)
+
+- **Output resolution is capped at 1080p** (`SFN_VIDEO_OUTPUT_HEIGHT`, §12).
+  Never upscale; a rescale is disclosed on the label per §7.4; the cap is
+  operator-overridable. Full quality is served by **Download original** (§7.5),
+  not by the viewing copy — that is what makes the cap acceptable rather than a
+  loss of evidence.
+- **Chunk length stays 30 s**, and is valid **only under the 1080p cap**. §3.5's
+  33.73 s first-play at 4K forecloses raising the cap without revisiting chunk
+  length in the same change.
+- **The hardware floor is this host** — the operator has ruled it the deployment
+  target, not a stand-in. Its spec is recorded in
+  `docs/benchmarks/video-bench-2026-08-13.md`, and §3.5's figures are the floor.
+  There is no extrapolated floor and none is to be invented.
+- **HDR fixture**: the three-source lookup in §14 (env gate → tracked
+  `test_data/` → `ffmpeg -f lavfi` generation).
+- **A full-video job is refused before it starts** when its estimated output
+  exceeds **50% of `SFN_VIDEO_CACHE_MAX_BYTES`**. The estimate is shown and
+  Download original is offered (§6.3).
+
 ---
 
 ## 17. Open questions
 
-1. Output resolution policy (§8) — cap at 1080p, match source, or operator choice.
-2. Chunk length: 30 s is chosen, but first-play latency at 4K may argue for less.
-3. Minimum hardware floor and behaviour below it (§14).
-4. HDR fixture strategy for tests (§14) — blocking for phase 4.
-5. Whether the full-video job should be admitted at all on sources whose estimated
-   output exceeds a large fraction of the cache ceiling (§6.3).
+Q1–Q5 are **closed**; the rulings are in §16. What remains open is measurement
+residue, not design: VFR, long-GOP and damaged-index seek behaviour, and
+multi-sample confirmation of §3.5's single-sample rows (§3.4).
