@@ -1790,23 +1790,18 @@ def index(
     # the only place faces happen — that would silently yield zero faces on an
     # already-indexed case.  Whatever the loop did not consume from
     # _face_pending (already-embedded media, run-duplicates, read failures,
-    # --faces-only runs) is processed here exactly as the standalone face pass
-    # always did: read, decode at native resolution, process.
+    # --faces-only runs) is processed here: read + decode + detect + embed fan
+    # out over a thread pool with per-thread YuNet detectors (efficiency audit
+    # 2026-08-13 §4 fix 1), while every store write still happens below on the
+    # main thread, per medium, in the points → vector clear → marker order.
     if face_pipeline is not None:
-        for _p, (_sha, _vmeta) in _face_pending.items():
-            try:
-                _data = _p.read_bytes()
-                _fres = face_pipeline.process_image(
-                    _data,
-                    image_hash=_sha,
-                    image_path=str(_p.resolve()),
-                    video_hash=(_vmeta or {}).get("video_hash"),
-                    video_path=(_vmeta or {}).get("video_path"),
-                    frame_timecode_ms=(_vmeta or {}).get("frame_timecode_ms"),
-                )
-            except Exception as _exc:  # one bad file must not end the run
+        from scalar_forensic.faces.indexing import process_media_threaded
+
+        _residual_jobs = [(_p, _fi[0], _fi[1]) for _p, _fi in _face_pending.items()]
+        for _p, _sha, _vmeta, _fres in process_media_threaded(face_pipeline, _residual_jobs):
+            if isinstance(_fres, Exception):  # one bad file must not end the run
                 _face_stats["failed"] += 1
-                typer.echo(f"[WARN] Face processing failed for {_p.name}: {_exc}", err=True)
+                typer.echo(f"[WARN] Face processing failed for {_p.name}: {_fres}", err=True)
                 continue
             _commit_face_result(_p, _sha, _vmeta, _fres)
 

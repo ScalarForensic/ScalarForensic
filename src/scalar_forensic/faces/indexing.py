@@ -10,6 +10,10 @@ from __future__ import annotations
 
 import importlib.metadata
 import io
+import os
+import threading
+from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -104,6 +108,14 @@ class FacePipeline:
     crop_dilation: float
     store_dir: Path | None
     thumb_size: int = 256
+    # Builds a fresh detector for one worker thread of the residual pass.
+    # YuNet (cv2.FaceDetectorYN) is not thread-safe, so a pooled pass must
+    # never share self.detector across threads.  None → sequential fallback.
+    detector_factory: Callable[[], object] | None = None
+    # OnnxFaceEmbedder.embed() writes self.embedding_norms, which
+    # process_image reads right after — under threads that pair must be
+    # atomic or one image's norms get attributed to another's points.
+    _embed_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     @classmethod
     def from_settings(cls, settings) -> FacePipeline:
@@ -159,6 +171,9 @@ class FacePipeline:
             crop_dilation=settings.face_crop_dilation,
             store_dir=store_dir,
             thumb_size=settings.face_thumb_size,
+            detector_factory=lambda: YuNetDetector(
+                settings.face_detector_model, settings.face_detect_max_size
+            ),
         )
 
     def _composite_quality(self, pre_subs: dict, post_subs: dict) -> float:
@@ -190,21 +205,25 @@ class FacePipeline:
         frame_timecode_ms: int | None = None,
         *,
         img: np.ndarray | None = None,
+        detector: object | None = None,
     ) -> FaceIndexResult:
         # An already-decoded native-resolution RGB array (from decode_shared)
         # skips the second decode the standalone face pass would pay.
         if img is None:
             img = load_for_detection(data)
+        # A worker thread of the residual pass passes its own detector; the
+        # pipeline's shared instance must not run on more than one thread.
+        det_impl = self.detector if detector is None else detector
         # The detector silently drops rows whose landmarks are non-canonical
         # (detect.py), subtracting them from n_detected.  Take the delta so the
         # marker can record it -- a wholesale-wrong landmark map shows up as a
         # large count here and nowhere else.
-        _dropped_before = getattr(self.detector, "n_dropped_noncanonical", 0)
-        detections = self.detector.detect(img)
+        _dropped_before = getattr(det_impl, "n_dropped_noncanonical", 0)
+        detections = det_impl.detect(img)
         result = FaceIndexResult(
             n_detected=len(detections),
             n_dropped_noncanonical=(
-                getattr(self.detector, "n_dropped_noncanonical", 0) - _dropped_before
+                getattr(det_impl, "n_dropped_noncanonical", 0) - _dropped_before
             ),
         )
         if not detections:
@@ -268,12 +287,15 @@ class FacePipeline:
         if not embeddable and not review_only:
             return result
 
-        embeddings = (
-            self.embedder.embed([e[1] for e in embeddable])
-            if embeddable
-            else np.empty((0, 0), dtype=np.float32)
-        )
-        norms = np.asarray(self.embedder.embedding_norms) if embeddable else np.empty(0)
+        # embed() writes embedder.embedding_norms as instance state; the lock
+        # keeps the write and the read below atomic across threads.
+        with self._embed_lock:
+            embeddings = (
+                self.embedder.embed([e[1] for e in embeddable])
+                if embeddable
+                else np.empty((0, 0), dtype=np.float32)
+            )
+            norms = np.asarray(self.embedder.embedding_norms) if embeddable else np.empty(0)
         provenance = self.cfg.to_payload()
         indexed_at = datetime.now(UTC).isoformat()
 
@@ -377,6 +399,72 @@ class FacePipeline:
             )
         result.n_kept = sum(1 for p in result.points if p.payload["embedding_status"] == "embedded")
         return result
+
+
+# Efficiency audit 2026-08-13 §4 fix 1 sized the residual pass at 8 threads
+# (17 → ~4–5 min on the full corpus) — no configurability was called for.
+DEFAULT_FACE_WORKERS = min(8, os.cpu_count() or 1)
+
+_FaceJob = tuple[Path, str, "dict | None"]  # (path, sha256, video meta)
+
+
+def _process_one(pipeline: FacePipeline, detector: object, job: _FaceJob):
+    path, sha, vmeta = job
+    try:
+        data = path.read_bytes()
+        return pipeline.process_image(
+            data,
+            image_hash=sha,
+            image_path=str(path.resolve()),
+            video_hash=(vmeta or {}).get("video_hash"),
+            video_path=(vmeta or {}).get("video_path"),
+            frame_timecode_ms=(vmeta or {}).get("frame_timecode_ms"),
+            detector=detector,
+        )
+    except Exception as exc:  # noqa: BLE001 - one bad file must not end the run
+        return exc
+
+
+def process_media_threaded(
+    pipeline: FacePipeline,
+    jobs: Sequence[_FaceJob],
+    *,
+    max_workers: int | None = None,
+) -> Iterator[tuple[Path, str, dict | None, FaceIndexResult | Exception]]:
+    """Residual face pass: thread pool over media, per-thread YuNet detectors.
+
+    Yields ``(path, sha256, vmeta, FaceIndexResult | Exception)`` in job order
+    on the *calling* thread — the caller does every store write there, so the
+    per-medium points → vector clear → marker ordering is untouched by the
+    pool.  Each worker thread builds its own detector via
+    ``pipeline.detector_factory`` (YuNet is not thread-safe); the embedder
+    session is shared, still one batch per image, serialised by the
+    pipeline's embed lock.  Without a factory the pass degrades to the old
+    sequential shared-detector behaviour.
+    """
+    jobs = list(jobs)
+    if not jobs:
+        return
+    factory = pipeline.detector_factory
+    n = DEFAULT_FACE_WORKERS if max_workers is None else max_workers
+    n = max(1, min(n, len(jobs)))
+    if factory is None or n == 1:
+        for job in jobs:
+            yield *job, _process_one(pipeline, pipeline.detector, job)
+        return
+
+    thread_state = threading.local()
+
+    def _work(job: _FaceJob):
+        detector = getattr(thread_state, "detector", None)
+        if detector is None:
+            detector = thread_state.detector = factory()
+        return _process_one(pipeline, detector, job)
+
+    with ThreadPoolExecutor(max_workers=n, thread_name_prefix="face-residual") as pool:
+        futures = [pool.submit(_work, job) for job in jobs]
+        for job, fut in zip(jobs, futures, strict=True):
+            yield *job, fut.result()
 
 
 def _sfn_version() -> str:
