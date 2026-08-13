@@ -44,12 +44,13 @@ distributed isolated LAN, fully offline.
   cites `f6cef02`.
 - Campaign complete: 8,137 files indexed. Cropper delivered as the standalone
   repo `portable_face_cropper` (8138→4537 crops, 0 failures, 35m01s).
-- **Fleet: manager `com-m4` + benchmarker `csm-b1`.** `com-c12` delivered phases
-  1–3, `com-c13` the carve; both retired with their ownership released. Two
-  stranded `cfm-g1` rows were reaped at the manager's open. **The operator
-  answered every open question on 2026-08-13 and phase 4 is UNBLOCKED**; `b1` is
-  running the §14 measurements alone, because concurrency scaling is only valid
-  on an otherwise-idle box. The phase-4 coder is spawned after `b1` reports.
+- **Fleet: EMPTY.** `com-c12` (phases 1–3), `com-c13` (the carve) and `csm-b1`
+  (the §14 measurements) all retired with ownership released. Manager `com-m4`
+  retired at ~186k; its handoff is
+  `docs/handoffs/scalarforensic-com-m4-20260813-2100.md` and **names the next
+  step: one fresh `com` coder on phase 4.**
+- **PHASE 4 IS UNBLOCKED AND UN-STARTED.** The operator answered every open
+  question on 2026-08-13; nothing is pending with them.
 - **The shared checkout is a real constraint, not a formality.** One working
   tree serves every session, so a coder on a feature branch means the manager
   cannot commit its own docs there without riding along in the coder's PR.
