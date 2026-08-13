@@ -2338,11 +2338,17 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   transition: border-color 0.1s;
 }
 .face-chip:hover { border-color: var(--accent); }
+/* Same geometry as .query-face-chip img: the two strips must read as one
+   control.  contain + auto shows the whole crop at its true aspect instead of
+   centre-cropping a face the examiner is being asked to judge. */
 .face-chip img {
   display: block;
-  width: 72px;
-  height: 72px;
-  object-fit: cover;
+  width: auto;
+  height: auto;
+  max-width: 72px;
+  max-height: 72px;
+  object-fit: contain;
+  margin: 0 auto;
 }
 /* Review-only chips are the small crops this modality exists to preserve.
    Never upscale and never centre-crop them: the examiner must see the whole
@@ -2426,7 +2432,11 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   flex-wrap: wrap;
   gap: 6px;
 }
+/* An <a> since item 3c (plain click opens the crop): block + no underline keep
+   the strip laid out exactly as it was when this was a <div>. */
 .query-face-chip {
+  display: block;
+  text-decoration: none;
   border: 2px solid transparent;
   border-radius: 2px;
   background: var(--surface2);
@@ -2461,6 +2471,71 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   font-family: var(--display);
   color: var(--muted);
   text-align: center;
+}
+
+/* Pair marker for the both-sides cross-highlight.  An underline, not a border:
+   the borders on both strips already carry selection and match state, and a
+   third border colour would be unreadable.  Accent, because the pair is a
+   pointer for the examiner to look at — never a verdict on a raw cosine. */
+.face-cross-matched {
+  border-bottom: 2px solid var(--accent);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* Selection basket (change-set 2026-08-13 item 3b).  Scrolls rather than
+   growing: the left panel's other lists are capped the same way. */
+.face-basket {
+  max-height: 18vh;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border2);
+}
+.face-basket-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border2);
+}
+.face-basket-row:hover { background: var(--surface2); }
+/* Unselected rows stay in the basket but out of the search — dimmed, not
+   hidden, so the examiner can see what was set aside. */
+.face-basket-row-off { opacity: 0.5; }
+.face-basket-check {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: 2px;
+  color: var(--success);
+  font-family: var(--display);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.face-basket-row-off .face-basket-check { color: var(--muted); }
+.face-basket-thumb {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 28px;
+  max-height: 28px;
+  object-fit: contain;
+}
+.face-basket-label {
+  font-family: var(--display);
+  font-size: 9px;
+  color: var(--text2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* An observation already sitting in the basket, marked on the match strip. */
+.face-chip-basketed {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
 }
 
 /* Uncalibrated-search banner: required whenever face results are on screen. */
