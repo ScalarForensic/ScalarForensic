@@ -84,6 +84,15 @@
       }[this.videoPlaybackProvenance];
       return digest + suffix;
     },
+    // The server's allowlist verdict, in the analyst's words.  '' when the file
+    // plays as it stands — a heading only appears where there is something the
+    // player cannot do (§5: no state the backend cannot observe).
+    get videoPlaybackModeHeading() {
+      return {
+        transcode: 'This browser cannot decode this stream',
+        unknown: 'Playback cannot be judged for this file',
+      }[this.videoPlayback?.mode] ?? '';
+    },
     get videoPlaybackDownloadUrl() {
       const path = this.videoPlayback?.source_path;
       return path ? `/api/video-download?path=${encodeURIComponent(path)}` : '';

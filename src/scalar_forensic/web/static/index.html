@@ -1523,6 +1523,16 @@
                              @loadedmetadata="seekVideoToHit($el)"
                              @error="videoPlaybackError = 'The browser could not decode this stream. The stored frame JPEGs remain available.'"></video>
 
+                      <!-- Codec allowlist verdict (spec §5). Decided server-side from
+                           the stream, never from what the browser advertises: Chrome
+                           claims HEVC and then fails. Phase 3 detects and explains;
+                           until the encode path lands, Download original is the way
+                           to view it. -->
+                      <div class="vc-error" x-show="videoPlaybackModeHeading">
+                        <strong x-text="`⚠ ${videoPlaybackModeHeading}`"></strong>
+                        <div x-text="videoPlayback.mode_reason"></div>
+                      </div>
+
                       <!-- Stale evidence: the file on disk is no longer the one that
                            was indexed. Decided server-side by hashing the file as it is
                            now, never by trusting the recorded video_hash. Prominent, not
@@ -1543,12 +1553,9 @@
                       <div class="vc-label">
                         <div class="vc-label-hdr">
                           <span class="badge badge-viewing-copy">VIEWING COPY</span>
-                          <span x-show="videoPlayback.mode === 'rewrap'">
-                            Container rewrap (QuickTime&nbsp;→&nbsp;MP4) — streams unmodified, no re-encode.
-                          </span>
-                          <span x-show="videoPlayback.mode === 'original'">
-                            Source file streamed as it is stored on disk.
-                          </span>
+                          <!-- One sentence, written by the side that probed the
+                               stream, so the label can never drift from the verdict. -->
+                          <span x-text="videoPlayback.mode_reason"></span>
                         </div>
                         <div class="vc-label-body">
                           The original file and the stored frame JPEGs remain the
