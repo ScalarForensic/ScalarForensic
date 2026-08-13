@@ -137,20 +137,24 @@ class Pipeline:
         return hashlib.sha256(self.canonical().encode("utf-8")).hexdigest()
 
     def describe(self) -> dict:
-        """The §7.2 label payload: what actually ran, in full."""
-        return {
-            "hwaccel": self.hwaccel,
-            "decoder": self.decoder,
-            "filter_chain": self.filter_chain,
-            "encoder": self.encoder,
-            "rate_control": " ".join(self.rate_control),
-            "output_height": self.output_height,
-            "chunk_seconds": self.chunk_seconds,
-            "audio": " ".join(self.audio),
-            "ffmpeg_version": self.ffmpeg_version,
-            "fingerprint": self.fingerprint(),
-            "tone_mapped": TONEMAP_CHAIN in self.filter_chain,
+        """The §7.2 label payload: what actually ran, in full.
+
+        Derived from ``fields(self)`` rather than hand-listed, for the same
+        reason :meth:`canonical` is: a field added to the pipeline would change
+        the fingerprint while a hand-written label quietly kept describing the
+        old one — a label naming a pipeline it does not fully describe, in an
+        evidence viewer.  The two computed extras stay explicit because they are
+        not fields.
+        """
+        described = {
+            f.name: " ".join(getattr(self, f.name))
+            if isinstance(getattr(self, f.name), tuple)
+            else getattr(self, f.name)
+            for f in fields(self)
         }
+        described["fingerprint"] = self.fingerprint()
+        described["tone_mapped"] = TONEMAP_CHAIN in self.filter_chain
+        return described
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # ffmpeg is a declared external dependency, not a convenience
+      # (docs/specs/video-playback-transcode.md §8): the transcode path shells
+      # out to the binary, and its libzimg-backed zscale/tonemap filters are
+      # what make an HDR viewing copy carry bt709 instead of an 8-bit picture
+      # still labelled bt2020.  Without this step every encode test skips and
+      # the job goes green on tests that never ran.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
@@ -77,6 +86,12 @@ jobs:
           echo "Qdrant did not become ready" >&2
           exit 1
 
+      # No ffmpeg install here on purpose: this job runs only
+      # tests/faces/test_store_integration.py, which touches no video path. If
+      # this job's test selection ever widens to the video suite, it needs the
+      # `Install ffmpeg` step from lint-and-test — the encode tests fail rather
+      # than skip when ffmpeg is absent under CI, so it will say so loudly.
+      #
       # --no-cov: the global --cov-fail-under=65 in pyproject addopts is a floor
       # for the *full* suite. This job runs a 5-test subset on purpose, so
       # coverage lands near 2% and the floor fails a job whose tests all passed.

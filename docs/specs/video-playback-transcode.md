@@ -383,7 +383,18 @@ Two consequences worth stating rather than discovering:
   a driver failure holds two key sets, never one key with two pictures in it.
 
 A test pins the field set, so adding a field is a deliberate act rather than a
-silent cache-wide invalidation.
+silent cache-wide invalidation, and the §7.2 label is derived from the same field
+set — a label that named fewer fields than the key hashes would describe a
+pipeline it does not fully describe.
+
+**Left for phase 5 to decide deliberately:** `chunk_seconds` is pixel-affecting
+for a *chunk* — it moves every encode boundary — but not for the §4.3 full-file
+artifact, which is one encode of the whole source however long a chunk is. One
+fingerprint for both artifact kinds therefore means changing
+`SFN_VIDEO_CHUNK_SECONDS` needlessly invalidates every cached `full.mp4`. That is
+the conservative direction and it stands for now; phase 5, which owns the cache,
+should choose between keeping it and splitting the fingerprint per artifact kind
+rather than rediscovering the question.
 
 ### 6.2 Eviction, corrected
 
