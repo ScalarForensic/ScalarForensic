@@ -20,6 +20,7 @@ import pytest
 from scalar_forensic.config import Settings
 from scalar_forensic.web.pipeline import (
     Hit,
+    MatchedVideoFrame,
     _group_video_hits,
     _query_exact_video,
     _video_frame_batch,
@@ -416,3 +417,37 @@ def test_grouping_marks_reference_when_any_frame_in_group_is_reference():
     result = _group_video_hits([f1, f2])
     assert len(result) == 1
     assert result[0].is_reference is True
+
+
+# ---------------------------------------------------------------------------
+# MatchedVideoFrame.path — each frame's own servable file
+# ---------------------------------------------------------------------------
+
+
+def test_matched_frame_carries_its_own_stored_path():
+    """Every matched frame reports its own file, not the representative's.
+
+    The UI shows the selected matched frame in the compare pane; addressing it
+    by hash only left /api/thumbnail as the sole option, which serves the
+    128x96 index thumb of the artefact under examination.
+    """
+    low = _frame_hit(timecode_ms=1000, scores={"semantic": 0.5})
+    high = _frame_hit(timecode_ms=2000, scores={"semantic": 0.9})
+    grouped = _group_video_hits([low, high])[0]
+
+    # The representative is the best-scoring frame; the other frame must not
+    # inherit its path, or selecting it would display the wrong picture.
+    assert grouped.path == high.path
+    by_tc = {mf.timecode_ms: mf for mf in grouped.matched_frames}
+    assert by_tc[1000].path == low.path
+    assert by_tc[2000].path == high.path
+    assert by_tc[1000].path != by_tc[2000].path
+
+
+def test_matched_frame_path_defaults_to_empty_not_missing():
+    # The UI branches on a falsy path to show the placeholder rather than a
+    # misleading thumbnail, so the field must always exist.
+    frame = _frame_hit(timecode_ms=0, scores={"exact": 1.0})
+    mf = _group_video_hits([frame])[0].matched_frames[0]
+    assert mf.path == frame.path
+    assert MatchedVideoFrame(timecode_ms=0, frame_hash="h", scores={}).path == ""

@@ -9,8 +9,6 @@ import re
 from html.parser import HTMLParser
 from pathlib import Path
 
-import pytest
-
 STATIC = Path(__file__).resolve().parents[1] / "src" / "scalar_forensic" / "web" / "static"
 
 
@@ -34,15 +32,19 @@ def test_selecting_a_video_frame_hit_shows_the_stored_frame_not_the_thumbnail():
     assert "/api/thumbnail/" not in body
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "selectMatchedFrame still uses /api/thumbnail: MatchedVideoFrame carries "
-        "only timecode_ms/frame_hash/scores, so the stored frame's path is not in "
-        "the payload (pipeline/query.py:26-29, routes/analyze.py:210-218). Needs a "
-        "path field on MatchedVideoFrame; delete this marker when that lands."
-    ),
-)
+def test_selecting_a_matched_frame_shows_that_frames_own_stored_jpeg():
+    # MatchedVideoFrame.path carries each frame's own image_path, so the pane
+    # shows the frame that was actually scored — not the representative's file
+    # and not a thumbnail.  A missing path shows the placeholder: an upscaled
+    # thumb would look like the frame without being it.
+    js = (STATIC / "js" / "analysis.js").read_text()
+    body = _fn_body(js, "async selectMatchedFrame")
+    assert "mf.path" in body
+    assert "/api/hit-image?path=" in body
+    assert "/api/thumbnail/" not in body
+    assert "vector-fallback.svg" in body
+
+
 def test_every_big_pane_source_is_a_full_resolution_endpoint():
     # The thumbnail endpoint belongs in the hit *list*, never in matchSrc: the
     # big pane is where the examiner actually compares two images.
