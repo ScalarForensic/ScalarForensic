@@ -71,7 +71,10 @@ jobs:
           echo "Qdrant did not become ready" >&2
           exit 1
 
+      # --no-cov: the global --cov-fail-under=65 in pyproject addopts is a floor
+      # for the *full* suite. This job runs a 5-test subset on purpose, so
+      # coverage lands near 2% and the floor fails a job whose tests all passed.
       - name: Run Qdrant-gated integration tests
         env:
           SFN_TEST_QDRANT_URL: http://localhost:6333
-        run: uv run pytest tests/faces/test_store_integration.py -v
+        run: uv run pytest tests/faces/test_store_integration.py -v --no-cov
