@@ -418,6 +418,55 @@ async def query_metadata(session_id: str, file_id: str) -> JSONResponse:
     return JSONResponse(meta)
 
 
+def _stored_frame_metadata(p: Path, video_hash: str, timecode_ms: int, settings: Settings) -> dict:
+    """Metadata for a stored video frame: Qdrant lookup + assembly.
+
+    Shared by /api/metadata (frame-path branch) and /api/frame-metadata.  The
+    Qdrant lookup is best-effort — on failure the frame identity from the path
+    is still served, just without hash/source-video enrichment.
+    """
+    frame_sha256: str | None = None
+    video_path_str: str | None = None
+    try:
+        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+        records, _ = client.scroll(
+            collection_name=settings.collection,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key="video_hash", match=MatchValue(value=video_hash)),
+                    FieldCondition(key="frame_timecode_ms", match=MatchValue(value=timecode_ms)),
+                    FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
+                ]
+            ),
+            limit=1,
+            with_payload=["image_hash", "video_path"],
+            with_vectors=False,
+        )
+        if records:
+            payload = records[0].payload or {}
+            frame_sha256 = payload.get("image_hash")
+            video_path_str = payload.get("video_path")
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("frame metadata: could not scroll %r: %s", settings.collection, exc)
+
+    meta: dict = {
+        "filename": p.name,
+        "path": str(p),
+        "is_video_frame": True,
+        "frame_timecode_ms": timecode_ms,
+        "video_hash": video_hash,
+    }
+    if frame_sha256:
+        meta["hash_sha256"] = frame_sha256
+    if video_path_str:
+        meta["video_path"] = video_path_str
+        _vp = Path(video_path_str)
+        if _vp.is_file():
+            _info = get_video_info(_vp)
+            meta.update({f"video_{k}": v for k, v in _info.items()})
+    return meta
+
+
 @router.get("/api/metadata")
 async def hit_metadata(path: str) -> JSONResponse:
     """Detailed metadata for a hit image or stored video frame (filesystem path)."""
@@ -439,50 +488,7 @@ async def hit_metadata(path: str) -> JSONResponse:
     )
     if frame_parsed is not None:
         video_hash, timecode_ms = frame_parsed
-
-        # Look up the source video path and frame image_hash from Qdrant.
-        frame_sha256: str | None = None
-        video_path_str: str | None = None
-        try:
-            _client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-            _records, _ = _client.scroll(
-                collection_name=settings.collection,
-                scroll_filter=Filter(
-                    must=[
-                        FieldCondition(key="video_hash", match=MatchValue(value=video_hash)),
-                        FieldCondition(
-                            key="frame_timecode_ms", match=MatchValue(value=timecode_ms)
-                        ),
-                        FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
-                    ]
-                ),
-                limit=1,
-                with_payload=["image_hash", "video_path"],
-                with_vectors=False,
-            )
-            if _records:
-                _payload = _records[0].payload or {}
-                frame_sha256 = _payload.get("image_hash")
-                video_path_str = _payload.get("video_path")
-        except Exception:  # noqa: BLE001
-            pass
-
-        meta: dict = {
-            "filename": p.name,
-            "path": str(p),
-            "is_video_frame": True,
-            "frame_timecode_ms": timecode_ms,
-            "video_hash": video_hash,
-        }
-        if frame_sha256:
-            meta["hash_sha256"] = frame_sha256
-        if video_path_str:
-            meta["video_path"] = video_path_str
-            _vp = Path(video_path_str)
-            if _vp.is_file():
-                _info = get_video_info(_vp)
-                meta.update({f"video_{k}": v for k, v in _info.items()})
-        return JSONResponse(meta)
+        return JSONResponse(_stored_frame_metadata(p, video_hash, timecode_ms, settings))
 
     # Regular image path
     if p.suffix.lower() not in _IMAGE_EXTENSIONS:
@@ -517,45 +523,4 @@ async def frame_metadata(video_hash: str, timecode_ms: int) -> JSONResponse:
     if frame_parsed is None:
         raise HTTPException(status_code=500, detail="Could not parse frame path")
     parsed_video_hash, parsed_timecode_ms = frame_parsed
-
-    frame_sha256: str | None = None
-    video_path_str: str | None = None
-    try:
-        _client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-        _records, _ = _client.scroll(
-            collection_name=settings.collection,
-            scroll_filter=Filter(
-                must=[
-                    FieldCondition(key="video_hash", match=MatchValue(value=parsed_video_hash)),
-                    FieldCondition(
-                        key="frame_timecode_ms", match=MatchValue(value=parsed_timecode_ms)
-                    ),
-                    FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
-                ]
-            ),
-            limit=1,
-            with_payload=["image_hash", "video_path"],
-            with_vectors=False,
-        )
-        if _records:
-            frame_sha256 = _records[0].payload.get("image_hash")
-            video_path_str = _records[0].payload.get("video_path")
-    except Exception:  # noqa: BLE001
-        pass
-
-    meta: dict = {
-        "filename": p.name,
-        "path": str(p),
-        "is_video_frame": True,
-        "frame_timecode_ms": parsed_timecode_ms,
-        "video_hash": parsed_video_hash,
-    }
-    if frame_sha256:
-        meta["hash_sha256"] = frame_sha256
-    if video_path_str:
-        meta["video_path"] = video_path_str
-        _vp = Path(video_path_str)
-        if _vp.is_file():
-            _info = get_video_info(_vp)
-            meta.update({f"video_{k}": v for k, v in _info.items()})
-    return JSONResponse(meta)
+    return JSONResponse(_stored_frame_metadata(p, parsed_video_hash, parsed_timecode_ms, settings))
