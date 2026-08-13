@@ -13,7 +13,12 @@ the suite stays hermetic and needs neither Qdrant nor sample media on disk.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import os
+import shutil
+import struct
+import subprocess
 import threading
 from fractions import Fraction
 from pathlib import Path
@@ -28,6 +33,7 @@ from scalar_forensic.config import Settings
 from scalar_forensic.embedder import hash_file
 from scalar_forensic.video import VIDEO_EXTENSIONS
 from scalar_forensic.video_playback import cache as vp_cache
+from scalar_forensic.video_playback import capability as vp_capability
 from scalar_forensic.video_playback import codecs as vp_codecs
 from scalar_forensic.video_playback import digest as vp_digest
 from scalar_forensic.video_playback import rewrap as vp_rewrap
@@ -138,6 +144,169 @@ def hevc_10bit_mov(roots):
     """An HEVC Main-10 .MOV — the iPhone case the whole feature exists for."""
     input_dir, _ = roots
     return _write_encoded(input_dir / "IMG_0010.MOV", "mov", "libx265", "yuv420p10le")
+
+
+# ---------------------------------------------------------------------------
+# The HDR fixture (spec §14): env gate → tracked test_data/ → generated
+# ---------------------------------------------------------------------------
+
+FFMPEG = os.environ.get("SFN_FFMPEG_PATH", "ffmpeg")
+FFPROBE = str(Path(FFMPEG).with_name("ffprobe")) if os.sep in FFMPEG else "ffprobe"
+
+requires_ffmpeg = pytest.mark.skipif(
+    shutil.which(FFMPEG) is None,
+    reason="ffmpeg is not installed; it is a declared dependency (spec §8)",
+)
+
+TEST_DATA_DIR = Path(__file__).resolve().parents[1] / "test_data"
+
+
+def _operator_hdr_clip() -> Path | None:
+    """A real HDR capture, if the operator supplied one.  Sources 1 and 2 of §14.
+
+    Nothing from the evidence corpus is ever committed, so the repository can
+    only ever hold source 3.  These two exist so a real clip can be dropped in
+    without touching code — the honest assertions a synthetic picture cannot
+    make are the whole reason §14 layers the lookup instead of picking one.
+    """
+    env = os.environ.get("SFN_TEST_VIDEO_HDR")
+    if env and Path(env).is_file():
+        return Path(env)
+    if TEST_DATA_DIR.is_dir():
+        for candidate in sorted(TEST_DATA_DIR.glob("hdr_sample.*")):
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+# The ISO base-media display matrix for a −90° rotation, in the tkhd layout
+# [a b u; c d v; x y w] — a/b/c/d/x/y in 16.16 and u/v/w in 2.30 fixed point.
+# ffmpeg cannot *write* rotation side data on an output stream (the old
+# `-metadata:s:v rotate=` is gone in 6.x), so the generated fixture gets a real
+# display matrix patched into its tkhd box instead of a weakened assertion.
+# The result is genuine side data: ffprobe reports it as "Display Matrix".
+def _rotation_matrix(width: int) -> bytes:
+    values = [0, -65536, 0, 65536, 0, 0, 0, width << 16, 1 << 30]
+    return b"".join(struct.pack(">i", v) for v in values)
+
+
+def _patch_display_matrix(path: Path, width: int) -> None:
+    data = bytearray(path.read_bytes())
+    box = data.find(b"tkhd")
+    if box < 0:  # pragma: no cover - every mov/mp4 track has one
+        raise AssertionError(f"no tkhd box in {path}")
+    # box start is the 4 size bytes before the type; the matrix sits 48 bytes in
+    # (version+flags, times, track id, duration, reserved, layer, group, volume).
+    offset = box - 4 + 48
+    data[offset : offset + 36] = _rotation_matrix(width)
+    path.write_bytes(bytes(data))
+
+
+def _generate_hdr_clip(dst: Path, *, rotated: bool = False) -> Path:
+    """Source 3 of §14: synthesise a 10-bit HLG/bt2020 clip with ffmpeg.
+
+    ffmpeg is already a §8 dependency, so this adds none.  What it is *not* is a
+    substitute for a real capture — it carries the transfer, primaries, bit
+    depth and (when asked) the display matrix that the pipeline has to handle,
+    and nothing about real sensor noise, real HDR highlights or a real device's
+    container quirks.
+    """
+    subprocess.run(  # noqa: S603 - fixed args, test-time fixture generation
+        [
+            FFMPEG,
+            "-nostdin",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x96:rate=10:duration=0.6,format=yuv420p10le,"
+            "setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
+            "-c:v",
+            "libx265",
+            "-x265-params",
+            "log-level=none",
+            "-tag:v",
+            "hvc1",
+            "-y",
+            str(dst),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    if rotated:
+        _patch_display_matrix(dst, 64)
+    return dst
+
+
+@pytest.fixture()
+def hdr_hlg_mov(roots) -> Path:
+    """A 10-bit HLG source in the input dir, by the §14 three-source lookup."""
+    input_dir, _ = roots
+    supplied = _operator_hdr_clip()
+    if supplied is not None:
+        dst = input_dir / f"hdr_sample{supplied.suffix}"
+        shutil.copy(supplied, dst)
+        return dst
+    if shutil.which(FFMPEG) is None:
+        pytest.skip("no HDR clip supplied and ffmpeg is absent (spec §14)")
+    return _generate_hdr_clip(input_dir / "hdr_generated.mov")
+
+
+@pytest.fixture()
+def hdr_rotated_mov(roots) -> Path:
+    """The same, carrying rotation side data — §3.1's defect needs it present.
+
+    An operator-supplied clip is used only if it *actually* carries rotation:
+    §14 requires it, and a clip silently missing it would turn the rotation
+    test green while testing nothing.
+    """
+    input_dir, _ = roots
+    supplied = _operator_hdr_clip()
+    if supplied is not None and _display_rotation(supplied) is not None:
+        dst = input_dir / f"hdr_rotated{supplied.suffix}"
+        shutil.copy(supplied, dst)
+        return dst
+    if shutil.which(FFMPEG) is None:
+        pytest.skip("no rotated HDR clip supplied and ffmpeg is absent (spec §14)")
+    return _generate_hdr_clip(input_dir / "hdr_rotated.mov", rotated=True)
+
+
+def _ffprobe_video_stream(path: Path) -> dict:
+    """The first video stream as ffprobe describes it, side data included.
+
+    ffprobe rather than PyAV: PyAV exposes no stream-level side data, so the
+    display matrix — the exact thing §3.1's defect destroys — is invisible from
+    Python.  ffprobe ships with the ffmpeg §8 already requires.
+    """
+    proc = subprocess.run(  # noqa: S603 - fixed args, test-time probe
+        [
+            FFPROBE,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_streams",
+            "-of",
+            "json",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(proc.stdout)["streams"][0]
+
+
+def _display_rotation(path: Path) -> float | None:
+    """The stream's rotation from its display matrix, or None if it carries none."""
+    if shutil.which(FFPROBE) is None:
+        return None
+    for side in _ffprobe_video_stream(path).get("side_data_list", []):
+        if "rotation" in side:
+            return float(side["rotation"])
+    return None
 
 
 def _packet_payloads(path: Path) -> list[bytes]:
@@ -843,3 +1012,261 @@ class TestPlaybackSettings:
         monkeypatch.setenv("SFN_VIDEO_CACHE_MAX_BYTES", "-1")
         with pytest.raises(ValueError, match="SFN_VIDEO_CACHE_MAX_BYTES"):
             Settings()
+
+
+class TestTranscodeSettings:
+    """The §12 defaults, each of which a §3.5 number is behind."""
+
+    def test_defaults(self, monkeypatch):
+        for name in (
+            "SFN_FFMPEG_PATH",
+            "SFN_VIDEO_HWACCEL",
+            "SFN_VIDEO_OUTPUT_HEIGHT",
+            "SFN_VIDEO_CHUNK_SECONDS",
+            "SFN_VIDEO_MAX_WORKERS",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        s = Settings()
+        assert s.ffmpeg_path == "ffmpeg"
+        assert s.video_hwaccel == "auto"
+        assert s.video_output_height == 1080
+        assert s.video_chunk_seconds == 30
+        assert s.video_max_workers == 2
+
+    @pytest.mark.parametrize(
+        ("name", "value", "match"),
+        [
+            ("SFN_VIDEO_HWACCEL", "vaapi", "SFN_VIDEO_HWACCEL"),
+            ("SFN_VIDEO_OUTPUT_HEIGHT", "100", "SFN_VIDEO_OUTPUT_HEIGHT"),
+            ("SFN_VIDEO_CHUNK_SECONDS", "0", "SFN_VIDEO_CHUNK_SECONDS"),
+            ("SFN_VIDEO_CHUNK_SECONDS", "601", "SFN_VIDEO_CHUNK_SECONDS"),
+            ("SFN_VIDEO_MAX_WORKERS", "0", "SFN_VIDEO_MAX_WORKERS"),
+        ],
+    )
+    def test_invalid_values_are_rejected(self, monkeypatch, name, value, match):
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ValueError, match=match):
+            Settings()
+
+    def test_hwaccel_is_case_insensitive(self, monkeypatch):
+        monkeypatch.setenv("SFN_VIDEO_HWACCEL", " CUDA ")
+        assert Settings().video_hwaccel == "cuda"
+
+
+# ---------------------------------------------------------------------------
+# Capability probe and pipeline fingerprint (spec §6.1, §8)
+# ---------------------------------------------------------------------------
+
+
+def _capability(**kw) -> vp_capability.Capability:
+    base = {
+        "ffmpeg_path": "ffmpeg",
+        "ffmpeg_version": "ffmpeg version 6.1.1-3ubuntu5",
+        "encoder": "libx264",
+        "hwaccel": "none",
+        "tonemap_ok": True,
+        "notes": (),
+    }
+    return vp_capability.Capability(**{**base, **kw})
+
+
+class TestPipelineFingerprint:
+    """§6.1: the half of the cache key that is not the source."""
+
+    def test_every_field_is_hashed(self, monkeypatch):
+        """A field added to Pipeline must change the fingerprint, or it is a lie.
+
+        The point of this test is not the arithmetic — it is that adding a
+        pixel-affecting setting to the pipeline without putting it in the key
+        would let one cache entry serve two renderings under one label, which is
+        exactly the defect §6.1 names.
+        """
+        pipeline = vp_capability.select(Settings(), _capability(), hdr=True)
+        base = pipeline.fingerprint()
+        for f in dataclasses.fields(pipeline):
+            value = getattr(pipeline, f.name)
+            if isinstance(value, tuple):
+                mutated = (*value, "x")
+            elif isinstance(value, int):
+                mutated = value + 1
+            else:
+                mutated = f"{value}-x"
+            other = dataclasses.replace(pipeline, **{f.name: mutated})
+            assert other.fingerprint() != base, f"{f.name} is not in the fingerprint"
+
+    def test_field_set_is_pinned(self):
+        """Adding a field is a deliberate act, not a silent cache invalidation."""
+        assert {f.name for f in dataclasses.fields(vp_capability.Pipeline)} == {
+            "hwaccel",
+            "decoder",
+            "filter_chain",
+            "encoder",
+            "rate_control",
+            "output_height",
+            "chunk_seconds",
+            "audio",
+            "ffmpeg_version",
+        }
+
+    def test_fingerprint_is_stable_across_instances(self):
+        s = Settings()
+        a = vp_capability.select(s, _capability(), hdr=True)
+        b = vp_capability.select(s, _capability(), hdr=True)
+        assert a is not b
+        assert a.fingerprint() == b.fingerprint()
+
+    def test_hdr_and_sdr_are_different_pipelines(self):
+        s = Settings()
+        hdr = vp_capability.select(s, _capability(), hdr=True)
+        sdr = vp_capability.select(s, _capability(), hdr=False)
+        assert hdr.fingerprint() != sdr.fingerprint()
+        assert vp_capability.TONEMAP_CHAIN in hdr.filter_chain
+        assert vp_capability.TONEMAP_CHAIN not in sdr.filter_chain
+
+    def test_gpu_fallback_is_a_different_key(self):
+        """§8's job-time fallback must not reuse the GPU pipeline's cache entry."""
+        s = Settings()
+        gpu = vp_capability.select(s, _capability(encoder="h264_nvenc", hwaccel="cuda"), hdr=True)
+        cpu = vp_capability.select(s, _capability(), hdr=True)
+        assert gpu.fingerprint() != cpu.fingerprint()
+
+    def test_chunk_length_moves_the_key(self, monkeypatch):
+        s = Settings()
+        monkeypatch.setenv("SFN_VIDEO_CHUNK_SECONDS", "15")
+        assert (
+            vp_capability.select(s, _capability(), hdr=True).fingerprint()
+            != vp_capability.select(Settings(), _capability(), hdr=True).fingerprint()
+        )
+
+    def test_describe_carries_the_whole_pipeline(self):
+        """§7.2: the label records what ran, not a summary of it."""
+        described = vp_capability.select(Settings(), _capability(), hdr=True).describe()
+        assert described["encoder"] == "libx264"
+        assert described["tone_mapped"] is True
+        assert described["ffmpeg_version"].startswith("ffmpeg version")
+        assert len(described["fingerprint"]) == 64
+
+
+class TestOutputResolutionPolicy:
+    """§16's 1080p cap: a cap, never a target."""
+
+    def test_scale_filter_never_upscales(self):
+        assert vp_capability._scale_filter(1080) == "scale=-2:'min(ih,1080)'"
+
+    def test_height_comes_from_settings(self, monkeypatch):
+        monkeypatch.setenv("SFN_VIDEO_OUTPUT_HEIGHT", "720")
+        pipeline = vp_capability.select(Settings(), _capability(), hdr=True)
+        assert "min(ih,720)" in pipeline.filter_chain
+        assert pipeline.output_height == 720
+
+    def test_scale_precedes_the_tonemap(self):
+        """Cheaper, and `ih` is post-autorotate — the property §3.1's GPU path lost."""
+        chain = vp_capability.select(Settings(), _capability(), hdr=True).filter_chain
+        assert chain.index("scale=-2") < chain.index("zscale")
+
+
+class TestHdrDetection:
+    def test_hlg_and_pq_are_hdr(self):
+        assert vp_capability.is_hdr({"video_color_trc": "arib-std-b67"})
+        assert vp_capability.is_hdr({"video_color_trc": "smpte2084"})
+
+    def test_bt709_is_not(self):
+        assert not vp_capability.is_hdr({"video_color_trc": "bt709"})
+
+    def test_unknown_transfer_is_not_hdr(self):
+        """Not-stated must not render as HDR: tone-mapping an SDR picture darkens it."""
+        assert not vp_capability.is_hdr({})
+        assert not vp_capability.is_hdr({"video_color_trc": None})
+
+    def test_probe_reads_the_transfer_off_the_container(self, hdr_hlg_mov):
+        info = vp_codecs._stream_report(hdr_hlg_mov)
+        assert info["video_color_trc"] == "arib-std-b67"
+        assert info["video_color_primaries"] == "bt2020"
+        assert vp_capability.is_hdr(info)
+
+    def test_an_sdr_clip_reports_no_hdr_transfer(self, mov):
+        assert not vp_capability.is_hdr(vp_codecs._stream_report(mov))
+
+
+class TestCapabilityRefusal:
+    """Three-state (§5): "cannot tone-map" is not "encode it anyway"."""
+
+    def test_no_encoder_is_unavailable(self):
+        cap = _capability(encoder=None, tonemap_ok=False, notes=("libx264: not found",))
+        assert cap.available is False
+        assert "libx264: not found" in cap.unavailable_reason(hdr=False)
+        with pytest.raises(RuntimeError):
+            vp_capability.select(Settings(), cap, hdr=False)
+
+    def test_a_build_without_tonemap_still_serves_sdr(self):
+        cap = _capability(tonemap_ok=False, notes=("zscale not found",))
+        assert cap.available is True
+        assert cap.unavailable_reason(hdr=False) is None
+        assert vp_capability.select(Settings(), cap, hdr=False).encoder == "libx264"
+
+    def test_a_build_without_tonemap_refuses_hdr(self):
+        """§3.1's second finding: 8-bit output still labelled HDR is the defect."""
+        cap = _capability(tonemap_ok=False, notes=("zscale not found",))
+        reason = cap.unavailable_reason(hdr=True)
+        assert reason is not None
+        assert "tone-map" in reason
+        assert "Download the original" in reason
+        with pytest.raises(RuntimeError, match="tone-map"):
+            vp_capability.select(Settings(), cap, hdr=True)
+
+
+class TestCapabilityProbe:
+    """§8: believe a real encode, never an `-encoders` listing."""
+
+    @pytest.fixture(autouse=True)
+    def _clear(self):
+        vp_capability.reset_cache()
+        yield
+        vp_capability.reset_cache()
+
+    def test_missing_binary_is_reported_not_raised(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SFN_FFMPEG_PATH", str(tmp_path / "no-such-ffmpeg"))
+        cap = vp_capability.probe(Settings())
+        assert cap.available is False
+        assert cap.ffmpeg_version is None
+        assert "not found" in cap.unavailable_reason(hdr=False)
+
+    @requires_ffmpeg
+    def test_real_probe_finds_a_working_pipeline(self, monkeypatch):
+        monkeypatch.setenv("SFN_VIDEO_HWACCEL", "none")
+        cap = vp_capability.probe(Settings())
+        assert cap.available is True
+        assert cap.encoder == "libx264"
+        assert cap.hwaccel == "none"
+        assert cap.ffmpeg_version.startswith("ffmpeg version")
+        # The probe ran the tone-map chain, not just an encoder listing.
+        assert cap.tonemap_ok is True
+
+    @requires_ffmpeg
+    def test_hwaccel_none_never_probes_the_gpu(self, monkeypatch):
+        monkeypatch.setenv("SFN_VIDEO_HWACCEL", "none")
+        calls: list[str] = []
+        real = vp_capability._try_encode
+
+        def spy(path, encoder, *, hdr):
+            calls.append(encoder)
+            return real(path, encoder, hdr=hdr)
+
+        monkeypatch.setattr(vp_capability, "_try_encode", spy)
+        vp_capability.probe(Settings())
+        assert "h264_nvenc" not in calls
+
+    @requires_ffmpeg
+    def test_result_is_cached_per_process(self, monkeypatch):
+        monkeypatch.setenv("SFN_VIDEO_HWACCEL", "none")
+        settings = Settings()
+        first = vp_capability.capability(settings)
+        assert vp_capability.capability(settings) is first
+        assert vp_capability.capability(settings, refresh=True) is not first
+
+    @requires_ffmpeg
+    def test_an_unknown_encoder_fails_the_probe(self, monkeypatch):
+        """The probe's verdict is the exit code, so a bogus encoder must fail."""
+        monkeypatch.setitem(vp_capability._RATE_CONTROL, "not_an_encoder", ())
+        err = vp_capability._try_encode(Settings().ffmpeg_path, "not_an_encoder", hdr=False)
+        assert err is not None and err.startswith("not_an_encoder:")

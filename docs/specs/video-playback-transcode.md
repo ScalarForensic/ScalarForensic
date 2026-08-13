@@ -273,8 +273,30 @@ Explicit, operator-initiated (§5), and long: at §3.1's 1080p CPU rate a 4-hour
 source is ~51 minutes, ~39 on GPU. Output is capped at 1080p (§12), so §3.5's
 4K row — which is 4K in *and* 4K out, 0.879× — is an upper bound on the cost,
 not the rate this job will see; downscaling a 4K input to 1080p has not been
-timed separately. It runs in
-the background; nothing blocks on it.
+timed separately. It runs in the background — but **"nothing blocks on it" is
+false, and the spec must not claim it.**
+
+**It competes with chunk playback for the same two workers.**
+`SFN_VIDEO_MAX_WORKERS=2` is not a throughput knob: §3.5 measured aggregate
+throughput flat from k=1 to k=8, so 2 is the shape of exactly *one viewer* —
+the chunk being played plus its single §4.2 prefetch. A full-video job holds one
+of those two for its whole ~51-minute run, which puts chunk encoding at k=2 for
+the duration: **8.21 s → ~16.35 s** per chunk (§3.5's k=2 row), outside the
+6–10 s window the double-buffered swap depends on. The analyst who starts a full
+export therefore makes their own live playback worse, and today nothing tells
+them so.
+
+Two candidate remedies, both **phase 7's call, neither implemented here**:
+
+1. **Yield.** Run the full-video job at lower priority (`nice`) with an explicit
+   `-threads` cap, so chunk work wins the contention instead of splitting it.
+   Costs a longer export; needs measuring, since §3.5 shows the box is already
+   saturated by one job.
+2. **Accept and disclose.** Leave the contention and say so in the UI — *"chunk
+   loading will be slower while the full export runs"* — which is honest but
+   makes the degradation the analyst's problem.
+
+What is ruled out is the third option: leaving it both unbounded and invisible.
 
 - Progress and ETA come from ffmpeg's own frame-level progress output, rendered
   with `_RateTracker` and `#139`'s honest labelling — *"~4 min remaining at
@@ -325,6 +347,43 @@ chain, output resolution policy and chunk length. Otherwise flipping
 probe yields a cache holding artifacts from two pipelines **inside one video** — a
 visible quality shift under a label naming one pipeline. This mirrors the existing
 rule that model hashes must match what a collection recorded (`CLAUDE.md`).
+
+**What the fingerprint is, decided in phase 4** (`video_playback/capability.py`,
+`Pipeline`). The fingerprint is `sha256` over the canonical rendering of exactly
+these nine fields, and the rule is that *every* field of `Pipeline` is hashed —
+so the question "is this in the key?" is the same question as "is this a field?",
+with no third answer:
+
+| Field | Why it changes pixels |
+|---|---|
+| `hwaccel` | GPU and CPU encoders do not produce the same picture |
+| `decoder` | fixed at `software`; §3.1's GPU-filtered decode loses rotation |
+| `filter_chain` | the tone-map chain and the scale expression, verbatim |
+| `encoder` | `libx264` vs `h264_nvenc` |
+| `rate_control` | preset and CRF/CQ |
+| `output_height` | the §16 cap |
+| `chunk_seconds` | changes where every artifact boundary falls |
+| `audio` | codec and bitrate of the re-encoded track |
+| `ffmpeg_version` | an encoder's output changes between builds |
+
+Deliberately **outside** it, because none of them changes a pixel:
+`SFN_VIDEO_MAX_WORKERS`, the cache directory and ceiling, queue and timeout
+settings, `SFN_EXAMINER_ID`, the source path, and the timecode a chunk starts at
+— that last is source identity and chunk arithmetic, the other half of the key.
+
+Two consequences worth stating rather than discovering:
+
+- **Upgrading ffmpeg invalidates the whole cache.** Accepted, and it is the
+  conservative direction: a rendering carries a label naming its pipeline (§7.2),
+  and a label that names a build which did not produce the file is a false
+  statement in an evidence viewer.
+- **§8's job-time GPU fallback lands under a different key**, because the
+  fallback *is* a different `Pipeline`. That is the correct behaviour — the CPU
+  encode is not the GPU encode — and it means a video half-encoded either side of
+  a driver failure holds two key sets, never one key with two pictures in it.
+
+A test pins the field set, so adding a field is a deliberate act rather than a
+silent cache-wide invalidation.
 
 ### 6.2 Eviction, corrected
 
@@ -514,7 +573,7 @@ as "plugin shape: optional modality, not a framework".
 ```
 src/scalar_forensic/video_playback/
 ├── __init__.py      public API — `router`                            [carved]
-├── capability.py    hwaccel probe, pipeline selection + fingerprint (§6.1, §8)
+├── capability.py    hwaccel probe, pipeline selection + fingerprint (§6.1, §8) [phase 4]
 ├── codecs.py        browser-safe allowlist, mode decision            [carved]
 ├── digest.py        source SHA-256 + the process-wide HashCache handle [carved]
 ├── rewrap.py        the PyAV stream copy — lossless, never an encode  [carved]
