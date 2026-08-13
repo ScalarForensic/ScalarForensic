@@ -488,17 +488,26 @@ async def hit_metadata(path: str) -> JSONResponse:
     )
     if frame_parsed is not None:
         video_hash, timecode_ms = frame_parsed
-        return JSONResponse(_stored_frame_metadata(p, video_hash, timecode_ms, settings))
+        # Sync Qdrant scroll — off the event loop.
+        meta = await asyncio.to_thread(_stored_frame_metadata, p, video_hash, timecode_ms, settings)
+        return JSONResponse(meta)
 
     # Regular image path
     if p.suffix.lower() not in _IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Invalid path")
-    data = p.read_bytes()
-    meta = extract_exif_detailed(data)
+
+    def _read_and_hash() -> dict:
+        # Full-file read + two digests of an arbitrary-size evidence file —
+        # off the event loop.
+        data = p.read_bytes()
+        meta = extract_exif_detailed(data)
+        meta["hash_sha256"] = hashlib.sha256(data).hexdigest()
+        meta["hash_md5"] = hashlib.md5(data).hexdigest()  # noqa: S324
+        return meta
+
+    meta = await asyncio.to_thread(_read_and_hash)
     meta["filename"] = p.name
     meta["path"] = str(p)
-    meta["hash_sha256"] = hashlib.sha256(data).hexdigest()
-    meta["hash_md5"] = hashlib.md5(data).hexdigest()  # noqa: S324
     return JSONResponse(meta)
 
 
@@ -523,4 +532,8 @@ async def frame_metadata(video_hash: str, timecode_ms: int) -> JSONResponse:
     if frame_parsed is None:
         raise HTTPException(status_code=500, detail="Could not parse frame path")
     parsed_video_hash, parsed_timecode_ms = frame_parsed
-    return JSONResponse(_stored_frame_metadata(p, parsed_video_hash, parsed_timecode_ms, settings))
+    # Sync Qdrant scroll — off the event loop.
+    meta = await asyncio.to_thread(
+        _stored_frame_metadata, p, parsed_video_hash, parsed_timecode_ms, settings
+    )
+    return JSONResponse(meta)
