@@ -34,6 +34,10 @@
       this.semanticStatsLoading = false;
       this.semanticStatsError = null;
       this.showSemanticStats = false;
+      this.videoPlayback = null;
+      this.videoPlaybackError = null;
+      this.videoPlaybackLoading = false;
+      this.videoPlaybackTimecodeMs = 0;
       this.showAudit = false;
       this.auditLoading = false;
       this.auditError = null;

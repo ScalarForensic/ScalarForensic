@@ -944,6 +944,9 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .badge-reference { background: rgba(245,158,11,0.12); color: var(--reference); border: 1px solid rgba(245,158,11,0.25); }
 .badge-faces     { background: rgba(46,204,113,0.12);  color: var(--success);   border: 1px solid rgba(46,204,113,0.25); }
 .badge-sm        { font-size: 8px; padding: 1px 4px; }
+/* Reads as a caution, not as a mode: a viewing copy is a derived artifact and
+   the label has to be the first thing seen next to the player. */
+.badge-viewing-copy { background: rgba(232,147,32,0.12); color: var(--accent); border: 1px solid rgba(232,147,32,0.3); }
 
 /* ── Tag strip (below image box in query and match panels) ── */
 .tag-strip {
@@ -1220,7 +1223,66 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   background: var(--surface);
   flex-shrink: 0;
 }
+.hit-frame-play {
+  flex-shrink: 0;
+  padding: 0 5px;
+  background: none;
+  border: 1px solid var(--border2);
+  border-radius: 2px;
+  color: var(--text2);
+  font-size: 9px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.hit-frame-play:hover { color: var(--accent); border-color: var(--accent-dim); }
 .hit-frame-scores { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+
+/* ── Source-video playback (viewing copy) ── */
+.vc-block { margin-top: 8px; }
+.vc-open-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 4px 8px;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  color: var(--text2);
+  font-size: 10px;
+  cursor: pointer;
+}
+.vc-open-btn:hover:not(:disabled) { color: var(--text); border-color: var(--accent-dim); }
+.vc-open-btn:disabled { cursor: default; opacity: 0.6; }
+.vc-spinner { margin-left: auto; color: var(--muted); }
+.vc-error {
+  margin-top: 6px;
+  padding: 5px 8px;
+  border-radius: var(--radius);
+  background: rgba(192,57,43,0.1);
+  border: 1px solid rgba(192,57,43,0.3);
+  color: var(--danger);
+  font-size: 10px;
+}
+.vc-player {
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  margin-top: 6px;
+  background: #000;
+  border-radius: var(--radius);
+}
+.vc-label {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--accent);
+  background: rgba(232,147,32,0.05);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.vc-label-hdr { display: flex; align-items: center; gap: 6px; color: var(--text2); }
+.vc-label-body { margin-top: 3px; color: var(--muted); }
+.vc-warn { color: var(--accent); }
 /* Wrapper that keeps each mode's badge and score pill one x-for root. */
 .hit-frame-score { display: inline-flex; align-items: center; gap: 3px; }
 
