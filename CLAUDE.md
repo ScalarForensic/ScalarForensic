@@ -6,7 +6,8 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 
 ## Commands
 
-- `uv run pytest -q` — full suite (530 passed / 5 skipped as of 2026-08-13, clean tree), hermetic,
+- `uv run pytest -q` — full suite (559 passed / 5 skipped at `32f3bf9`, 2026-08-13, verified
+  clean tree; coverage 66.58% against the 65% floor), hermetic,
   needs no Qdrant; the 5 skips need `SFN_TEST_QDRANT_URL` and are the only tests that can
   observe the face exclusion guarantee against a real store (CI runs them in a separate
   Qdrant service-container job)
@@ -78,7 +79,10 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
   `pytest` collects from disk, not from git, so a parallel worker's uncommitted tests are
   counted in *your* run. On 2026-08-12 this published 526/5 for a commit whose real bar was
   521/5. Check `git status --porcelain` is 0 before quoting a bar against a sha.
-- The 14 pytest warnings are a third-party torch `jit.script_method` deprecation — not ours.
+- The 15 pytest warnings are both third-party: 14 are a torch `jit.script_method` deprecation
+  (all from `test_embedder_preprocessing.py`), and since the 2026-08-13 fastapi bump one is
+  `StarletteDeprecationWarning: Using httpx with starlette.testclient is deprecated; install
+  httpx2 instead`. Neither is ours; the starlette one is a live TODO, not noise.
 - The face real-model test skips unless a YuNet ONNX is present (`models/` is gitignored; fetch
   with `scripts/download_models.py --yunet`). It is the only check that can catch a wrong YuNet
   landmark-column map — the other detector tests build rows from the same assumption as the code.
