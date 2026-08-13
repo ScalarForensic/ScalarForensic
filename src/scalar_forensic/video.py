@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image
+
+_log = logging.getLogger(__name__)
 
 VIDEO_EXTENSIONS: frozenset[str] = frozenset(
     {
@@ -365,7 +368,12 @@ def get_video_info(video_path: Path) -> dict:
                     info["frame_count"] = vs.frames
             return info
     except Exception as exc:
-        return {"error": str(exc)}
+        # The decoder's own message can carry absolute paths and library
+        # internals, and this dict is serialised straight to the browser by
+        # /api/query-metadata. Keep the detail in the server log, where the
+        # operator can read it, and hand the client a fixed string.
+        _log.warning("video metadata read failed for %s: %s", video_path, exc)
+        return {"error": "Cannot read video metadata"}
 
 
 def get_pyav_version() -> str:
