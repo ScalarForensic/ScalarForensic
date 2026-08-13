@@ -6,8 +6,8 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 
 ## Commands
 
-- `uv run pytest -q` — full suite (559 passed / 5 skipped at `32f3bf9`, 2026-08-13, verified
-  clean tree; coverage 66.58% against the 65% floor), hermetic,
+- `uv run pytest -q` — full suite (771 passed / 5 skipped at `287880f`, 2026-08-13, verified
+  clean tree; coverage 70.22% against the 65% floor), hermetic,
   needs no Qdrant; the 5 skips need `SFN_TEST_QDRANT_URL` and are the only tests that can
   observe the face exclusion guarantee against a real store (CI runs them in a separate
   Qdrant service-container job)
@@ -51,6 +51,18 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
 
 - Web endpoints live in `src/scalar_forensic/web/routes/` (APIRouter per topic,
   shared helpers in `_shared.py`); `app.py` keeps only app setup, lifespan, `/`.
+  **Exception: two subsystems own their routers.** `faces/` and
+  `video_playback/` are self-contained packages that export a `router` from
+  their `__init__.py`, which `app.py` includes like any other. Video playback
+  is split `codecs.py` (container/codec classification and the mode decision),
+  `digest.py` (the source SHA-256 and the process-wide `HashCache` handle),
+  `rewrap.py` (the PyAV stream copy — *not* an encode), `cache.py` (the bounded
+  viewing-copy store) and `routes.py`. `routes/video.py` keeps only the
+  indexing side: `/api/video-frame` and `/api/video-timeline`. Spec:
+  `docs/specs/video-playback-transcode.md` §11.
+- Path-validating security controls get exactly one definition, in
+  `routes/_shared.py`: `_check_allowed_path` and `_resolve_video_path`. Never
+  re-implement either at a call site.
 - Pipeline logic is the package `src/scalar_forensic/web/pipeline/`; public API is
   re-exported in its `__init__.py` — import sites use `from scalar_forensic.web.pipeline import X`.
 - Frontend: the Alpine `sfn()` component is split into part files under

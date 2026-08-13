@@ -472,31 +472,63 @@ as "plugin shape: optional modality, not a framework".
 
 ```
 src/scalar_forensic/video_playback/
-├── __init__.py      public API — `router`
+├── __init__.py      public API — `router`                            [carved]
 ├── capability.py    hwaccel probe, pipeline selection + fingerprint (§6.1, §8)
-├── codecs.py        browser-safe allowlist, mode decision
+├── codecs.py        browser-safe allowlist, mode decision            [carved]
+├── digest.py        source SHA-256 + the process-wide HashCache handle [carved]
+├── rewrap.py        the PyAV stream copy — lossless, never an encode  [carved]
 ├── encode.py        chunk and full encode; one path, different -ss/-t
 ├── jobs.py          worker pool, queue, refcounts, cancellation, lifecycle (§10)
-├── cache.py         keys, leases, eviction, purge (§6)
+├── cache.py         keys, leases, eviction, purge (§6)               [carved]
 ├── audit.py         provenance + examiner record (§7.3), wrapping faces/ helpers
-└── routes.py        the APIRouter
+└── routes.py        the APIRouter                                    [carved]
 
 src/scalar_forensic/web/static/js/video_playback/player.js   (double-buffered)
 ```
+
+`[carved]` marks what exists as of the phase 1–3 carve; the rest arrive with
+their phases (§15).
+
+Two modules are additions to v1's list, ruled in during the carve:
+
+- **`digest.py`.** The source digest and its `HashCache` handle are neither
+  codec logic nor artifact-cache logic. Folding a *hash* cache into `cache.py`,
+  which is the *artifact* cache, is exactly the conflation §6.1 warns about. The
+  handle is a process-wide singleton over an open SQLite connection, so it has
+  to live in exactly one module and be imported as functions — never as the
+  `_hash_cache` global.
+- **`rewrap.py`.** §2's own table calls the rewrap "lossless rewrap … reused
+  unchanged": it is a PyAV stream copy, deliberately not an encode, and
+  `encode.py` is specified as the ffmpeg path. Keeping them apart is what stops
+  a later reader from treating the rewrap as an encode.
+
+`_stale_evidence_report` stays in `routes.py` until `audit.py` arrives in phase
+8; `audit.py` is not created early for one function.
 
 Honest caveat on the precedent: `faces/` is genuinely optional and env-gated;
 video playback is core UI on the default path, so "removable without archaeology"
 is a weaker claim here. Cohesion is the justification, not optionality.
 
 **Seams:** `app.py` includes the router; `config.py` gains `SFN_VIDEO_*`;
-`index.html` loads `player.js` before `app.js`. `_resolve_video_path`
-(`routes/video.py:36`) is **shared with `/api/video-frame` and
-`/api/video-timeline`** — v1's move list omitted it. It moves to
+`index.html` loads `player.js` before `app.js`. `_resolve_video_path` is
+**shared with `/api/video-frame`** — v1's move list omitted it. It moves to
 `routes/_shared.py` beside `_check_allowed_path`, since by the same
 one-implementation rule it is a security control.
 
+Correction to v1: `/api/video-timeline` does **not** call `_resolve_video_path`.
+It takes a `video_hash` only, validated with `re.fullmatch(r"[0-9a-f]{64}")`,
+and never touches a filesystem path. The four callers are `/api/video-frame` and
+the three playback routes. The move is still a two-module split and still
+correct; there is simply no call in the timeline handler to go looking for.
+
 `/api/video-frame` and `/api/video-timeline` stay in `routes/video.py`: they serve
 the indexing side, not playback.
+
+No compatibility re-exports are left behind in `routes/video.py`. The tests read
+private symbols off the module without patching, so a stale alias would turn a
+loud `AttributeError` into a silently wrong patch target; a missing name is the
+signal wanted. Patch targets are rebound per-module instead (`CLAUDE.md`'s first
+gotcha).
 
 **`CLAUDE.md` must be updated in the same PR as the carve**, or the checked-in
 convention is false for the life of that PR.
@@ -571,6 +603,10 @@ did not exist; the reviews were right that this is premature. Note it is not a
 pure move: `tests/test_video_endpoints.py` and `tests/test_video_playback.py`
 patch `scalar_forensic.web.routes.video.*` by name, and `CLAUDE.md`'s first gotcha
 is that patch targets are per-module.
+
+Done: phases 1–3 and the carve. In the event only `tests/test_video_playback.py`
+needed rewiring — all six of `test_video_endpoints.py`'s string targets belong to
+`/api/video-frame` and `/api/video-timeline`, which stay put.
 
 ---
 
