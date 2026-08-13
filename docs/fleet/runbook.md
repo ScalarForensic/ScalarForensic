@@ -1297,3 +1297,31 @@ via `cx f`); the operator caught my overrun by hand. c6 ordered to hand off item
 (at 186.3k) and cx q; its successor spawns as `com-c` per model policy. Successor manager
 `scalarforensic-cfm-m3` is live; full handoff:
 `docs/handoffs/scalarforensic-cfm-m2-20260813-121206.md`.
+
+## [ScalarForensic, cfm-m3, 2026-08-13] window opens — m2/c6 retired, com-c6 on UI items 3+4
+
+Successor to cfm-m2 (operator-caught at ~204k; handoff
+`docs/handoffs/scalarforensic-cfm-m2-20260813-121206.md`). Main `d6b238b`, bar
+**618 passed / 5 skipped at `e66fa78`** (shared checkout, models/ present; worktrees read
+N−1/6). Runbook ownership claimed by me after closing m2's window; c6 killed after `cx q`
+(all 5 UI-file rows released), m2's window closed, c7's dead row left for the next spawn
+to reap.
+
+- **Dispatched `scalarforensic-com-c6`** (Opus, per model policy — the `cfm-c` drift ends
+  here) on UI items 3+4: branch `ui/face-basket` (`1264006`), the 10 red wiring tests are
+  the TODO, index.html + style.css only. Briefed: shared-checkout branch fence, campaign
+  Qdrant `:6333` read-only, `.env` untouched, restart-gated features noted in PR body,
+  no 0.363 in controls, review-only faces stay vectorless.
+- **c4 verified items 1+2 live** in the operator's Chrome at `860bee5` (force-refetch,
+  all 200, 0 attributable console errors) — items 1+2 fully CLOSED.
+- **Pending with the operator** (not workers): (a) one batched sfn-web restart for
+  #123 (HEIC serving) + #124 (compare/point_id endpoints) — until then HEIC hits 400 and
+  the new endpoints 404 on the live server; c4 verifies both after. (b) `sfn_tags` drop
+  one-liner `curl -X DELETE http://localhost:6333/collections/sfn_tags` (ruled yes,
+  permission-blocked for managers, not routed around).
+- **Queued, unassigned** (carried): stale-observation prompt should name files; Kalman
+  ETA line removal; relabel all-frames-in-run-duplicate videos (`cli.py:1762-1767`);
+  Qdrant client 1.19.0 / server 1.17.1 skew; optional full-corpus projection re-bench at
+  `b4582a9`.
+- Known-broken tooling (m2, filed high): `cx w` misreads live sessions as dead/CTX 0 —
+  no automatic retirement nudges; size workers off `cx s` by hand.
