@@ -89,7 +89,6 @@
       this.queryFacesLoading = true;
       this.queryFacesError = '';
       this.queryFaces = [];
-      this.selectedQueryFaceIndices = [];
       this.queryFacesTruncated = false;
       try {
         const fd = new FormData();
@@ -105,14 +104,17 @@
         this.queryFacesTruncated = body.truncated === true;
         // Pre-select every searchable face: the examiner de-selects, rather than
         // starting from an empty selection that looks like "no faces found".
-        this.selectedQueryFaceIndices = this.queryFaces
-          .filter(f => f.searchable).map(f => f.index);
+        // Query rows always describe the *current* file — stale ones would
+        // silently probe with another image's faces.  Hit rows persist.
+        this.faceBasket = this.faceBasket.filter(r => r.side !== 'query');
+        for (const f of this.queryFaces) if (f.searchable) this._basketAddQuery(f);
       } catch (e) {
         this.queryFacesError = String(e);
       } finally {
         this.queryFacesLoading = false;
       }
       this.runFaceSearch();
+      this.runFaceCompare(this.selectedHit?.image_hash);
     },
 
     queryFaceChipUrl(index) {
@@ -123,28 +125,92 @@
       return this.selectedQueryFaceIndices.includes(index);
     },
 
+    // ── Selection basket (change-set 2026-08-13 item 3) ───────────────────
+    // Ctrl+click on a chip *selects* (idempotent — deselection lives on the
+    // basket row, removal on ctrl+click of the row).  Both add-paths refuse a
+    // review-only face: it has no vector, so it can never be a probe, and a
+    // basket row that could not be searched would misstate the selection.
+    _basketAddQuery(face) {
+      const key = `q:${this.selectedFileId}:${face.index}`;
+      const row = this.faceBasket.find(r => r.key === key);
+      if (row) { row.selected = true; return; }
+      this.faceBasket.push({
+        key, side: 'query', fileId: this.selectedFileId, faceIndex: face.index,
+        pointId: null, imageHash: null,
+        thumbUrl: this.queryFaceChipUrl(face.index),
+        reviewUrl: this.queryFaceChipUrl(face.index),
+        label: `query · face ${face.index + 1}`,
+        selected: true,
+      });
+    },
+
     toggleQueryFace(face) {
       if (!face.searchable) return;   // review-only faces have no vector
-      const i = this.selectedQueryFaceIndices.indexOf(face.index);
-      if (i === -1) this.selectedQueryFaceIndices.push(face.index);
-      else this.selectedQueryFaceIndices.splice(i, 1);
+      this._basketAddQuery(face);
+      this.runFaceSearch();
+    },
+
+    toggleHitFace(face) {
+      if (this.faceIsReviewOnly(face)) return;   // vectorless, never a probe
+      const pid = String(face.id);
+      const key = `p:${pid}`;
+      const row = this.faceBasket.find(r => r.key === key);
+      if (row) { row.selected = true; }
+      else {
+        this.faceBasket.push({
+          key, side: 'hit', fileId: null, faceIndex: null,
+          pointId: pid, imageHash: face.image_hash ?? this.selectedHit?.image_hash ?? null,
+          thumbUrl: this.faceThumbUrl(face.review_chip_hash),
+          reviewUrl: this.faceReviewUrl(face.review_chip_hash),
+          label: `match · ${(face.image_hash ?? this.selectedHit?.image_hash ?? pid).slice(0, 8)}`,
+          selected: true,
+        });
+      }
+      this.runFaceSearch();
+    },
+
+    hitFaceSelected(face) {
+      const row = this.faceBasket.find(r => r.key === `p:${String(face.id)}`);
+      return row ? row.selected : false;
+    },
+
+    basketToggleRow(row) {
+      row.selected = !row.selected;
+      this.runFaceSearch();
+    },
+
+    basketRemoveRow(row) {
+      const i = this.faceBasket.indexOf(row);
+      if (i !== -1) this.faceBasket.splice(i, 1);
+      this.runFaceSearch();
+    },
+
+    basketClear() {
+      this.faceBasket = [];
       this.runFaceSearch();
     },
 
     selectAllQueryFaces() {
-      this.selectedQueryFaceIndices = this.queryFaces
-        .filter(f => f.searchable).map(f => f.index);
+      for (const f of this.queryFaces) if (f.searchable) this._basketAddQuery(f);
       this.runFaceSearch();
     },
 
     clearQueryFaceSelection() {
-      this.selectedQueryFaceIndices = [];
+      for (const r of this.faceBasket) {
+        if (r.side === 'query' && r.fileId === this.selectedFileId) r.selected = false;
+      }
       this.runFaceSearch();
     },
 
     // ── Cross-file face search ────────────────────────────────────────────
+    // Aggregated many-to-many from the basket: every selected face — session
+    // query faces and stored points alike — probes the collection, one kNN
+    // per probe, and the backend collapses to the best-scoring observation
+    // per medium.  Hit order is therefore max-score-per-hit.
     async runFaceSearch() {
-      if (!this.facesAvailable || !this.selectedQueryFaceIndices.length) {
+      const idxs = this.selectedQueryFaceIndices;
+      const pids = this.selectedFacePointIds;
+      if (!this.facesAvailable || (!idxs.length && !pids.length)) {
         this.faceHits = [];
         this.faceMatchScores = {};
         return;
@@ -155,7 +221,8 @@
         const fd = new FormData();
         fd.append('session_id', this.sessionId);
         fd.append('file_id', this.selectedFileId);
-        fd.append('face_indices', this.selectedQueryFaceIndices.join(','));
+        fd.append('face_indices', idxs.join(','));
+        fd.append('point_ids', pids.join(','));
         fd.append('limit', this.faceLimit);
         fd.append('threshold', this.faceThreshold);
         fd.append('exact', this.faceExactSearch ? 'true' : 'false');
@@ -177,6 +244,52 @@
       } finally {
         this.faceSearchLoading = false;
       }
+    },
+
+    // ── Pairwise compare against the selected match (item 3d) ─────────────
+    // Auto-runs on match selection.  The response is the full matrix of raw
+    // cosines over comparable faces; the operator's faceCrossThreshold floor
+    // is applied client-side in faceCrossHighlight, so moving the slider
+    // never re-queries.  Against a server without the endpoint (deployed
+    // statics before restart) this fails soft: no highlight, error shown.
+    async runFaceCompare(imageHash) {
+      this.faceComparePairs = [];
+      this.faceCompareCounts = null;
+      this.faceCompareError = '';
+      if (!this.facesAvailable || !this.sessionId || !this.selectedFileId || !imageHash) return;
+      if (!this.queryFaces.some(f => f.searchable)) return;
+      this.faceCompareLoading = true;
+      try {
+        const fd = new FormData();
+        fd.append('session_id', this.sessionId);
+        fd.append('file_id', this.selectedFileId);
+        fd.append('image_hash', imageHash);
+        const resp = await fetch('/api/faces/compare', { method: 'POST', body: fd });
+        const body = await resp.json();
+        if (!resp.ok) {
+          this.faceCompareError = body.detail || 'face compare unavailable';
+          return;
+        }
+        this.faceComparePairs = Array.isArray(body.pairs) ? body.pairs : [];
+        this.faceCompareCounts = {
+          queryComparable: body.n_query_comparable,
+          queryReviewOnly: body.n_query_review_only,
+          matchComparable: body.n_match_comparable,
+          matchReviewOnly: body.n_match_review_only,
+        };
+      } catch (e) {
+        this.faceCompareError = String(e);
+      } finally {
+        this.faceCompareLoading = false;
+      }
+    },
+
+    faceCrossMatched(face) {
+      return this.faceCrossHighlight.pointIds.has(String(face.id));
+    },
+
+    queryFaceCrossMatched(index) {
+      return this.faceCrossHighlight.queryIndices.has(index);
     },
 
     // ── Per-model explainer surfaces (face pair) ──────────────────────────
