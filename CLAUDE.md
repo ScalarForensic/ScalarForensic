@@ -6,12 +6,14 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 
 ## Commands
 
-- `uv run pytest -q` — full suite (771 passed / 5 skipped at `f6cef02`, 2026-08-13, verified
-  clean tree; coverage 70.22% against the 65% floor — measured *after* the
-  `video_playback/` carve, so it describes the layout below, not the one before it), hermetic,
-  needs no Qdrant; the 5 skips need `SFN_TEST_QDRANT_URL` and are the only tests that can
-  observe the face exclusion guarantee against a real store (CI runs them in a separate
-  Qdrant service-container job)
+- `uv run pytest -q` — full suite (821 passed / 5 skipped at `57246c4`, 2026-08-13, verified
+  clean tree; coverage 70.99% against the 65% floor — measured *after* video-playback
+  phase 4, so it describes the layout below), needs no Qdrant; the 5 skips need
+  `SFN_TEST_QDRANT_URL` and are the only tests that can observe the face exclusion
+  guarantee against a real store (CI runs them in a separate Qdrant service-container job).
+  **No longer fully hermetic:** the video encode tests need `ffmpeg` on `PATH`. Without it
+  they skip locally and **fail** in CI (`CI` env var set) — a skip is how they went quiet
+  for a day, so absence in CI is an error, not a shrug.
 - `uv run ruff check src tests scripts` and `uv run ruff format --check src tests scripts` — CI runs exactly these
 - `./run.sh sfn-web` — start web UI (wrapper exports venv CUDA libs); boots fine without
   Qdrant and degrades to exact-hash-only mode
@@ -57,10 +59,22 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
   their `__init__.py`, which `app.py` includes like any other. Video playback
   is split `codecs.py` (container/codec classification and the mode decision),
   `digest.py` (the source SHA-256 and the process-wide `HashCache` handle),
-  `rewrap.py` (the PyAV stream copy — *not* an encode), `cache.py` (the bounded
-  viewing-copy store) and `routes.py`. `routes/video.py` keeps only the
-  indexing side: `/api/video-frame` and `/api/video-timeline`. Spec:
+  `rewrap.py` (the PyAV stream copy — *not* an encode), `capability.py` (the
+  ffmpeg probe and the pipeline fingerprint), `encode.py` (the ffmpeg re-encode
+  — *not* a stream copy), `cache.py` (the bounded viewing-copy store) and
+  `routes.py`. `routes/video.py` keeps only the indexing side:
+  `/api/video-frame` and `/api/video-timeline`. Spec:
   `docs/specs/video-playback-transcode.md` §11.
+- **`rewrap.py` and `encode.py` must never merge.** A rewrap is a PyAV stream
+  copy whose output bitstream is bit-identical to its input; an encode is lossy,
+  tone-mapped and carries the §7.4 disclosure. Keeping them apart is what stops
+  a later reader treating a re-encode as a lossless copy in an evidence viewer.
+- **Everything that changes a rendered pixel is a field of
+  `capability.Pipeline`, and every field is hashed into the cache key.** No third
+  answer: a pixel-affecting setting outside the fingerprint gives one cache entry
+  two pictures under one label. A test pins the field set, and `describe()` (the
+  §7.2 label) derives from the same fields, so a new field cannot change the key
+  while the label keeps describing the old pipeline. Spec §6.1.
 - Path-validating security controls get exactly one definition, in
   `routes/_shared.py`: `_check_allowed_path` and `_resolve_video_path`. Never
   re-implement either at a call site.
@@ -75,6 +89,21 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
 
 ## Gotchas
 
+- **`ffmpeg` is a declared external dependency** (spec §8), installed by CI and the
+  Dockerfile, documented in `INSTALL.md`. PyAV covers indexing and the rewrap; only the
+  re-encode shells out. The build needs `--enable-libzimg` for `zscale`/`tonemap` — without
+  it an HDR source is *refused*, not encoded, because 8-bit output still tagged `bt2020`/HLG
+  is the defect §3.1 measured. The capability probe runs a real six-frame
+  decode→tone-map→encode→mux; never "fix" it into reading `ffmpeg -encoders`, which is the
+  false positive §8 exists to reject.
+- **The GPU is used for the *encoder* only.** `-hwaccel_output_format cuda` bypasses
+  ffmpeg's autorotate and every portrait clip comes out on its side (§3.1, measured).
+  Decode and filtering stay in software; `tests/test_video_playback.py` pins it with a
+  fixture carrying a real display matrix, and adding `-noautorotate` fails that test.
+- ffmpeg 6 **cannot write rotation side data on an output stream** (`-metadata:s:v rotate=`
+  is gone), so the generated HDR fixture gets a display matrix patched into its `tkhd` box.
+  Do not replace that with a weakened assertion — the rotation test is one of the two §14
+  tests the whole encode path exists to keep honest.
 - `unittest.mock.patch` targets are per-module: patch where the name is *used*
   (e.g. `scalar_forensic.web.routes.files.Settings`, `...pipeline.query.QdrantClient`),
   not the package that re-exports it.
