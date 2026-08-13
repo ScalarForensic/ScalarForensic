@@ -33,6 +33,7 @@ from scalar_forensic.embedder import (
     write_thumbnail,
 )
 from scalar_forensic.indexer import Indexer
+from scalar_forensic.manifest import input_file_entry, write_run_manifest
 from scalar_forensic.scanner import _HEIF_AVAILABLE, scan_all_files
 from scalar_forensic.video import (
     extract_frames,
@@ -370,7 +371,11 @@ def index(
     report: Path | None = typer.Option(
         None,
         "--report",
-        help="CSV report output path (default: data/reports/sfn_ingestion_<timestamp>.csv)",
+        help=(
+            "CSV report output path "
+            "(default: <SFN_REPORT_DIR>/sfn_ingestion_<timestamp>.csv, "
+            "SFN_REPORT_DIR defaults to data/reports)"
+        ),
     ),
     allow_online: bool = typer.Option(
         False,
@@ -500,7 +505,8 @@ def index(
         raise typer.Exit(1)
 
     # Resolve the CSV report path early so the user knows where it will land.
-    csv_path = report or Path("data/reports") / f"sfn_ingestion_{datetime.now():%Y%m%d_%H%M%S}.csv"
+    # The per-run manifest is written next to it (see scalar_forensic.manifest).
+    csv_path = report or settings.report_dir / f"sfn_ingestion_{datetime.now():%Y%m%d_%H%M%S}.csv"
 
     # Build list of (use_sscd, model_name, vector_name) for each requested backend.
     models_to_run: list[tuple[bool, str, str]] = []
@@ -1129,6 +1135,33 @@ def index(
                 + f"  │  {len(_videos_to_process):,} to process"
                 f"  │  {len(video_paths) - len(_pre_hashes):,} read errors"
             )
+
+    # ── Per-run manifest ──────────────────────────────────────────────────────
+    # Config snapshot + model hashes + discovered input list, written before any
+    # embedding or upsert.  Placed after the hash pass so every readable input
+    # already carries its sha256; unreadable/unsupported files appear as
+    # path+size only.  Records at this point hold only *input* files — video
+    # frames are derived later, during slicing, and belong in Qdrant payloads,
+    # not here.
+    _manifest_models: dict[str, dict] = {
+        idx.vector_name: {
+            "model_name": emb.model_name,
+            "model_hash": mh,
+            "embedding_dim": emb.embedding_dim,
+        }
+        for emb, idx, mh in specs
+    }
+    if face_pipeline is not None:
+        _manifest_models["faces"] = face_pipeline.cfg.to_payload()
+    _manifest_path = write_run_manifest(
+        csv_path,
+        settings=settings,
+        target_collection=target_collection,
+        input_root=resolved_input,
+        files=[input_file_entry(p, sha256=rec.sha256 or None) for p, rec in records.items()],
+        models=_manifest_models,
+    )
+    typer.echo(f"Run manifest → {_manifest_path}")
 
     # ── Video slicing pass ────────────────────────────────────────────────────
     # Extract frames from each video that needs processing, save each as a JPEG
