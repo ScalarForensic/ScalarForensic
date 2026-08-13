@@ -116,6 +116,60 @@ def _fmt_duration(seconds: float) -> str:
     return f"{h}h {m:02d}m {s:02d}s"
 
 
+def _progress_bar(pct: float, width: int = 28) -> str:
+    """Unicode block-element progress bar."""
+    filled = round(width * min(max(pct, 0.0), 100.0) / 100)
+    return "█" * filled + "░" * (width - filled)
+
+
+class _RateTracker:
+    """Smoothed throughput estimate driving the run-progress line. Θ(1) per update.
+
+        x̂ₜ = x̂ₜ₋₁ + α(zₜ − x̂ₜ₋₁),  α = ½,  x̂₁ = z₁
+
+    where zₜ = items / elapsed_s for one batch (or one block of frames).
+
+    The previous version of this class was a scalar Kalman filter that also
+    published a ±1σ band around the ETA. That band was not a calibrated
+    uncertainty: Q and R were hand-picked constants, so at steady state the
+    filter is exactly this α = ½ EWMA and √P is a function of those constants,
+    not of the run. Reporting it as a confidence interval collides with the
+    project rule against displaying uncalibrated numbers (precedent: the raw
+    face cosine, `docs/specs/face-pipeline.md` §10), so the band is gone and
+    the ETA is labelled for what it is — an extrapolation at the current rate.
+    """
+
+    _ALPHA: float = 0.5  # smoothing factor: half old estimate, half new observation
+
+    def __init__(self) -> None:
+        self._x: float | None = None  # x̂: current rate estimate (items/s)
+        self._n: int = 0  # number of updates applied
+
+    def update(self, n_items: int, elapsed_s: float) -> None:
+        """Incorporate one batch/block observation."""
+        if elapsed_s <= 0 or n_items <= 0:
+            return
+        z = n_items / elapsed_s
+        self._n += 1
+        self._x = z if self._x is None else self._x + self._ALPHA * (z - self._x)
+
+    @property
+    def rate(self) -> float | None:
+        """x̂ₜ — current smoothed rate (items/s), or None before the first update."""
+        return self._x
+
+    def eta(self, remaining: int) -> float | None:
+        """Seconds to finish `remaining` items at the current rate.
+
+        None until two observations exist — a single batch is not a rate the
+        display should extrapolate from. No error bound is returned: this is a
+        straight-line extrapolation, not a prediction with a known spread.
+        """
+        if self._x is None or self._x <= 0 or self._n < 2:
+            return None
+        return remaining / self._x
+
+
 def _write_csv(records: dict[Path, "_FileRecord"], csv_path: Path) -> None:
     try:
         csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -685,6 +739,7 @@ def index(
     total_bytes = 0
     batch_num = 0
     imgs_processed_so_far = 0
+    tracker = _RateTracker()
 
     # ── Mutable containers shared between slicing pass and _finish_batch ─────
     # Pre-declared so the closure captures them by reference; filled later.
@@ -904,6 +959,7 @@ def index(
             # Dedup time (~ms) is intentionally excluded.
             wall_s = ctx.read_s + ctx.hash_s + (perf_counter() - t_finish)
             n_items = len(ctx.path_hash_pairs)
+            tracker.update(n_items, wall_s)
             items_str = (
                 f"{n_plain_in_batch} imgs + {n_frames_in_batch} frames"
                 if n_frames_in_batch > 0
@@ -920,7 +976,22 @@ def index(
 
             if ctx.batch_num % 10 == 0 and total_image_count > 0:
                 pct = ctx.imgs_at_batch / total_image_count * 100
-                typer.echo(f"  ── {ctx.imgs_at_batch:,} / {total_image_count:,} files ({pct:.1f}%)")
+                bar = _progress_bar(pct)
+                sep = "─" * 68
+                eta_s = tracker.eta(total_image_count - ctx.imgs_at_batch)
+                rate_str = f"{tracker.rate:.1f} img/s" if tracker.rate is not None else "— img/s"
+                eta_str = (
+                    f"  ·  ~{_fmt_duration(eta_s)} remaining at current rate"
+                    if eta_s is not None
+                    else ""
+                )
+                typer.echo(
+                    f"  {sep}\n"
+                    f"  [{bar}]  {ctx.imgs_at_batch:,} / {total_image_count:,}"
+                    f"  ({pct:.1f}%)\n"
+                    f"  {rate_str}{eta_str}\n"
+                    f"  {sep}"
+                )
 
     def _timed_preprocess(
         paths: "list[Path]",
@@ -1220,8 +1291,9 @@ def index(
         if _total_expected_frames > 0:
             typer.echo(f"  ~{_total_expected_frames:,} frames estimated across {_n_vids} video(s)")
 
+        _slice_tracker = _RateTracker()
         _slice_total_frames = 0  # running total across all videos
-        _SLICE_BLOCK = 50  # frames per progress line
+        _SLICE_BLOCK = 50  # frames per rate update + progress line
 
         _video_records_to_upsert: list[dict] = []
 
@@ -1237,7 +1309,7 @@ def index(
             _t_video_start = perf_counter()
             _t_block_start = perf_counter()
             _block_frames = 0
-            _block_count = 0  # complete blocks emitted — for progress-line cadence
+            _block_count = 0  # how many complete blocks emitted — for progress-box cadence
 
             try:
                 for _frame in extract_frames(
@@ -1300,6 +1372,7 @@ def index(
 
                     if _block_frames >= _SLICE_BLOCK:
                         _block_s = perf_counter() - _t_block_start
+                        _slice_tracker.update(_block_frames, _block_s)
                         _block_frames = 0
                         _block_count += 1
                         _t_block_start = perf_counter()
@@ -1317,13 +1390,28 @@ def index(
                             f"  │  {_fmt_rate(_SLICE_BLOCK, _block_s, 'fps')}"
                         )
 
-                        # Run-wide frame counter every 5 blocks (= 250 frames);
+                        # Run-wide progress box every 5 blocks (= 250 frames);
                         # the total is an estimate from the probed durations.
                         if _block_count % 5 == 0 and _total_expected_frames > 0:
+                            _remaining = max(_total_expected_frames - _slice_total_frames, 0)
                             _pct = _slice_total_frames / _total_expected_frames * 100
+                            _bar = _progress_bar(_pct)
+                            _sep = "─" * 68
+                            _eta_s = _slice_tracker.eta(_remaining)
+                            _rate = _slice_tracker.rate
+                            _rate_str = f"{_rate:.1f} fps" if _rate is not None else "— fps"
+                            _eta_str = (
+                                f"  ·  ~{_fmt_duration(_eta_s)} remaining at current rate"
+                                if _eta_s is not None
+                                else ""
+                            )
                             typer.echo(
-                                f"  ── {_slice_total_frames:,} / ~{_total_expected_frames:,}"
-                                f" frames ({_pct:.1f}%)"
+                                f"  {_sep}\n"
+                                f"  [{_bar}]  {_slice_total_frames:,}"
+                                f" / ~{_total_expected_frames:,}"
+                                f"  ({_pct:.1f}%)\n"
+                                f"  {_rate_str}{_eta_str}\n"
+                                f"  {_sep}"
                             )
 
             except RuntimeError as _exc:
@@ -1331,6 +1419,11 @@ def index(
                 records[_vp].status = _S_FAIL_PRE
                 records[_vp].reason = f"frame extraction error: {_exc}"
                 continue
+
+            # Flush any remaining sub-block frames into the tracker.
+            if _block_frames > 0:
+                _block_s = perf_counter() - _t_block_start
+                _slice_tracker.update(_block_frames, _block_s)
 
             _video_s = perf_counter() - _t_video_start
             typer.echo(
@@ -1512,10 +1605,7 @@ def index(
         )
         typer.echo(
             f"\nEmbedding {item_desc}"
-            "  ·  ETA  x̂ₜ = x̂ₜ⁻ + Kₜ(zₜ − x̂ₜ⁻)"
-            "  ·  Kₜ = Pₜ⁻(Pₜ⁻ + R)⁻¹"
-            "  ·  σ_η = N_rem · √Pₜ / x̂²"
-            "  [Θ(1) Kalman]"
+            "  ·  progress every 10 batches; ETA extrapolates the current smoothed rate"
         )
 
     with ThreadPoolExecutor(max_workers=1) as _pre_pool:
