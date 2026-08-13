@@ -1221,6 +1221,8 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   flex-shrink: 0;
 }
 .hit-frame-scores { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+/* Wrapper that keeps each mode's badge and score pill one x-for root. */
+.hit-frame-score { display: inline-flex; align-items: center; gap: 3px; }
 
 .no-hits-msg {
   display: flex;

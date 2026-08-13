@@ -1705,11 +1705,17 @@
                       <span class="hit-frame-tc"
                             x-text="`t\u202f=\u202f${(mf.timecode_ms/1000).toFixed(2)}s`"></span>
                       <span class="hit-frame-scores">
+                        <!-- One root per x-for: Alpine renders only the first
+                             element of a multi-root template and drops the rest,
+                             which silently hid the score value behind the mode
+                             badge on every matched frame. -->
                         <template x-for="[mode, score] in Object.entries(mf.scores)" :key="mode">
-                          <span :class="`badge badge-${mode}`" style="font-size:9px"
-                                x-text="mode.slice(0,3).toUpperCase()"></span>
-                          <span :class="`pill-score pill-score-${mode}`" style="font-size:10px"
-                                x-text="score.toFixed(3)"></span>
+                          <span class="hit-frame-score">
+                            <span :class="`badge badge-${mode}`" style="font-size:9px"
+                                  x-text="mode.slice(0,3).toUpperCase()"></span>
+                            <span :class="`pill-score pill-score-${mode}`" style="font-size:10px"
+                                  x-text="score.toFixed(3)"></span>
+                          </span>
                         </template>
                       </span>
                     </div>
