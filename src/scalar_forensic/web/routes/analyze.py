@@ -165,7 +165,10 @@ async def query(
 
     settings = Settings()
     mode_list = [m.strip() for m in modes.split(",") if m.strip()]
-    results, embedding_models = query_session(
+    # Sync Qdrant I/O (potentially one query per video frame) — run in a
+    # thread so a slider drag never stalls other examiners' requests.
+    results, embedding_models = await asyncio.to_thread(
+        query_session,
         session,
         mode_list,
         threshold_altered,
