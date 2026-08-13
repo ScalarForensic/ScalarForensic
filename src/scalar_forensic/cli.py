@@ -267,6 +267,25 @@ def _dedup_by_hash(
     return needs_per_spec, any_needs, n_run_dups, n_all_indexed
 
 
+def _stale_path_listing(stale_points: "list[dict]", limit: int = 20) -> "list[str]":
+    """Indented lines naming the files a stale-observation set belongs to.
+
+    One line per distinct source file, most-affected first, so the operator
+    deciding whether to delete sees *which* evidence is involved rather than a
+    bare total.  Long listings are capped at *limit* files and the remainder is
+    reported as a count.
+    """
+    counts: dict[str, int] = {}
+    for sp in stale_points:
+        src = sp.get("source_path") or "(source file unknown)"
+        counts[src] = counts.get(src, 0) + 1
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    lines = [f"    {n:>4} × {src}" for src, n in ordered[:limit]]
+    if len(ordered) > limit:
+        lines.append(f"    … and {len(ordered) - limit:,} more file(s)")
+    return lines
+
+
 def _video_status(
     n_total: int, n_indexed: int, n_already: int, n_run_dup: int
 ) -> "tuple[str, str]":
@@ -1552,9 +1571,18 @@ def index(
         # observation whose bbox moved because the detector changed — in
         # both cases the old point is still there, still carrying its old
         # provenance, and if it was embedded it is still searchable.
-        _stale_points.extend(
-            face_pipeline.store.stale_face_points(_sha, {str(pt.id) for pt in _fres.points})
+        # Tag each stale point with the file it came from while that is still
+        # known here — the stored payload fields fetched for a stale point do
+        # not include a path, and the end-of-run prompt has to name the files
+        # whose observations would be deleted, not just count them.  For a
+        # video frame the operator's file is the video, not the frame JPEG.
+        _stale_here = face_pipeline.store.stale_face_points(
+            _sha, {str(pt.id) for pt in _fres.points}
         )
+        _stale_src = (_vmeta or {}).get("video_path") or str(_p)
+        for _sp in _stale_here:
+            _sp["source_path"] = _stale_src
+        _stale_points.extend(_stale_here)
         face_pipeline.store.upsert_faces(_fres.points)
         # Every review-only point, not only genuinely demoted ones:
         # delete_vectors is idempotent and ignores absent vectors, so
@@ -1883,6 +1911,11 @@ def index(
                 "  by config: "
                 + ", ".join(f"{_n} under {_c[:12]}" for _c, _n in sorted(_by_cfg.items()))
             )
+            _stale_lines = _stale_path_listing(_stale_points)
+            _n_stale_files = len({_sp.get("source_path") for _sp in _stale_points})
+            typer.echo(f"  by file ({_n_stale_files:,}):")
+            for _line in _stale_lines:
+                typer.echo(_line)
             if _by_status.get("embedded"):
                 typer.echo(
                     "  Embedded ones are still returned by similarity search, under thresholds "

@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
-from scalar_forensic.cli import faces_app, index
+from scalar_forensic.cli import _stale_path_listing, faces_app, index
 from scalar_forensic.faces.store import PurgeResult
 
 runner = CliRunner()
@@ -250,6 +250,39 @@ def test_stale_observations_are_shown_before_anything_is_deleted(run_faces_cli):
     assert "1 embedded" in result.output and "1 review-only" in result.output
     assert "oldcfg" in result.output
     pipeline.store.delete_face_points.assert_not_called()
+
+
+def test_stale_prompt_names_the_affected_file(run_faces_cli):
+    # A count alone does not tell the operator which evidence a deletion would
+    # touch; the prompt has to name the files.
+    result, _, _pipeline = run_faces_cli(
+        detected=1, kept=1, stale=[_stale("s1"), _stale("s2")], confirm="n\n"
+    )
+    assert "by file (1)" in result.output
+    assert "2 × " in result.output
+    assert "media/a.jpg" in result.output.replace("\n", "")
+
+
+def test_stale_path_listing_groups_and_orders_by_file():
+    points = [
+        {"source_path": "/ev/b.jpg"},
+        {"source_path": "/ev/a.mov"},
+        {"source_path": "/ev/a.mov"},
+    ]
+    assert _stale_path_listing(points) == ["       2 × /ev/a.mov", "       1 × /ev/b.jpg"]
+
+
+def test_stale_path_listing_caps_long_listings():
+    points = [{"source_path": f"/ev/{i:03d}.jpg"} for i in range(50)]
+    lines = _stale_path_listing(points, limit=3)
+    assert len(lines) == 4
+    assert lines[-1] == "    … and 47 more file(s)"
+
+
+def test_stale_path_listing_marks_points_without_a_known_source():
+    # Never silently drop a point from the listing: the count above it and the
+    # deletion below it both include it.
+    assert _stale_path_listing([{"id": "s1"}]) == ["       1 × (source file unknown)"]
 
 
 def test_declining_leaves_the_stale_observations_in_place(run_faces_cli):
