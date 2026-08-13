@@ -81,10 +81,33 @@ directories** (e.g. one mount) if you split them:
 | `SFN_THUMBNAIL_DIR` | `data/thumbnails` | thumbnails written during indexing, served at `/api/thumbnail/…` |
 | `SFN_FRAME_STORE_DIR` | `data/frames` | extracted video frames, source for thumbnail regeneration |
 | `SFN_HASH_CACHE_PATH` | `data/hash_cache.db` | SHA-256 cache keyed by (path, mtime, size) — path-specific, do not share between machines |
+| `SFN_VIDEO_CACHE_DIR` | `data/video_cache` | viewing copies of source videos, written by `sfn-web` on demand — see below |
+| `SFN_VIDEO_CACHE_MAX_BYTES` | `8589934592` (8 GiB) | size ceiling for that directory; `0` = no ceiling |
 | ingestion reports | `data/reports/` | per-run CSV reports from `sfn index` |
 
 Everything else (collections, tags, reference material) lives in Qdrant and
 moves with it.
+
+### Playback viewing copies
+
+Playing a source video in the browser needs a container the browser can open.
+QuickTime `.MOV` above all is not, so `sfn-web` losslessly **rewraps** it into
+MP4 on first playback and parks the result in `SFN_VIDEO_CACHE_DIR`, keyed by
+the SHA-256 of the source file. Streams are copied bit for bit — nothing here
+is a re-encode, and nothing here is an evidential artifact: the original file
+and the stored frame JPEGs (`SFN_FRAME_STORE_DIR`) stay authoritative. The
+directory is a cache and can be deleted at any time; it refills on demand.
+
+- It is written by `sfn-web`, not by indexing, so it needs to be writable on
+  the application host — but unlike the tables above it does **not** have to be
+  shared with an indexing machine.
+- After each new rewrap the least recently served copies are deleted until the
+  total fits `SFN_VIDEO_CACHE_MAX_BYTES`. Set it to `0` to lift the ceiling;
+  a negative value is refused at startup.
+- Set `SFN_VIDEO_CACHE_DIR=` (empty) to disable rewrapping entirely. Videos
+  already in a browser-playable container still play; the rest offer no
+  playback rather than writing a viewing copy — the right setting where the
+  case policy forbids derived media on disk.
 
 ## Multi-user limits (web UI)
 
