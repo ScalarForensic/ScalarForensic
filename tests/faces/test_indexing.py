@@ -1,4 +1,7 @@
 import io
+import os
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -6,7 +9,12 @@ import pytest
 from PIL import Image
 
 from scalar_forensic.faces.chips import chip_paths, review_chip_paths
-from scalar_forensic.faces.indexing import FacePipeline, decode_shared
+from scalar_forensic.faces.indexing import (
+    DEFAULT_FACE_WORKERS,
+    FacePipeline,
+    decode_shared,
+    process_media_threaded,
+)
 from scalar_forensic.faces.store import FACE_VECTOR_NAME
 from scalar_forensic.faces.types import FaceDetection
 
@@ -498,3 +506,146 @@ def test_face_marker_skip_set_is_honoured_on_both_paths(inloop_env):
     calls = pipeline.process_image.call_args_list
     assert len(calls) == 1  # only blue.png is unmarked
     assert calls[0].kwargs["image_hash"] not in {green_sha, red_sha}
+
+
+# ── Residual-pass threading (efficiency audit 2026-08-13 §4, fix 1) ──────────
+# The residual pass fans decode+detect+embed out over a thread pool.  YuNet is
+# not thread-safe, so each worker thread must build its own detector; the
+# embedder session is shared and its embed()+embedding_norms read must be
+# serialised; every yielded result reaches the caller on the calling thread.
+
+
+class _ThreadDetector:
+    """Fake detector recording which threads call it; optional rendezvous."""
+
+    def __init__(self, detections, barrier=None):
+        self._detections = detections
+        self._barrier = barrier
+        self.threads: set[int] = set()
+        self.n_dropped_noncanonical = 0
+
+    def detect(self, img):
+        self.threads.add(threading.get_ident())
+        if self._barrier is not None:
+            try:
+                self._barrier.wait(timeout=5)
+            except threading.BrokenBarrierError:
+                pass
+        return list(self._detections)
+
+
+class _SerialCheckingEmbedder:
+    """Flags overlapping embed() calls; norms are per-call instance state."""
+
+    def __init__(self):
+        self._guard = threading.Lock()
+        self._active = 0
+        self.overlap = False
+        self.embedding_norms = np.empty(0, np.float32)
+
+    def embed(self, crops):
+        with self._guard:
+            self._active += 1
+            if self._active > 1:
+                self.overlap = True
+        time.sleep(0.005)
+        self.embedding_norms = np.full(len(crops), 21.7, np.float32)
+        out = np.eye(512, dtype=np.float32)[: len(crops)]
+        with self._guard:
+            self._active -= 1
+        return out
+
+
+def _media_jobs(tmp_path, n):
+    jobs = []
+    for i in range(n):
+        p = tmp_path / f"m{i}.png"
+        p.write_bytes(_img_bytes())
+        jobs.append((p, f"sha-{i}", None))
+    return jobs
+
+
+def test_threaded_results_arrive_in_job_order_with_correct_attribution(tmp_path):
+    pipeline = _pipeline([])
+    pipeline.detector_factory = lambda: _ThreadDetector([_det()])
+    jobs = _media_jobs(tmp_path, 6)
+    jobs[0] = (jobs[0][0], jobs[0][1], {"video_hash": "vh0", "frame_timecode_ms": 42})
+
+    out = list(process_media_threaded(pipeline, jobs, max_workers=3))
+
+    assert [(p, sha, vmeta) for p, sha, vmeta, _ in out] == jobs
+    for _p, sha, _vmeta, res in out:
+        assert not isinstance(res, Exception)
+        assert res.n_kept == 1
+        assert res.points[0].payload["image_hash"] == sha
+    assert out[0][3].points[0].payload["video_hash"] == "vh0"
+    assert out[0][3].points[0].payload["frame_timecode_ms"] == 42
+
+
+def test_each_detector_instance_is_used_by_exactly_one_thread(tmp_path):
+    barrier = threading.Barrier(2)
+    created: list[_ThreadDetector] = []
+
+    def factory():
+        d = _ThreadDetector([_det()], barrier=barrier)
+        created.append(d)
+        return d
+
+    pipeline = _pipeline([])
+    pipeline.detector_factory = factory
+    jobs = _media_jobs(tmp_path, 8)
+
+    list(process_media_threaded(pipeline, jobs, max_workers=4))
+
+    # The pipeline's own detector must never run in a worker thread.
+    assert pipeline.detector.detect.call_count == 0
+    # The barrier forces ≥2 threads into detect() simultaneously, so a shared
+    # single instance would show a thread-count > 1 here.
+    assert 2 <= len(created) <= 4
+    assert all(len(d.threads) == 1 for d in created)
+
+
+def test_shared_embedder_calls_never_overlap(tmp_path):
+    pipeline = _pipeline([])
+    pipeline.embedder = _SerialCheckingEmbedder()
+    pipeline.detector_factory = lambda: _ThreadDetector([_det()], barrier=threading.Barrier(2))
+    jobs = _media_jobs(tmp_path, 8)
+
+    out = list(process_media_threaded(pipeline, jobs, max_workers=4))
+
+    assert not pipeline.embedder.overlap
+    assert all(res.n_kept == 1 for *_head, res in out)
+    for *_head, res in out:
+        assert res.points[0].payload["embedding_norm"] == pytest.approx(21.7)
+
+
+def test_unreadable_file_yields_its_exception_and_spares_the_rest(tmp_path):
+    pipeline = _pipeline([])
+    pipeline.detector_factory = lambda: _ThreadDetector([_det()])
+    jobs = _media_jobs(tmp_path, 4)
+    jobs[2] = (tmp_path / "does-not-exist.png", "sha-missing", None)
+
+    out = list(process_media_threaded(pipeline, jobs, max_workers=2))
+
+    assert isinstance(out[2][3], Exception)
+    for i, (_p, _sha, _vmeta, res) in enumerate(out):
+        if i != 2:
+            assert not isinstance(res, Exception)
+            assert res.n_kept == 1
+
+
+def test_without_a_factory_the_pass_runs_sequentially_on_the_calling_thread(tmp_path):
+    shared = _ThreadDetector([_det()])
+    pipeline = _pipeline([])
+    pipeline.detector = shared
+    pipeline.detector_factory = None
+    jobs = _media_jobs(tmp_path, 3)
+
+    out = list(process_media_threaded(pipeline, jobs))
+
+    assert shared.threads == {threading.get_ident()}
+    assert all(res.n_kept == 1 for *_head, res in out)
+
+
+def test_default_worker_count_is_min_8_cpu():
+    assert DEFAULT_FACE_WORKERS == min(8, os.cpu_count() or 1)
