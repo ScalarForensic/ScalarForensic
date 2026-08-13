@@ -80,7 +80,7 @@ class _BatchCtx:
     batch_bytes: int
     read_s: float
     hash_s: float
-    imgs_at_batch: int  # items_processed_so_far snapshot — used for ETA display
+    imgs_at_batch: int  # items_processed_so_far snapshot — used for the progress line
     path_hash_pairs: list[tuple[Path, str]]
     md5_by_sha256: dict[str, str]
     unique_pairs: list[tuple[Path, str]]
@@ -114,96 +114,6 @@ def _fmt_duration(seconds: float) -> str:
         return f"{m}m {s:02d}s"
     h, m = divmod(m, 60)
     return f"{h}h {m:02d}m {s:02d}s"
-
-
-def _progress_bar(pct: float, width: int = 28) -> str:
-    """Unicode block-element progress bar."""
-    filled = round(width * min(max(pct, 0.0), 100.0) / 100)
-    return "█" * filled + "░" * (width - filled)
-
-
-class _ETATracker:
-    """Kalman-filtered throughput estimator — Θ(1) time and space per update.
-
-    State space: x ∈ ℝ₊ (throughput, img/s), A = H = 1 (scalar random walk):
-
-        Predict:  x̂ₜ⁻  = x̂ₜ₋₁                         Φ := 1
-                  Pₜ⁻  = Pₜ₋₁ + Q,    Q ∈ ℝ₊
-
-        Update:   Kₜ   = Pₜ⁻ (Pₜ⁻ + R)⁻¹               Kₜ ∈ (0, 1)
-                  x̂ₜ   = x̂ₜ⁻ + Kₜ(zₜ − x̂ₜ⁻)
-                  Pₜ   = (1 − Kₜ)Pₜ⁻                   (Joseph form, H = 1)
-
-        DARE (t → ∞, unique ℝ₊ root of P∞² + QP∞ − QR = 0):
-                  P∞   = ½(√(Q² + 4QR) − Q)
-                  K∞   = Q / (Q + √(Q² + 4QR))
-          ∀ Q = R/2 :  K∞ = ½                           equal-weight equilibrium ✓
-
-        δ-method (first-order error propagation, η̂ := N_rem / x̂):
-                  Var[η̂] ≈ (∂η/∂x)²|_{x=x̂} · Pₜ
-                           = (N_rem · x̂⁻²)² · Pₜ
-                  σ_η    = N_rem · √Pₜ / x̂²            ±1σ confidence band
-
-        Contrast with a rolling-window mean (O(w) space, no variance) or a
-        simple EWMA (O(1) space, but no principled variance propagation):
-        the Kalman formulation is optimal under Gaussian assumptions and
-        yields a calibrated uncertainty estimate at no extra cost.
-    """
-
-    _Q: float = 50.0  # process-noise variance  (img/s)²
-    _R: float = 100.0  # measurement-noise variance (img/s)²
-
-    def __init__(self) -> None:
-        self._x: float | None = None  # x̂: current rate estimate (img/s)
-        self._P: float = 1e8  # P: estimate error variance (diffuse prior)
-        self._k: float = 1.0  # Kₜ: Kalman gain at last update (1 = full trust)
-        self._n: int = 0  # number of updates applied
-
-    def update(self, n_imgs: int, elapsed_s: float) -> None:
-        """Incorporate a new batch observation.  Θ(1) — scalar predict-update cycle."""
-        if elapsed_s <= 0 or n_imgs <= 0:
-            return
-        z = n_imgs / elapsed_s  # zₜ: observed throughput
-        self._n += 1
-        if self._x is None:
-            self._x = z
-            self._P = self._R  # P₁ = R: certainty = measurement quality
-            return
-        p_pred = self._P + self._Q  # Pₜ⁻ = Pₜ₋₁ + Q
-        k = p_pred / (p_pred + self._R)  # Kₜ = Pₜ⁻(Pₜ⁻ + R)⁻¹
-        self._x = self._x + k * (z - self._x)  # x̂ₜ = x̂ₜ⁻ + Kₜ(zₜ − x̂ₜ⁻)
-        self._P = (1.0 - k) * p_pred  # Pₜ = (1 − Kₜ)Pₜ⁻
-        self._k = k
-
-    @property
-    def rate(self) -> float | None:
-        """x̂ₜ — current optimal rate estimate (img/s)."""
-        return self._x
-
-    @property
-    def rate_std(self) -> float:
-        """√Pₜ — 1σ uncertainty on the rate estimate (img/s)."""
-        return self._P**0.5
-
-    @property
-    def kalman_gain(self) -> float:
-        """Kₜ — Kalman gain at the most recent update.
-        Converges toward K∞ = ½ at steady state (Q = R/2).
-        """
-        return self._k
-
-    def eta(self, remaining: int) -> tuple[float, float] | None:
-        """Return (η̂, σ_η) in seconds, or None if not enough data.
-
-        Θ(1) — closed-form δ-method propagation:
-            η̂   = N_rem / x̂
-            σ_η = N_rem · √Pₜ / x̂²
-        """
-        if self._x is None or self._x <= 0 or self._n < 2:
-            return None
-        eta_s = remaining / self._x  # η̂
-        sigma_s = remaining * self.rate_std / self._x**2  # σ_η
-        return eta_s, sigma_s
 
 
 def _write_csv(records: dict[Path, "_FileRecord"], csv_path: Path) -> None:
@@ -775,7 +685,6 @@ def index(
     total_bytes = 0
     batch_num = 0
     imgs_processed_so_far = 0
-    tracker = _ETATracker()
 
     # ── Mutable containers shared between slicing pass and _finish_batch ─────
     # Pre-declared so the closure captures them by reference; filled later.
@@ -995,7 +904,6 @@ def index(
             # Dedup time (~ms) is intentionally excluded.
             wall_s = ctx.read_s + ctx.hash_s + (perf_counter() - t_finish)
             n_items = len(ctx.path_hash_pairs)
-            tracker.update(n_items, wall_s)
             items_str = (
                 f"{n_plain_in_batch} imgs + {n_frames_in_batch} frames"
                 if n_frames_in_batch > 0
@@ -1011,23 +919,8 @@ def index(
             typer.echo(shared + "  │  " + "  │  ".join(model_segments) + upsert_str)
 
             if ctx.batch_num % 10 == 0 and total_image_count > 0:
-                result = tracker.eta(total_image_count - ctx.imgs_at_batch)
-                if result is not None:
-                    eta_s, sigma_s = result
-                    pct = ctx.imgs_at_batch / total_image_count * 100
-                    bar = _progress_bar(pct)
-                    sep = "─" * 68
-                    typer.echo(
-                        f"  {sep}\n"
-                        f"  [{bar}]  {ctx.imgs_at_batch:,} / {total_image_count:,}"
-                        f"  ({pct:.1f}%)\n"
-                        f"  x̂ = {tracker.rate:.1f} img/s"
-                        f"  √P = {tracker.rate_std:.1f}"
-                        f"  K = {tracker.kalman_gain:.3f}"
-                        f"  ·  η̂ ~ {_fmt_duration(eta_s)}"
-                        f"  σ_η ± {_fmt_duration(sigma_s)}\n"
-                        f"  {sep}"
-                    )
+                pct = ctx.imgs_at_batch / total_image_count * 100
+                typer.echo(f"  ── {ctx.imgs_at_batch:,} / {total_image_count:,} files ({pct:.1f}%)")
 
     def _timed_preprocess(
         paths: "list[Path]",
@@ -1327,9 +1220,8 @@ def index(
         if _total_expected_frames > 0:
             typer.echo(f"  ~{_total_expected_frames:,} frames estimated across {_n_vids} video(s)")
 
-        _slice_tracker = _ETATracker()
         _slice_total_frames = 0  # running total across all videos
-        _SLICE_BLOCK = 50  # frames per Kalman update + progress line
+        _SLICE_BLOCK = 50  # frames per progress line
 
         _video_records_to_upsert: list[dict] = []
 
@@ -1345,7 +1237,7 @@ def index(
             _t_video_start = perf_counter()
             _t_block_start = perf_counter()
             _block_frames = 0
-            _block_count = 0  # how many complete blocks emitted — for ETA box cadence
+            _block_count = 0  # complete blocks emitted — for progress-line cadence
 
             try:
                 for _frame in extract_frames(
@@ -1408,7 +1300,6 @@ def index(
 
                     if _block_frames >= _SLICE_BLOCK:
                         _block_s = perf_counter() - _t_block_start
-                        _slice_tracker.update(_block_frames, _block_s)
                         _block_frames = 0
                         _block_count += 1
                         _t_block_start = perf_counter()
@@ -1426,38 +1317,20 @@ def index(
                             f"  │  {_fmt_rate(_SLICE_BLOCK, _block_s, 'fps')}"
                         )
 
-                        # Kalman ETA box every 5 blocks (= 250 frames)
+                        # Run-wide frame counter every 5 blocks (= 250 frames);
+                        # the total is an estimate from the probed durations.
                         if _block_count % 5 == 0 and _total_expected_frames > 0:
-                            _remaining = max(_total_expected_frames - _slice_total_frames, 0)
-                            _eta_result = _slice_tracker.eta(_remaining)
-                            if _eta_result is not None:
-                                _pct = _slice_total_frames / _total_expected_frames * 100
-                                _bar = _progress_bar(_pct)
-                                _eta_s, _sigma_s = _eta_result
-                                _sep = "─" * 68
-                                typer.echo(
-                                    f"  {_sep}\n"
-                                    f"  [{_bar}]  {_slice_total_frames:,}"
-                                    f" / ~{_total_expected_frames:,}"
-                                    f"  ({_pct:.1f}%)\n"
-                                    f"  x̂ = {_slice_tracker.rate:.1f} fps"
-                                    f"  √P = {_slice_tracker.rate_std:.1f}"
-                                    f"  K = {_slice_tracker.kalman_gain:.3f}"
-                                    f"  ·  η̂ ~ {_fmt_duration(_eta_s)}"
-                                    f"  σ_η ± {_fmt_duration(_sigma_s)}\n"
-                                    f"  {_sep}"
-                                )
+                            _pct = _slice_total_frames / _total_expected_frames * 100
+                            typer.echo(
+                                f"  ── {_slice_total_frames:,} / ~{_total_expected_frames:,}"
+                                f" frames ({_pct:.1f}%)"
+                            )
 
             except RuntimeError as _exc:
                 typer.echo(f"[WARN] Frame extraction failed for {_vp.name}: {_exc}", err=True)
                 records[_vp].status = _S_FAIL_PRE
                 records[_vp].reason = f"frame extraction error: {_exc}"
                 continue
-
-            # Flush any remaining sub-block frames into the tracker.
-            if _block_frames > 0:
-                _block_s = perf_counter() - _t_block_start
-                _slice_tracker.update(_block_frames, _block_s)
 
             _video_s = perf_counter() - _t_video_start
             typer.echo(
