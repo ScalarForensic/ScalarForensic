@@ -29,11 +29,14 @@ from qdrant_client.models import (
 )
 
 from scalar_forensic.cli import (
+    _S_FAIL_EMB,
     _S_INDEXED,
     _S_SKIP_DUP,
+    _S_SKIP_FRAME_DUP,
     _S_SKIP_IDX,
     _dedup_by_hash,
     _FileRecord,
+    _video_status,
     _write_csv,
 )
 from scalar_forensic.embedder import hash_file_both
@@ -599,6 +602,46 @@ def test_dedup_per_spec_needs_differ_but_skip_counts_are_shared(tmp_path):
     assert n_all_indexed == 0  # c is still needed by spec 1 → not "all indexed"
     assert records[c].status == "pending"
     assert skipped == [1, 1]
+
+
+# ---------------------------------------------------------------------------
+# cli._video_status — three-way split of a video's frame outcomes
+# ---------------------------------------------------------------------------
+
+
+def test_video_status_indexed_when_any_frame_produced_a_vector():
+    assert _video_status(10, 3, 2, 5) == (_S_INDEXED, "10 frames extracted")
+
+
+def test_video_status_already_indexed_when_every_frame_was_in_qdrant():
+    status, reason = _video_status(10, 0, 10, 0)
+    assert status == _S_SKIP_IDX
+    assert reason == "all 10 extracted frames already indexed"
+
+
+def test_video_status_in_run_duplicate_is_not_a_failure():
+    """The campaign case: every frame was byte-identical to a frame of another
+    video in the same run, so nothing was embedded — that is a duplicate, not a
+    failed embedding."""
+    status, reason = _video_status(10, 0, 0, 10)
+    assert status == _S_SKIP_FRAME_DUP
+    assert status != _S_FAIL_EMB
+    assert reason == (
+        "all 10 extracted frames were duplicates of frames from other media "
+        "in this run (in-run duplicates)"
+    )
+
+
+def test_video_status_mixed_dup_and_already_indexed_names_both_counts():
+    status, reason = _video_status(10, 0, 4, 6)
+    assert status == _S_SKIP_FRAME_DUP
+    assert "6 in-run duplicate(s), 4 already indexed" in reason
+
+
+def test_video_status_still_fails_when_frames_are_unaccounted_for():
+    status, reason = _video_status(10, 0, 2, 3)
+    assert status == _S_FAIL_EMB
+    assert reason == "10 frames extracted but no new vectors were indexed"
 
 
 # ---------------------------------------------------------------------------

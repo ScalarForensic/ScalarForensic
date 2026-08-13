@@ -46,6 +46,11 @@ from scalar_forensic.video import (
 _S_INDEXED = "indexed"
 _S_SKIP_DUP = "skipped_dup_batch"
 _S_SKIP_IDX = "skipped_indexed"
+# Video source file whose every extracted frame was a byte-identical duplicate
+# of a frame from other media in the same run — nothing new to index, but not a
+# failure either.  Distinct from _S_SKIP_DUP: the video file itself is not a
+# duplicate, its frames are.
+_S_SKIP_FRAME_DUP = "skipped_frames_dup_run"
 _S_FAIL_READ = "failed_read"
 _S_FAIL_PRE = "failed_preprocessing"
 _S_FAIL_EMB = "failed_embedding"
@@ -262,6 +267,35 @@ def _dedup_by_hash(
     return needs_per_spec, any_needs, n_run_dups, n_all_indexed
 
 
+def _video_status(
+    n_total: int, n_indexed: int, n_already: int, n_run_dup: int
+) -> "tuple[str, str]":
+    """Classify a video source file from the outcomes of its extracted frames.
+
+    ``n_total`` frames were extracted; of those ``n_indexed`` produced new
+    vectors, ``n_already`` were already in Qdrant, and ``n_run_dup`` were
+    byte-identical to a frame of other media processed in the same run.
+    Returns ``(status, reason)`` — both are court-facing, so each branch states
+    the fact that holds, never a failure standing in for a duplicate.
+    """
+    if n_indexed > 0:
+        return _S_INDEXED, f"{n_total} frames extracted"
+    if n_already >= n_total:
+        return _S_SKIP_IDX, f"all {n_total} extracted frames already indexed"
+    if n_already + n_run_dup >= n_total:
+        detail = (
+            f"{n_run_dup} in-run duplicate(s), {n_already} already indexed"
+            if n_already
+            else "in-run duplicates"
+        )
+        return (
+            _S_SKIP_FRAME_DUP,
+            f"all {n_total} extracted frames were duplicates of frames from "
+            f"other media in this run ({detail})",
+        )
+    return _S_FAIL_EMB, f"{n_total} frames extracted but no new vectors were indexed"
+
+
 def _print_summary(
     records: dict[Path, "_FileRecord"],
     resolved_input: Path,
@@ -300,6 +334,7 @@ def _print_summary(
         ("Indexed (new)", counts[_S_INDEXED]),
         ("Skipped — already indexed", counts[_S_SKIP_IDX]),
         ("Skipped — duplicate in batch", counts[_S_SKIP_DUP]),
+        ("Skipped — all frames dup in run", counts[_S_SKIP_FRAME_DUP]),
         ("Failed  — read error", counts[_S_FAIL_READ]),
         ("Failed  — preprocessing", counts[_S_FAIL_PRE]),
         ("Failed  — embedding", counts[_S_FAIL_EMB]),
@@ -1737,11 +1772,14 @@ def index(
         # Build per-video aggregate counts from frame record statuses.
         _vf_indexed_total: dict[Path, int] = {}
         _vf_skipped_total: dict[Path, int] = {}
+        _vf_rundup_total: dict[Path, int] = {}
         for _fp, _sv in _frame_source.items():
             if records[_fp].status == _S_INDEXED:
                 _vf_indexed_total[_sv] = _vf_indexed_total.get(_sv, 0) + 1
             elif records[_fp].status == _S_SKIP_IDX:
                 _vf_skipped_total[_sv] = _vf_skipped_total.get(_sv, 0) + 1
+            elif records[_fp].status == _S_SKIP_DUP:
+                _vf_rundup_total[_sv] = _vf_rundup_total.get(_sv, 0) + 1
 
         for _vp in video_paths:
             _vrec = records[_vp]
@@ -1754,17 +1792,12 @@ def index(
                     _vrec.status = _S_UNSUPPORTED
                     _vrec.reason = "no frames extracted"
                 continue
-            _n_idx = _vf_indexed_total.get(_vp, 0)
-            _n_skp = _vf_skipped_total.get(_vp, 0)
-            if _n_idx > 0:
-                _vrec.status = _S_INDEXED
-                _vrec.reason = f"{_total} frames extracted"
-            elif _n_skp >= _total:
-                _vrec.status = _S_SKIP_IDX
-                _vrec.reason = f"all {_total} extracted frames already indexed"
-            else:
-                _vrec.status = _S_FAIL_EMB
-                _vrec.reason = f"{_total} frames extracted but no new vectors were indexed"
+            _vrec.status, _vrec.reason = _video_status(
+                _total,
+                _vf_indexed_total.get(_vp, 0),
+                _vf_skipped_total.get(_vp, 0),
+                _vf_rundup_total.get(_vp, 0),
+            )
 
     # ── Reclassify run-duplicates whose winner failed preprocessing ───────────
     # Non-winners are marked _S_SKIP_DUP upfront and never enter any batch, so
