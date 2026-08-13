@@ -28,9 +28,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from scalar_forensic.config import Settings
 from scalar_forensic.video_playback.cache import (
     _cache_dir_or_503,
-    _evict_cache,
-    _remux_locks,
     _touch,
+    artifact_locks,
+    evict,
+    pin,
+    release_lease,
+    renew_lease,
+    rewrap_path,
 )
 from scalar_forensic.video_playback.codecs import _needs_remux, _playback_mode, _stream_report
 from scalar_forensic.video_playback.digest import _cached_source_digest, _source_digest
@@ -82,24 +86,32 @@ async def _prepare_viewing_copy(p: Path, settings: Settings) -> tuple[Path, dict
     cache_dir = _cache_dir_or_503(settings)
     digest = await asyncio.to_thread(_source_digest, p, settings)
     report["video_sha256"] = digest
-    dst = cache_dir / f"{digest}.mp4"
+    dst = rewrap_path(cache_dir, digest)
 
-    lock = _remux_locks.setdefault(digest, asyncio.Lock())
-    async with lock:
+    # Register the lease *before* the work: a `FileResponse` streams its body
+    # after this handler has returned, so nothing else can tell eviction that
+    # this video is being read (§6.2).  The player refreshes it from there.
+    renew_lease(digest, settings.video_lease_seconds)
+    async with artifact_locks.hold(digest):
         if dst.exists():
             report["cached"] = True
             await asyncio.to_thread(_touch, dst)
             return dst, report
         report["cached"] = False
-        try:
-            report.update(await asyncio.to_thread(_remux_to_mp4, p, dst))
-        except (av.FFmpegError, ValueError, OSError) as exc:
-            _log.warning("viewing copy: rewrap failed for %s: %s", p, exc)
-            raise HTTPException(
-                status_code=422,
-                detail=f"Cannot rewrap this container for playback: {exc}",
-            ) from exc
-        await asyncio.to_thread(_evict_cache, cache_dir, settings.video_cache_max_bytes, dst)
+        # The pin covers the write itself: the lease can expire under a rewrap
+        # slower than its ttl, and the .part lives inside the directory LRU
+        # would then remove.
+        with pin(digest):
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                report.update(await asyncio.to_thread(_remux_to_mp4, p, dst))
+            except (av.FFmpegError, ValueError, OSError) as exc:
+                _log.warning("viewing copy: rewrap failed for %s: %s", p, exc)
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Cannot rewrap this container for playback: {exc}",
+                ) from exc
+            await asyncio.to_thread(evict, cache_dir, settings.video_cache_max_bytes)
     return dst, report
 
 
@@ -166,6 +178,39 @@ async def video_download(path: str) -> FileResponse:
     )
 
 
+@router.post("/api/video-lease")
+async def video_lease(path: str, release: bool = False) -> JSONResponse:
+    """Register, refresh or drop the playback lease on a video (spec §6.2).
+
+    HTTP is stateless: between two of a video's own chunk requests the server
+    cannot otherwise tell that the video is still on screen, and eviction that
+    guesses will drop a video mid-play.  So the player says so explicitly and
+    keeps saying so — one call when playback starts, one per heartbeat, one with
+    ``release=true`` when the analyst closes the video.
+
+    ``state`` is three-valued and stays that way: ``held``, ``expired`` (the
+    heartbeat stopped) and ``none`` (never registered in this process).  The
+    third is not a synonym for the second — a fresh worker process says ``none``
+    about a video another worker is serving, and a boolean would report that as
+    "not being watched".
+
+    The lease is advisory protection for the *cache*, never an access control:
+    it decides what eviction may delete, and nothing about who may read what.
+    """
+    p = _resolve_video_path(path)
+    settings = Settings()
+    digest = await asyncio.to_thread(_source_digest, p, settings)
+    state = release_lease(digest) if release else renew_lease(digest, settings.video_lease_seconds)
+    return JSONResponse(
+        {
+            "video_sha256": digest,
+            "state": state.state,
+            "seconds_remaining": state.seconds_remaining,
+            "lease_seconds": settings.video_lease_seconds,
+        }
+    )
+
+
 @router.get("/api/video-playback-info")
 async def video_playback_info(path: str, video_hash: str | None = None) -> JSONResponse:
     """Describe what playback of *path* would serve, without serving it.
@@ -207,7 +252,7 @@ async def video_playback_info(path: str, video_hash: str | None = None) -> JSONR
     elif info["mode"] == "rewrap":
         cache_dir = settings.video_cache_dir
         info["cached"] = (
-            cache_dir is not None and (cache_dir / f"{info['video_sha256']}.mp4").exists()
+            cache_dir is not None and rewrap_path(cache_dir, info["video_sha256"]).exists()
         )
         info["cache_enabled"] = cache_dir is not None
     info.update(_stale_evidence_report(info["video_sha256"], video_hash))

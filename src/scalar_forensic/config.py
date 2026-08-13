@@ -93,6 +93,15 @@ class Settings:
         )
         if self.video_cache_max_bytes < 0:
             raise ValueError("SFN_VIDEO_CACHE_MAX_BYTES must be >= 0 (0 disables the ceiling)")
+        # How long a playback lease survives without a heartbeat (§6.2).  HTTP is
+        # stateless, so "this video is on screen" has to be registered and
+        # refreshed; the expiry is what keeps a closed tab from pinning the cache
+        # forever.  120 s tolerates four missed 30 s beats — long enough that a
+        # slow chunk encode never drops the lease, short enough that a crashed
+        # browser stops protecting a video within a couple of minutes.
+        self.video_lease_seconds: int = self._parse_int("SFN_VIDEO_LEASE_SECONDS", 120)
+        if not (1 <= self.video_lease_seconds <= 3600):
+            raise ValueError("SFN_VIDEO_LEASE_SECONDS must be between 1 and 3600")
 
         # --- Transcoded playback (spec docs/specs/video-playback-transcode.md §12) ---
         # ffmpeg is a declared external dependency (§8): the rewrap above is PyAV,
