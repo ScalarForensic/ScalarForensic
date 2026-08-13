@@ -1084,3 +1084,114 @@ arg); c1 correctly did not touch `.env` — left to the operator.
 
 **c1 retired** after DONE: scope complete, next queued item (face-pass parallelization)
 is post-run and gains nothing from manifest context.
+
+### Runbook merged #116 (`4a05946`); sfn_tags ruling arrived — drop BLOCKED at my classifier
+
+Operator RULED: drop `sfn_tags`. My `curl -X DELETE .../collections/sfn_tags` was DENIED
+by this session's permission classifier. Per fleet precedent (the c2 DELETE episode,
+2026-08-12 entry): a permission block is not routed around and not handed to a peer — the
+one-liner went to the operator's hand via g1:
+`curl -X DELETE http://localhost:6333/collections/sfn_tags`. Collections at time of
+writing (read-only GET, allowed): `sfn_tags`, `faces_danny_validation`.
+
+**Run-command verification for the operator (relayed via g1, each fact checked, not
+remembered):** documented command stands as written (input dir, faces gates, examiner id,
+model paths, Qdrant URL all confirmed present in `.env`; nothing to export). The
+first-activation prompt WILL appear — `iphone_campaign_2026_faces` does not exist and
+`collection_is_new()` (`cli.py:460`) prompts for an authorization reference (empty allowed,
+warns). Output is `typer.echo` lines, no progress bar: startup config, Scanning/Hashing,
+`Run manifest → …`, per-video `▶ [i/N]`, one line per batch, summary table + CSV path.
+~35 min projected (upper 45). Manifest PR #115 already merged — no wait needed.
+
+### INGESTION LIVE (operator-triggered, 2026-08-13) — holding; post-run queue now 2 items
+
+Run is in flight (videos processing). Nothing touches the running process, `.env`, or
+Qdrant until it finishes. Post-run queue, unassigned:
+1. Face-pass parallelization (~13 min saving, per-thread YuNet instances; audit item).
+2. Qdrant client/server version skew — client 1.19.0 vs server 1.17.1 emits a startup
+   warning; align (server image bump or client pin) so campaign logs stay clean (g1 relay).
+
+### c1 dead-row audit (g1 request) — nothing lost; two findings, both fixed
+
+g1's tooling flagged `scalarforensic-cfm-c1` as "DEAD: registered, not running". Premise
+corrected: c1 did not die unkilled — I killed it via `cx k` after verifying its DONE
+(ownership releases printed). Audit result: **nothing lost** — no leftover worktree, no
+local branch, PR #115 merged, bar verified 572/5. Row left for the next `cx n` to reap.
+
+Two real leftovers the audit caught, both fixed:
+1. **My earlier `git pull --ff-only` to `4a05946` had silently ABORTED** — the dirty
+   `runbook.md` blocked the fast-forward and `tail -1` hid the error; the checkout sat at
+   `ca86cd7` while I reported it past #116. Fixed: local runbook saved aside, checkout
+   restored, ff completed, appends restored (diff = exactly the 26 appended lines).
+   Lesson: **never `tail` a state-changing git command — the error is what tail cuts.**
+2. Both merged PR branches survived on origin (`--delete-branch`'s remote delete failed
+   for #115 and #116 alike); deleted both, `git fetch --prune` cleared 24 further stale refs.
+
+### OPERATOR GO (g1 relay) — implementation restarts in parallel with the live run
+
+Ruling: merges do not affect the running ingest process (code already in memory). Two
+coders dispatched, disjoint file sets, both fenced: never touch `localhost:6333` (throwaway
+Qdrant only for integration tests), no branch switch in the shared checkout, no `.env` edits.
+
+- `scalarforensic-cfm-c2` — **face-pass speed integration** (queued item, promoted): fold
+  face DETECTION into the main ingest loop reusing the already-decoded full-res image
+  (HEIC re-decode 103 ms is the duplicated cost); align+embed may stay batched. Preserves
+  env gating, separate face collection, enablement record, vectorless review-only points —
+  pass integration, not storage/gating integration. Briefed to verify the decode-path
+  resolution assumption in code first. Owns `cli.py`, `faces/indexing.py`,
+  `tests/faces/test_indexing.py`.
+- `scalarforensic-cfm-c3` — **benchmark subset**: seeded, sorted-then-sampled ~10%
+  stratified copy of `input_scalar` (HEIC/JPG/other/video proportions preserved) into a
+  sibling dir with a selection manifest; doc + tests; bench runs use command-line
+  `SFN_COLLECTION`/`SFN_FACE_COLLECTION` overrides and a throwaway Qdrant. Owns
+  `scripts/make_benchmark_subset.py`, `docs/fleet/benchmark-subset.md`,
+  `tests/test_benchmark_subset.py`.
+
+Bar both must hold: **572 passed / 5 skipped at `4a05946`**.
+
+### c3 DONE — benchmark subset landed #117 `0df8035`; c2 caught working in the shared tree
+
+**c3 verified and retired.** PR #117 MERGED, 8/8 CI checks SUCCESS, remote branch confirmed
+deleted. Manifest checked on disk (`input_scalar_bench10/benchmark_subset_manifest.json`):
+seed 20260813, sorted-then-sampled per-stratum RNG, strata totals match the audit corpus —
+heic 310/3098, jpg 218/2182, other_image 235/2351, video 51/509 (~10.0% each), 76 non-media
+skipped, 814 files total. c3's bar 583/5 (+11 tests) — **not yet re-measured by me**: c2's
+uncommitted edits dirty the shared tree, so CI's full-suite green is the standing machine
+check; I re-measure when the tree clears.
+
+**c2 correction issued:** porcelain showed c2 editing `cli.py`/`faces/indexing.py`/
+`tests/faces/test_indexing.py` directly in the SHARED checkout despite the worktree brief.
+Ordered to move its diff to a worktree off `origin/main` (`0df8035`) and restore the shared
+tree clean. No branch was switched; caught before any commit here.
+
+**Benchmarker: deliberately HELD.** c3 proposed a timed bench ingest against the subset now.
+Refused for two reasons: (a) the campaign run is live — a bench ingest contends for the same
+GPU/disk and would both skew the measurement and slow the evidence run; (b) the measurement
+worth having is before/after c2's face-pass integration on the same subset — one benchmarker,
+two timed runs, after the campaign run completes and c2 lands.
+
+### c2 DONE — face-pass integration landed #118 `bb4cf41`; the 6-skip mystery explained
+
+**Verified by me, not relayed:** PR #118 MERGED, 8/8 CI SUCCESS, remote branch deleted,
+shared checkout restored clean (only my runbook edit + the intentional override file).
+Bar **re-measured by me at `bb4cf41`: 592 passed / 5 skipped**, all 5 skips
+`test_store_integration.py` (`-rs` verified), coverage 67.29%, ruff check+format rc=0.
+Arithmetic closes: 572/5 at `4a05946` + c3's 11 + c2's 9 = 592. This run also retroactively
+confirms c3's 583/5.
+
+**c2's "591 / 6 skipped" was not wrong — it was measured in a worktree.** `models/` is
+gitignored, so a fresh worktree lacks the YuNet ONNX and the face real-model test skips
+(the CLAUDE.md gotcha): worktree 591/6 ≡ shared-checkout-with-models 592/5, same suite.
+Worth remembering for every future worktree-measured bar.
+
+What shipped (diff reviewed): detection folded into the batch loop's preprocess worker via
+`decode_shared()` — HEIC decode paid once, −122.6 ms/file (−34.6%), PNG −20.8%, JPEG ±0 by
+design (draft() kept so embed pixels stay byte-identical); total −30.6% decode+detect wall
+on a 28-file sample. Align+SFace stay one batch per image (#111 chunking intact); residual
+pass keeps the old path for loop-skipped media; store I/O main-thread, point-order and
+**vectorless review-only untouched** (`store.py` not in the diff at all). `localhost:6333`
+untouched; store-integration tests legitimately skipped (store code untouched).
+
+**Queued (c2's successor rec, HELD like the benchmarker):** parallelize the residual face
+pass (thread pool + per-thread YuNet, audit §4 fix 1) for the remaining ~12 min — only
+worth measuring after the before/after bench on the subset, post-campaign-run. c2 retired.
