@@ -8,6 +8,7 @@ the raw cosine is displayed and labelled as such (spec §10 divergence).
 
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
 import math
@@ -448,7 +449,30 @@ def _query_image_bytes(entry, timecode_ms: int | None) -> bytes:
         raise HTTPException(status_code=404, detail="file not found in session") from exc
 
 
-def _face_json(face, session_id: str, file_id: str) -> dict:
+def _detection_token(faces, cfg) -> str:
+    """Fingerprint of one detection generation.
+
+    Face *indices* are positions in whatever detection is currently cached on
+    the session entry, so a chip URL that carries only an index survives a
+    re-detection and starts addressing a different face — a 404 when the new
+    detection found fewer faces (the reported defect), and worse, the wrong
+    person's crop when it found at least as many.
+
+    Deriving the token from the detection's own content rather than from a
+    counter keeps it stateless: re-detecting the identical frame under the
+    identical config reproduces the token, so an unchanged view does not
+    invalidate URLs the examiner is still looking at.
+    """
+    digest = hashlib.sha256()
+    digest.update(str(getattr(cfg, "config_hash", "")).encode())
+    for face in faces:
+        digest.update(
+            f"|{face.index}|{tuple(face.bbox)}|{face.det_conf:.6f}|{face.embedding_status}".encode()
+        )
+    return digest.hexdigest()[:16]
+
+
+def _face_json(face, session_id: str, file_id: str, token: str) -> dict:
     """Serialise one QueryFace for the wire.
 
     Built field by field on purpose.  ``dataclasses.asdict`` would carry
@@ -466,7 +490,7 @@ def _face_json(face, session_id: str, file_id: str) -> dict:
         "embedding_status": face.embedding_status,
         "embedding_exclusion_reason": face.embedding_exclusion_reason,
         "quality": face.quality,
-        "chip_url": f"/api/faces/query-chip/{session_id}/{file_id}/{face.index}",
+        "chip_url": f"/api/faces/query-chip/{session_id}/{file_id}/{token}/{face.index}",
     }
 
 
@@ -497,9 +521,11 @@ def query_faces(
 
     entry.query_faces = result.faces
     entry.query_faces_cfg = result.cfg
+    token = _detection_token(result.faces, result.cfg)
     return JSONResponse(
         {
-            "faces": [_face_json(f, session_id, file_id) for f in result.faces],
+            "faces": [_face_json(f, session_id, file_id, token) for f in result.faces],
+            "detection_token": token,
             "n_detected": result.n_detected,
             "n_searchable": result.n_searchable,
             "n_review_only": result.n_review_only,
@@ -511,15 +537,29 @@ def query_faces(
     )
 
 
-@router.get("/api/faces/query-chip/{session_id}/{file_id}/{face_index}")
-def query_chip(session_id: str, file_id: str, face_index: int) -> Response:
+@router.get("/api/faces/query-chip/{session_id}/{file_id}/{token}/{face_index}")
+def query_chip(session_id: str, file_id: str, token: str, face_index: int) -> Response:
     """The session review crop for one query face.
 
     Served from memory with ``no-store``: this crop is never written to
     SFN_FACE_STORE_DIR, and it must not survive in a browser cache either.
+
+    *token* pins the detection generation the index was issued against.  A URL
+    from a superseded detection is refused with 409 rather than answered from
+    the current one — serving it would put another face's crop under the
+    identity the examiner is looking at, which is the failure that matters here.
     """
     entry = _resolve_entry(session_id, file_id)
     faces = entry.query_faces or []
+    current = _detection_token(faces, getattr(entry, "query_faces_cfg", None))
+    if token != current:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "stale face detection: this chip belongs to a superseded detection "
+                "for this file — re-run query-faces"
+            ),
+        )
     if face_index < 0 or face_index >= len(faces):
         raise HTTPException(status_code=404, detail="unknown face index")
     jpeg = faces[face_index].review_jpeg

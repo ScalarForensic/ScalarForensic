@@ -106,18 +106,28 @@
     // The vectors stay in the server-side Session; the browser only ever holds
     // face *indices*.  A face that failed the embedding gate is vectorless and
     // therefore cannot be a probe — toggleQueryFace refuses it.
+    // Every detection carries the file it ran on and a request ordinal.  Two
+    // files in one session means two POSTs in flight, and the first one can
+    // land last: applying it would leave the earlier file's faces on screen
+    // while the chip URLs address the file now selected — a 404 when the new
+    // file has fewer faces, and another person's crop when it has more.
     async loadQueryFaces() {
       if (!this.facesAvailable || !this.sessionId || !this.selectedFileId) return;
+      const fileId = this.selectedFileId;
+      const seq = ++this._queryFacesSeq;
+      const current = () => seq === this._queryFacesSeq && fileId === this.selectedFileId;
       this.queryFacesLoading = true;
       this.queryFacesError = '';
       this.queryFaces = [];
+      this.queryFacesStale = {};
       this.queryFacesTruncated = false;
       try {
         const fd = new FormData();
         fd.append('session_id', this.sessionId);
-        fd.append('file_id', this.selectedFileId);
+        fd.append('file_id', fileId);
         const resp = await fetch('/api/faces/query-faces', { method: 'POST', body: fd });
         const body = await resp.json();
+        if (!current()) return;
         if (!resp.ok) {
           this.queryFacesError = this.faceErrText(body.detail, 'face detection failed');
           return;
@@ -139,8 +149,17 @@
       this.runFaceCompare(this.selectedHit?.image_hash);
     },
 
-    queryFaceChipUrl(index) {
-      return `/api/faces/query-chip/${this.sessionId}/${this.selectedFileId}/${index}`;
+    // The server stamps each chip URL with the file and the detection
+    // generation it was issued under.  Rebuilding it here from the *current*
+    // selection is what let a stale index address the wrong file's faces.
+    queryFaceChipUrl(face) {
+      return face?.chip_url || '/static/vector-fallback.svg';
+    },
+
+    // A chip that fails to load is either gone (404) or superseded (409).
+    // Either way the tile must not stay blank next to a live identity label.
+    markQueryFaceStale(face) {
+      if (face && face.index != null) this.queryFacesStale[face.index] = true;
     },
 
     queryFaceSelected(index) {

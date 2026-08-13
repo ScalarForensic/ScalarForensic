@@ -1114,10 +1114,12 @@
                      'query-face-chip-unsearchable': !face.searchable,
                      'face-cross-matched': queryFaceCrossMatched(face.index),
                    }"
-                   :href="queryFaceChipUrl(face.index)" target="_blank" rel="noopener"
+                   :href="queryFaceChipUrl(face)" target="_blank" rel="noopener"
                    @click="if ($event.ctrlKey) { $event.preventDefault(); toggleQueryFace(face); }">
-                  <img :src="queryFaceChipUrl(face.index)" alt="">
-                  <span class="query-face-status" x-text="queryFaceStatusLabel(face)"></span>
+                  <img :src="queryFaceChipUrl(face)" alt=""
+                       @error="markQueryFaceStale(face)">
+                  <span class="query-face-status"
+                        x-text="queryFacesStale[face.index] ? 'stale — re-detect' : queryFaceStatusLabel(face)"></span>
                 </a>
               </template>
             </div>
