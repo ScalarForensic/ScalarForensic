@@ -245,8 +245,12 @@
       this.selectedMatchedFrameKey = `${hit.path}:${mf.timecode_ms}`;
       this.matchZoom = 1.0;
       this.matchMeta = null; this.matchMetaError = null;
-      this.matchSrc = mf.frame_hash
-        ? `/api/thumbnail/${mf.frame_hash}`
+      // mf.path is this frame's own stored JPEG (not the representative's), so
+      // /api/hit-image serves it at native resolution.  No thumbnail fallback:
+      // a 128x96 thumb upscaled into the compare pane looks like the frame but
+      // is not it, and a missing path is missing data — show the placeholder.
+      this.matchSrc = mf.path
+        ? `/api/hit-image?path=${encodeURIComponent(mf.path)}`
         : '/static/vector-fallback.svg';
       if (hit.video_hash) {
         await this._loadFrameMeta(hit.video_hash, mf.timecode_ms);

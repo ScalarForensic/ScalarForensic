@@ -212,6 +212,7 @@ async def query(
                                     "timecode_ms": mf.timecode_ms,
                                     "frame_hash": mf.frame_hash,
                                     "scores": mf.scores,
+                                    "path": mf.path,
                                 }
                                 for mf in h.matched_frames
                             ]

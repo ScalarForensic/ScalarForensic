@@ -27,6 +27,13 @@ class MatchedVideoFrame:
     timecode_ms: int
     frame_hash: str
     scores: dict  # mode → score
+    # On-disk path of this frame's stored JPEG, straight from the indexed
+    # point's ``image_path`` — the same locator Hit.path carries, so it is
+    # inside the frame store and therefore servable by /api/hit-image.  Without
+    # it the UI can only address the frame by hash, and /api/thumbnail serves
+    # the 128x96 index thumb — an upscaled blur of the artefact under
+    # examination.  Empty only when the payload had no image_path.
+    path: str = ""
 
 
 @dataclass
@@ -196,6 +203,7 @@ def _group_video_hits(hits: list[Hit]) -> list[Hit]:
                 timecode_ms=h.frame_timecode_ms or 0,
                 frame_hash=h.image_hash or "",
                 scores=h.scores,  # exact score from this one comparison
+                path=h.path,  # this frame's own file, not the representative's
             )
             for h in sorted(group, key=lambda h: h.frame_timecode_ms or 0)
         ]
@@ -697,6 +705,7 @@ def _query_exact_video(
                 timecode_ms=f["timecode_ms"],
                 frame_hash=f["frame_hash"],
                 scores={"exact": 1.0},
+                path=f["image_path"],
             )
             for f in sorted_frames
         ]
