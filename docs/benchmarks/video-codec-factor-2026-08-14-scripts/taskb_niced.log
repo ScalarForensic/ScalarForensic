@@ -1,0 +1,8 @@
+=== niced+threaded (nice 10, -threads 12) ===
+  chunk 0 start=10.0 wall=17.15s ok=True competitor_running_at_start=True restarts_so_far=0
+  chunk 1 start=30.0 wall=16.83s ok=True competitor_running_at_start=True restarts_so_far=0
+  chunk 2 start=10.0 wall=16.98s ok=True competitor_running_at_start=True restarts_so_far=0
+  chunk 3 start=30.0 wall=16.69s ok=True competitor_running_at_start=True restarts_so_far=0
+  chunk 4 start=10.0 wall=16.67s ok=True competitor_running_at_start=True restarts_so_far=0
+  chunk 5 start=30.0 wall=16.64s ok=True competitor_running_at_start=True restarts_so_far=0
+{'niced': [{'wall': 17.14883571397513, 'competitor_running_at_start': True}, {'wall': 16.83070992998546, 'competitor_running_at_start': True}, {'wall': 16.975007892004214, 'competitor_running_at_start': True}, {'wall': 16.688425473985262, 'competitor_running_at_start': True}, {'wall': 16.673328583012335, 'competitor_running_at_start': True}, {'wall': 16.639386056980584, 'competitor_running_at_start': True}]}
