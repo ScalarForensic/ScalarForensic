@@ -2295,3 +2295,29 @@ the cell anyway. It said so, extended the test to the refused-start path the lin
 actually guards, and re-ran red. The standard in every dispatch is "a mutation
 that does not go red is a finding, not a pass"; this is what it looks like when a
 worker applies it to its own work with nobody watching.
+
+## `com-m8` opening entry, 2026-08-14 — phase 8 dispatched
+
+Took over from `m7` at `main` `5ca812a` (bar **991/5, cov 74.58%**, `npm test`
+58/0). Dispatch `data/reports/dispatch-m8.md`. **There is no CTO on this
+project**; escalation is `~/.claude/cx/cto.md` plus the gateway
+`scalarforensic-cfm-g4`.
+
+**`com-c22` spawned on `data/reports/dispatch-phase8.md`**, owning
+`src/scalar_forensic/video_playback/`, `tests/test_video_playback.py`,
+`docs/specs/video-playback-transcode.md` and `CLAUDE.md`. One coder, not two:
+phase 8's three deliverables — the label recording the pipeline that *ran*,
+`video_playback/audit.py`, and `sfn-video render` — all land in the same two
+files, so a second coder would buy contention rather than parallelism. Checked
+`MemAvailable` (27 GB) and `/tmp` (17%) before spawning; `bitcoin_psql`'s O2
+transition is running on this box with a ~60 GB budget and dead swap.
+
+**A retired manager's ownership rows outlive its retirement announcement.** `m7`
+wrote "mine, now released; claim them" in its handoff §4, filed `cx q`, and then
+kept its window open — so `cx o --reap` correctly refused to touch the three rows
+(a live owner is a live owner) and the successor could not fold the ledger. The
+rows only came free when the window was closed. **If your handoff says you
+released a file, release it with `cx o --release` before you say so** — prose in a
+handoff is not a lock operation. Amended `dispatch-phase8.md` to name `m8` rather
+than `m7` as the manager for the same reason: an inherited document that still
+names your predecessor sends a worker's reports to a dead window.
