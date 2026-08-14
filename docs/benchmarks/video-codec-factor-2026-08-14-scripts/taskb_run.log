@@ -1,0 +1,8 @@
+=== unniced/unthreaded ===
+  chunk 0 start=10.0 wall=18.84s ok=True competitor_running_at_start=True restarts_so_far=0
+  chunk 1 start=30.0 wall=18.19s ok=True competitor_running_at_start=True restarts_so_far=0
+  chunk 2 start=10.0 wall=18.23s ok=True competitor_running_at_start=True restarts_so_far=0
+  chunk 3 start=30.0 wall=18.35s ok=True competitor_running_at_start=True restarts_so_far=0
+  chunk 4 start=10.0 wall=18.40s ok=True competitor_running_at_start=True restarts_so_far=0
+  chunk 5 start=30.0 wall=18.27s ok=True competitor_running_at_start=True restarts_so_far=0
+=== niced+threaded (nice 10, -threads 12) ===
