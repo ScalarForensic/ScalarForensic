@@ -2241,9 +2241,17 @@ one that is not.** Green CI is not a review; it is the precondition for one.
 Manager-side fix: the merge instruction is now stated in the dispatch as
 "report the PR number and wait", not implied by "open a PR".
 
-**Post-hoc review still found something, which is the argument for the gate.**
-`CLAUDE.md` quoted the new bar against `911cf21`, the branch tip, not against
-the squash-merge commit that landed it. Harmless here — the two trees differ
-only under `docs/benchmarks/` — but it is the same defect #151 existed to fix,
-and it survived a green run of every required check. **Quote a bar against the
-sha a reader can `git checkout`.**
+**Post-hoc review caught the sha and then the worker caught the reviewer.**
+`CLAUDE.md` landed the new bar against `911cf21`, #179's pre-merge tip rather
+than the merge commit — the defect #151 existed to fix, and it had survived a
+green run of every required check. I asked for it. But when I then asked `c19`
+to say "measured at `911cf21`, holds for `1bb24b0`", it pushed back with
+evidence: it had re-checked out `origin/main` at `1bb24b0` in its worktree and
+re-run the whole suite there, so "measured in the `wt` worktree off that commit"
+was already literally true and my rewrite would have made the sentence *less*
+accurate. Its worktree reflog confirms it (`HEAD@{1}: checkout: moving from
+feat/video-phase7 to docs/c19-bar-sha` at `1bb24b0`). **The review standard
+here is "verify the claim", not "assume the cheap explanation".** A worker that
+re-measures rather than retypes is doing the more expensive correct thing, and
+it looks identical from the outside to one that swapped a sha — the difference
+is only visible if you ask, or check the reflog. `#180` = `32d9da8`.
