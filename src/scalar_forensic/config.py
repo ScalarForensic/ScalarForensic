@@ -151,6 +151,26 @@ class Settings:
         self.video_job_timeout: int = self._parse_int("SFN_VIDEO_JOB_TIMEOUT", 3600)
         if self.video_job_timeout < 1:
             raise ValueError("SFN_VIDEO_JOB_TIMEOUT must be >= 1")
+        # --- §4.3's contention, remedy (a): the full-video job yields ---
+        # A full copy holds a worker for ~51 minutes and puts chunk encoding at
+        # k=2 — 8.21 s → 16.35 s (§3.5), outside §4.2's 6–10 s window.  Chunk
+        # work is what an analyst is waiting on; a background export is not, so
+        # the export runs niced and thread-capped and loses the contention on
+        # purpose.  10 is `nice(1)`'s own default increment and gives the export
+        # roughly a tenth of a nice-0 task's CPU weight under CFS, so a chunk
+        # encode running beside it keeps most of the box.
+        self.video_job_nice: int = self._parse_int("SFN_VIDEO_JOB_NICE", 10)
+        if not (0 <= self.video_job_nice <= 19):
+            raise ValueError("SFN_VIDEO_JOB_NICE must be between 0 and 19")
+        # ffmpeg `-threads` for the full-video job only.  niceness alone is per
+        # thread, so an export that spawns one encoding thread per core competes
+        # on every core at once; the cap is what leaves cores for chunk work.
+        # 0 means "half the online CPUs, at least one" — the value is a property
+        # of the host, not of the deployment, and §3.5 measured one job enough to
+        # saturate this box.
+        self.video_job_threads: int = self._parse_int("SFN_VIDEO_JOB_THREADS", 0)
+        if not (0 <= self.video_job_threads <= 256):
+            raise ValueError("SFN_VIDEO_JOB_THREADS must be between 0 and 256")
 
         # --- Network policy ---
         # Default: offline — no outward connections to HuggingFace or any other service.

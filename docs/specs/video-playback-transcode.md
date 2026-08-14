@@ -286,24 +286,63 @@ the duration: **8.21 s → ~16.35 s** per chunk (§3.5's k=2 row), outside the
 export therefore makes their own live playback worse, and today nothing tells
 them so.
 
-Two candidate remedies, both **phase 7's call, neither implemented here**:
+**Ruled 2026-08-14 (phase 7): both remedies, in this order.** v1 of this section
+named two candidates and left the choice open; what follows is what shipped.
 
-1. **Yield.** Run the full-video job at lower priority (`nice`) with an explicit
-   `-threads` cap, so chunk work wins the contention instead of splitting it.
-   Costs a longer export; needs measuring, since §3.5 shows the box is already
-   saturated by one job.
-2. **Accept and disclose.** Leave the contention and say so in the UI — *"chunk
-   loading will be slower while the full export runs"* — which is honest but
-   makes the degradation the analyst's problem.
+1. **Yield — implemented.** The job runs at `SFN_VIDEO_JOB_NICE` (default 10,
+   `nice(1)`'s own increment) with `-threads SFN_VIDEO_JOB_THREADS` (default 0,
+   meaning half the online CPUs, at least one), so chunk work wins the contention
+   instead of splitting it. Niceness is applied with `setpriority(PRIO_PGRP)` on
+   a child started in its own session, because on Linux niceness is a
+   **per-thread** attribute and reniceing the pid alone would leave every
+   encoding thread ffmpeg spawns at the parent's priority. The thread cap is the
+   other half of the same point: an export that runs one thread per core competes
+   on every core no matter how it is niced.
+
+   **What this can and cannot be claimed to do.** `nice` reprioritises CPU
+   scheduling and `-threads` caps libx264's thread pool: both bite on the **CPU
+   pipeline**. On the **GPU pipeline** the contended resource is the encoder
+   block and its driver queue, which neither knob controls — a niced NVENC job
+   still takes its slot. No measurement of the residual on either path exists in
+   this repository; §3.5 shows the box already saturated by one job, so yielding
+   is *expected* to reduce the k=2 penalty on the CPU path and is not claimed to
+   remove it. An unmeasured mechanism claim would be §16's invented-constant rule
+   in prose form.
+
+2. **Disclose anyway — implemented.** While an export runs, `POST
+   /api/video-chunk` and `GET /api/video-job-status` both carry
+   `contention_notice`, and the player renders it beside the chunk spinner it
+   explains. This is not decoration and not a substitute for (1): yield is
+   bounded on one pipeline and absent on the other, so the sentence is the only
+   remedy that covers both.
+
+Doing (1) alone would re-create the option ruled out below the moment yielding
+turned out to be partial — which, on the GPU path, it is by construction. Doing
+(2) alone would make a reducible degradation the analyst's problem.
 
 What is ruled out is the third option: leaving it both unbounded and invisible.
 
 - Progress and ETA come from ffmpeg's own frame-level progress output, rendered
   with `_RateTracker` and `#139`'s honest labelling — *"~4 min remaining at
-  current rate"*, never a calibrated-uncertainty claim.
-- Cancellable explicitly; navigating away prompts.
+  current rate"*, never a calibrated-uncertainty claim. **Implemented in phase 7**
+  over `-progress pipe:1`, reading `out_time=HH:MM:SS.ffffff` and not
+  `out_time_ms`, which ffmpeg has emitted in *microseconds* under a millisecond
+  name for years; that unit bug would report a 51-minute export as finishing in
+  three seconds.
+- Cancellable explicitly; navigating away prompts. **Cancellation is a refcount
+  drop, not a kill** (§10.4): `DELETE /api/video-full` releases one analyst's
+  claim and stops the encoder only when it was the last, and the response says
+  which of the two happened. A cancelled job is **not a fourth state** — nothing
+  is running, so the video is back to `needs-transcode` with `cancelled: true`
+  saying why.
 - On completion: notification, and if the analyst is still watching chunks, the
   player switches to the full file **at the current timestamp**.
+- The job takes a slot from the **same** admission gate as chunk encoding
+  (`jobs.Admission`, `SFN_VIDEO_MAX_WORKERS` / `SFN_VIDEO_QUEUE_MAX`). Two pools
+  would be two bounds and therefore no bound; with the default 2 workers one
+  remains for playback while an export runs, and a deployment that sets
+  `SFN_VIDEO_MAX_WORKERS=1` blocks chunk encoding for the duration — visibly, in
+  one place, which is what it asked for.
 
 ---
 
@@ -352,11 +391,14 @@ phase 3; `states.MODE_TO_STATE` carries it through to the UI instead of
 flattening it on the way. A test asserts the state is neither `playable` nor
 `needs-transcode`.
 
-`full-job-running`, `full-job-done` and `full-job-failed` are **phase 7's** and
-are deliberately not in phase 6's set: §5 says nothing here may invent a state
-it cannot observe, and with no job endpoints nothing can enter them.
-`states.PHASE_7_STATES` names them so the omission is visible rather than
-accidental.
+`full-job-running`, `full-job-done` and `full-job-failed` were held back through
+phase 6 because §5 forbids inventing a state nothing can observe, and with no job
+endpoints nothing could enter them. **Phase 7 built the endpoints, so they are
+ordinary members of `states.PLAYER_STATES` now**; `states.FULL_JOB_STATES` is
+kept only to name which three the job owns. There is deliberately **no
+`full-job-cancelled`**: a cancelled export leaves nothing running, so the video
+is back to `needs-transcode`, and the status payload's `cancelled: true` says why
+it stopped without a state that describes an absence.
 
 ---
 
@@ -532,6 +574,21 @@ usually *larger* than its source, so the estimate runs low on exactly the corpus
 this feature exists for. **The phase 7 job runner must therefore check the growing
 `.part` against the estimate and abort on overshoot rather than trusting it.**
 
+**Implemented in phase 7**, and the number it aborts on is stated precisely,
+because "the estimate" alone would be the wrong one: the runner watches the
+`.part` against **`limit_bytes` — the 50% ceiling the job was admitted against —
+not against `estimate_bytes`.** An admitted job has `estimate ≤ limit` by
+construction, so the limit is the binding number, and it is the one that is
+actually an invariant: the estimate is a screen whose error is unmeasured, while
+"no single rendering exceeds half the cache" is the promise §6.2 needs. Aborting
+at the estimate would kill nearly every HEVC export for being exactly what this
+paragraph predicts it will be — larger than the estimate — while protecting
+nothing extra. Passing the estimate is instead **logged with the actual bytes**,
+which is where a measured codec factor can come from. The abort raises
+`encode.CeilingExceeded`, which §10.1 carries as `full-copy-overshoot`; the
+`.part` is removed on the way out, so an aborted export leaves no file behind and
+nothing counted against the ceiling.
+
 ### 6.4 Retention
 
 The LRU ceiling is the only automatic retention mechanism. v1 also proposed a TTL
@@ -630,8 +687,9 @@ lever on both cost and disclosure, and v1 never mentioned it. It is now settled:
 | `GET /api/video-playback-info` | extended: mode, reason, duration, verified digest, job state |
 | `POST /api/video-chunk` | encode the chunk at a timecode; returns JSON, not bytes |
 | `GET /api/video-chunk` | serve an already-encoded chunk; **never encodes** |
-| `POST /api/video-full` | start the background full-video job |
-| `DELETE /api/video-full` | cancel it |
+| `POST /api/video-full` | start the background full-video job, or join the one running |
+| `DELETE /api/video-full` | drop this client's claim; stops the encoder when it was the last |
+| `GET /api/video-full` | serve a finished full copy; **never encodes** |
 | `GET /api/video-job-status` | progress, rate, ETA, terminal state |
 | `GET /api/video-download` | original bytes, `Content-Disposition`, verified digest |
 | `GET /api/video-playback` | unchanged — `original` and `rewrap` modes |
@@ -674,6 +732,12 @@ ffmpeg non-zero exit; job timeout; GPU failure or saturation; OOM; disk or tmpfs
 full; cache directory unwritable or unset; source disappeared or changed
 mid-session; malformed duration metadata; queue full. Nothing may retry-storm.
 
+**Phase 7's job runner maps every one of these rows onto `full-job-failed`
+through `states.classify_full_job()`**, which is `classify()` with the *state*
+rewritten and nothing else: the `kind`, the status and the retry rule are
+untouched, because the file, the encoder, the disk and the clock do not care
+which window was asked for. It is one function and not a second matrix.
+
 **Implemented in phase 6** as one table, `video_playback/states.py`, beside the
 §5 state list it maps onto — two tables that have to agree, so they live in one
 module. `classify()` turns an exception into a row; every row names an HTTP
@@ -698,6 +762,7 @@ same function rather than re-deriving them.
 | source changed mid-session | `source-changed` | 409 | `chunk-failed` | no |
 | malformed duration metadata | `malformed-duration` | 422 | `chunk-failed` | no |
 | queue full | `queue-full` | 503 | `capacity-exhausted` | 15 s |
+| full copy outgrew the ceiling mid-encode (§6.3, phase 7) | `full-copy-overshoot` | 507 | `capacity-exhausted` | no |
 
 The two rows with **no kind** are the ones that are not failures by the time a
 caller sees them, and the table says so rather than omitting them: a GPU that
@@ -782,7 +847,7 @@ src/scalar_forensic/video_playback/
 ├── digest.py        source SHA-256 + the process-wide HashCache handle [carved]
 ├── rewrap.py        the PyAV stream copy — lossless, never an encode  [carved]
 ├── encode.py        chunk and full encode; one path, different -ss/-t
-├── jobs.py          worker pool, queue, refcounts, cancellation, lifecycle (§10)
+├── jobs.py          admission gate, the full-video job, refcounts, cancel  [phase 7]
 ├── cache.py         keys, leases, eviction, purge (§6)               [carved]
 ├── states.py        §5 player states + the §10.1 failure matrix       [phase 6]
 ├── audit.py         provenance + examiner record (§7.3), wrapping faces/ helpers
@@ -854,7 +919,8 @@ aggressively; `face-pipeline.md` §13 is the template):
 `SFN_VIDEO_CACHE_DIR`, `SFN_VIDEO_CACHE_MAX_BYTES`, `SFN_VIDEO_LEASE_SECONDS`,
 `SFN_VIDEO_CHUNK_SECONDS`, `SFN_VIDEO_HWACCEL`, `SFN_VIDEO_MAX_WORKERS`,
 `SFN_VIDEO_QUEUE_MAX`, `SFN_VIDEO_JOB_TIMEOUT`, `SFN_VIDEO_OUTPUT_HEIGHT`,
-`SFN_FFMPEG_PATH`.
+`SFN_FFMPEG_PATH`, and phase 7's two: `SFN_VIDEO_JOB_NICE`,
+`SFN_VIDEO_JOB_THREADS`.
 
 **Settled defaults**, each tied to a §3.5 number rather than to taste:
 
@@ -864,6 +930,8 @@ aggressively; `face-pipeline.md` §13 is the template):
 | `SFN_VIDEO_OUTPUT_HEIGHT` | `1080` | Operator ruling (§16), and §3.5 measures the cost of the alternative: 4K first-play is 33.73 s and 4K CPU tone-map encoding is 0.879×, below realtime. Never upscale — a source shorter than 1080 is passed through at its own height. |
 | `SFN_VIDEO_LEASE_SECONDS` | `120` | Four missed 30 s heartbeats — long enough that a chunk encode at §3.5's 8.21 s never drops the lease under §4.2's margin, short enough that a crashed browser stops protecting a video within a couple of minutes (§6.2). |
 | `SFN_VIDEO_QUEUE_MAX` | `8` | Admitted chunk encodes, running **and** waiting — §10.4's "a LAN host must not be able to grow the queue without limit". Four §3.5 chunk times deep at the default 2 workers (8.21 s at k=1, 16.35 s at k=2), so a full queue drains in well under a minute; beyond it the request is refused with a `Retry-After` rather than left hanging. Validated `>= SFN_VIDEO_MAX_WORKERS`. |
+| `SFN_VIDEO_JOB_NICE` | `10` | §4.3 remedy (a). `nice(1)`'s own default increment, and roughly a tenth of a nice-0 task's CPU weight under CFS — so a chunk encode running beside an export keeps most of the box. Applied to the encoder's whole process **group**, because niceness on Linux is per thread. `0` disables the yield; validated 0–19. |
+| `SFN_VIDEO_JOB_THREADS` | `0` | The other half of remedy (a): `0` means half the online CPUs, at least one. A per-thread renice does not stop an export that runs one thread per core from competing on every core, and §3.5 measured one job enough to saturate this host. An explicit value overrides; validated 0–256. |
 | `SFN_VIDEO_CHUNK_SECONDS` | `30` | Valid **only under the 1080p cap**: a 30 s chunk lands in 8.21 s at 1080p (§3.5), inside §4.2's margin. At 4K the same chunk takes 33.73 s, so raising `SFN_VIDEO_OUTPUT_HEIGHT` above 1080 requires revisiting this value in the same change. |
 
 ---
@@ -977,6 +1045,14 @@ long-GOP and damaged-index seek behaviour, and multi-sample confirmation of
    gate, `SFN_VIDEO_QUEUE_MAX`, and every §10.1 row pinned by a test.
 7. **Full-video job** — background worker, progress/ETA via `_RateTracker`,
    cancel, completion notification, auto-switch at timestamp.
+   *Server side done*: `jobs.py` (admission gate moved off `routes._Admission`,
+   which is gone; the runner, refcounts and cancel), `POST`/`DELETE`/`GET
+   /api/video-full`, `GET /api/video-job-status`, §6.3's ceiling enforced and the
+   `.part` watched, §10.1 mapped through `states.classify_full_job()`, and §4.3's
+   contention both yielded (`SFN_VIDEO_JOB_NICE`, `SFN_VIDEO_JOB_THREADS`) and
+   disclosed (`contention_notice`).
+   *Browser side not done*: the progress/cancel UI, the navigate-away prompt, the
+   completion notification and the auto-switch at the current timestamp.
 8. **Provenance and audit** — label with full pipeline record, examiner audit,
    `sfn-video render` reproduction command.
 
