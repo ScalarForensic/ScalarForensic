@@ -27,7 +27,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
 from scalar_forensic.config import Settings
-from scalar_forensic.video_playback import jobs, states
+from scalar_forensic.video_playback import audit, jobs, states
 from scalar_forensic.video_playback.cache import (
     FULL_NAME,
     _cache_dir_or_503,
@@ -334,7 +334,7 @@ def chunk_start_for(t: float, chunk_seconds: int) -> float:
 class _CachedChunk:
     path: Path
     fingerprint: str
-    describe: dict
+    pipeline: Pipeline
 
 
 # Which pipeline last *actually produced* a chunk when a given pipeline was
@@ -365,12 +365,12 @@ def _cached_chunk(
     fp = selected.fingerprint()
     direct = artifact_dir(cache_dir, digest, fp) / name
     if direct.is_file():
-        return _CachedChunk(direct, fp, selected.describe())
+        return _CachedChunk(direct, fp, selected)
     alt = _substitutions.get(fp)
     if alt is not None and alt.fingerprint() != fp:
         candidate = artifact_dir(cache_dir, digest, alt.fingerprint()) / name
         if candidate.is_file():
-            return _CachedChunk(candidate, alt.fingerprint(), alt.describe())
+            return _CachedChunk(candidate, alt.fingerprint(), alt)
     return None
 
 
@@ -487,19 +487,41 @@ async def _prepare_chunk(p: Path, settings: Settings, t: float, *, video_hash: s
         else None
     )
 
-    name = chunk_name(start)
-    hit = _cached_chunk(cache_dir, digest, selected, name)
-    if hit is not None:
-        await asyncio.to_thread(_touch, hit.path)
+    has_audio = info.get("audio_codec") is not None
+
+    def _cache_hit(cached: _CachedChunk) -> dict:
+        """The §7.2 label for a rendering that was found rather than produced.
+
+        Every field describes the pipeline that *made the bytes being served* —
+        ``cached.pipeline``, which is the substitute after a §8 fallback and not
+        the one selection would pick today.  ``command`` is ``None``: no process
+        ran for this response, and ``sfn-video render`` is where an invocation
+        comes from.
+        """
+        rendering = audit.Rendering(
+            pipeline=cached.pipeline,
+            scope=audit.SCOPE_CHUNK,
+            has_audio=has_audio,
+            start_seconds=start,
+            duration_seconds=float(settings.video_chunk_seconds),
+        )
         report.update(
             cached=True,
-            pipeline_fingerprint=hit.fingerprint,
-            pipeline=hit.describe,
-            fell_back=hit.fingerprint != selected.fingerprint(),
+            pipeline_fingerprint=cached.fingerprint,
+            pipeline=rendering.describe(),
+            fell_back=cached.fingerprint != selected.fingerprint(),
             fallback_reason=None,
             encode_seconds=None,
         )
         return report
+
+    name = chunk_name(start)
+    hit = _cached_chunk(cache_dir, digest, selected, name)
+    if hit is not None:
+        await asyncio.to_thread(_touch, hit.path)
+        # No audit record: nothing was transcoded.  §7.3 records encodes, and the
+        # encode that produced these bytes filed its own record when it ran.
+        return _cache_hit(hit)
 
     dst = artifact_dir(cache_dir, digest, selected.fingerprint()) / name
     async with jobs.admission.enter(settings):
@@ -510,15 +532,7 @@ async def _prepare_chunk(p: Path, settings: Settings, t: float, *, video_hash: s
             again = _cached_chunk(cache_dir, digest, selected, name)
             if again is not None:  # published while we waited for the lock
                 await asyncio.to_thread(_touch, again.path)
-                report.update(
-                    cached=True,
-                    pipeline_fingerprint=again.fingerprint,
-                    pipeline=again.describe,
-                    fell_back=again.fingerprint != selected.fingerprint(),
-                    fallback_reason=None,
-                    encode_seconds=None,
-                )
-                return report
+                return _cache_hit(again)
             with pin(digest):
                 try:
                     result = await asyncio.to_thread(
@@ -529,11 +543,27 @@ async def _prepare_chunk(p: Path, settings: Settings, t: float, *, video_hash: s
                         dst,
                         hdr=hdr,
                         start=start,
-                        has_audio=info.get("audio_codec") is not None,
+                        has_audio=has_audio,
                     )
                 except Exception as exc:
                     failure = states.classify(exc)
                     _log.warning("chunk %s of %s failed (%s): %s", start, p, failure.kind, exc)
+                    # A transcode that ran and did not produce a rendering is
+                    # still a transcode (§7.3).  Recorded against the *selected*
+                    # pipeline, which is all that is known: there is no result,
+                    # so there is no pipeline that produced bytes to name.
+                    audit.record_transcode(
+                        settings,
+                        source=p,
+                        video_sha256=digest,
+                        scope=audit.SCOPE_CHUNK,
+                        outcome=audit.OUTCOME_FAILED,
+                        examiner_id=settings.examiner_id,
+                        requested_timecode=t,
+                        pipeline_fingerprint=selected.fingerprint(),
+                        error=f"{failure.kind}: {exc}",
+                        chunk_start=start,
+                    )
                     raise failure.as_http() from exc
                 published = relocate_to_pipeline_key(
                     result.path, cache_dir, digest, result.pipeline.fingerprint(), name
@@ -541,10 +571,32 @@ async def _prepare_chunk(p: Path, settings: Settings, t: float, *, video_hash: s
                 _substitutions[selected.fingerprint()] = result.pipeline
             await asyncio.to_thread(evict, cache_dir, settings.video_cache_max_bytes)
 
+    # `result.pipeline`, never `selected`: after a §8 GPU→CPU fallback those name
+    # different encoders, and the label must name the one that produced the bytes.
+    rendering = audit.Rendering.from_result(
+        result,
+        scope=audit.SCOPE_CHUNK,
+        has_audio=has_audio,
+        start_seconds=start,
+        duration_seconds=float(settings.video_chunk_seconds),
+    )
+    audit.record_transcode(
+        settings,
+        source=p,
+        video_sha256=digest,
+        scope=audit.SCOPE_CHUNK,
+        outcome=audit.OUTCOME_SUCCESS,
+        examiner_id=settings.examiner_id,
+        requested_timecode=t,
+        rendering=rendering,
+        chunk_start=start,
+        artifact_path=str(published),
+        encode_seconds=round(result.wall_seconds, 3),
+    )
     report.update(
         cached=False,
         pipeline_fingerprint=result.pipeline.fingerprint(),
-        pipeline=result.pipeline.describe(),
+        pipeline=rendering.describe(),
         fell_back=result.fell_back,
         fallback_reason=result.fallback_reason,
         encode_seconds=round(result.wall_seconds, 3),
@@ -686,10 +738,21 @@ async def video_full_start(
                 detail=states.OVERRIDE_UNATTRIBUTED.as_detail(),
             )
         overridden_by = settings.examiner_id
-        # The audit line.  WARNING because a capacity gate being set aside is not
-        # routine traffic, and every field a later reader needs is on it: who,
-        # which file, which verdict, the estimate that was overridden and the
-        # ceiling that still applies.
+        # Two records, one call site, different readers (§7.3).  The WARNING is
+        # the operational alarm an operator watching the process log sees as it
+        # happens — a capacity gate being set aside is not routine traffic — and
+        # `record_override` is the durable entry a reviewer reads months later,
+        # in the one audit log this tool has.  Emitting both here is what keeps
+        # them from drifting; neither replaces the other.
+        audit.record_override(
+            settings,
+            source=p,
+            video_sha256=src.digest,
+            examiner_id=overridden_by,
+            verdict=verdict.state,
+            estimate_bytes=verdict.estimate_bytes,
+            limit_bytes=verdict.limit_bytes,
+        )
         _log.warning(
             "SFN §6.3 full-copy refusal OVERRIDDEN by examiner %s: source=%s "
             "video_sha256=%s verdict=%s estimate_bytes=%s limit_bytes=%s",
@@ -721,6 +784,12 @@ async def video_full_start(
             estimate_bytes=verdict.estimate_bytes,
             overridden_by=overridden_by,
             overridden_verdict=verdict.state if overridden_by else None,
+            # Who this encode is attributed to (§7.3).  Captured here, at the
+            # click that starts it, and not read from the environment when it
+            # finishes ~51 minutes later: one encode gets one record, naming the
+            # examiner who asked for it.  Analysts who join a running job are
+            # counted as claimants on that record, never given one of their own.
+            started_by=settings.examiner_id,
         ),
         settings,
     )

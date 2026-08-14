@@ -54,7 +54,7 @@ from pathlib import Path
 # front of an analyst.
 from scalar_forensic.cli import _RateTracker
 from scalar_forensic.config import Settings
-from scalar_forensic.video_playback import states
+from scalar_forensic.video_playback import audit, states
 from scalar_forensic.video_playback.cache import (
     FULL_NAME,
     artifact_dir,
@@ -71,6 +71,7 @@ from scalar_forensic.video_playback.encode import (
     Progress,
     _kill_group,
     encode_full,
+    job_threads,
 )
 
 _log = logging.getLogger(__name__)
@@ -180,6 +181,12 @@ class JobRequest:
     #: every existing job is unchanged: this is per request and never a mode.
     overridden_by: str | None = None
     overridden_verdict: str | None = None
+    #: ``SFN_EXAMINER_ID`` as it was when this encode was started, or ``None``
+    #: when the deployment sets none.  One encode, one audit record, attributed
+    #: to whoever started it (§7.3): a job is refcounted, so a second analyst
+    #: joining it adds a claimant to that record rather than producing a second
+    #: one for an encode that only ran once.
+    started_by: str | None = None
 
     @property
     def override(self) -> dict | None:
@@ -222,6 +229,11 @@ class FullJob:
         self.written_bytes = 0
         self.failure: states.Failure | None = None
         self.result: EncodeResult | None = None
+        #: The §7.2 record of what actually ran, set when the encode returns.
+        #: ``None`` while the job is running — a label that named a pipeline
+        #: before an encoder had produced a frame would be describing a
+        #: selection, which is the thing §7.2 exists to stop the label doing.
+        self.rendering: audit.Rendering | None = None
         self.artifact: Path | None = None
         self.task: asyncio.Task | None = None
         self._proc: subprocess.Popen | None = None
@@ -302,6 +314,11 @@ class FullJob:
             "estimate_bytes": self.request.estimate_bytes,
             "limit_bytes": self.request.limit_bytes,
             "override": self.request.override,
+            # §7.2: the label records the pipeline that *ran*, in full — filter
+            # chain with parameters, encoder and rate control, output height,
+            # ffmpeg version, the thread cap this copy was encoded under and what
+            # became of the audio.  `None` until there is an encode to describe.
+            "rendering": None if self.rendering is None else self.rendering.describe(),
             # media seconds encoded per wall second — the same number §3.1 quotes
             # as "2.7× realtime", so the label the analyst reads matches the
             # measurement the spec is argued from.
@@ -424,6 +441,24 @@ class JobRunner:
                 await asyncio.to_thread(evict, request.cache_dir, settings.video_cache_max_bytes)
         except BaseException as exc:  # noqa: BLE001 - every ending is a reported state
             job.finished_at = time.monotonic()
+            # §7.3: an encode that ran is recorded whatever became of it.  A
+            # cancelled export and a failed one are different outcomes, and a log
+            # that held only the successes would answer "what did this examiner
+            # produce" while saying nothing about what they started.
+            audit.record_transcode(
+                settings,
+                source=request.source,
+                video_sha256=request.digest,
+                scope=audit.SCOPE_FULL,
+                outcome=audit.OUTCOME_CANCELLED if job.cancelled else audit.OUTCOME_FAILED,
+                examiner_id=request.started_by,
+                pipeline_fingerprint=request.pipeline.fingerprint(),
+                error=None if job.cancelled else f"{type(exc).__name__}: {exc}",
+                waiters=job.waiters,
+                elapsed_seconds=round(job.elapsed_seconds, 1),
+                written_bytes=job.written_bytes,
+                override=request.override,
+            )
             if job.cancelled:
                 # A cancelled encode dies of SIGKILL, which `classify` would read
                 # as the OOM killer (§10.1).  It is neither a failure nor a §5
@@ -440,8 +475,39 @@ class JobRunner:
             return
         job.finished_at = time.monotonic()
         job.result = result
+        # `result.pipeline`, not `request.pipeline`.  They differ after a §8
+        # GPU→CPU fallback, and `request` is the object in scope for most of this
+        # method — a record built from it would name the encoder that was
+        # selected and not the one that produced the file, which is exactly the
+        # false label §7.2 exists to prevent.  `threads` is not a Pipeline field
+        # (it changes no pixel the cache key must separate) but libx264's output
+        # does depend on it, so a full copy that does not record it cannot be
+        # reproduced byte-for-byte on a host with a different core count.
+        job.rendering = audit.Rendering.from_result(
+            result,
+            scope=audit.SCOPE_FULL,
+            has_audio=request.has_audio,
+            threads=job_threads(settings),
+            duration_seconds=request.duration_seconds,
+        )
         job.artifact = published
         job.state = "full-job-done"
+        audit.record_transcode(
+            settings,
+            source=request.source,
+            video_sha256=request.digest,
+            scope=audit.SCOPE_FULL,
+            outcome=audit.OUTCOME_SUCCESS,
+            examiner_id=request.started_by,
+            rendering=job.rendering,
+            # Claimants, not records: this encode ran once and is recorded once.
+            waiters=job.waiters,
+            artifact_path=str(published),
+            artifact_bytes=published.stat().st_size if published.exists() else 0,
+            elapsed_seconds=round(job.elapsed_seconds, 1),
+            estimate_bytes=request.estimate_bytes,
+            override=request.override,
+        )
         _log.info(
             "full-video job for %s done in %.1f s (%s bytes, estimate %s, override %s)",
             request.source,
