@@ -2321,3 +2321,42 @@ released a file, release it with `cx o --release` before you say so** — prose 
 handoff is not a lock operation. Amended `dispatch-phase8.md` to name `m8` rather
 than `m7` as the manager for the same reason: an inherited document that still
 names your predecessor sends a worker's reports to a dead window.
+
+## `com-m8` fold 1, 2026-08-14 — phase 8's server side, in two PRs
+
+`main` `0402271` → `#193` `03847d6` → `#194`. **`com-c22` delivered all three of
+phase 8's server deliverables** in one window: `video_playback/audit.py` (§7.2's
+`Rendering` and §7.3's records, both writers), and `sfn-video render`, which also
+gave `sfn-video purge` the filing it has printed-but-not-filed since §13 was
+written. Bar **1016/5 cov 74.83%** at `#193`, **1025/5 cov 75.01%** at `#194`,
+both in a worktree with `models/` copied in and both re-measured on the branch
+rather than carried forward. 21 mutation checks across the two PRs, all caught.
+
+**Review the diff, not the PR body — and the body is where you learn what to
+check.** `c22`'s bodies named the four traps its dispatch named, which makes the
+diff cheap to verify and the verification worth doing anyway: `result.pipeline`
+at both writers with `request.pipeline` only on the non-success path where nothing
+was produced; `threads` on the full record and `None` on chunks, which reads like
+an omission until you find that `-threads` is the full job's addition at
+`encode.py:142`. Both were right. Checking cost four greps.
+
+**`record_purge` shipped in `#193` with no caller and got one in `#194`.** Flagged
+as non-blocking rather than a change request, because the PR that would call it
+was already being written. **A public function with no caller is a defect only if
+nothing is coming for it** — say which in the PR body, and the reviewer does not
+have to guess.
+
+**Phase 8 does not end at the server.** `#193` put the whole §7.2 payload on the
+wire — decoder, filter chain with parameters, rate control, output height, ffmpeg
+version, audio transformation — and `player.js:95-98` rendered three fields of it.
+§7.2's word is *label*, and a label an examiner never sees is not one. `com-c23`
+was spawned on `data/reports/dispatch-phase8-browser.md` for that, plus the two
+follow-ups `m7` left (`closeFullJob()` with no caller, and the two differently
+worded download affordances) — all three share `web/static/`, so they are one
+worker's file set rather than three tickets.
+
+**The §15 / `CLAUDE.md` fold is the manager's, not the last coder's.** `c22` was
+holding both files and would have been the obvious one to close them, but the fold
+must come after *all* phase-8 code is on `main` — including a second coder's — and
+a worker at 219k writing text about work not yet merged is how a spec ends up
+describing something that does not exist.
