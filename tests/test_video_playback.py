@@ -40,7 +40,9 @@ from typer.testing import CliRunner
 from scalar_forensic import cli
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import hash_file
+from scalar_forensic.faces import audit as faces_audit
 from scalar_forensic.video import VIDEO_EXTENSIONS
+from scalar_forensic.video_playback import audit as vp_audit
 from scalar_forensic.video_playback import cache as vp_cache
 from scalar_forensic.video_playback import capability as vp_capability
 from scalar_forensic.video_playback import codecs as vp_codecs
@@ -2487,8 +2489,8 @@ class TestFallbackCacheLookup:
 
         hit = vp_routes._cached_chunk(cache_dir, DIGEST_A, gpu, name)
         assert hit.fingerprint == cpu.fingerprint()
-        assert hit.describe["encoder"] == "libx264"
-        assert hit.describe["fingerprint"] == cpu.fingerprint()
+        assert hit.pipeline.describe()["encoder"] == "libx264"
+        assert hit.pipeline.describe()["fingerprint"] == cpu.fingerprint()
 
     def test_a_substitution_never_serves_another_videos_chunk(self, tmp_path):
         cache_dir = tmp_path / "cache"
@@ -3218,3 +3220,414 @@ class TestFullJobProgress:
         assert job.eta_seconds is not None
         assert job.view()["fraction"] == pytest.approx(0.02)
         assert job.view()["eta_label"].endswith("at current rate")
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 — provenance and audit (§7.1, §7.2, §7.3)
+# ---------------------------------------------------------------------------
+
+
+def _records(event: str | None = None) -> list[dict]:
+    """Every audit record this deployment has written, newest last."""
+    events = list(vp_audit.audit_log(Settings()).iter_events())
+    return [e for e in events if event is None or e["event"] == event]
+
+
+class TestAuditLogLocation:
+    """One audit shape for the tool, and a log a retention sweep cannot delete."""
+
+    def test_the_video_log_is_the_faces_audit_log_type(self):
+        # §7.3: "faces/audit.py … is the pattern; this must not invent a second
+        # one."  Imported and used, not re-implemented — a forensic tool with two
+        # audit formats has two answers to what it did.
+        assert isinstance(vp_audit.audit_log(Settings()), faces_audit.AuditLog)
+
+    def test_the_log_sits_beside_the_cache_and_never_inside_it(self, roots):
+        _, cache_dir = roots
+        path = vp_audit.audit_log(Settings()).path
+        assert path == cache_dir.parent / "video_audit.log"
+        assert cache_dir not in path.parents
+
+    def test_an_unset_cache_dir_still_has_a_log(self, monkeypatch):
+        # A deployment with no viewing-copy cache still purges and still refuses;
+        # those acts are recorded somewhere rather than nowhere.
+        monkeypatch.setenv("SFN_VIDEO_CACHE_DIR", "")
+        assert vp_audit.audit_log(Settings()).path == Path("data") / "video_audit.log"
+
+
+class TestRenderingLabel:
+    """§7.2: the label records the pipeline that ran, in full."""
+
+    def test_the_record_names_the_encoder_that_produced_the_bytes(self):
+        # The §7.2 trap: after a §8 fallback the pipeline that was *selected* and
+        # the one that *ran* name different encoders.  `from_result` reads the
+        # result, which is the only one of the two that made a file.
+        cpu = _pipeline()
+        result = vp_encode.EncodeResult(
+            path=Path("/c.mp4"),
+            pipeline=cpu,
+            command=["ffmpeg", "-i", "in.mov", "out.mp4"],
+            wall_seconds=1.0,
+            fell_back=True,
+            fallback_reason="no NVENC capable devices found",
+        )
+        described = vp_audit.Rendering.from_result(
+            result, scope=vp_audit.SCOPE_CHUNK, has_audio=False
+        ).describe()
+        assert described["encoder"] == "libx264"
+        assert described["fingerprint"] == cpu.fingerprint()
+        assert described["fell_back"] is True
+        assert described["fallback_reason"] == "no NVENC capable devices found"
+
+    def test_every_pipeline_field_reaches_the_label(self):
+        # §7.2 lists hwaccel, decoder, the filter chain *with parameters*, the
+        # encoder and its rate control, the output resolution and the ffmpeg
+        # version.  Derived from `fields()` so a field added to the pipeline
+        # cannot change the fingerprint while the label describes the old one.
+        described = vp_audit.Rendering(
+            pipeline=_pipeline(), scope=vp_audit.SCOPE_FULL, has_audio=True
+        ).describe()
+        for field in dataclasses.fields(vp_capability.Pipeline):
+            assert field.name in described
+        assert described["filter_chain"].endswith(vp_capability.SDR_CHAIN)
+        assert "scale=-2:'min(ih,1080)'" in described["filter_chain"]
+        assert described["rate_control"] == "-preset medium -crf 23"
+
+    def test_the_audio_transformation_is_stated_and_so_is_its_omission(self):
+        # §7.2's last clause.  `audio` (the pipeline field) is the args that
+        # *would* be used; whether they were is a property of the source.
+        with_audio = vp_audit.Rendering(
+            pipeline=_pipeline(), scope=vp_audit.SCOPE_CHUNK, has_audio=True
+        )
+        without = dataclasses.replace(with_audio, has_audio=False)
+        assert with_audio.describe()["audio_transformation"] == vp_audit.AUDIO_REENCODED
+        assert without.describe()["audio_transformation"] == vp_audit.AUDIO_OMITTED
+        assert "-an" in vp_audit.AUDIO_OMITTED
+
+    def test_a_rendering_found_in_the_cache_claims_no_invocation(self):
+        # No process ran for a cache hit.  Reconstructing a plausible argv would
+        # put a command on a label that nothing ever executed.
+        assert (
+            vp_audit.Rendering(
+                pipeline=_pipeline(), scope=vp_audit.SCOPE_CHUNK, has_audio=False
+            ).describe()["command"]
+            is None
+        )
+
+    @requires_ffmpeg
+    def test_a_chunk_response_carries_the_whole_pipeline_record(self, client, hevc_10bit_mov):
+        body = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+        label = body["pipeline"]
+        assert label["fingerprint"] == body["pipeline_fingerprint"]
+        assert label["ffmpeg_version"]
+        assert label["audio_transformation"] == vp_audit.AUDIO_OMITTED
+        assert label["start_seconds"] == 0.0
+        assert label["duration_seconds"] == float(Settings().video_chunk_seconds)
+        assert "-c:v" in label["command"]
+        assert label["command"][-1].endswith(".part")  # §10.2: published by rename
+
+    @requires_ffmpeg
+    def test_a_cache_hit_is_labelled_with_the_same_pipeline_and_no_command(
+        self, client, hevc_10bit_mov
+    ):
+        first = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+        second = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+        assert second["cached"] is True
+        assert second["pipeline"]["fingerprint"] == first["pipeline"]["fingerprint"]
+        assert second["pipeline"]["encoder"] == first["pipeline"]["encoder"]
+        assert second["pipeline"]["command"] is None
+
+    @requires_ffmpeg
+    def test_a_full_copy_records_the_thread_cap_it_was_encoded_under(self, hevc_10bit_mov):
+        # libx264's output depends on its thread count, so a full copy whose
+        # record omits `-threads` does not reproduce on a host with a different
+        # core count — the §7.2 promise kept for chunks but not for exports.
+        with TestClient(app) as c:
+            c.post(f"/api/video-full?path={hevc_10bit_mov}")
+            body = _await_terminal(c, hevc_10bit_mov)
+        assert body["player_state"] == "full-job-done", body
+        rendering = body["rendering"]
+        assert rendering["scope"] == vp_audit.SCOPE_FULL
+        assert rendering["threads"] == vp_encode.job_threads(Settings())
+        assert "-threads" in rendering["command"]
+        assert rendering["command"][rendering["command"].index("-threads") + 1] == str(
+            vp_encode.job_threads(Settings())
+        )
+
+    def test_a_running_job_describes_no_rendering_yet(self, hevc_10bit_mov):
+        request = vp_jobs.JobRequest(
+            source=hevc_10bit_mov,
+            digest=DIGEST_A,
+            duration_seconds=10.0,
+            hdr=False,
+            has_audio=False,
+            capability=_capability(),
+            pipeline=_pipeline(),
+            cache_dir=Settings().video_cache_dir,
+            limit_bytes=None,
+            estimate_bytes=None,
+        )
+        assert vp_jobs.FullJob(request, Settings()).view()["rendering"] is None
+
+
+class TestTranscodeAudit:
+    """§7.3: every transcode — chunk and full — writes a record."""
+
+    @requires_ffmpeg
+    def test_a_chunk_encode_writes_one_record_with_every_required_field(
+        self, client, hevc_10bit_mov, monkeypatch
+    ):
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        body = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0.3").json()
+        records = _records(vp_audit.EVENT_TRANSCODE)
+        assert len(records) == 1
+        rec = records[0]
+        assert rec["examiner_id"] == "examiner-7"
+        assert rec["ts"]
+        assert rec["source"] == str(hevc_10bit_mov)
+        assert rec["video_sha256"] == body["video_sha256"]
+        assert rec["requested_timecode"] == 0.3
+        assert rec["scope"] == vp_audit.SCOPE_CHUNK
+        assert rec["outcome"] == vp_audit.OUTCOME_SUCCESS
+        assert rec["pipeline_fingerprint"] == body["pipeline_fingerprint"]
+        assert rec["rendering"]["command"][0].endswith("ffmpeg")
+
+    @requires_ffmpeg
+    def test_the_recorded_digest_is_the_verified_one_and_not_the_indexed_hash(
+        self, client, hevc_10bit_mov
+    ):
+        # §7.1: a record pairing the hash the index remembers with a rendering of
+        # the file as it is now is a false statement.  The route is handed a
+        # different `video_hash` here and must refuse rather than record it.
+        client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        rec = _records(vp_audit.EVENT_TRANSCODE)[0]
+        assert rec["video_sha256"] == hash_file(hevc_10bit_mov)
+        stale = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0&video_hash={'b' * 64}")
+        assert stale.status_code == 409
+        assert len(_records(vp_audit.EVENT_TRANSCODE)) == 1
+
+    @requires_ffmpeg
+    def test_a_cache_hit_writes_no_second_record(self, client, hevc_10bit_mov):
+        # A record per *encode*.  Recording re-serves as transcodes would inflate
+        # the count of renderings this examiner produced from one.
+        client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        assert len(_records(vp_audit.EVENT_TRANSCODE)) == 1
+
+    def test_a_failed_chunk_encode_is_recorded_as_a_failure_with_no_rendering(
+        self, client, hevc_10bit_mov, monkeypatch
+    ):
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        with patch.object(
+            vp_routes,
+            "encode_chunk",
+            side_effect=vp_encode.EncodeError("boom", command=[], returncode=1),
+        ):
+            assert client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").status_code == 422
+        rec = _records(vp_audit.EVENT_TRANSCODE)[0]
+        assert rec["outcome"] == vp_audit.OUTCOME_FAILED
+        assert rec["rendering"] is None
+        assert "boom" in rec["error"]
+        assert rec["pipeline_fingerprint"]
+
+    def test_an_unattributed_transcode_is_recorded_as_unattributed(
+        self, client, hevc_10bit_mov, monkeypatch
+    ):
+        # Playback is not gated on SFN_EXAMINER_ID the way the faces modality is,
+        # so the honest record is `null` — never an invented identity, and never
+        # a missing record.
+        monkeypatch.delenv("SFN_EXAMINER_ID", raising=False)
+        with patch.object(
+            vp_routes, "encode_chunk", side_effect=vp_encode.EncodeError("boom", command=[])
+        ):
+            client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        assert _records(vp_audit.EVENT_TRANSCODE)[0]["examiner_id"] is None
+
+    @requires_ffmpeg
+    def test_a_full_copy_writes_exactly_one_record_however_many_claim_it(
+        self, hevc_long_mov, monkeypatch
+    ):
+        # §10.4: one encode, N claimants.  N records would say this examiner
+        # produced N renderings of one video; one record per claimant-set would
+        # lose the fact that anyone else was waiting on it.  The claimants are a
+        # field on the single record.
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        with TestClient(app) as c:
+            c.post(f"/api/video-full?path={hevc_long_mov}")
+            c.post(f"/api/video-full?path={hevc_long_mov}")
+            body = _await_terminal(c, hevc_long_mov, timeout=60)
+        assert body["player_state"] == "full-job-done", body
+        records = _records(vp_audit.EVENT_TRANSCODE)
+        assert len(records) == 1
+        assert records[0]["scope"] == vp_audit.SCOPE_FULL
+        assert records[0]["examiner_id"] == "examiner-7"
+        assert records[0]["waiters"] == 2
+        assert records[0]["rendering"]["threads"] == vp_encode.job_threads(Settings())
+
+    @requires_ffmpeg
+    def test_a_full_copy_is_attributed_to_whoever_started_it(self, hevc_10bit_mov, monkeypatch):
+        # The environment can change under a 51-minute export; the record names
+        # the examiner who clicked, not whoever is configured when it lands.
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        with TestClient(app) as c:
+            c.post(f"/api/video-full?path={hevc_10bit_mov}")
+            monkeypatch.setenv("SFN_EXAMINER_ID", "someone-else")
+            _await_terminal(c, hevc_10bit_mov)
+        assert _records(vp_audit.EVENT_TRANSCODE)[0]["examiner_id"] == "examiner-7"
+
+    @requires_ffmpeg
+    def test_a_cancelled_export_is_recorded_as_cancelled_and_not_as_a_failure(self, hevc_long_mov):
+        with TestClient(app) as c:
+            c.post(f"/api/video-full?path={hevc_long_mov}")
+            c.request("DELETE", f"/api/video-full?path={hevc_long_mov}")
+            _await_terminal(c, hevc_long_mov)
+        rec = _records(vp_audit.EVENT_TRANSCODE)[0]
+        assert rec["outcome"] == vp_audit.OUTCOME_CANCELLED
+        assert rec["error"] is None
+        assert rec["rendering"] is None
+
+    def test_a_failed_export_is_recorded(self, hevc_10bit_mov):
+        with (
+            TestClient(app) as c,
+            patch.object(
+                vp_jobs, "encode_full", side_effect=vp_encode.EncodeError("no", command=[])
+            ),
+        ):
+            c.post(f"/api/video-full?path={hevc_10bit_mov}")
+            _await_terminal(c, hevc_10bit_mov)
+        rec = _records(vp_audit.EVENT_TRANSCODE)[0]
+        assert rec["scope"] == vp_audit.SCOPE_FULL
+        assert rec["outcome"] == vp_audit.OUTCOME_FAILED
+        assert "no" in rec["error"]
+
+    def test_an_audit_write_that_fails_does_not_fail_the_request(
+        self, client, hevc_10bit_mov, caplog
+    ):
+        # The rendering already exists on disk; raising here would report an
+        # error for work that succeeded while un-writing none of it.  Loud, not
+        # silent: a deployment whose log cannot be written needs fixing now.
+        with (
+            caplog.at_level(logging.ERROR, logger="scalar_forensic.video_playback.audit"),
+            patch.object(
+                faces_audit.AuditLog, "append", side_effect=OSError("read-only filesystem")
+            ),
+            patch.object(
+                vp_routes, "encode_chunk", side_effect=vp_encode.EncodeError("boom", command=[])
+            ),
+        ):
+            assert client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").status_code == 422
+        assert any("read-only filesystem" in r.getMessage() for r in caplog.records)
+
+
+class TestOverrideAudit:
+    """§6.3's override is filed as well as alarmed."""
+
+    def test_the_override_is_recorded_in_the_audit_log_and_in_the_process_log(
+        self, hevc_10bit_mov, monkeypatch, caplog
+    ):
+        monkeypatch.setenv("SFN_VIDEO_CACHE_MAX_BYTES", "2")
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        estimate = vp_cache.check_ceiling(
+            Settings(), vp_codecs._stream_report(hevc_10bit_mov)
+        ).estimate_bytes
+        with (
+            caplog.at_level(logging.WARNING, logger="scalar_forensic.video_playback.routes"),
+            TestClient(app) as c,
+            patch.object(
+                vp_jobs, "encode_full", side_effect=vp_encode.EncodeError("stop", command=[])
+            ),
+        ):
+            c.post(f"/api/video-full?path={hevc_10bit_mov}&override=true")
+            _await_terminal(c, hevc_10bit_mov)
+        rec = _records(vp_audit.EVENT_OVERRIDE)[0]
+        assert rec["examiner_id"] == "examiner-7"
+        assert rec["verdict"] == "refused"
+        assert rec["estimate_bytes"] == estimate
+        assert rec["limit_bytes"] == 1
+        assert rec["video_sha256"] == hash_file(hevc_10bit_mov)
+        # The operational alarm is not replaced by the durable record.
+        assert any("OVERRIDDEN" in r.getMessage() for r in caplog.records)
+
+    def test_a_refused_override_files_nothing(self, client, hevc_10bit_mov, monkeypatch):
+        monkeypatch.setenv("SFN_VIDEO_CACHE_MAX_BYTES", "2")
+        monkeypatch.delenv("SFN_EXAMINER_ID", raising=False)
+        assert (
+            client.post(f"/api/video-full?path={hevc_10bit_mov}&override=true").status_code == 403
+        )
+        assert _records(vp_audit.EVENT_OVERRIDE) == []
+
+
+@requires_ffmpeg
+class TestProvenanceAfterAGpuFallback:
+    """§7.2's exact failure mode, on both writers: `request` is not `result`.
+
+    A GPU that probes clean and fails at job time is the one case where the
+    pipeline that was *selected* and the pipeline that *ran* name different
+    encoders — so it is the only case that can tell a label built from the
+    request apart from one built from the result.  Both writers are pinned here
+    because `request` is the object in scope for most of each of them.
+    """
+
+    @staticmethod
+    def _gpu_that_fails(monkeypatch):
+        """Select h264_nvenc, and make every nvenc invocation fail for real."""
+        monkeypatch.setattr(
+            vp_routes,
+            "capability",
+            lambda *a, **kw: _capability(encoder="h264_nvenc", hwaccel="cuda"),
+        )
+        for name in ("_run", "_run_watched"):
+            real = getattr(vp_encode, name)
+
+            def flaky(cmd, timeout, *args, _real=real, **kw):
+                if "h264_nvenc" in cmd:
+                    raise vp_encode.EncodeError(
+                        "no NVENC capable devices found", command=cmd, returncode=1
+                    )
+                return _real(cmd, timeout, *args, **kw)
+
+            monkeypatch.setattr(vp_encode, name, flaky)
+
+    def test_the_chunk_label_and_record_name_the_encoder_that_ran(
+        self, client, hevc_10bit_mov, monkeypatch
+    ):
+        gpu_fingerprint = vp_capability.select(
+            Settings(), _capability(encoder="h264_nvenc", hwaccel="cuda"), hdr=False
+        ).fingerprint()
+        self._gpu_that_fails(monkeypatch)
+        body = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+
+        assert body["fell_back"] is True
+        assert body["pipeline"]["encoder"] == "libx264"
+        assert body["pipeline"]["fingerprint"] != gpu_fingerprint
+        rec = _records(vp_audit.EVENT_TRANSCODE)[0]
+        assert rec["rendering"]["encoder"] == "libx264"
+        assert rec["pipeline_fingerprint"] == body["pipeline_fingerprint"]
+        assert rec["pipeline_fingerprint"] != gpu_fingerprint
+
+        # And the hit that follows is labelled with the pipeline that made the
+        # bytes, not the one selection would pick again today.
+        hit = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+        assert hit["cached"] is True
+        assert hit["pipeline"]["encoder"] == "libx264"
+        assert hit["pipeline"]["fingerprint"] == body["pipeline"]["fingerprint"]
+
+    def test_the_full_copy_label_and_record_name_the_encoder_that_ran(
+        self, hevc_10bit_mov, monkeypatch
+    ):
+        gpu_fingerprint = vp_capability.select(
+            Settings(), _capability(encoder="h264_nvenc", hwaccel="cuda"), hdr=False
+        ).fingerprint()
+        self._gpu_that_fails(monkeypatch)
+        with TestClient(app) as c:
+            c.post(f"/api/video-full?path={hevc_10bit_mov}")
+            body = _await_terminal(c, hevc_10bit_mov)
+
+        assert body["player_state"] == "full-job-done", body
+        assert body["rendering"]["encoder"] == "libx264"
+        assert body["rendering"]["fingerprint"] != gpu_fingerprint
+        # And the file is served under the key the label names, not the other one.
+        assert f"fp={body['rendering']['fingerprint']}" in body["full_url"]
+        rec = _records(vp_audit.EVENT_TRANSCODE)[0]
+        assert rec["rendering"]["encoder"] == "libx264"
+        assert rec["pipeline_fingerprint"] != gpu_fingerprint
