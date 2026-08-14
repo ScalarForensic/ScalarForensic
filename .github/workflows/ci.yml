@@ -59,7 +59,7 @@ jobs:
       # runs on Node's built-in test runner and `package.json` declares no
       # dependencies (see tests/js/harness.mjs for why).
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "24.14.0"
 
