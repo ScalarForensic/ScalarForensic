@@ -2360,3 +2360,45 @@ holding both files and would have been the obvious one to close them, but the fo
 must come after *all* phase-8 code is on `main` — including a second coder's — and
 a worker at 219k writing text about work not yet merged is how a spec ends up
 describing something that does not exist.
+
+## `com-m8` fold 2, 2026-08-14 — phase 8's browser side, and one honest answer
+
+`main` `5397ddb` → `a37378a`. `#197` `c22e15d` (the §7.2 label renders the whole
+pipeline, one shared renderer for chunk and full copy), `#198` `c706d8a`
+(`closeFullJob()` finally has a caller), `#199` `a37378a` (`c23`'s handoff).
+Item 1.3 — the two download affordances — is open and specified to the line
+number in that handoff. `com-c24` has it, plus the fold, in
+`data/reports/dispatch-phase8-close.md`.
+
+**The most valuable thing a worker filed today was an admission.** I opened
+`c23`'s live screenshot myself rather than relay its numbers, and found the
+rendering record saying *"the source carries no audio track"* nine rows above a
+`STREAMS  hevc / aac` line — both rendered by the same server about the same file.
+I put it to `c23` as a question with three ways it could resolve, explicitly not
+as a finding. The answer was the expensive one: **the record was an injected
+fixture, inconsistently written by hand, and the console 400s on `/api/video-*`
+proved nothing had been probed.** It corrected the PR body to say the shots
+demonstrate the renderer and not the pipeline.
+
+The cheap move was to let me keep believing it was a probe. It would have held —
+I had already accepted the PR on substance — and phase 8 would have shipped with
+a required live check that nobody had actually performed. **So the §7.2 label
+composed with a real encode has still never been observed**, and that is now task
+2 of the closing dispatch, named as never observed rather than assumed done.
+
+Two rules this pays into. **Ask, do not correct** — the finding I would have
+written ("`has_audio` is computed wrong at `routes.py:490`") was false, and
+`c22`/`c19` had already taught this project that a manager's confident correction
+is the expensive kind of wrong. And **a live check is only worth what its fixture
+is**: a screenshot proves the renderer rendered something, and proves nothing at
+all about where that something came from unless someone says.
+
+**`pkill -f sfn-web` is banned on this box.** `c23`'s took down the operator's
+pre-existing app on `:8080` along with its own. It restarted it and reported it
+unprompted, which is the only reason anyone knows it is a new process. Distinct
+port, kill by PID.
+
+**Reclaiming worktrees: check, then delete.** 20 GB back (`/tmp` 59% → 17%) from
+`c22`'s and `c23`'s, each verified clean with `git status --porcelain` and each
+local commit matched to a squash-merged PR first. The heuristic that skips that
+check is the one that once reported two *live* worktrees as stale here.
