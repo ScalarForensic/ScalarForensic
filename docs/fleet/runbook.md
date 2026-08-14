@@ -2065,3 +2065,55 @@ which of the two shapes it was before recording it closed; it was the right one.
 stopped at a boundary and wrote the map instead of starting the next unit. Every
 phase since has cost roughly one PR. The pattern is now self-sustaining: `c16`
 wrote its handoff and *held* rather than opening phase 7, unprompted.
+
+---
+
+## Window `com-m6` — phase 7 dispatched, both operator rulings executing (2026-08-14)
+
+Opened at `f2b07a7` (`main`, phases 1–6 done, bar **954/5**, coverage 73.09% at
+`8af5266`). Retired `com-c16` (finished, cold at 292k) and `com-m5` (sent, cold
+at 189k) and reaped their ownership rows; the operator's standing rule is no cold
+adoptions. Three workers dispatched.
+
+**§4.3's worker contention is ruled, not inherited.** Three managers passed it
+along; the spec said "phase 7 must pick one" of two remedies and the honest
+answer turned out to be **both**:
+
+- **Yield** — the full-video job runs under `nice` with an explicit `-threads`
+  cap (`SFN_VIDEO_JOB_NICE`, `SFN_VIDEO_JOB_THREADS`), so chunk work wins the
+  contention rather than splitting it. §3.5 shows the box saturated by one job,
+  so this shrinks the k=2 penalty (8.21 s → ~16.35 s) rather than removing it.
+- **Disclose anyway** — the UI says chunk loading is slower while a full export
+  runs.
+
+**Why both, and this is the part worth keeping:** yield alone re-creates §4.3's
+explicitly ruled-out third option the moment yielding proves partial — bounded,
+but invisible. The residual is unmeasured *today*, so a remedy that depends on
+the residual being small cannot be shipped as if it were. Disclosure costs one
+UI line and is correct whatever the measurement says. `csm-b2` measures the
+residual against the settings `c17` actually lands.
+
+**Where a benchmark can share a box and where it cannot.** `csm-b2` has two
+tasks and they have opposite contention rules, which is why they are split
+rather than sequenced: output **sizes** are deterministic — byte counts do not
+care what else is running, so task A runs alongside the coders. Chunk **latency**
+under a concurrent job is exactly the kind of number a parallel pytest run
+corrupts silently, so task B must confirm the box is quiet first and record what
+was running. "Needs an idle box" was true of half this benchmarker's work; the
+scheduling constraint belongs on the task, not on the agent.
+
+**The JS runner goes inside `lint-and-test (3.12)`, not beside it.** The operator
+ruled the dependency YES; the wiring is a manager call. `main` is gated by a
+repository ruleset whose required checks are exactly `lint-and-test (3.12)` and
+`qdrant-integration`, so a new top-level job would **not** be required and could
+be red while the PR merged — a decorative check is worse than none, because it
+reads as coverage. As a step inside an already-required job it is required by
+construction and needs no ruleset change (operator-only anyway).
+
+`c18`'s done-criterion is not "the runner is installed" but **reintroduce
+`player.js`'s `?? … ||` `SyntaxError`, prove the JS suite goes red while the
+Python suite stays green, revert.** That is this project's mutation-check
+standard turned on the harness itself: a harness that cannot be shown to catch
+the defect that motivated it has only been installed, not demonstrated. The
+existing Python wiring tests stay — they pin that markup and script are wired
+together at all, which the new runner does not.
