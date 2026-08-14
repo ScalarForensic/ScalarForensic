@@ -539,3 +539,30 @@ which is what the measurement showed it to be.
 *Consequence for the spec:* §6.3's direction claim was already corrected in
 `#179`; the "escalated 2026-08-14 and open" paragraph is now superseded and must
 be replaced by this ruling rather than left standing next to it.
+
+## §6.3, narrowed — `unknown` is NOT overridable (operator, 2026-08-14)
+
+**RULED (operator, delivered through `scalarforensic-cfm-g4`, 2026-08-14): the
+`unknown`-estimate case is NOT examiner-overridable.** An `unknown` verdict is
+refused, with **Download original** offered, and there is no examiner escape
+hatch. **The measured-high override stays exactly as shipped** — that ruling
+stands, and so do every one of its constraints: explicit per request, a named
+examiner or 403, disclosed for the life of the job and on the copy it produced,
+and the `.part` watch still killing the job at `limit_bytes`.
+
+*Why the question existed:* `com-c20` implemented `unknown` as overridable and the
+spec said, in those words, that this was **the implementation's reading** rather
+than the ruling. `com-m7` accepted it and flagged it rather than let it pass
+silently — the operator had ruled on an estimate measured erring *high*, not on
+`unknown` by name. Marking it as a reading instead of a ruling is what made this
+answerable months later instead of indistinguishable from a decision.
+
+*What it costs, and this was the sizing the ruling was taken against:* one spec
+paragraph — **replace `c20`'s "implementation's reading" passage with this
+ruling, do not leave it standing beside it** — plus one predicate, plus a test
+that pins `unknown` as never overridable. Normal PR flow.
+
+*The invariant is unchanged either way.* `limit_bytes` never depended on the
+estimate existing, so this narrows who may act, not what the system guarantees.
+The estimate remains advisory (`csm-b2` measured it wrong in **both** directions;
+repairing it is not on the table).
