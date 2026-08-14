@@ -6,18 +6,18 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 
 ## Commands
 
-- `uv run pytest -q` — full suite (979 passed / 5 skipped at `1bb24b0`, 2026-08-14,
-  verified clean tree, measured in the `wt` worktree off that commit with `models/`
-  copied in — a tree without `models/` reads 978/6; coverage 74.51% against the 65%
-  floor — measured *after* video-playback phase 7's server side, so it describes the
-  layout below), needs no Qdrant; the 5 skips need
+- `uv run pytest -q` — full suite (991 passed / 5 skipped at `fd31488`, 2026-08-14,
+  verified clean tree, measured in a worktree off that commit with `models/`
+  copied in — a tree without `models/` reads 990/6; coverage 74.58% against the 65%
+  floor — measured *after* video-playback phase 7 and the §6.3 override, so it
+  describes the layout below), needs no Qdrant; the 5 skips need
   `SFN_TEST_QDRANT_URL` and are the only tests that can observe the face exclusion
   guarantee against a real store (CI runs them in a separate Qdrant service-container job).
   **No longer fully hermetic:** the video encode tests need `ffmpeg` on `PATH`. Without it
   they skip locally and **fail** in CI (`CI` env var set) — a skip is how they went quiet
   for a day, so absence in CI is an error, not a shrug.
-- `npm test` — the JS suite (`node --test`, Node ≥22, zero dependencies; 41 tests
-  at PR #183). Runs as a step inside CI's `lint-and-test (3.12)` job. It
+- `npm test` — the JS suite (`node --test`, Node ≥22, zero dependencies; 58 tests
+  at `fd31488`, #188). Runs as a step inside CI's `lint-and-test (3.12)` job. It
   *executes* every `<script src>` in `static/index.html` in a `node:vm` context,
   which is the only check that can catch a `SyntaxError` in a part file — 14
   text-level wiring tests once passed against a `player.js` that did not parse.
@@ -81,6 +81,19 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
   the store by any other route. `routes/video.py` keeps only the indexing side:
   `/api/video-frame` and `/api/video-timeline`. Spec:
   `docs/specs/video-playback-transcode.md` §11.
+- **The §6.3 ceiling refusal is examiner-overridable, and the override is a
+  parameter of one request** — `POST /api/video-full?override=true`, never a
+  setting or a default (ruling 2026-08-14, spec §6.3). It is refused with 403
+  `override-unattributed` when `SFN_EXAMINER_ID` cannot attribute it, logged at
+  WARNING with the examiner and the estimate it set aside, and disclosed through
+  the job view's `override` field; `OVERRIDE_NOTICE` is defined once in
+  `jobs.py` and rendered from that field — never re-worded at a call site.
+  **It bypasses the forecast and never `limit_bytes`.** That is also why
+  `routes.py` decides `limit_bytes` from whether a ceiling is *configured*
+  (`settings.video_cache_max_bytes > 0`) and never from the limit being
+  non-zero: 50% of a ceiling too small to halve floors to 0, and `or None` would
+  read that as "unbounded" — handing the one job that got past the forecast the
+  one encode with no `.part` watch at all.
 - **`rewrap.py` and `encode.py` must never merge.** A rewrap is a PyAV stream
   copy whose output bitstream is bit-identical to its input; an encode is lossy,
   tone-mapped and carries the §7.4 disclosure. Keeping them apart is what stops
@@ -107,10 +120,12 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
   still load before `app.js`.
 - **A wiring test cannot tell you the browser can run the file.** `player.js` once
   shipped a `?? … ||` precedence `SyntaxError` — it did not parse at all — and all
-  fourteen of its text-level wiring tests passed against it. There is no JS test
-  harness here, so browser-side work is finished by starting a server, force-refetching
-  every `<script src>` **and** the stylesheet with `fetch(url, {cache: 'reload'})`,
-  reloading, and driving the component. Spec §14 records the gap.
+  fourteen of its text-level wiring tests passed against it. `npm test` closes the
+  **parse** half of that gap since `#173` — `tests/js/harness.mjs` compiles and runs
+  every part file — but not the **render** half: there is no DOM in it. Browser-side
+  work is still finished by starting a server, force-refetching every `<script src>`
+  **and** the stylesheet with `fetch(url, {cache: 'reload'})`, reloading, and driving
+  the component. Spec §14.
 
 ## Gotchas
 
