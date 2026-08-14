@@ -1254,6 +1254,26 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 }
 .vc-open-btn:hover:not(:disabled) { color: var(--text); border-color: var(--accent-dim); }
 .vc-open-btn:disabled { cursor: default; opacity: 0.6; }
+/* §6.3's examiner override.  Deliberately not a `.vc-open-btn`: the other
+   controls in this panel are offers, and this one is an act recorded against a
+   named examiner.  It carries the caution colour of the band it sits in so it
+   reads as part of the refusal rather than as the way past it, and it is set
+   apart from Download original above it — that remains the cheap answer. */
+.vc-override-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px dashed var(--accent);
+  border-radius: var(--radius);
+  color: var(--accent);
+  font-size: 10px;
+  cursor: pointer;
+}
+.vc-override-btn:hover { background: rgba(232,147,32,0.1); }
 .vc-spinner { margin-left: auto; color: var(--muted); }
 .vc-error {
   margin-top: 6px;

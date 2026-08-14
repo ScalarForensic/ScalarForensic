@@ -89,6 +89,12 @@
           this.videoPlaybackError = body.detail ?? `HTTP ${r.status}`;
         } else {
           this.videoPlayback = body;
+          // §9 and §6.3: the payload already carries the running job and the
+          // §6.3 override that was performed on it, so the panel adopts them
+          // rather than starting from nothing. Without this a page opened after
+          // the export finished shows no sign that a capacity gate was set
+          // aside, which is the one thing the ruling requires to survive.
+          this._adoptPlaybackInfo(body);
         }
       } catch (e) {
         this.videoPlaybackError = e?.message || 'Playback request failed';

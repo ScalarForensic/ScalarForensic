@@ -469,7 +469,7 @@
               <span class="audit-k">File size</span>
               <span class="audit-v"
                     x-text="queryMeta?.size_bytes
-                      ? `${(queryMeta.size_bytes/1048576).toFixed(2)} MB (${queryMeta.size_bytes.toLocaleString()} bytes)`
+                      ? `${(queryMeta.size_bytes/1048576).toFixed(2)} MB (${queryMeta.size_bytes.toLocaleString('en-US')} bytes)`
                       : '—'"></span>
             </div>
             <div class="audit-row">
@@ -563,7 +563,7 @@
               <span class="audit-k">File size</span>
               <span class="audit-v"
                     x-text="matchMeta?.size_bytes
-                      ? `${(matchMeta.size_bytes/1048576).toFixed(2)} MB (${matchMeta.size_bytes.toLocaleString()} bytes)`
+                      ? `${(matchMeta.size_bytes/1048576).toFixed(2)} MB (${matchMeta.size_bytes.toLocaleString('en-US')} bytes)`
                       : '—'"></span>
             </div>
             <div class="audit-row">
@@ -1664,18 +1664,55 @@
                                offer the original. -->
                           <div class="vc-warn-band" x-show="fullJobRefused">
                             <div x-text="fullJob.reason"></div>
+                            <!-- `unknown` has no second sentence here on purpose: the
+                                 server's own reason already says the container reports
+                                 no duration, bitrate or height and that no copy is
+                                 started without an estimate. A client paraphrase beside
+                                 it is a second wording of one disclosure. What
+                                 distinguishes the two verdicts on screen is that this
+                                 row is absent — there is no number, because none was
+                                 measured. -->
                             <div class="vc-job-meta" x-show="fullJobRefusedTooBig">
                               Estimated output <span x-text="fullJobEstimateLabel"></span>
                               against a cache ceiling of <span x-text="fullJobLimitLabel"></span>.
                             </div>
-                            <div class="vc-job-meta" x-show="fullJobRefusedUnknown">
-                              This source did not report the duration, bitrate and coded
-                              height an estimate needs, so there is no estimate to show —
-                              which is why the export is refused rather than attempted.
-                            </div>
                             <a class="vc-open-btn" :href="videoPlaybackDownloadUrl">
                               <span>⭳</span><span>Download the original instead</span>
                             </a>
+                            <!-- §6.3's examiner override (ruling 2026-08-14). Beside
+                                 Download original and never in place of it: the refusal
+                                 still stands and the original is still the answer that
+                                 costs nothing. Shown only when the server said it would
+                                 honour one (`full_copy.overridable`) — it refuses an
+                                 override it cannot attribute to SFN_EXAMINER_ID, and a
+                                 button that produces a 403 is worse than no button.
+                                 Worded as the deliberate act it is, not as a retry. -->
+                            <button class="vc-override-btn" x-show="fullJobOverrideOffered"
+                                    @click="startFullJob(true)">
+                              <span>⚖</span>
+                              <span>Override this refusal as the named examiner and export anyway</span>
+                            </button>
+                          </div>
+
+                          <!-- The §6.3 override, once performed. NOT an error band and
+                               not a success band either: it is a record. It renders for
+                               the whole life of the job and afterwards beside the copy
+                               the job produced, including when that job then failed —
+                               `full-copy-overshoot` is what an override can still run
+                               into, and this panel must not make a killed encode look
+                               like it worked. The sentence is the server's
+                               (`jobs.OVERRIDE_NOTICE`), rendered and never copied. -->
+                          <div class="vc-notice" x-show="fullJobOverridden">
+                            <div>
+                              <strong>Capacity refusal overridden</strong>
+                              · examiner <span x-text="fullJobOverrideExaminer"></span>
+                              · verdict set aside: <span x-text="fullJobOverrideVerdict"></span>
+                            </div>
+                            <div x-text="fullJobOverrideNotice"></div>
+                            <div class="vc-job-meta" x-show="fullJobOverrideEstimateLabel">
+                              Estimate set aside <span x-text="fullJobOverrideEstimateLabel"></span>
+                              against a cache ceiling of <span x-text="fullJobOverrideLimitLabel"></span>.
+                            </div>
                           </div>
 
                           <!-- state `full-job-failed`: this one *is* an error. -->

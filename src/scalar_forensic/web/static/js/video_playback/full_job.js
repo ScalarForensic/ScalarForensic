@@ -34,6 +34,29 @@
     url: '',
     switched: false,
   },
+  // ── The §6.3 override (ruling 2026-08-14, #184) ──────────────────────────
+  // Two cells, each with exactly one writer, for the same reason
+  // `contentionNotice` has one (player.js): the server sends each of these on
+  // more than one payload, and two carriers writing two cells is two answers
+  // that can disagree.
+  //
+  // `overrideOffer` — whether the server would honour an override for *this
+  // video*. It is a fact about the video and not about a job, so it does not
+  // live inside `fullJob`. Carriers: `playback-info.full_copy.overridable`
+  // (routes.py:289) and the 507 refusal detail's `overridable`
+  // (routes.py:676). Both are already `verdict.overridable AND an examiner id`
+  // — the server refuses an override it cannot attribute (403
+  // `override-unattributed`), so a button offered without this would produce a
+  // 403 and that is worse than no button.
+  overrideOffer: false,
+  // `overrideDisclosure` — the record of an override that was performed:
+  // `{examiner_id, verdict, estimate_bytes, limit_bytes, notice}`, or null.
+  // The server puts it on *every* job view, during the job and after it, so an
+  // analyst opening the page once the export has finished still sees that a
+  // capacity gate was set aside and by whom. Carriers: the POST response, every
+  // status poll, and `playback-info.full_job` — all three land in
+  // `_applyFullJobView`, which is why there is one writer and not three.
+  overrideDisclosure: null,
   _fullJobPollTimer: null,
   _fullJobLeaveHandler: null,
 
@@ -97,15 +120,73 @@
   // number an analyst reads and the exact byte count they can quote.  §6.3 says
   // the estimate must be *shown*; a rounded "3 GB" alone is not a number anyone
   // can check.
+  //
+  // The locale is pinned rather than the host's.  A bare `toLocaleString()`
+  // prints `9.000.000.000` on a de-DE box and `9,000,000,000` on an en-US one,
+  // so the same evidence screenshotted on two workstations carries two
+  // different-looking numbers — and a reader who reads the first as a decimal
+  // point reads it as nine. What an examiner exhibits may not depend on which
+  // machine rendered it.
   _bytesLabel(n) {
     if (n === null || n === undefined) return '';
-    return `${(n / 1048576).toFixed(1)} MB (${n.toLocaleString()} bytes)`;
+    return `${(n / 1048576).toFixed(1)} MB (${n.toLocaleString('en-US')} bytes)`;
   },
   get fullJobEstimateLabel() {
     return this._bytesLabel(this.fullJob.estimateBytes);
   },
   get fullJobLimitLabel() {
     return this._bytesLabel(this.fullJob.limitBytes);
+  },
+
+  // ── The §6.3 override: the offer, and the disclosure ─────────────────────
+  // The control is offered for the two refusals an override can actually set
+  // aside, named explicitly rather than inferred from `capacity-exhausted`:
+  // `queue-full` is that state too (states.py:232) and is a wait, not a
+  // verdict — an override would neither help it nor be honoured. Naming the
+  // kinds keeps a later refusal in that state from silently acquiring a button.
+  get fullJobOverrideOffered() {
+    return (
+      this.fullJobRefused &&
+      ['full-copy-refused', 'full-copy-unknown'].includes(this.fullJob.kind) &&
+      this.overrideOffer
+    );
+  },
+  // The disclosure outlives the job (§6.3, and jobs.py:141): true while the
+  // export runs, after it finishes, and beside the copy it produced.
+  get fullJobOverridden() {
+    return this.overrideDisclosure !== null;
+  },
+  // The server's sentence, rendered — never a copy. One definition, at
+  // `jobs.py:148`, for the same reason CONTENTION_NOTICE has one.
+  get fullJobOverrideNotice() {
+    return this.overrideDisclosure?.notice ?? '';
+  },
+  get fullJobOverrideExaminer() {
+    return this.overrideDisclosure?.examiner_id ?? '';
+  },
+  // The verdict token as the server recorded it (`refused` / `unknown`), not a
+  // sentence about it: this is the value an examiner defending the override
+  // will find in the log line at `routes.py:693`, and it has to match.
+  get fullJobOverrideVerdict() {
+    return this.overrideDisclosure?.verdict ?? '';
+  },
+  // Three-valued here too. An overridden `unknown` set aside no number, so
+  // `estimate_bytes` is null and nothing is printed — printing a zero would
+  // claim a measurement that was never made (#147).
+  get fullJobOverrideEstimateLabel() {
+    return this._bytesLabel(this.overrideDisclosure?.estimate_bytes);
+  },
+  get fullJobOverrideLimitLabel() {
+    return this._bytesLabel(this.overrideDisclosure?.limit_bytes);
+  },
+
+  // The two writers.  Do not inline either into its callers: that is how the
+  // carriers stop agreeing.
+  _setOverrideOffer(value) {
+    this.overrideOffer = value === true;
+  },
+  _setOverrideDisclosure(value) {
+    this.overrideDisclosure = value && typeof value === 'object' ? value : null;
   },
 
   // ── Starting, polling, cancelling ────────────────────────────────────────
@@ -138,6 +219,10 @@
     // response writes (player.js `_setContentionNotice`) — one disclosure, not
     // two that can disagree.
     this._setContentionNotice(view.contention_notice);
+    // The §6.3 disclosure, from whichever of the three carriers produced this
+    // view — the POST response, a status poll, or playback-info's `full_job`.
+    // Deleting this write leaves the override invisible on every surface.
+    this._setOverrideDisclosure(view.override);
   },
 
   _applyFullJobRefusal(detail, status) {
@@ -148,16 +233,27 @@
       detail?.reason ?? (plain || `The export could not start (HTTP ${status ?? '?'}).`);
     this.fullJob.estimateBytes = detail?.estimate_bytes ?? null;
     this.fullJob.limitBytes = detail?.limit_bytes ?? null;
+    // The refusal's own carrier of the offer (routes.py:676). The second one is
+    // playback-info; both land in the one cell, so a page that was opened before
+    // the refusal and one that was reloaded after it show the same control.
+    this._setOverrideOffer(detail?.overridable);
     this._stopFullJobPoll();
   },
 
-  async startFullJob() {
+  // `override` is an argument and never a mode: it is one deliberate act on one
+  // video by one examiner, and the server records it that way (§6.3). A sticky
+  // flag would carry the last click onto the next video.
+  async startFullJob(override = false) {
     const q = this._fullJobQuery();
     if (!q) return;
     this.fullJob.switched = false;
+    // A new attempt has not been overridden until the server says it was. The
+    // disclosure is re-established from the response, so a stale one cannot
+    // survive onto a job that carries no override.
+    this._setOverrideDisclosure(null);
     let r;
     try {
-      r = await fetch(`/api/video-full?${q}`, { method: 'POST' });
+      r = await fetch(`/api/video-full?${q}${override ? '&override=true' : ''}`, { method: 'POST' });
     } catch (e) {
       this._applyFullJobRefusal({ reason: e?.message || 'The export request failed.' }, null);
       return;
@@ -170,6 +266,31 @@
     this._applyFullJobView(body);
     this._startFullJobPoll();
     this._armLeavePrompt();
+  },
+
+  // ── What a freshly opened panel already knows ────────────────────────────
+  // §9: playback-info carries `full_job` so a reloaded page rejoins the running
+  // export instead of offering to start a second one — and, for §6.3, so the
+  // override disclosure outlives the job that carried it. An analyst who opens
+  // this video an hour after the export finished still reads who set the
+  // capacity gate aside; a disclosure that existed only in the tab that clicked
+  // is not disclosure.
+  //
+  // Called on every playback-info load, including when there is no job: that is
+  // what clears the previous video's panel rather than showing its state under
+  // this video's name.
+  _adoptPlaybackInfo(info) {
+    this._setOverrideOffer(info?.full_copy?.overridable);
+    const view = info?.full_job;
+    if (!view) {
+      this.closeFullJob();
+      return;
+    }
+    this._applyFullJobView(view);
+    if (this.fullJobRunning) {
+      this._startFullJobPoll();
+      this._armLeavePrompt();
+    }
   },
 
   _startFullJobPoll() {
@@ -265,6 +386,10 @@
 
   closeFullJob() {
     this._stopFullJobPoll();
+    // The disclosure belongs to the job and goes with it; `overrideOffer` does
+    // not — it is a property of the video, re-established by whichever
+    // playback-info load put this panel on screen.
+    this._setOverrideDisclosure(null);
     this.fullJob = {
       state: 'idle', reason: '', kind: '', fraction: null, etaLabel: null, rate: null,
       elapsedS: 0, outSeconds: 0, durationSeconds: 0, writtenBytes: 0,
