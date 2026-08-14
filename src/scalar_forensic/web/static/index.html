@@ -1729,8 +1729,12 @@
                               Estimated output <span x-text="fullJobEstimateLabel"></span>
                               against a cache ceiling of <span x-text="fullJobLimitLabel"></span>.
                             </div>
+                            <!-- The same control as the panel's permanent escape route
+                                 below, in the second placement §6.3 requires. One act,
+                                 one label, defined once in `computed.js`. -->
                             <a class="vc-open-btn" :href="videoPlaybackDownloadUrl">
-                              <span>⭳</span><span>Download the original instead</span>
+                              <span>⭳</span>
+                              <span x-text="videoPlaybackDownloadLabel"></span>
                             </a>
                             <!-- §6.3's examiner override (ruling 2026-08-14). Beside
                                  Download original and never in place of it: the refusal
@@ -1847,7 +1851,7 @@
                            with the verified digest in the response headers. -->
                       <a class="vc-open-btn" :href="videoPlaybackDownloadUrl">
                         <span>⭳</span>
-                        <span x-text="`Download original (${videoPlayback.filename})`"></span>
+                        <span x-text="videoPlaybackDownloadLabel"></span>
                       </a>
                     </div>
                   </template>
