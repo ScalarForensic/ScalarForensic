@@ -608,12 +608,49 @@ high-side and badly so — HEVC 10-bit HDR over-estimates on 8 of 8 samples, one
 finding is the **ordering**, not a constant: these ratios do not support a single
 multiplicative codec factor and one must not be invented from them (§16).
 
-**Known limitation, named rather than fixed.** An estimate that over-reads by up
-to 8× can `refuse` a job whose real output would have fit — a false refusal this
-section does not contemplate and phase 7 does not change. Loosening a forensic
-capacity gate is an operator decision, escalated 2026-08-14 and open; until it is
-taken, the gate stays as specified and the over-refusal is recorded here with its
-evidence rather than being quietly tuned away.
+**Ruled 2026-08-14: the refusal is the examiner's to set aside.** An estimate that
+over-reads by up to 8× can `refuse` a job whose real output would have fit, and
+loosening a forensic capacity gate is an operator decision rather than a coder's.
+It was taken, and it is this: **a §6.3 refusal is overridable, per job request**,
+by `POST /api/video-full?override=true`. Four conditions are the ruling itself and
+not implementation detail.
+
+1. **Explicit, for one request.** There is no setting, no default and no session
+   flag. The same video requested again without the parameter is refused again —
+   an override may never make a later refusal silent.
+2. **Attributed, or refused.** The override is logged with `SFN_EXAMINER_ID`, the
+   verdict it set aside and `estimate_bytes` — the forecast the examiner
+   overrode — and the job's completion line carries the examiner beside the bytes
+   actually written, so both halves of the record are in one log. Where
+   `SFN_EXAMINER_ID` is unset the override is **refused** (`override-unattributed`,
+   403) rather than recorded against nobody: an entry naming no one reads as
+   authority in a log an examiner may have to defend in court.
+3. **Disclosed.** `playback-info` reports `full_copy.overridable` — true only when
+   the verdict refuses *and* an examiner identity exists, so the UI never offers a
+   control the server would refuse — and the job view carries `override` for the
+   life of the job and on the copy it produced, so an analyst opening the page
+   afterwards still sees that a capacity gate was set aside and by whom.
+4. **It bypasses the forecast and never the ceiling.** `limit_bytes` reaches the
+   runner unchanged, so the `.part` watch below still aborts the export at the 50%
+   ceiling. An override buys the chance to discover that the estimate was wrong;
+   it does not buy the right to fill the cache. A change that lets an overridden
+   job exceed `limit_bytes` is wrong whatever it does for the estimate.
+
+**`unknown` is overridable too, and that is this specification's reading rather
+than a quotation of the ruling.** The ruling was taken about an estimate measured
+erring high; `unknown` is the *absence* of an estimate, which is a slightly longer
+step and is recorded here as such — the operator did not rule on it by name. The
+guarantee is nevertheless identical: the enforced number is `limit_bytes`, which
+is derived from `SFN_VIDEO_CACHE_MAX_BYTES` and does not depend on the estimate
+existing, so an overridden `unknown` job is watched exactly as an overridden
+`refused` one is. What `unknown` withholds is the forecast, and the forecast is
+the only thing an override sets aside.
+
+A corollary of (4), found while implementing it: `limit_bytes` is decided from
+whether a ceiling is *configured*, never from the limit being non-zero. Half of a
+ceiling too small to halve floors to 0, and reading 0 as "unbounded" would give
+the one job that got past the forecast the one encode with no `.part` watch at
+all.
 
 **Implemented in phase 7**, and the number it aborts on is stated precisely,
 because "the estimate" alone would be the wrong one: the runner watches the
@@ -730,7 +767,7 @@ lever on both cost and disclosure, and v1 never mentioned it. It is now settled:
 | `GET /api/video-playback-info` | extended: mode, reason, duration, verified digest, job state |
 | `POST /api/video-chunk` | encode the chunk at a timecode; returns JSON, not bytes |
 | `GET /api/video-chunk` | serve an already-encoded chunk; **never encodes** |
-| `POST /api/video-full` | start the background full-video job, or join the one running |
+| `POST /api/video-full` | start the background full-video job, or join the one running; `override=true` sets a §6.3 refusal aside for **this request only** |
 | `DELETE /api/video-full` | drop this client's claim; stops the encoder when it was the last |
 | `GET /api/video-full` | serve a finished full copy; **never encodes** |
 | `GET /api/video-job-status` | progress, rate, ETA, terminal state |
@@ -806,6 +843,7 @@ same function rather than re-deriving them.
 | malformed duration metadata | `malformed-duration` | 422 | `chunk-failed` | no |
 | queue full | `queue-full` | 503 | `capacity-exhausted` | 15 s |
 | full copy outgrew the ceiling mid-encode (§6.3, phase 7) | `full-copy-overshoot` | 507 | `capacity-exhausted` | no |
+| §6.3 refusal overridden with no `SFN_EXAMINER_ID` to record it against | `override-unattributed` | 403 | `capacity-exhausted` | no |
 
 The two rows with **no kind** are the ones that are not failures by the time a
 caller sees them, and the table says so rather than omitting them: a GPU that
