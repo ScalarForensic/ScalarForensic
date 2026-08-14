@@ -48,7 +48,26 @@ export function scriptPaths() {
 // part reached for a browser API outside this list and the harness should be
 // extended on purpose rather than by accident.
 export function browserContext() {
-  const window = { __sfnParts: [] };
+  // `listeners` records every registration so a test can assert that a handler
+  // was added while a job ran and removed when it ended, and can invoke it.
+  // Recording rather than ignoring: a stub that swallowed addEventListener would
+  // have handed us a green `beforeunload` test asserting nothing, which is the
+  // same defect class as the wiring tests that passed on an unparseable file.
+  const listeners = new Map();
+  const window = {
+    __sfnParts: [],
+    listeners,
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(fn);
+    },
+    removeEventListener(type, fn) {
+      const fns = listeners.get(type);
+      if (!fns) return;
+      const i = fns.indexOf(fn);
+      if (i !== -1) fns.splice(i, 1);
+    },
+  };
   const sandbox = {
     window,
     console,

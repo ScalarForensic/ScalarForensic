@@ -40,6 +40,18 @@
     preload: { start: null, url: '' },
     prefetchFailed: false,
   },
+  // ── The §4.3 contention disclosure ───────────────────────────────────────
+  // THIS IS THE REMEDY, NOT A LABEL.  Yielding was measured at ~9% (median
+  // 18.31 s unniced vs 16.83 s niced, n=6, CPU/libx264) and *neither* arm lands
+  // inside §4.2's 6–10 s window, so the slowdown an analyst sees while an export
+  // runs is not fixed — it is disclosed.  This sentence is the only thing that
+  // explains it, on both pipelines.
+  //
+  // It lives here and not inside `chunk` because it is a fact about the host,
+  // not about this chunk: `closeChunkPlayback()`'s reset would clear something
+  // still true, and `full_job.js` would have to reach into the chunk object to
+  // write it.
+  contentionNotice: '',
   _chunkLeaseTimer: null,
   _chunkElapsedTimer: null,
   _chunkRetryTimer: null,
@@ -92,6 +104,19 @@
     return `${this.chunk.start.toFixed(0)}–${end.toFixed(0)} s of the source`;
   },
 
+  // The disclosure's only writer.  The server sends `contention_notice` on two
+  // payloads on purpose — the chunk response (`routes.py:480`) and the job status
+  // view (`jobs.py:270`) — because the analyst meets the slowdown at the chunk
+  // spinner, not in an export panel.  Both land in this one cell, so the two
+  // carriers are one disclosure that cannot disagree rather than two that can.
+  // Do not delete either write as redundant, and do not hard-code the sentence:
+  // it has exactly one definition, server-side at `jobs.py:135`, for the same
+  // reason `_check_allowed_path` has exactly one — a disclosure an examiner
+  // defends may not have a second wording.
+  _setContentionNotice(value) {
+    this.contentionNotice = typeof value === 'string' && value ? value : '';
+  },
+
   // ── Requesting a chunk ───────────────────────────────────────────────────
   async _requestChunk(seconds) {
     const path = this.videoPlayback?.source_path;
@@ -118,6 +143,11 @@
       d?.reason ?? (plain || `The chunk request failed (HTTP ${result?.status ?? '?'}).`);
     this.chunk.retryable = Boolean(d?.retryable);
     this.chunk.retryAfterS = d?.retry_after_seconds ?? null;
+    // Deliberately does not touch `contentionNotice`.  A failed chunk request
+    // says nothing about whether an export is still running, and blanking the
+    // disclosure on an unrelated failure would drop it at the moment it matters
+    // most — a slow chunk that then failed is exactly when the analyst needs to
+    // know an export is competing for the encoders.
     this._stopChunkElapsed();
     this._startChunkRetryCountdown();
   },
@@ -152,6 +182,7 @@
     this.chunk.fellBack = Boolean(b.fell_back);
     this.chunk.preload = { start: null, url: '' };
     this.chunk.prefetchFailed = false;
+    this._setContentionNotice(b.contention_notice);
     this._startChunkLease();
     // §4.2: the next chunk is queued the moment this one is ready — not when
     // playback reaches the boundary — so the ~8 s encode is spent while the
@@ -285,6 +316,10 @@
     this._stopChunkElapsed();
     if (this._chunkRetryTimer) { clearInterval(this._chunkRetryTimer); this._chunkRetryTimer = null; }
     this._stopChunkLease();
+    // Cleared on close, unlike on failure: nothing is on screen to explain, and
+    // a stale sentence would outlive the export that justified it.  Both
+    // carriers re-establish it — the next chunk response, or the next job poll.
+    this.contentionNotice = '';
     this.chunk = {
       state: 'idle', reason: '', kind: '', retryable: false, retryAfterS: null,
       start: null, next: null, url: '', pipeline: null, fellBack: false,
