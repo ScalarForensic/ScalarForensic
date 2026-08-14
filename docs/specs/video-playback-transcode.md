@@ -1073,30 +1073,50 @@ eviction during playback; cache-full refusal (§6.3); stale-source detection
 (§7.1); every §10.1 failure mapped to its player state; path-containment on every
 new route including rejection of a cache key as source identity.
 
-**There is no JavaScript test harness in this repository, and phase 6 is the
-first phase whose weight is in the browser.** Stated here because it is a
-project-level fact, not a phase-6 caveat, and because the shape of the gap is
-not obvious:
+**There is a JavaScript test harness as of 2026-08-14, and phase 6 was the
+first phase whose weight was in the browser.** The gap that motivated it,
+recorded here because it is a project-level fact and not a phase-6 caveat:
 
-- `player.js` is pinned by **text-level wiring tests** (in
-  `tests/test_video_playback.py`, in the style of `test_static_wiring_web.py`)
-  plus a **manual browser run** recorded in the PR that introduced it.
-- **A wiring test cannot tell you the browser can run the file.** One already
-  slipped through: `player.js` shipped a `?? … ||` precedence `SyntaxError`, so
-  the file did not parse *at all*, and all fourteen wiring tests passed against
-  it. This is the `/?cachebust=N` gotcha generalised — reading a file as text
-  says nothing about executing it — and it is why the live check with a forced
-  re-fetch of every `<script src>` and the stylesheet is **mandatory** for
-  browser-side work here, not a nicety.
-- The markup inside `.vc-block` is **wiring-pinned only**. Rendering it needs a
-  full analysis session — Qdrant and an indexed corpus — so the browser run
-  exercised the component's methods and getters directly rather than through the
-  panel that hosts them.
-
-What would close it is a real JS test runner. That is a new dependency and a
-separate decision with a real cost, so it belongs to the operator and not to any
-phase of this spec; it is named here so the next person weighs it deliberately
-instead of rediscovering the gap.
+- `player.js` shipped a `?? … ||` precedence `SyntaxError`, so the file did not
+  parse *at all*, and all fourteen text-level wiring tests passed against it.
+  **A wiring test cannot tell you the browser can run the file.** This is the
+  `/?cachebust=N` gotcha generalised — reading a file as text says nothing
+  about executing it.
+- The operator ruled the dependency YES on 2026-08-14. What landed is
+  `tests/js/`, run by Node's built-in test runner (`npm test` →
+  `node --test "tests/js/**/*.test.mjs"`, Node ≥22), as a **step inside the
+  already-required `lint-and-test (3.12)` job**. A separate job would not be a
+  required check under the repository ruleset, so it could be red and still
+  merge.
+- `tests/js/harness.mjs` reads the `<script src>` list out of
+  `static/index.html` and **compiles and runs** each file in a `node:vm`
+  context holding a small `window`. Compiling is the mechanism: a parse error
+  in any part file is a test failure. The component under test is assembled by
+  the shipped `static/app.js`, so the property-descriptor merge rule
+  (CLAUDE.md: never `Object.assign`) is asserted rather than assumed.
+- **The dependency cost is zero packages.** `package.json` declares no
+  dependencies and the committed `package-lock.json` has a single entry, its
+  own root. The airgap cost is therefore a pinned Node (24.14.0 in CI,
+  `engines: node >= 22`) and nothing to vendor. This was a deliberate choice
+  over Vitest/Jest+jsdom: the frontend is plain browser scripts registering
+  fragments on `window.__sfnParts` — no bundler, no module graph — and the
+  parts under test touch no DOM, so a several-hundred-package tree would have
+  bought nothing and cost a real `vendor/` regeneration.
+- **What it still does not cover: the DOM.** There is none. The markup inside
+  `.vc-block` — Alpine directives, the two `<video>` elements, CSS — stays
+  **wiring-pinned only**, because rendering it needs a full analysis session
+  with Qdrant and an indexed corpus. The harness pins the script half: that it
+  parses, and that its methods and getters compute what they claim to. The live
+  browser check with a forced re-fetch of every `<script src>` and the
+  stylesheet remains mandatory.
+- The Python wiring tests in `tests/test_video_playback.py` **stay**. They pin
+  that the markup and the script are wired together at all, which the JS
+  harness cannot see; deleting them would trade one blind spot for another.
+- The harness was accepted by mutation, not by installation: re-introducing the
+  historical `?? … ||` SyntaxError takes the JS suite from 22/22 to 10 passed /
+  12 failed, while the Python suite stays at its full 954 passed / 5 skipped,
+  73.09% — including all 276 tests in `tests/test_video_playback.py`. That
+  before/after is the whole argument for the harness in one line.
 
 **Measurements required on real hardware before phase 4 is accepted: satisfied
 by §3.5** (2026-08-13) — 4K rates, long-source seek, concurrent-job scaling and
