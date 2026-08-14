@@ -33,6 +33,7 @@ attributed to the examiner who started it, with the claimant count on the record
 from __future__ import annotations
 
 import logging
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -159,6 +160,42 @@ def audit_log(settings: Settings) -> AuditLog:
     return AuditLog(audit_dir(settings) / AUDIT_FILENAME)
 
 
+def find_transcode(
+    settings: Settings, *, video_sha256: str, scope: str, at: float | None = None
+) -> dict | None:
+    """The record of the rendering that covers *at*, or ``None`` (§7.2).
+
+    Keyed on the **digest**, not the path: a file that moved is the same evidence
+    and its rendering is the same rendering, while a different file at the same
+    path is not — matching on the path would be the §7.1 error with extra steps.
+
+    A chunk record is matched by its own recorded window rather than by
+    recomputing one from ``SFN_VIDEO_CHUNK_SECONDS``: the setting can have changed
+    since, and the question being asked is "which rendering did this analyst see",
+    not "which one would be produced now".
+
+    The **last** match wins.  A rendering can be produced more than once — evicted
+    and re-encoded, or re-encoded after an ffmpeg upgrade — and the most recent is
+    the one whose bytes are in the cache.
+    """
+    found = None
+    for rec in audit_log(settings).iter_events():
+        if rec.get("event") != EVENT_TRANSCODE or rec.get("outcome") != OUTCOME_SUCCESS:
+            continue
+        if rec.get("video_sha256") != video_sha256 or rec.get("scope") != scope:
+            continue
+        rendering = rec.get("rendering") or {}
+        if scope == SCOPE_CHUNK:
+            start = rendering.get("start_seconds")
+            duration = rendering.get("duration_seconds")
+            if start is None or duration is None or at is None:
+                continue
+            if not start <= at < start + duration:
+                continue
+        found = rec
+    return found
+
+
 def _append(settings: Settings, event: str, examiner_id: str | None, **fields) -> None:
     """Append one event, or log loudly and carry on.
 
@@ -254,6 +291,195 @@ def record_override(
         estimate_bytes=estimate_bytes,
         limit_bytes=limit_bytes,
     )
+
+
+#: The three things `sfn-video render` may have to say about what it found.
+#: Constants, because they are the sentences a reviewer reads and a test that
+#: asserted a paraphrase of one would pass while the tool said something else.
+RENDER_NO_RECORD = (
+    "NO RECORD: this host's audit log holds no rendering of that window of this file. "
+    "The invocation below is what this host would run now — a reproduction recipe, not a "
+    "record of what ran. It reproduces the original bytes only if the ffmpeg build, the "
+    "settings and the hardware match the host that produced them."
+)
+RENDER_SOURCE_CHANGED = (
+    "STALE EVIDENCE: the file at this path no longer hashes to the digest the recorded "
+    "rendering was made from. The record describes a rendering of the bytes that used to "
+    "be here, and nothing below reproduces from the file as it is now. Re-index before "
+    "relying on either."
+)
+RENDER_PART_NOTE = (
+    "The invocation is verbatim: ffmpeg writes the '.part' file it names, which is renamed "
+    "to the published artifact on success (spec §10.2)."
+)
+RENDER_NO_PIPELINE = (
+    "NO PIPELINE: this host cannot encode, so there is no invocation to rebuild. "
+    "The reason follows; the recorded invocation, if any, is printed above it."
+)
+
+
+def _pipeline_lines(rendering: dict) -> list[str]:
+    """The §7.2 fields, one per line, in the order §7.2 names them."""
+    return [
+        f"  hwaccel:          {rendering['hwaccel']}",
+        f"  decoder:          {rendering['decoder']}",
+        f"  filter chain:     {rendering['filter_chain']}",
+        f"  encoder:          {rendering['encoder']}",
+        f"  rate control:     {rendering['rate_control']}",
+        f"  output height:    {rendering['output_height']}",
+        f"  ffmpeg version:   {rendering['ffmpeg_version']}",
+        f"  tone-mapped:      {rendering['tone_mapped']}",
+        f"  audio:            {rendering['audio_transformation']}",
+        f"  threads:          {rendering['threads'] if rendering['threads'] is not None else '—'}",
+    ]
+
+
+def reproduction_report(
+    settings: Settings, source: Path, *, scope: str, at: float | None = None
+) -> list[str]:
+    """The lines ``sfn-video render`` prints: §7.2's "a reviewer can reproduce it".
+
+    Two answers, and they are labelled apart because they are not the same claim.
+    A **record** says what ran: the argv, the pipeline it ran under, when, and on
+    whose act.  A **reconstruction** says what this host would run now — useful,
+    and not evidence of anything.  Printing the second in the shape of the first
+    is the failure this whole section exists to prevent.
+
+    The digest is computed here, from the file as it lies (§7.1), and the record
+    is matched on it — so a source that changed since the rendering is reported
+    as stale rather than silently answered with a recipe.
+    """
+    # Deferred: `routes` imports this module at import time, so the arithmetic it
+    # owns can only be borrowed at call time.  One implementation of the snap,
+    # since two would put a reviewer on a different chunk boundary than the
+    # analyst was on.
+    from scalar_forensic.video_playback.digest import _source_digest
+
+    digest = _source_digest(source, settings)
+    lines = [
+        f"Source:             {source}",
+        f"SHA-256 (verified): {digest}",
+    ]
+
+    record = find_transcode(settings, video_sha256=digest, scope=scope, at=at)
+    if record is None:
+        stale = _record_for_another_digest(settings, source, scope=scope, digest=digest)
+        if stale is not None:
+            lines += ["", RENDER_SOURCE_CHANGED, f"  recorded digest:  {stale['video_sha256']}"]
+        else:
+            lines += ["", RENDER_NO_RECORD]
+    else:
+        rendering = record["rendering"]
+        lines += [
+            f"Recorded:           {record['ts']} by examiner {record['examiner_id'] or '(none)'}",
+            f"Pipeline:           {rendering['fingerprint']}",
+            *_pipeline_lines(rendering),
+            "",
+            "Invocation that produced this rendering:",
+            f"  {shlex.join(rendering['command'])}",
+            "",
+            RENDER_PART_NOTE,
+        ]
+        return lines
+
+    rebuilt, reason = _rebuild_command(settings, source, digest, scope=scope, at=at)
+    if rebuilt is None:
+        lines += ["", RENDER_NO_PIPELINE, f"  {reason}"]
+        return lines
+    pipeline, command, window = rebuilt
+    described = Rendering(
+        pipeline=pipeline,
+        scope=scope,
+        has_audio=window["has_audio"],
+        threads=window["threads"],
+    ).describe()
+    lines += [
+        f"Pipeline (as it would be selected now): {pipeline.fingerprint()}",
+        *_pipeline_lines(described),
+        "",
+        "Invocation this host would run now:",
+        f"  {shlex.join(command)}",
+        "",
+        RENDER_PART_NOTE,
+    ]
+    return lines
+
+
+def _record_for_another_digest(
+    settings: Settings, source: Path, *, scope: str, digest: str
+) -> dict | None:
+    """A successful record for this *path* whose digest is not the current one."""
+    found = None
+    for rec in audit_log(settings).iter_events():
+        if rec.get("event") != EVENT_TRANSCODE or rec.get("outcome") != OUTCOME_SUCCESS:
+            continue
+        if rec.get("source") != str(source) or rec.get("scope") != scope:
+            continue
+        if rec.get("video_sha256") != digest:
+            found = rec
+    return found
+
+
+def _rebuild_command(
+    settings: Settings, source: Path, digest: str, *, scope: str, at: float | None
+) -> tuple[tuple[Pipeline, list[str], dict] | None, str]:
+    """Rebuild the invocation this host would run.  ``build_command`` is pure.
+
+    The full copy carries ``-threads``; a chunk carries none, and neither is a
+    :class:`Pipeline` field — which is exactly why a reproduction that printed the
+    pipeline alone would not reproduce a full copy's bytes on a host with a
+    different core count.
+    """
+    from scalar_forensic.video_playback.cache import (
+        FULL_NAME,
+        artifact_dir,
+        chunk_name,
+        part_path,
+    )
+    from scalar_forensic.video_playback.capability import capability, is_hdr, select
+    from scalar_forensic.video_playback.codecs import _stream_report
+    from scalar_forensic.video_playback.encode import build_command, job_threads
+    from scalar_forensic.video_playback.routes import chunk_start_for
+
+    info = _stream_report(source)
+    if "probe_error" in info:
+        return None, f"the container could not be probed: {info['probe_error']}"
+    try:
+        pipeline = select(settings, capability(settings), hdr=is_hdr(info))
+    except RuntimeError as exc:
+        return None, str(exc)
+
+    has_audio = info.get("audio_codec") is not None
+    cache_dir = settings.video_cache_dir or Path("data/video_cache")
+    if scope == SCOPE_FULL:
+        window = {
+            "start": None,
+            "duration": None,
+            "threads": job_threads(settings),
+            "name": FULL_NAME,
+        }
+    else:
+        start = chunk_start_for(at or 0.0, settings.video_chunk_seconds)
+        window = {
+            "start": start,
+            "duration": float(settings.video_chunk_seconds),
+            "threads": None,
+            "name": chunk_name(start),
+        }
+    window["has_audio"] = has_audio
+    dst = artifact_dir(cache_dir, digest, pipeline.fingerprint()) / str(window["name"])
+    command = build_command(
+        settings,
+        pipeline,
+        source,
+        part_path(dst),
+        start=window["start"],
+        duration=window["duration"],
+        has_audio=has_audio,
+        threads=window["threads"],
+        progress=scope == SCOPE_FULL,
+    )
+    return (pipeline, command, window), ""
 
 
 def record_purge(
