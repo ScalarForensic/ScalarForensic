@@ -1293,6 +1293,41 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   border-left: 2px solid var(--accent-dim); background: rgba(255,255,255,0.02);
 }
 .vc-elapsed { margin-left: auto; font-variant-numeric: tabular-nums; }
+/* §4.3 disclosure and the completion notice.  Informational, and deliberately
+   NOT .vc-error: no red, no ⚠. #139 removed a fake error band from this UI, and
+   a disclosure styled as a failure tells the analyst something untrue about what
+   happened. --semantic is the existing informational token. */
+.vc-notice {
+  margin-top: 6px;
+  padding: 5px 8px;
+  border-left: 2px solid var(--semantic);
+  background: rgba(74,158,224,0.06);
+  color: var(--text2);
+  font-size: 10px;
+  line-height: 1.45;
+}
+/* §6.3 refusal.  A refusal is not a crash — the job never started — so it gets
+   the caution colour and not the danger one. */
+.vc-warn-band {
+  margin-top: 6px;
+  padding: 5px 8px;
+  border-left: 2px solid var(--accent);
+  background: rgba(232,147,32,0.06);
+  color: var(--text2);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.vc-job { margin-top: 6px; font-size: 10px; color: var(--muted); }
+.vc-job-hdr { display: flex; align-items: center; gap: 6px; }
+.vc-job-meta { margin-top: 3px; color: var(--muted); }
+/* The bar is only in the DOM when there is a fraction to draw (x-show above), so
+   an empty track never reads as "0% done" — which would be a fabricated number
+   of exactly the kind §5 forbids. */
+.vc-bar {
+  margin-top: 4px; height: 3px; border-radius: 2px;
+  background: var(--surface2); overflow: hidden;
+}
+.vc-bar-fill { height: 100%; background: var(--accent); transition: width 0.4s linear; }
 /* Wrapper that keeps each mode's badge and score pill one x-for root. */
 .hit-frame-score { display: inline-flex; align-items: center; gap: 3px; }
 

@@ -1553,6 +1553,22 @@
                             <span class="vc-elapsed" x-text="chunkElapsedLabel"></span>
                           </div>
 
+                          <!-- §4.3 contention disclosure. Rendered verbatim from the
+                               server's field; the sentence has exactly one definition,
+                               at jobs.py:135, because a disclosure an examiner defends
+                               may not have a second wording.
+                               THIS IS THE REMEDY, NOT A LABEL: yielding was measured at
+                               ~9% (18.31 s unniced vs 16.83 s niced, n=6) and neither
+                               pipeline lands inside §4.2's 6–10 s window, so the
+                               slowdown is disclosed rather than fixed.
+                               NOT an error band — #139 removed a fake one from this UI
+                               and that precedent binds. It sits beside the spinner it
+                               explains, and is not gated on chunkIsEncoding: the
+                               sentence is about the *next* chunk, so it has to be
+                               readable while this one still plays. -->
+                          <div class="vc-notice" x-show="contentionNotice"
+                               x-text="contentionNotice"></div>
+
                           <!-- states `chunk-ready` (visible buffer) and the hidden
                                buffer holding the prefetched next chunk. Both elements
                                always exist; which one is on screen is chunk.buffer. -->
@@ -1590,6 +1606,82 @@
                                     @click="retryChunk()">
                               <span>↻</span><span>Retry this window</span>
                             </button>
+                          </div>
+
+                          <!-- ── The full-video job (spec §4.3, §6.3, §5) ──────────
+                               Every state below came off the wire. The panel decides
+                               nothing and writes no sentence: the refusal reason, the
+                               ETA label and the §4.3 disclosure are all the server's
+                               own strings. -->
+                          <button class="vc-open-btn" x-show="fullJobOffered"
+                                  @click="startFullJob()">
+                            <span>⇩</span>
+                            <span>Export the whole video as a viewing copy</span>
+                          </button>
+
+                          <!-- state `full-job-running`. The bar has no width until the
+                               server reports a fraction; §5 and #139 both forbid
+                               inventing a percentage to fill the gap, so the label
+                               falls back to elapsed seconds and says nothing more. -->
+                          <div class="vc-job" x-show="fullJobRunning">
+                            <div class="vc-job-hdr">
+                              <span class="vc-spinner">◐</span>
+                              <span>Encoding a full viewing copy…</span>
+                              <span class="vc-elapsed" x-text="fullJobProgressLabel"></span>
+                            </div>
+                            <div class="vc-bar" x-show="fullJobPercent !== null">
+                              <div class="vc-bar-fill" :style="`width: ${fullJobPercent}%`"></div>
+                            </div>
+                            <div class="vc-job-meta">
+                              <span x-show="fullJobEtaLabel" x-text="fullJobEtaLabel"></span>
+                              <span x-show="fullJobRateLabel"> · <span x-text="fullJobRateLabel"></span></span>
+                              <span x-show="fullJob.waiters > 1"> · <span x-text="fullJob.waiters"></span> viewers waiting</span>
+                            </div>
+                            <button class="vc-open-btn" @click="cancelFullJob()">
+                              <span>✕</span><span>Cancel the export</span>
+                            </button>
+                          </div>
+
+                          <!-- state `full-job-done`. The completion notice is not an
+                               error either, and the switch keeps the analyst's
+                               position: jumping to zero would lose the frame they
+                               waited for. -->
+                          <div class="vc-notice" x-show="fullJobDone">
+                            <div>The full viewing copy is ready.</div>
+                            <a class="vc-open-btn" :href="fullJob.url"
+                               x-show="fullJob.url">
+                              <span>▶</span>
+                              <span x-text="`Play the full copy from ${fullJobSwitchAtSeconds.toFixed(0)} s`"></span>
+                            </a>
+                          </div>
+
+                          <!-- §6.3 refusal. THREE-VALUED, and the two sentences are
+                               different on purpose: `refused` knows the estimate,
+                               `unknown` could not read the numbers at all and sends
+                               estimate_bytes: null. Printing the too-big sentence for
+                               `unknown` is #147's "unknown displayed as mismatch",
+                               already rejected at three layers. Both refuse, and both
+                               offer the original. -->
+                          <div class="vc-warn-band" x-show="fullJobRefused">
+                            <div x-text="fullJob.reason"></div>
+                            <div class="vc-job-meta" x-show="fullJobRefusedTooBig">
+                              Estimated output <span x-text="fullJobEstimateLabel"></span>
+                              against a cache ceiling of <span x-text="fullJobLimitLabel"></span>.
+                            </div>
+                            <div class="vc-job-meta" x-show="fullJobRefusedUnknown">
+                              This source did not report the duration, bitrate and coded
+                              height an estimate needs, so there is no estimate to show —
+                              which is why the export is refused rather than attempted.
+                            </div>
+                            <a class="vc-open-btn" :href="videoPlaybackDownloadUrl">
+                              <span>⭳</span><span>Download the original instead</span>
+                            </a>
+                          </div>
+
+                          <!-- state `full-job-failed`: this one *is* an error. -->
+                          <div class="vc-error" x-show="fullJobFailed">
+                            <strong x-text="`⚠ ${fullJob.state}`"></strong>
+                            <div x-text="fullJob.reason"></div>
                           </div>
                         </div>
                       </template>
@@ -2450,6 +2542,7 @@
 <!-- The video-playback subsystem owns its part file (spec §11); it must
      still load before app.js like every other part. -->
 <script src="/static/js/video_playback/player.js"></script>
+<script src="/static/js/video_playback/full_job.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
