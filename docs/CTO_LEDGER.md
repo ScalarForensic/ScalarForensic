@@ -495,3 +495,47 @@ answer is on-demand segment transcoding keyed to what the analyst actually
 watches, not pre-built viewing copies; the earlier NVENC-transcode
 recommendation was measured and found to silently drop rotation metadata.
 **Cropper remote** — was never actually open; the push had already happened.
+
+## 2026-08-14 — `com-m7`: phase 7's server side, and §6.3 ruled overridable
+
+**Phase 7 server side is on `main`: `#179` `1bb24b0`, `#180` `32d9da8`.** Bar
+**979 passed / 5 skipped, coverage 74.51%**, re-measured at `1bb24b0` itself in
+a worktree with `models/` copied in (a tree without `models/` reads 978/6). The
+§4.3 full-video job, its admission and ceiling checks, the yield knobs and the
+`contention_notice` field all ship; the browser half — which is what actually
+renders the disclosure — does not, so **§4.3's load-bearing remedy is still half
+delivered until `c18`'s PR lands.**
+
+Eleven mutation checks were run against it and three survived, each becoming a
+named test: `out_time` → `out_time_ms` (a 51-minute export reported as three
+seconds remaining), `PRIO_PGRP` → `PRIO_PROCESS` (niceness on Linux is per
+thread, so this renices the one thread that does no encoding), and a DELETE
+landing between `Popen` and the runner receiving the handle (the analyst is told
+the export stopped; it runs on). All three were traps `c17` had documented as
+written down nowhere else — the documentation was right and the tests were
+absent, which is the case for writing both.
+
+**RULED (operator, delegated to `cfm-g3`, 2026-08-14): a §6.3 full-copy refusal
+IS examiner-overridable.** This closes the last open item on this project.
+
+*Why the question existed:* `csm-b2`'s measurement
+(`docs/benchmarks/video-codec-factor-2026-08-14.md`, `#175`, scripts committed
+in `#177`) falsified §6.3's own premise. The section said
+`estimate_full_output_bytes()` "runs low on exactly the HEVC corpus this feature
+exists for". Measured, it runs **high** on the CPU pipeline — HEVC 10-bit HDR
+over-estimates on 8 of 8 samples, one by 8× (ratio 0.125) — and only crosses 1
+for **GPU** encodes of 8-bit sources, which is not the case the paragraph named.
+So the gate could refuse a job whose real output would have fit, on the pipeline
+every host without a working GPU encoder always uses.
+
+*The ruling's constraints, all forensically legible:* the override is **explicit
+per job — never a default and never a config flag**; it is logged with
+`SFN_EXAMINER_ID` and the estimate it overrode; it is disclosed in the UI; and
+the `.part` watch still kills the job at the real ceiling. **The override
+bypasses the forecast, never the limit.** That distinction is the whole ruling:
+`limit_bytes` remains the invariant, and the estimate is demoted to advisory,
+which is what the measurement showed it to be.
+
+*Consequence for the spec:* §6.3's direction claim was already corrected in
+`#179`; the "escalated 2026-08-14 and open" paragraph is now superseded and must
+be replaced by this ruling rather than left standing next to it.

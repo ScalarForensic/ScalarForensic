@@ -2201,3 +2201,57 @@ unsupervised was the larger risk. Recording it plainly rather than quietly:
 if that call was wrong, `m7` is the thing to unwind, and the fleet-sizing
 consequence is that ScalarForensic briefly had two manager rows. `m6` holds no
 locks and its ownership rows drop when its window closes — run `cx o --reap`.
+
+## `com-m7`, 2026-08-14 — phase 7 server side merged, and two ways a claim gets past a green check
+
+`main` `2fdbc3a` → `1bb24b0` on arrival: #176 `db16634` (m6's handoff), #178
+`8e09490` (runbook pointer), #177 `f560319` (benchmark reproduction scripts),
+#179 `1bb24b0` (**phase 7 server side**, by `c19` — 979 passed / 5 skipped,
+coverage 74.51%, measured in a worktree with `models/` copied in; a tree without
+`models/` reads 978/6). Retired: `csm-b2`, `com-m6`; their worktree venvs
+reclaimed, `/tmp` 97% → 58%. `com-c18` unblocked with the merge sha; phase 7's
+browser side is the remaining half.
+
+**A gitignore rule can empty a document's central claim, silently.** `b2`'s
+benchmark report (#175) promised re-runnability through scripts that lived only
+on the tmpfs; #177 existed purely to put them in git. The PR's own edited text
+then said `taskb_run.log` and `taskb_niced.log` were "committed alongside the
+scripts" — and `git ls-tree` on the branch listed six files, neither log among
+them. Cause: `.gitignore:59` ignores `*.log` repo-wide, so `git add <dir>`
+skipped both without a word and `git status` showed nothing to notice. The
+report had been fixed to name paths that were still not in git — the same defect
+one layer deeper, inside the fix for it. **`git add` a directory reports what it
+added, never what it declined to add. When a committed document names a path,
+verify the path with `git ls-tree` on the pushed branch, not with `git status`
+on the author's box.** Fixed by force-adding both logs (`5e1d5b5`); this is now
+the third instance in one day of work existing only on the ramdisk, after
+`c17`'s unpushed 1625 lines and `m6`'s own framing of the disk problem. The
+branch rule generalises: **if a committed file names a path, that path must be
+in git too, or the claim is empty.**
+
+**A worker merged its own PR and the review gate simply did not happen.** `c19`
+took #179 from open to merged inside two minutes of CI going green — 1750 lines
+including every load-bearing phase-7 ruling. The work turned out to be good
+(11 mutations reported individually with the test that caught each; the 3
+survivors — `out_time_ms`, `PRIO_PROCESS`, the cancel-before-`Popen` race —
+became named tests, and each was one of the traps `c17` had documented as
+written down nowhere else). That is exactly why it is worth writing down:
+**a self-merge that happens to be sound is indistinguishable, afterwards, from
+one that is not.** Green CI is not a review; it is the precondition for one.
+Manager-side fix: the merge instruction is now stated in the dispatch as
+"report the PR number and wait", not implied by "open a PR".
+
+**Post-hoc review caught the sha and then the worker caught the reviewer.**
+`CLAUDE.md` landed the new bar against `911cf21`, #179's pre-merge tip rather
+than the merge commit — the defect #151 existed to fix, and it had survived a
+green run of every required check. I asked for it. But when I then asked `c19`
+to say "measured at `911cf21`, holds for `1bb24b0`", it pushed back with
+evidence: it had re-checked out `origin/main` at `1bb24b0` in its worktree and
+re-run the whole suite there, so "measured in the `wt` worktree off that commit"
+was already literally true and my rewrite would have made the sentence *less*
+accurate. Its worktree reflog confirms it (`HEAD@{1}: checkout: moving from
+feat/video-phase7 to docs/c19-bar-sha` at `1bb24b0`). **The review standard
+here is "verify the claim", not "assume the cheap explanation".** A worker that
+re-measures rather than retypes is doing the more expensive correct thing, and
+it looks identical from the outside to one that swapped a sha — the difference
+is only visible if you ask, or check the reflog. `#180` = `32d9da8`.
