@@ -47,12 +47,89 @@ test('the disclosure and the refusal are not error bands', () => {
 test('the §6.3 refusal shows both numbers and offers the original', () => {
   const refusal = html.slice(
     html.indexOf('x-show="fullJobRefused"'),
-    html.indexOf('x-show="fullJobFailed"'),
+    html.indexOf('x-show="fullJobOverridden"'),
   );
   assert.match(refusal, /fullJobEstimateLabel/);
   assert.match(refusal, /fullJobLimitLabel/);
-  assert.match(refusal, /fullJobRefusedUnknown/);
   assert.match(refusal, /videoPlaybackDownloadUrl/);
+  // The numbers row is gated, which is what distinguishes the two verdicts on
+  // screen: `unknown` measured nothing, so it prints nothing.
+  assert.match(refusal, /x-show="fullJobRefusedTooBig"/);
+});
+
+// c18's finding, fixed: the client's explanation of the `unknown` verdict said
+// back what the server's own `reason` already says. One disclosure, one wording.
+test('the unknown refusal does not restate the server\'s reason', () => {
+  assert.doesNotMatch(html, /did not report the duration, bitrate and coded/);
+});
+
+// ── The §6.3 override (#184) ────────────────────────────────────────────────
+test('the override control is offered, and beside Download original', () => {
+  const refusal = html.slice(
+    html.indexOf('x-show="fullJobRefused"'),
+    html.indexOf('x-show="fullJobOverridden"'),
+  );
+  assert.match(refusal, /x-show="fullJobOverrideOffered"/);
+  assert.match(refusal, /@click="startFullJob\(true\)"/);
+  // Beside, not instead of: the refusal still offers the cheap answer, and it
+  // comes first.
+  assert.ok(
+    refusal.indexOf('videoPlaybackDownloadUrl') < refusal.indexOf('fullJobOverrideOffered'),
+    'the override must not replace Download original',
+  );
+  // Not a retry button: this one is an act recorded against a named examiner.
+  assert.match(refusal, /class="vc-override-btn"/);
+});
+
+test('the override disclosure renders the server\'s fields, not a copy of its sentence', () => {
+  const band = html.slice(html.indexOf('x-show="fullJobOverridden"'));
+  assert.match(band.slice(0, 900), /x-text="fullJobOverrideNotice"/);
+  assert.match(band.slice(0, 900), /x-text="fullJobOverrideExaminer"/);
+  assert.match(band.slice(0, 900), /x-text="fullJobOverrideVerdict"/);
+  // One definition, at jobs.py:148. Same rule as CONTENTION_NOTICE.
+  assert.doesNotMatch(html, /The estimate is advisory; the cache ceiling is not/);
+});
+
+// #139's precedent again: an override is a record, not a failure and not a
+// success. It renders beside `full-job-failed` when a `full-copy-overshoot`
+// kills the overridden encode, so styling it as either would be a claim about
+// an outcome it does not know.
+test('the override disclosure is not an error band', () => {
+  assert.match(html, /class="vc-notice" x-show="fullJobOverridden"/);
+  const band = html.slice(html.indexOf('x-show="fullJobOverridden"'));
+  assert.doesNotMatch(band.slice(0, 900), /vc-error/);
+});
+
+// The disclosure has to survive the tab that clicked it: playback-info carries
+// the job, and the panel adopts it on open.
+test('playback-info is adopted when the player opens', () => {
+  const evidence = fs.readFileSync(
+    path.join(REPO_ROOT, 'src', 'scalar_forensic', 'web', 'static', 'js', 'evidence.js'),
+    'utf8',
+  );
+  assert.match(evidence, /this\._adoptPlaybackInfo\(body\)/);
+});
+
+// TEXT-LEVEL ON PURPOSE, and it is the only check that can see this on every
+// runner. `full_job.test.mjs` asserts the *value* `9,000,000,000`, but a bare
+// `toLocaleString()` produces exactly that string on an en-US host — so on CI
+// the value test cannot tell a pinned locale from an unpinned one. The defect
+// only appears on a de-DE workstation, which is where the evidence gets
+// screenshotted. This assertion sees it anywhere.
+test('byte counts pin a locale rather than taking the host\'s', () => {
+  const js = fs.readFileSync(
+    path.join(REPO_ROOT, 'src', 'scalar_forensic', 'web', 'static',
+      'js', 'video_playback', 'full_job.js'),
+    'utf8',
+  );
+  for (const [name, source] of [['full_job.js', js], ['index.html', html]]) {
+    assert.doesNotMatch(
+      source,
+      /toLocaleString\(\)\}\s*bytes/,
+      `${name} prints a byte count in the host locale`,
+    );
+  }
+  assert.match(js, /toLocaleString\('en-US'\)/);
 });
 
 test('the progress bar is only drawn when there is a fraction', () => {

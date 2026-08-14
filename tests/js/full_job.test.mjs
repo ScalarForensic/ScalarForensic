@@ -13,6 +13,25 @@ const NOTICE =
   "A full viewing copy is being produced. It shares this host's two encode workers " +
   'with playback, so the next chunk will take longer than usual to appear.';
 
+// `jobs.OVERRIDE_NOTICE`, verbatim — the constant, not a paraphrase of it. The
+// point of asserting it here is that the client renders the server's string; a
+// paraphrase would pass while the UI showed a second wording of one disclosure.
+const OVERRIDE_NOTICE =
+  'The capacity estimate for this full viewing copy was refused and set aside by the ' +
+  'examiner named here. The estimate is advisory; the cache ceiling is not. This export ' +
+  'is still stopped if it passes the size a single rendering may occupy.';
+
+function overrideRecord(overrides = {}) {
+  return {
+    examiner_id: 'examiner-7',
+    verdict: 'refused',
+    estimate_bytes: 9_000_000_000,
+    limit_bytes: 4_000_000_000,
+    notice: OVERRIDE_NOTICE,
+    ...overrides,
+  };
+}
+
 function componentUnderTest() {
   const { context, component } = loadFrontend();
   component.videoPlayback = {
@@ -44,6 +63,7 @@ function jobView(overrides = {}) {
     eta_seconds: 400,
     eta_label: 'about 7 min remaining (extrapolated)',
     contention_notice: NOTICE,
+    override: null,
     full_url: null,
     error: null,
     ...overrides,
@@ -156,13 +176,11 @@ test('a refused export shows the estimate and the ceiling', async () => {
   assert.equal(component.fullJobRefused, true);
   assert.equal(component.fullJobRefusedTooBig, true);
   assert.equal(component.fullJobRefusedUnknown, false);
-  // Digits compared with grouping separators stripped: the label uses
-  // `toLocaleString()`, matching how this UI already prints sizes
-  // (index.html:471), so the separator is the runner's locale and not a
-  // property of the code under test.
-  const digits = (s) => s.replace(/[^0-9]/g, '');
-  assert.ok(digits(component.fullJobEstimateLabel).includes('9000000000'));
-  assert.ok(digits(component.fullJobLimitLabel).includes('4000000000'));
+  // Exact, both figures, and no dependence on the runner's locale: the label
+  // pins 'en-US' (see the locale test below), so this is the string an examiner
+  // screenshots on any workstation.
+  assert.equal(component.fullJobEstimateLabel, '8583.1 MB (9,000,000,000 bytes)');
+  assert.equal(component.fullJobLimitLabel, '3814.7 MB (4,000,000,000 bytes)');
   assert.equal(component.fullJob.reason, 'The estimated viewing copy does not fit in the cache.');
 });
 
@@ -190,6 +208,220 @@ test('an unknown-verdict refusal prints no estimate and not the too-big sentence
   assert.equal(component.fullJobRefusedUnknown, true);
   assert.equal(component.fullJobRefusedTooBig, false, 'unknown must not claim a size');
   assert.equal(component.fullJobEstimateLabel, '', 'there is no estimate to print');
+});
+
+// ── The §6.3 examiner override (ruling 2026-08-14, #184) ────────────────────
+// The server has sent all of this since 45fe545 and nothing displayed it. Each
+// test below names the carrier it pins, because the failure mode here is the
+// contention notice's: two carriers, one of them quietly dropped.
+
+// UNREACHABLE FROM TEXT: that the byte label does not depend on the machine the
+// test (or the browser) runs on. A wiring test sees `toLocaleString` either way;
+// only executing it shows which separator comes out. On a de-DE host an
+// unpinned label prints `9.000.000.000`, which a reader can take for nine.
+test('byte labels are pinned to one locale, not the host\'s', () => {
+  const { component } = componentUnderTest();
+  component._applyFullJobView(jobView({ estimate_bytes: 9_000_000_000 }));
+  assert.equal(component.fullJobEstimateLabel, '8583.1 MB (9,000,000,000 bytes)');
+  assert.doesNotMatch(component.fullJobEstimateLabel, /9\.000\.000\.000/);
+});
+
+// CARRIER 1 of the offer: the 507 refusal detail (routes.py:676).
+// UNREACHABLE FROM TEXT: whether a getter combining three conditions is true.
+test('the override is offered from the refusal payload', async () => {
+  const { context, component } = componentUnderTest();
+  context.fetch = async () => ({
+    ok: false,
+    status: 507,
+    json: async () => ({
+      detail: {
+        error: 'full-copy-refused',
+        player_state: 'capacity-exhausted',
+        reason: 'The estimated viewing copy does not fit in the cache.',
+        estimate_bytes: 9_000_000_000,
+        limit_bytes: 4_000_000_000,
+        overridable: true,
+      },
+    }),
+  });
+
+  await component.startFullJob();
+  assert.equal(component.fullJobOverrideOffered, true);
+});
+
+// CARRIER 2 of the offer: playback-info's `full_copy.overridable`
+// (routes.py:289). Deleting either write leaves one surface without the control.
+test('the override offer is also read off playback-info — the second carrier', () => {
+  const { component } = componentUnderTest();
+  assert.equal(component.overrideOffer, false);
+  component._adoptPlaybackInfo({ full_copy: { state: 'refused', overridable: true } });
+  assert.equal(component.overrideOffer, true);
+  // And it is not sticky: the next video decides for itself.
+  component._adoptPlaybackInfo({ full_copy: { state: 'fits', overridable: false } });
+  assert.equal(component.overrideOffer, false);
+});
+
+// The server refuses an override it cannot attribute (403 override-unattributed)
+// and an override of a verdict that is not a §6.3 refusal. `capacity-exhausted`
+// is also `queue-full`'s state (states.py:232) — a wait, not a verdict — so the
+// state alone must not produce a button.
+test('the override is not offered where the server would refuse it', async () => {
+  const { context, component } = componentUnderTest();
+  const refuse = (detail) => {
+    context.fetch = async () => ({ ok: false, status: 507, json: async () => ({ detail }) });
+  };
+
+  refuse({
+    error: 'full-copy-refused',
+    player_state: 'capacity-exhausted',
+    reason: 'x',
+    overridable: false, // no SFN_EXAMINER_ID on this server
+  });
+  await component.startFullJob();
+  assert.equal(component.fullJobRefused, true);
+  assert.equal(component.fullJobOverrideOffered, false, 'unattributable override was offered');
+
+  // queue-full: same §5 state, retryable, and nothing an override can set aside.
+  refuse({ error: 'queue-full', player_state: 'capacity-exhausted', reason: 'x', overridable: true });
+  await component.startFullJob();
+  assert.equal(component.fullJobOverrideOffered, false, 'a wait was offered an override');
+});
+
+// UNREACHABLE FROM TEXT: what URL the click actually requests. The override is
+// one act on one video, so it rides on the request and is never a mode.
+test('only the override click sends override=true', async () => {
+  const { context, component } = componentUnderTest();
+  const urls = [];
+  context.fetch = async (url) => {
+    urls.push(url);
+    return { ok: true, json: async () => jobView() };
+  };
+
+  await component.startFullJob();
+  await component.startFullJob(true);
+  component._stopFullJobPoll();
+
+  assert.doesNotMatch(urls[0], /override/);
+  assert.match(urls[1], /[?&]override=true/);
+});
+
+// THE DISCLOSURE. UNREACHABLE FROM TEXT: that the field arriving on a view
+// produces the server's sentence, the examiner and the verdict, and that it
+// survives the job ending — §6.3 requires the record to outlive the job.
+test('the override disclosure renders from a job view and survives the job ending', () => {
+  const { component } = componentUnderTest();
+  component._applyFullJobView(jobView({ override: overrideRecord() }));
+  assert.equal(component.fullJobOverridden, true);
+  assert.equal(component.fullJobOverrideExaminer, 'examiner-7');
+  assert.equal(component.fullJobOverrideVerdict, 'refused');
+  assert.equal(component.fullJobOverrideNotice, OVERRIDE_NOTICE);
+  assert.equal(component.fullJobOverrideEstimateLabel, '8583.1 MB (9,000,000,000 bytes)');
+  assert.equal(component.fullJobOverrideLimitLabel, '3814.7 MB (4,000,000,000 bytes)');
+
+  component._applyFullJobView(jobView({
+    player_state: 'full-job-done',
+    contention_notice: null,
+    override: overrideRecord(),
+    full_url: '/api/video-full?path=x&fp=y',
+  }));
+  assert.equal(component.fullJobDone, true);
+  assert.equal(component.fullJobOverridden, true, 'the record must outlive the job');
+});
+
+// The third carrier, and the one that makes the disclosure survive the *tab*:
+// an analyst opening this video after the export finished reads who set the
+// capacity gate aside. Without this, the record exists only where it was clicked.
+test('a page opened after the export still shows the override — playback-info', () => {
+  const { component } = componentUnderTest();
+  component._adoptPlaybackInfo({
+    full_copy: { state: 'refused', overridable: true },
+    full_job: jobView({
+      player_state: 'full-job-done',
+      contention_notice: null,
+      override: overrideRecord(),
+      full_url: '/api/video-full?path=x&fp=y',
+    }),
+  });
+  assert.equal(component.fullJobDone, true);
+  assert.equal(component.fullJobOverridden, true);
+  assert.equal(component.fullJobOverrideExaminer, 'examiner-7');
+});
+
+// A video with no job must not inherit the previous one's panel.
+test('adopting a playback-info with no job clears the previous panel', () => {
+  const { component } = componentUnderTest();
+  component._applyFullJobView(jobView({ player_state: 'full-job-done', override: overrideRecord() }));
+  component._adoptPlaybackInfo({ full_copy: { state: 'fits', overridable: false } });
+  assert.equal(component.fullJob.state, 'idle');
+  assert.equal(component.fullJobOverridden, false);
+});
+
+// REQUIREMENT 4 OF THE RULING. An override buys the chance to find out the
+// estimate was wrong; it does not buy the right to fill the cache. The `.part`
+// watch still kills the encode at the real ceiling, and that ending is a
+// failure — the disclosure beside it may not make it read as a success.
+test('an overridden job killed by the ceiling renders as a failure', () => {
+  const { component } = componentUnderTest();
+  component._applyFullJobView(jobView({
+    player_state: 'full-job-failed',
+    contention_notice: null,
+    override: overrideRecord(),
+    error: {
+      error: 'full-copy-overshoot',
+      player_state: 'full-job-failed',
+      reason: 'The full viewing copy passed 3.7 GiB while encoding and was stopped.',
+    },
+  }));
+  assert.equal(component.fullJobFailed, true);
+  assert.equal(component.fullJobDone, false, 'a killed encode must not read as done');
+  assert.equal(component.fullJobRefused, false, 'the job ran; it was not refused');
+  assert.equal(component.fullJob.kind, 'full-copy-overshoot');
+  // The record still stands: the gate was set aside, and that is true whether or
+  // not the export then survived.
+  assert.equal(component.fullJobOverridden, true);
+});
+
+// #147 again, on this surface: an overridden `unknown` set aside no number.
+test('an overridden unknown verdict prints no estimate', () => {
+  const { component } = componentUnderTest();
+  component._applyFullJobView(jobView({
+    override: overrideRecord({ verdict: 'unknown', estimate_bytes: null }),
+  }));
+  assert.equal(component.fullJobOverrideVerdict, 'unknown');
+  assert.equal(component.fullJobOverrideEstimateLabel, '', 'there was no estimate to set aside');
+  assert.equal(component.fullJobOverrideLimitLabel, '3814.7 MB (4,000,000,000 bytes)');
+});
+
+test('the override disclosure is never invented client-side, and does not stick', async () => {
+  const { context, component } = componentUnderTest();
+  for (const value of [null, undefined, '', 0, false, 'yes']) {
+    component._setOverrideDisclosure(value);
+    assert.equal(component.overrideDisclosure, null);
+  }
+
+  // A new export attempt starts with no record; only the server's answer creates
+  // one, so a previous override cannot be shown against a job that had none.
+  component._applyFullJobView(jobView({ override: overrideRecord() }));
+  context.fetch = async () => ({ ok: true, json: async () => jobView() });
+  await component.startFullJob();
+  component._stopFullJobPoll();
+  assert.equal(component.fullJobOverridden, false);
+
+  // And on the path that has no job view to overwrite it: a start that is
+  // refused never reaches `_applyFullJobView`, so without the reset the record
+  // of the *previous* export stays on screen beside a refusal for a job that
+  // does not exist — a disclosure attached to nothing.
+  component._applyFullJobView(jobView({ override: overrideRecord() }));
+  context.fetch = async () => ({
+    ok: false,
+    status: 503,
+    json: async () => ({
+      detail: { error: 'queue-full', player_state: 'capacity-exhausted', reason: 'busy' },
+    }),
+  });
+  await component.startFullJob();
+  assert.equal(component.fullJobRefused, true);
+  assert.equal(component.fullJobOverridden, false, 'a refusal kept the previous override on screen');
 });
 
 // ── Cancel, completion, auto-switch ─────────────────────────────────────────
