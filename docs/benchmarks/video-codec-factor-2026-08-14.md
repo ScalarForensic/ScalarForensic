@@ -2,12 +2,15 @@
 
 Benchmarker: `scalarforensic-csm-b2`. Repo `main` at `f2b07a7`, clean tree in a
 dedicated worktree (`PYTHONPATH=$PWD/src`). Raw per-run JSON, the driver
-script and the full 509-file corpus probe are in the bench scratch dir (not
-under `data/`, not committed):
-`/tmp/claude-1000/-home-user01-Schreibtisch-gitea-ScalarForensic/6c283a41-4d19-4aa9-a815-5baafc4e5e55/scratchpad/codec-bench/`
-(`results.jsonl`, `corpus_probe.tsv`, `run_bench.py`, `samples.py`). Encoded
-`.mp4` outputs were deleted immediately after each run's size was recorded, to
-avoid accumulating case-derived bytes on disk.
+scripts, the full 509-file corpus probe and the task-B logs are committed
+alongside this report — `docs/benchmarks/video-codec-factor-2026-08-14-scripts/`
+(`probe_all.py`, `run_bench.py`, `task_b.py`, `samples.py`, `results.jsonl`,
+`corpus_probe.tsv`, `taskb_run.log`, `taskb_niced.log`) — not left on the
+bench scratch dir's tmpfs, which does not survive a reboot and would have
+quietly broken this report's own reproduction instructions. Encoded `.mp4`
+outputs were deleted immediately after each run's size was recorded, to
+avoid accumulating case-derived bytes on disk; only filenames/metadata from
+the corpus are in the committed files, never footage bytes.
 
 ## Hardware and build
 
@@ -50,7 +53,7 @@ exactly, so this is the same population §3 sampled from, probed in full:
   very short clip — see §3's gap below.
 
 Full per-file probe (codec, pixel format, resolution, duration, bit rate,
-transfer/primaries) is `corpus_probe.tsv` in the scratch dir; `probe_all.py`
+transfer/primaries) is `corpus_probe.tsv` in the scripts dir; `probe_all.py`
 is the exact script that produced it (one `ffprobe -show_entries` call per
 file, `-select_streams v:0`).
 
@@ -309,7 +312,7 @@ knobs c17 landed do not touch the encoder block or its driver queue).
 
 Full per-rep data (`competitor_running_at_start` checked true on all 12
 reps, `Sustainer.restarts` counted): `taskb_run.log` (unniced) and
-`taskb_niced.log` (niced) in the scratch dir.
+`taskb_niced.log` (niced), committed alongside the scripts.
 
 **§4.3's own projection was optimistic — say so plainly.** §4.3 extrapolates
 ~16.35 s for k=2 from §3.5's throughput-halving model (8.21 s baseline ×2).
@@ -352,8 +355,9 @@ remedy provides no reason to expect the same improvement on that path.
 `output_bytes / estimate_full_output_bytes()` — using the repository's own
 estimator and pipeline-selection code rather than a reimplementation, so a
 future drift between this report and the code it describes is at least
-detectable (re-run `run_bench.py` against the current `cache.py`/
-`capability.py`/`encode.py`). No code under test was edited.
+detectable (re-run `docs/benchmarks/video-codec-factor-2026-08-14-scripts/run_bench.py`,
+`PYTHONPATH=$PWD/src`, against the current `cache.py`/`capability.py`/
+`encode.py` and the operator's corpus). No code under test was edited.
 
 **What the numbers support.** With n=3–8 per class, this report should not be
 read as delivering a single "the codec factor is X" constant — it explicitly
