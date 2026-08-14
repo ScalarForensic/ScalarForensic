@@ -97,6 +97,16 @@
       const path = this.videoPlayback?.source_path;
       return path ? `/api/video-download?path=${encodeURIComponent(path)}` : '';
     },
+    // One act, one wording.  §6.3 requires the refusal to offer the original and
+    // §7.5 requires the panel's permanent escape route, so the control appears in
+    // two placements — but two wordings for one act is the defect class this file
+    // already refuses for the contention and override sentences.  The
+    // stale-evidence link keeps its own wording on purpose: it offers a *different*
+    // file, the one on disk now, which is no longer the one that was indexed.
+    get videoPlaybackDownloadLabel() {
+      const filename = this.videoPlayback?.filename;
+      return filename ? `Download original (${filename})` : 'Download original';
+    },
     // Streams the rewrap cannot carry into MP4 (Live-Photo LPCM audio, above
     // all).  Named rather than left for the operator to notice as silence.
     get videoPlaybackDroppedNotice() {
