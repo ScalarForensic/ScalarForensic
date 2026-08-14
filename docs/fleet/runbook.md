@@ -2497,3 +2497,58 @@ Also folded into that dispatch, from reading the tree rather than the handoffs:
 naming four affordances. Before anyone writes "phases 1–8 complete", those four
 have to be found on `main` — a spec that declares itself finished while one of
 its own paragraphs says otherwise is worse than one that is merely out of date.
+
+### The close — both items merged, the spec finished (`8a747ea`)
+
+| PR | sha | What |
+|---|---|---|
+| `#206` | `3a227f1` | `m8`'s ledger record of the §6.3 ruling |
+| `#207` | `d345450` | My opening entry |
+| `#208` | `5cfae82` | **`unknown` is not overridable** (`c25`) |
+| `#209` | `317b035` | `c25`'s handoff |
+| `#210` | `83047ac` | **The fold — §15 at phases 1–8, `CLAUDE.md` true** (`c26`) |
+| `#211` | `8a747ea` | `c26`'s handoff |
+
+`docs/specs/video-playback-transcode.md` is finished: phases 1–8 and the carve,
+with both post-hoc rulings folded into the body rather than appended to it.
+**Bar: 1036 passed / 5 skipped at `5cfae82`**, coverage 75.10%.
+
+**A local bar becomes checkable when you can reconcile it with CI's.** `c26`
+measured 1036/5; CI reads 1035/6. Neither is wrong and both describe the same
+run — **1041 collected on both sides**, with the YuNet real-model test passing
+locally because `models/` was copied in and skipping in CI, which has no ONNX.
+That arithmetic is the strongest corroboration available for a number measured on
+a machine nobody else can see, and it costs one `grep` of the CI log. The project
+has published a false bar twice from a dirty tree; the rule that prevents it is
+"clean tree, named sha", but the check that *catches* it is this reconciliation.
+`c26`'s handoff §4 has it as a four-step recipe. Raw output:
+`data/reports/c26-bar-5cfae82.txt`.
+
+**Both workers found things the dispatch said were not there, and the dispatch
+was written from two managers' assessments.** I told `c25` to check four spec
+passages for agreement with the narrowing; two of them (~398, ~830) were the §5
+**player-state** table, a different `unknown` from §6.3's — I had conflated two
+values that share a name. The passage that *did* disagree was not on my list:
+§6.3 condition 3 said `overridable` is true when the verdict "refuses", and
+`unknown` refuses, so as written it asserted the opposite of the ruling. I told
+`c26` that §11 needed nothing, on `c24`'s assessment carried forward; §11 had
+three defects, including a promise that `_stale_evidence_report` would move to
+`audit.py` in phase 8 — `audit.py` shipped at `#195` and the function never
+moved. **A section two people have said is fine has been read by nobody.** The
+instruction that found all three was "audit it", not "fix the following".
+
+**`c25`'s M4 is the mutation to remember.** Dropping `verdict.overridable` from
+the 507 detail leaves the gate refusing correctly and the client still drawing an
+override button — a suite that exercises only `POST /api/video-full` passes clean
+through it. Every guarantee with two carriers needs a test per carrier; the gate
+is not the disclosure.
+
+**Ordering, restated because it generalises:** the narrowing ran before the fold
+because the narrowing adds a test and the fold's substance is a re-measured bar.
+**When one item's output is another item's measurement, the measurement runs
+last.** Had I kept the inherited order, `CLAUDE.md` would have gone stale on the
+day the spec was declared finished, in the one file the project uses to decide
+whether a bar can be trusted.
+
+**Reclaimed 27 GB** (`/tmp` 75% → 17%), each worktree checked clean and each
+local commit matched to its squash-merged PR before removal.
