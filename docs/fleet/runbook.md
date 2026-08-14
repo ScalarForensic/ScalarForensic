@@ -2117,3 +2117,70 @@ standard turned on the harness itself: a harness that cannot be shown to catch
 the defect that motivated it has only been installed, not demonstrated. The
 existing Python wiring tests stay — they pin that markup and script are wired
 together at all, which the new runner does not.
+
+### The scheduling mistake that cost a verification (2026-08-14)
+
+`csm-b2` asked `com-c17` directly to hold CPU for a benchmark window — correct
+peer-to-peer routing. Separately I told `b2` **not** to run task B yet, because
+the box was not quiet. Nobody told `c17`. It held every `pytest` run for a window
+that had already been cancelled, and its retire nudge arrived inside that hold —
+so phase 7's server side was committed at `d5a39c4` with **the suite never run
+and zero mutation checks**, and needed a successor.
+
+**The rule this produces: whoever cancels or defers a window tells everyone who
+was holding for it, not just the agent that asked.** A hold is a fleet-wide state
+with one requester and N holders, and the requester cannot release the holders it
+does not know about. Corollary now in every dispatch: *ask the manager before
+running the suite if a window was announced; the manager announces both the open
+and the close.*
+
+The cheap version of this is that quiescing a box is a **manager** operation, not
+a peer negotiation. Peers may ask; only the manager can grant, because only the
+manager knows who else is holding.
+
+### `/tmp` is a tmpfs and the fleet fills it
+
+`/tmp` here is a **46 G tmpfs** — RAM, not disk — and each worktree venv is
+~7.1 G. Retired agents leave theirs behind. It reached **97% (1.6 G free)** and
+the first symptom was my own `uv sync` failing with `No space left on device`
+mid-`libtorch_cpu.so`. Reclaiming the venvs of the two agents I had retired took
+it to 76%.
+
+Two things worth keeping:
+
+- **The failure is silent and looks like something else.** A benchmark run that
+  ENOSPCs mid-encode reports a truncated wall time, not an error; `b2` had
+  already flagged "disk is tight" as a constraint on its methodology when the
+  real problem was reclaimable garbage. `df -h /tmp` belongs before any long run.
+- **Do not infer liveness from file mtimes.** My "recently touched" heuristic
+  reported `c18`'s *live* worktree and `b2`'s *actively running* one as stale. I
+  deleted only the venvs of agents I had personally killed. `5b748562` looked
+  abandoned by every signal I had and was `c17`'s live tree. Retirement is the
+  only reliable evidence that a worktree is dead — `cx s`, not the filesystem.
+
+This is `CLAUDE.md`'s own tmpfs caution (`SFN_VIDEO_CACHE_DIR` on `/dev/shm`,
+"ENOSPC can precede the LRU") arriving from the direction nobody was watching:
+the fleet's scratchpads, not the video cache.
+
+### One string, one definition — the §4.3 disclosure
+
+`c18` asked whether the on-screen contention wording was its to write. Ruled: it
+is not. `CONTENTION_NOTICE` lives in `jobs.py:132`, the server sends it on the
+chunk response only while `state == "full-job-running"`, and the browser renders
+**the field**, never a copy. Same reasoning as `_check_allowed_path` having
+exactly one definition: a disclosure an examiner may have to defend needs a
+single auditable source, and a JS duplicate drifts silently. It is a remedy-(b)
+disclosure and not an error, so it must not render in an error band — `#139`
+removed a fake error band from this UI and that precedent binds.
+
+### Sequencing two coders through shared files
+
+`c17`'s retirement left phase 7 split: server committed-but-untested, browser
+untouched, and both `docs/specs/…` and `CLAUDE.md` needing text from *two*
+agents (`c18`'s §14 harness block, the successor's §15/§6.3/§4.3 fold). Resolved
+by making it strictly sequential — successor merges the server side and releases
+both files, then `c18` branches off the merged sha for the browser side. Neither
+shares a branch, neither waits on a review, and the ownership handover has one
+named order instead of a negotiation. `c18` had independently refused to land
+text claiming a harness that was not yet on `main`, which is the same discipline
+one layer down.
