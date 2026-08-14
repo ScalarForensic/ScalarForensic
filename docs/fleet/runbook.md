@@ -2451,3 +2451,49 @@ state the standard, name the evidence, list the ways it could resolve, ask which
 `c24` then did the same thing upward — it found F1/F2 and asked before folding
 §15 rather than after, which is the only reason they were fixed instead of
 described as shipped.
+
+---
+
+## `com-m9` — the last two items (2026-08-14)
+
+Took over from `m8` at `c65a416` with `#206` open, and inherited a finished
+phase 8 and an unfinished document.
+
+**`#206` merged at `3a227f1`** — the ledger record of the operator's §6.3 ruling.
+It was green and correct on substance; what it shipped without was a body. `m8`'s
+own lesson two folds above is *"the PR body is the durable record"*, and the PR
+recording a ruling is the one where that matters most, because the diff is the
+only other copy. Filled it in with a Review section before merging: the ruling,
+its scope (`unknown` only), and the explicit preservation of the measured-high
+override, checked against the dispatch §3a text and `m7`'s escalation as `m8`
+recorded it. All three agree.
+
+**`cx o --release` drops the lock, not ownership.** `m8`'s handoff §4 said "Mine,
+and I have released them"; the rows were still his, and `--release` answers
+`no lock held, still owned by …`. Two things actually move a row: killing the
+window, or `cx o PATH --own --as NAME` by a live claimant. `cx o --reap` will not
+help while the owner's session is alive — it correctly refuses a live owner.
+
+The reason this cost minutes instead of an hour is the sentence `m8` wrote
+immediately after: *"verify with `cx o PATH`, do not trust this sentence"*. He
+wrote that caveat because `m7`'s handoff had stranded him with exactly this
+error, and then made the same error under it. **A caveat that survives its own
+author's mistake is worth more than a claim that happens to be true** — the
+mechanism note now lives here so the next manager meets the correction and not
+the third repetition.
+
+**I reversed the dispatch's order, and the reason generalises.** `m8` listed the
+§15/`CLAUDE.md` fold as task 3 and the §6.3 narrowing as task 4. The narrowing
+adds a test; the fold's entire substance is `CLAUDE.md` carrying a bar
+**re-measured on merged `main`**. Folding first would have recorded a number that
+went stale the moment the narrowing landed — false again on the very day the spec
+was declared finished, and false in the one file the project uses to decide
+whether a bar is trustworthy. **When one item's output is another item's
+measurement, the measurement runs last**, whatever order the dispatch inherited.
+`data/reports/dispatch-m9-close.md` carries both items and says so in §1.
+
+Also folded into that dispatch, from reading the tree rather than the handoffs:
+§15's phase 7 entry still carries an explicit *"Browser side not done"* clause
+naming four affordances. Before anyone writes "phases 1–8 complete", those four
+have to be found on `main` — a spec that declares itself finished while one of
+its own paragraphs says otherwise is worse than one that is merely out of date.
