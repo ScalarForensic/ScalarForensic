@@ -109,6 +109,19 @@
       // Dropping the payload first would leave the video protected from
       // eviction until the ttl ran out.
       this.closeChunkPlayback();
+      // The full-job panel closes with the player it lives in. Without this the
+      // status poll went on firing once a second at a panel nobody can see, for
+      // a video the analyst has left — and `_disarmLeavePrompt()`, which
+      // `closeFullJob()` reaches through `_stopFullJobPoll()`, never ran either,
+      // so the tab kept warning about an export it no longer showed.
+      //
+      // It cancels nothing. The job is the server's — `cancelFullJob()` is the
+      // DELETE, and it is a button the analyst presses — so the export keeps
+      // running, and reopening this video rejoins it: `_adoptPlaybackInfo`
+      // re-establishes the state and the §6.3 override disclosure from
+      // `playback-info.full_job`. Closing the panel is the analyst saying they
+      // are done looking, not done exporting.
+      this.closeFullJob();
       this.videoPlayback = null;
       this.videoPlaybackError = null;
       this.videoPlaybackLoading = false;
