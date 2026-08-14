@@ -287,6 +287,37 @@ test('the override is not offered where the server would refuse it', async () =>
   assert.equal(component.fullJobOverrideOffered, false, 'a wait was offered an override');
 });
 
+// The operator's 2026-08-14 narrowing, on the client half: an `unknown` verdict
+// is refused with NO escape hatch, and the ruling is "refuse *and* offer Download
+// original" — refusing without the hatch is a different, worse behaviour. The
+// hatch rides on `fullJobRefused`: `index.html`'s `vc-warn-band` is shown by it
+// and carries the Download original anchor unconditionally, beside the panel's
+// permanent one. So this asserts the band appears and the override button does
+// not, which is exactly the pair the narrowing changed.
+test('an unknown verdict is refused with the download offer and no override', async () => {
+  const { context, component } = componentUnderTest();
+  context.fetch = async () => ({
+    ok: false,
+    status: 507,
+    json: async () => ({
+      detail: {
+        error: 'full-copy-unknown',
+        player_state: 'capacity-exhausted',
+        reason: 'This container reports no duration, bitrate or height.',
+        estimate_bytes: null,
+        limit_bytes: 4_000_000_000,
+        overridable: false,
+      },
+    }),
+  });
+
+  await component.startFullJob(true); // the examiner asking anyway
+  assert.equal(component.fullJobRefused, true, 'the refusal band — and its Download original — is absent');
+  assert.equal(component.fullJobOverrideOffered, false, 'an override was offered for `unknown`');
+  // `refused` prints the estimate row and `unknown` must not: there is no number.
+  assert.equal(component.fullJobRefusedTooBig, false);
+});
+
 // UNREACHABLE FROM TEXT: what URL the click actually requests. The override is
 // one act on one video, so it rides on the request and is never a mode.
 test('only the override click sends override=true', async () => {

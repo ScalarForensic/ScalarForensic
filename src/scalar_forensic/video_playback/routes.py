@@ -688,7 +688,11 @@ async def video_full_start(
     refuses too, because "this file would not say how big it is" is not
     permission to find out by filling the cache.
 
-    **``override=true`` sets that refusal aside** (ruling 2026-08-14, §6.3).  It
+    **``override=true`` sets a ``refused`` verdict aside, and only that one**
+    (ruling 2026-08-14, narrowed by the operator the same day, §6.3).  An
+    ``unknown`` verdict is refused with **Download original** offered and has no
+    examiner escape hatch: the override exists to correct a forecast that was
+    measured wrong, and ``unknown`` is the absence of a forecast.  It
     was measured wrong in both directions — over-reading HEVC 10-bit HDR on the
     CPU pipeline on 8 of 8 samples, one by 8× — so a refusal can deny an export
     whose real output would have fitted, and the analyst, not the forecast, is

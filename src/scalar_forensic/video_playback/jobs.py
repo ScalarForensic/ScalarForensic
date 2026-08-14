@@ -176,8 +176,12 @@ class JobRequest:
     #: Set only when this job was started over a §6.3 refusal (ruling
     #: 2026-08-14).  ``overridden_by`` is ``SFN_EXAMINER_ID`` — the route refuses
     #: an unattributable override rather than recording ``None`` — and
-    #: ``overridden_verdict`` is the verdict that was set aside, ``refused`` or
-    #: ``unknown``.  Both default to "no override", so every other caller and
+    #: ``overridden_verdict`` is the verdict that was set aside, which since the
+    #: operator's 2026-08-14 narrowing can only be ``refused``: an ``unknown``
+    #: verdict is not overridable and never reaches a job.  The field stays a
+    #: string rather than a constant because the record has to say *what* was set
+    #: aside without depending on there being one answer.
+    #: Both default to "no override", so every other caller and
     #: every existing job is unchanged: this is per request and never a mode.
     overridden_by: str | None = None
     overridden_verdict: str | None = None
@@ -192,9 +196,11 @@ class JobRequest:
     def override(self) -> dict | None:
         """The disclosure the browser renders, or ``None`` for a normal job.
 
-        ``estimate_bytes`` here is the forecast that was overridden — it is
-        ``None`` for an ``unknown`` verdict, which is the whole content of that
-        verdict and is reported as such rather than as a zero.
+        ``estimate_bytes`` here is the forecast that was overridden.  It stays
+        optional because the shape is the job's, not the gate's — a job carries
+        whatever it was started with — but since the 2026-08-14 narrowing only a
+        ``refused`` verdict can be overridden, and a ``refused`` verdict always
+        has a number.
         """
         if self.overridden_by is None:
             return None

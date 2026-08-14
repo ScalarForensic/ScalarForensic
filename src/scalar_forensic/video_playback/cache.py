@@ -483,15 +483,23 @@ class CeilingVerdict:
 
     @property
     def overridable(self) -> bool:
-        """Whether an examiner may start this job anyway (§6.3, ruling 2026-08-14).
+        """Whether an examiner may start this job anyway (§6.3, ruling 2026-08-14,
+        narrowed by the operator on 2026-08-14).
 
-        Both refusing states are overridable, and ``unknown`` deliberately so: it
-        is a statement about what the *container* would say, not about the video,
-        and the number that is actually enforced — ``limit_bytes``, watched
-        against the growing ``.part`` — does not depend on the estimate existing.
-        A verdict of ``fits`` has nothing to override.
+        **Only ``refused``.** That is the state the ruling was taken about: an
+        estimate measured erring high by up to 8× can refuse a job whose real
+        output would have fit, and setting that forecast aside is the examiner's
+        call. ``unknown`` is **not** overridable — it is the *absence* of an
+        estimate, so there is no forecast to set aside, and an examiner asking to
+        proceed anyway would be asking to start an unbounded encode on the
+        strength of a file that would not say how big it is. The answer for
+        ``unknown`` is the refusal plus **Download original** (§7.5), and there is
+        no escape hatch behind it. A verdict of ``fits`` has nothing to override.
+
+        The guarantee is unchanged either way: ``limit_bytes`` never depended on
+        the estimate existing, so this narrows who may act, not what is enforced.
         """
-        return self.state in {"refused", "unknown"}
+        return self.state == "refused"
 
 
 def estimate_full_output_bytes(info: dict, output_height: int) -> int | None:

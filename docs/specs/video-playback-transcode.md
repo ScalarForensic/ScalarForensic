@@ -626,8 +626,9 @@ not implementation detail.
    403) rather than recorded against nobody: an entry naming no one reads as
    authority in a log an examiner may have to defend in court.
 3. **Disclosed.** `playback-info` reports `full_copy.overridable` — true only when
-   the verdict refuses *and* an examiner identity exists, so the UI never offers a
-   control the server would refuse — and the job view carries `override` for the
+   the verdict is `refused` *and* an examiner identity exists, so the UI never
+   offers a control the server would refuse (`unknown` refuses without an
+   override; see the narrowing below) — and the job view carries `override` for the
    life of the job and on the copy it produced, so an analyst opening the page
    afterwards still sees that a capacity gate was set aside and by whom.
 4. **It bypasses the forecast and never the ceiling.** `limit_bytes` reaches the
@@ -636,15 +637,21 @@ not implementation detail.
    it does not buy the right to fill the cache. A change that lets an overridden
    job exceed `limit_bytes` is wrong whatever it does for the estimate.
 
-**`unknown` is overridable too, and that is this specification's reading rather
-than a quotation of the ruling.** The ruling was taken about an estimate measured
-erring high; `unknown` is the *absence* of an estimate, which is a slightly longer
-step and is recorded here as such — the operator did not rule on it by name. The
-guarantee is nevertheless identical: the enforced number is `limit_bytes`, which
-is derived from `SFN_VIDEO_CACHE_MAX_BYTES` and does not depend on the estimate
-existing, so an overridden `unknown` job is watched exactly as an overridden
-`refused` one is. What `unknown` withholds is the forecast, and the forecast is
-the only thing an override sets aside.
+**Narrowed by the operator, 2026-08-14: `unknown` is NOT overridable.** The
+override above is `refused` and nothing else. An `unknown` verdict is refused with
+**Download original** (§7.5) offered, and there is **no examiner escape hatch**
+behind it — `overridable` is false for `unknown` on `playback-info` and on the 507
+detail alike, so no control is offered and `override=true` is not honoured. The
+reason is that the four conditions above are conditions on setting a *forecast*
+aside, and `unknown` is the absence of a forecast: there is no over-reading
+estimate to correct, only a file that would not say how big it is. The earlier
+implementation treated `unknown` as overridable and this specification recorded
+that as the implementation's reading rather than a quotation of the ruling; the
+operator has now ruled on it by name, and this paragraph replaces that reading.
+
+The guarantee is unchanged either way — `limit_bytes` is derived from
+`SFN_VIDEO_CACHE_MAX_BYTES` and never depended on the estimate existing — so this
+narrows who may act, not what the system enforces. Recorded in `docs/CTO_LEDGER.md`.
 
 A corollary of (4), found while implementing it: `limit_bytes` is decided from
 whether a ceiling is *configured*, never from the limit being non-zero. Half of a

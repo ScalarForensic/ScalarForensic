@@ -2872,23 +2872,71 @@ class TestFullCopyOverride:
         assert again.status_code == 507
         assert again.json()["detail"]["error"] == "full-copy-refused"
 
-    def test_an_unknown_verdict_is_overridable_too(self, hevc_10bit_mov, monkeypatch):
-        # `unknown` says what the container would not report; it is not a claim
-        # about the video, and `limit_bytes` does not need the estimate to exist.
-        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
-        report = vp_codecs._stream_report(hevc_10bit_mov)
+    def _unknown_report(self, video):
+        """A probe that yields no estimate: the §6.3 `unknown` verdict's input."""
+        report = vp_codecs._stream_report(video)
         report.pop("bit_rate", None)
-        calls, encode = self._recorder()
+        return report
+
+    def test_an_unknown_verdict_is_never_overridable(self, hevc_10bit_mov, monkeypatch):
+        # Operator narrowing, 2026-08-14 (`docs/CTO_LEDGER.md`, spec §6.3): the
+        # override exists to correct a forecast measured erring high.  `unknown`
+        # is the *absence* of a forecast, so there is nothing to set aside and no
+        # escape hatch behind the refusal.  The predicate is the whole defect: a
+        # gate that stops refusing here starts unbounded encodes on files that
+        # would not say how big they are.
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        verdict = vp_cache.check_ceiling(Settings(), self._unknown_report(hevc_10bit_mov))
+        assert verdict.state == "unknown"
+        assert verdict.allowed is False
+        assert verdict.overridable is False
+
+    def test_an_unknown_verdict_refuses_the_job_even_with_override_true(
+        self, hevc_10bit_mov, monkeypatch
+    ):
+        # The gate itself: `override=true` by a named examiner is refused, and
+        # nothing is encoded.  507 and not 403 — the request is well-formed and
+        # attributable; it is the verdict that has no override.
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
         with (
             TestClient(app) as c,
-            patch.object(vp_routes, "_stream_report", return_value=report),
-            patch.object(vp_jobs, "encode_full", encode),
+            patch.object(
+                vp_routes, "_stream_report", return_value=self._unknown_report(hevc_10bit_mov)
+            ),
+            patch.object(vp_jobs, "encode_full", side_effect=AssertionError("encoded anyway")),
         ):
-            body = c.post(f"/api/video-full?path={hevc_10bit_mov}&override=true").json()
-            _await_terminal(c, hevc_10bit_mov)
-        assert body["override"]["verdict"] == "unknown"
-        assert body["override"]["estimate_bytes"] is None
-        assert len(calls) == 1
+            r = c.post(f"/api/video-full?path={hevc_10bit_mov}&override=true")
+        assert r.status_code == 507
+        detail = r.json()["detail"]
+        assert detail["error"] == "full-copy-unknown"
+        assert detail["estimate_bytes"] is None
+        # The refusal detail is the second carrier of the offer (routes.py:728)
+        # and `full_job.js:259` writes the override button from it: a gate-only
+        # test passes while the client still draws a button the server refuses.
+        assert detail["overridable"] is False
+        # …and the escape hatch the ruling requires beside the refusal: the state
+        # the player renders `Download original` under (`full_job.js:80`,
+        # index.html's `fullJobRefused` band).
+        assert detail["player_state"] == "capacity-exhausted"
+
+    def test_playback_info_never_advertises_an_override_for_unknown(
+        self, hevc_10bit_mov, monkeypatch
+    ):
+        # The first carrier (routes.py:289).  A named examiner is set, so the
+        # `and bool(settings.examiner_id)` clause cannot be what makes this false.
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        with (
+            TestClient(app) as c,
+            patch.object(
+                vp_routes, "_stream_report", return_value=self._unknown_report(hevc_10bit_mov)
+            ),
+        ):
+            body = c.get(f"/api/video-playback-info?path={hevc_10bit_mov}").json()
+        assert body["full_copy"]["state"] == "unknown"
+        assert body["full_copy"]["overridable"] is False
+        # Refusing without the hatch would be a worse behaviour than refusing:
+        # the panel's permanent escape route is served off this field.
+        assert body["download_url"].startswith("/api/video-download?path=")
 
     def test_a_verdict_that_fits_has_nothing_to_override(self, hevc_10bit_mov, monkeypatch):
         monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
