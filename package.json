@@ -1,0 +1,12 @@
+{
+  "name": "scalar-forensic-js-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Test-only manifest: runs the browser scripts under Node's built-in test runner. See tests/js/harness.mjs for why there are no dependencies.",
+  "scripts": {
+    "test": "node --test \"tests/js/**/*.test.mjs\""
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

@@ -48,6 +48,27 @@ jobs:
       - name: Format check (ruff)
         run: uv run ruff format --check src tests scripts
 
+      # The JS suite is a STEP in this job and deliberately not a job of its
+      # own. `main` is gated by a repository ruleset whose required checks are
+      # exactly `lint-and-test (3.12)` and `qdrant-integration`; a third job
+      # would not be required, so it could be red and still merge — a
+      # decorative check is worse than none, because it looks like coverage.
+      # As a step it is required by construction and needs no ruleset change.
+      #
+      # There is no `npm ci` because there is nothing to install: the harness
+      # runs on Node's built-in test runner and `package.json` declares no
+      # dependencies (see tests/js/harness.mjs for why).
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24.14.0"
+
+      # Before the Python suite: it takes seconds, and it is the only check
+      # that can tell a browser script apart from a text file that looks like
+      # one. `player.js` once shipped a SyntaxError past 14 green wiring tests.
+      - name: Run JS tests (node --test)
+        run: npm test
+
       - name: Run tests
         run: uv run pytest
 
