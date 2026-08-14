@@ -61,7 +61,9 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
   `digest.py` (the source SHA-256 and the process-wide `HashCache` handle),
   `rewrap.py` (the PyAV stream copy — *not* an encode), `capability.py` (the
   ffmpeg probe and the pipeline fingerprint), `encode.py` (the ffmpeg re-encode
-  — *not* a stream copy), `cache.py` (the bounded viewing-copy store) and
+  — *not* a stream copy), `cache.py` (the bounded viewing-copy store),
+  `jobs.py` (the §4.3 full-video job: `Admission`, `JobRequest`, `FullJob`,
+  `JobRunner`, and the module singletons `admission` and `runner`) and
   `routes.py`. `cache.py`'s public surface is `cache_key`/`artifact_dir`/
   `chunk_name`/`rewrap_path` (§6.1 layout), `renew_lease`/`release_lease`/
   `lease_state`/`pin`/`protected_videos` (§6.2 protection), `scan`/`evict`
@@ -124,8 +126,10 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
   `capability.reset_cache()` (the probe), `digest._reset_hash_cache()` (the `HashCache`
   handle), and `cache.reset_leases()` + `cache.artifact_locks.reset()` +
   `cache._reset_sweep()` (leases, pins, the lock table, the once-per-process `.part`
-  sweep), and `routes.admission.reset()` + `routes.reset_substitutions()` (the chunk
-  admission counter and the GPU→CPU cache-lookup hint). `tests/test_video_playback.py`
+  sweep), and `jobs.admission.reset()` + `jobs.runner.reset()` +
+  `routes.reset_substitutions()` (the shared admission counter, the full-video job
+  table — `runner.reset()` kills what is still running — and the GPU→CPU
+  cache-lookup hint). `tests/test_video_playback.py`
   has a module-scope **autouse** fixture doing all of them; keep it autouse.
 - `unittest.mock.patch` targets are per-module: patch where the name is *used*
   (e.g. `scalar_forensic.web.routes.files.Settings`, `...pipeline.query.QdrantClient`),

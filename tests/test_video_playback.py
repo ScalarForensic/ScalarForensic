@@ -23,6 +23,7 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
 import threading
 import time
 from fractions import Fraction
@@ -2822,6 +2823,19 @@ class TestFullJobRefcounts:
 
         asyncio.run(_go())
 
+    def test_a_cancel_that_races_the_encoder_still_stops_it(self):
+        # The window is between `Popen` returning and the runner being handed
+        # the handle: a DELETE landing inside it sets a flag with nobody left to
+        # read it, and a 51-minute encode runs on after the analyst was told it
+        # had stopped.  `attach` re-checks the flag, which is what closes it.
+        job = vp_jobs.FullJob(self._request(), Settings())
+        job.cancel()  # no process yet — this must not be lost
+        assert job.cancelled is True
+        proc = MagicMock()
+        with patch.object(vp_jobs, "_kill_group") as killed:
+            job.attach(proc)
+        assert killed.call_args.args == (proc,)
+
     def test_cancelling_a_job_nobody_started_is_a_404(self, client, hevc_10bit_mov):
         r = client.request("DELETE", f"/api/video-full?path={hevc_10bit_mov}")
         assert r.status_code == 404
@@ -2889,7 +2903,11 @@ class TestFullJobContentionDisclosure:
             body = c.post(f"/api/video-chunk?path={hevc_long_mov}&t=0").json()
             notice = body["contention_notice"]
             _await_terminal(c, hevc_long_mov, timeout=60)
-        assert notice and "slower" in notice.lower()
+        # The wording is the module's one disclosure sentence; what the test
+        # pins is that a chunk answered under an export says the wait is worse,
+        # not that it uses any particular adjective.
+        assert notice == vp_jobs.CONTENTION_NOTICE
+        assert "longer" in notice.lower()
 
     def test_a_chunk_with_no_export_running_claims_no_contention(self, client, hevc_10bit_mov):
         body = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
@@ -2927,6 +2945,19 @@ class TestFullJobYield:
         monkeypatch.setenv("SFN_VIDEO_JOB_THREADS", "3")
         assert vp_encode.job_threads(Settings()) == 3
 
+    def test_the_renice_reaches_every_encoding_thread_and_not_just_the_pid(self):
+        # Niceness on Linux is a *per-thread* attribute: `PRIO_PROCESS` renices
+        # the one thread that called `Popen`, and every thread ffmpeg spawns to
+        # do the encoding keeps the parent's priority — the yield would then be
+        # measured on the one thread that does no work.  `PRIO_PGRP` is what
+        # makes it reach them, and it is why the child gets its own session.
+        with patch.object(os, "setpriority") as sp:
+            vp_encode._lower_priority(4321, 10)
+        assert sp.call_args.args == (os.PRIO_PGRP, 4321, 10)
+        with patch.object(os, "setpriority") as sp:
+            vp_encode._lower_priority(4321, 0)
+        assert sp.call_count == 0
+
     def test_the_settings_are_validated_like_every_other(self, monkeypatch):
         monkeypatch.setenv("SFN_VIDEO_JOB_NICE", "20")
         with pytest.raises(ValueError, match="SFN_VIDEO_JOB_NICE"):
@@ -2946,6 +2977,23 @@ class TestFullJobProgress:
         assert vp_encode._out_seconds("00:01:30.500000") == pytest.approx(90.5)
         assert vp_encode._out_seconds("N/A") == 0.0
         assert vp_encode._out_seconds(None) == 0.0
+
+    def test_the_watcher_reads_out_time_and_not_out_time_ms(self, tmp_path):
+        # The parser above is only half the guarantee: the other half is *which*
+        # field `_run_watched` hands it.  A progress block that reports the same
+        # instant in both fields is the only thing that can tell those apart, so
+        # this drives a real child emitting both — `out_time_ms` carries
+        # microseconds, and reading it as milliseconds would say 90500 s.
+        emitter = tmp_path / "emit.py"
+        emitter.write_text(
+            "print('frame=42')\n"
+            "print('out_time_ms=90500000')\n"
+            "print('out_time=00:01:30.500000')\n"
+            "print('progress=continue')\n"
+        )
+        seen: list[vp_encode.Progress] = []
+        vp_encode._run_watched([sys.executable, str(emitter)], timeout=30, on_progress=seen.append)
+        assert [p.out_seconds for p in seen] == [pytest.approx(90.5)]
 
     def test_the_eta_is_labelled_as_an_extrapolation_and_never_as_a_time(self):
         assert vp_jobs.eta_label(None) is None

@@ -281,10 +281,13 @@ false, and the spec must not claim it.**
 throughput flat from k=1 to k=8, so 2 is the shape of exactly *one viewer* —
 the chunk being played plus its single §4.2 prefetch. A full-video job holds one
 of those two for its whole ~51-minute run, which puts chunk encoding at k=2 for
-the duration: **8.21 s → ~16.35 s** per chunk (§3.5's k=2 row), outside the
-6–10 s window the double-buffered swap depends on. The analyst who starts a full
-export therefore makes their own live playback worse, and today nothing tells
-them so.
+the duration. v1 of this section extrapolated **8.21 s → ~16.35 s** per chunk
+from §3.5's k=2 row; that projection has since been **measured and is optimistic
+— the real figure is 18.31 s** (median of n=6, CPU/libx264, under a sustained
+full-copy competitor; `docs/benchmarks/video-codec-factor-2026-08-14.md`). Either
+way it is outside the 6–10 s window the double-buffered swap depends on. The
+analyst who starts a full export therefore makes their own live playback worse,
+and before phase 7 nothing told them so.
 
 **Ruled 2026-08-14 (phase 7): both remedies, in this order.** v1 of this section
 named two candidates and left the choice open; what follows is what shipped.
@@ -303,13 +306,24 @@ named two candidates and left the choice open; what follows is what shipped.
    scheduling and `-threads` caps libx264's thread pool: both bite on the **CPU
    pipeline**. On the **GPU pipeline** the contended resource is the encoder
    block and its driver queue, which neither knob controls — a niced NVENC job
-   still takes its slot. No measurement of the residual on either path exists in
-   this repository; §3.5 shows the box already saturated by one job, so yielding
-   is *expected* to reduce the k=2 penalty on the CPU path and is not claimed to
-   remove it. An unmeasured mechanism claim would be §16's invented-constant rule
-   in prose form.
+   still takes its slot.
 
-2. **Disclose anyway — implemented.** While an export runs, `POST
+   **Measured 2026-08-14 (`docs/benchmarks/video-codec-factor-2026-08-14.md`),
+   and it does not solve the problem.** Chunk encode latency under a sustained
+   full-copy competitor, CPU/libx264, n=6 per arm: unniced median **18.31 s**
+   (18.19–18.84), niced with `nice` 10 and `-threads` 12 median **16.83 s**
+   (16.64–17.15). The yield buys **~9%** — real, free, and worth keeping — but
+   *neither* arm is inside §4.2's 6–10 s window, so this section must not say the
+   job "yields" as though the contention were handled. The caveats are part of the
+   result: it is the **CPU pipeline** under a **synthesised** competitor (an
+   11.4-minute concat source relaunched to keep a competitor alive across reps),
+   not one continuous 51-minute export, and the **GPU path is unmeasured** —
+   there the contended resource is the encoder block, which neither knob touches.
+   Claiming a GPU benefit would be §16's invented-constant rule in prose form.
+
+2. **Disclose anyway — implemented, and now the load-bearing remedy.** The 9%
+   above is why: yield shrinks the degradation on one pipeline and is unmeasured
+   on the other, and neither arm reaches the window playback needs. While an export runs, `POST
    /api/video-chunk` and `GET /api/video-job-status` both carry
    `contention_notice`, and the player renders it beside the chunk spinner it
    explains. This is not decoration and not a substitute for (1): yield is
@@ -569,10 +583,37 @@ output cap — `(min(ih, H)/ih)²`, since the cap never upscales — and applies
 codec factor**, because none is measured: §3.5 timed the encodes and recorded no
 output sizes, so there is no ratio in this repository to apply and inventing one
 is what §16 forbids. The direction of the error is knowable even though its size
-is not: a CRF-23 H.264 encode of a 10-bit HEVC source at the same resolution is
-usually *larger* than its source, so the estimate runs low on exactly the corpus
-this feature exists for. **The phase 7 job runner must therefore check the growing
-`.part` against the estimate and abort on overshoot rather than trusting it.**
+is not: a CRF-23 H.264 encode of a 10-bit HEVC source at the same resolution was
+argued to be usually *larger* than its source, so the estimate was believed to run
+low on exactly the corpus this feature exists for. **The phase 7 job runner must
+therefore check the growing `.part` against the estimate and abort on overshoot
+rather than trusting it.**
+
+**Measured 2026-08-14, and the direction claim above is false**
+(`docs/benchmarks/video-codec-factor-2026-08-14.md`). Actual
+`output_bytes / estimate_full_output_bytes()`, median per class:
+
+| Class | Pipeline | n | median |
+|---|---|---|---|
+| HEVC 10-bit HDR | CPU | 8 | **0.301** (max 0.356) |
+| HEVC 10-bit HDR | GPU | 8 | 0.471 |
+| HEVC 8-bit | CPU | 8 | 0.886 |
+| HEVC 8-bit | GPU | 8 | **1.409** |
+| H.264 1080p | CPU | 4 | 0.309 |
+
+The error is **not uniformly low-side**. On the CPU pipeline it is frequently
+high-side and badly so — HEVC 10-bit HDR over-estimates on 8 of 8 samples, one by
+8× — and the ratio crosses 1 mainly for **GPU** encodes of lightly-compressed
+8-bit sources, which is not the case this paragraph named. With n=3–8 per cell the
+finding is the **ordering**, not a constant: these ratios do not support a single
+multiplicative codec factor and one must not be invented from them (§16).
+
+**Known limitation, named rather than fixed.** An estimate that over-reads by up
+to 8× can `refuse` a job whose real output would have fit — a false refusal this
+section does not contemplate and phase 7 does not change. Loosening a forensic
+capacity gate is an operator decision, escalated 2026-08-14 and open; until it is
+taken, the gate stays as specified and the over-refusal is recorded here with its
+evidence rather than being quietly tuned away.
 
 **Implemented in phase 7**, and the number it aborts on is stated precisely,
 because "the estimate" alone would be the wrong one: the runner watches the
@@ -580,11 +621,13 @@ because "the estimate" alone would be the wrong one: the runner watches the
 not against `estimate_bytes`.** An admitted job has `estimate ≤ limit` by
 construction, so the limit is the binding number, and it is the one that is
 actually an invariant: the estimate is a screen whose error is unmeasured, while
-"no single rendering exceeds half the cache" is the promise §6.2 needs. Aborting
-at the estimate would kill nearly every HEVC export for being exactly what this
-paragraph predicts it will be — larger than the estimate — while protecting
-nothing extra. Passing the estimate is instead **logged with the actual bytes**,
-which is where a measured codec factor can come from. The abort raises
+"no single rendering exceeds half the cache" is the promise §6.2 needs. The
+measurement above makes this stronger than the reason it was chosen for: the
+estimate is wrong in **both** directions depending on pipeline and class, so
+aborting at it would kill exports for being either larger *or* smaller than a
+number that predicts neither, while protecting nothing extra. Passing the estimate
+is instead **logged with the actual bytes**, which is where the measured ratios
+above came from. The abort raises
 `encode.CeilingExceeded`, which §10.1 carries as `full-copy-overshoot`; the
 `.part` is removed on the way out, so an aborted export leaves no file behind and
 nothing counted against the ceiling.

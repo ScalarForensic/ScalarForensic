@@ -39,11 +39,20 @@ class CeilingExceeded(RuntimeError):
     """The growing ``.part`` passed the size a single rendering may occupy (§6.3).
 
     Raised by the full-video job's own watcher, never by ffmpeg.  §6.3's estimate
-    applies **no codec factor** because none is measured, and its error runs *low*
-    on exactly the 10-bit HEVC corpus this feature exists for — so the admission
-    check is a screen and this is the guarantee behind it.  The job is stopped and
-    its ``.part`` removed rather than allowed to fill the cache it was admitted
+    applies **no codec factor** because none is measured, so the admission check
+    is a screen and this is the guarantee behind it.  The job is stopped and its
+    ``.part`` removed rather than allowed to fill the cache it was admitted
     against.
+
+    **The watch is against ``limit_bytes`` and not against the estimate, and the
+    2026-08-14 measurement is why** (``docs/benchmarks/video-codec-factor-
+    2026-08-14.md``): the estimate/actual ratio ranges from 0.301 (HEVC 10-bit
+    HDR, CPU — an over-estimate) to 1.409 (HEVC 8-bit, GPU — an under-estimate).
+    It is wrong in *both* directions depending on pipeline and class, so it
+    predicts nothing an abort can be hung on.  ``limit_bytes`` — the 50% ceiling
+    the job was admitted against, and ≥ the estimate for any admitted job — is the
+    only number here that is actually an invariant.  Do not "correct" this back to
+    the estimate; §6.3 records the same ruling with the data.
     """
 
     def __init__(self, message: str, *, written_bytes: int, limit_bytes: int) -> None:
@@ -244,7 +253,8 @@ def _run_watched(
     §6.3's: it reports progress while the encode runs, it hands the ``Popen`` to
     the caller so a cancel can stop it, and it **watches the growing ``.part``
     against the size a single rendering may occupy** — the check §6.3 requires
-    because its admission estimate carries no codec factor and errs low.
+    because its admission estimate carries no codec factor.  See
+    :class:`CeilingExceeded` for why that watch is against ``limit_bytes``.
 
     The process gets its own session so a kill reaches ffmpeg's children as well
     (§10.3), and stderr is drained by a thread and bounded, so a chatty encoder

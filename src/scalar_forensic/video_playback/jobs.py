@@ -9,8 +9,8 @@ rest of the system, which is the part v1 got wrong and §4.3 says out loud:
 
 `SFN_VIDEO_MAX_WORKERS=2` is the shape of exactly one viewer — the chunk being
 played plus its single §4.2 prefetch — so a full job holding one of those two
-puts chunk encoding at k=2 for its whole run: §3.5's 8.21 s becomes ~16.35 s,
-outside the 6–10 s window the double-buffered swap depends on.
+puts chunk encoding at k=2 for its whole run: §3.5's 8.21 s becomes a measured
+18.31 s, outside the 6–10 s window the double-buffered swap depends on.
 
 **The ruling (2026-08-14, phase 7) is both of §4.3's remedies, in this order.**
 
@@ -19,12 +19,15 @@ outside the 6–10 s window the double-buffered swap depends on.
    splitting it.  **This bites on the CPU pipeline only.**  Niceness and
    ``-threads`` reprioritise CPU scheduling and libx264's thread pool; on the GPU
    pipeline the contended resource is the encoder block and its driver queue,
-   which neither knob touches — a niced NVENC job still takes its slot.  The size
-   of what remains on either path is **unmeasured today**.
-2. *Disclose anyway.*  While a job runs, the player says that chunk loading is
-   slower (``contention_notice`` below, rendered by ``full_job.js``).  Yield
-   shrinks the degradation on one path and does nothing on the other, so
-   disclosure is the only remedy that covers both — and doing (1) alone would
+   which neither knob touches — a niced NVENC job still takes its slot.
+   **Measured 2026-08-14, CPU/libx264, n=6 per arm: 18.31 s unniced vs 16.83 s
+   niced — ~9%, and neither inside §4.2's 6–10 s window**
+   (``docs/benchmarks/video-codec-factor-2026-08-14.md``).  Keep the knobs; the
+   9% is free.  Do not describe the job as yielding as though that settled it.
+2. *Disclose anyway.*  While a job runs, the player says the next chunk will take
+   longer (``contention_notice`` below, rendered by ``full_job.js``).  Yield buys
+   9% on one path and is unmeasured on the other, so disclosure is the
+   load-bearing remedy and the only one that covers both — and doing (1) alone would
    re-create the option §4.3 rules out: bounded but invisible.
 
 This module owns the runner ``routes._Admission`` deliberately was not: a
