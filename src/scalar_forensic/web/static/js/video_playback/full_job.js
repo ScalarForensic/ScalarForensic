@@ -33,6 +33,10 @@
     waiters: 0,
     url: '',
     switched: false,
+    // §7.2's record of the copy this job produced (`jobs.py:321`). `null` while
+    // the job runs: there is no encode to describe yet, and a label naming a
+    // pipeline before one has produced anything is a claim, not a record.
+    rendering: null,
   },
   // ── The §6.3 override (ruling 2026-08-14, #184) ──────────────────────────
   // Two cells, each with exactly one writer, for the same reason
@@ -97,6 +101,16 @@
   // disagree and the analyst would not know which one to believe.
   get fullJobEtaLabel() {
     return this.fullJob.etaLabel || '';
+  },
+  // §7.2 for the full copy, through the one renderer both scopes share
+  // (`rendering.js`). Empty until the encode has produced something to
+  // describe, which is what keeps the panel from labelling a job as though it
+  // were an artifact.
+  get fullJobRenderingRows() {
+    return this._renderingRows(this.fullJob.rendering);
+  },
+  get fullJobRenderingCommand() {
+    return this._renderingCommand(this.fullJob.rendering);
   },
   get fullJobRateLabel() {
     const r = this.fullJob.rate;
@@ -213,6 +227,12 @@
     this.fullJob.limitBytes = view.limit_bytes ?? null;
     this.fullJob.waiters = view.waiters ?? 0;
     this.fullJob.url = view.full_url ?? '';
+    // §7.2: the full copy is a rendering too, and the analyst who watches it
+    // is entitled to the same record as the one who watches a chunk. Carried
+    // by every job view — the POST response, each poll and playback-info's
+    // `full_job` — so a page opened after the export finished still shows what
+    // produced the copy it is offering to play.
+    this.fullJob.rendering = view.rendering ?? null;
     this.fullJob.reason = view.error?.reason ?? '';
     this.fullJob.kind = view.error?.error ?? '';
     // The other carrier of the §4.3 disclosure. Same single cell as the chunk
@@ -394,6 +414,7 @@
       state: 'idle', reason: '', kind: '', fraction: null, etaLabel: null, rate: null,
       elapsedS: 0, outSeconds: 0, durationSeconds: 0, writtenBytes: 0,
       estimateBytes: null, limitBytes: null, waiters: 0, url: '', switched: false,
+      rendering: null,
     };
   },
 });

@@ -91,12 +91,26 @@
   get chunkElapsedLabel() {
     return `${this.chunk.elapsedS.toFixed(0)} s elapsed`;
   },
+  // The one-line summary. It is a *subset* of the §7.2 record below it and not
+  // a substitute for it: the full record is `chunkRenderingRows`, rendered
+  // open beneath this line. Both are built from the same `b.pipeline` payload,
+  // so the summary cannot say something the record contradicts.
   get chunkPipelineLabel() {
     const p = this.chunk.pipeline;
     if (!p) return '';
     const bits = [p.encoder, p.hwaccel === 'none' ? 'software' : p.hwaccel];
     if (p.tone_mapped) bits.push('tone-mapped to BT.709');
     return bits.filter(Boolean).join(' · ');
+  },
+  // §7.2 in full, from `audit.Rendering.describe()` — the decoder, the filter
+  // chain with its parameters, the rate control, the output height, the ffmpeg
+  // build and what became of the audio. Shared with the full copy's panel
+  // (`rendering.js`), because one requirement gets one renderer.
+  get chunkRenderingRows() {
+    return this._renderingRows(this.chunk.pipeline);
+  },
+  get chunkRenderingCommand() {
+    return this._renderingCommand(this.chunk.pipeline);
   },
   get chunkWindowLabel() {
     if (this.chunk.start === null) return '';
