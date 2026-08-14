@@ -503,3 +503,75 @@ test('an idle job does not warn on leave', () => {
   const { component } = componentUnderTest();
   assert.equal(component.fullJobWarnsOnLeave, false);
 });
+
+// ── Closing the player closes the job panel ─────────────────────────────────
+// UNREACHABLE FROM TEXT, and it was a live defect: `closeFullJob()` had no
+// caller on the close path, so the 1 Hz status poll and the `beforeunload`
+// handler both outlived the panel they belonged to. A grep can see the function
+// exists; only running the close can show what it left behind.
+test('closing the player stops the full-job poll and disarms the leave prompt', async () => {
+  const { context, component } = componentUnderTest();
+  let polls = 0;
+  context.fetch = async () => {
+    polls += 1;
+    return { ok: true, json: async () => jobView() };
+  };
+
+  await component.startFullJob();
+  assert.equal(component.fullJobRunning, true);
+  assert.equal(context.window.listeners.get('beforeunload').length, 1);
+
+  component.closeVideoPlayback();
+
+  assert.equal(component.fullJob.state, 'idle', 'the panel kept the closed job');
+  assert.equal(
+    context.window.listeners.get('beforeunload').length,
+    0,
+    'the tab still warns about an export it no longer shows',
+  );
+  // The poll is a timer, so the proof is that it stops firing. Two intervals'
+  // worth of wall clock with no further request.
+  const after = polls;
+  try {
+    await new Promise((r) => setTimeout(r, 2100));
+    assert.equal(polls, after, 'the status poll outlived the panel');
+  } finally {
+    // A timer this test is *asserting about* must not be left running: node's
+    // runner does not exit while an interval is pending, so a regression here
+    // would hang the suite instead of failing it.
+    component.closeFullJob();
+  }
+});
+
+// Closing the panel is not cancelling the job: the export is the server's and
+// the DELETE is a button. The distinction matters — a close that cancelled would
+// throw away minutes of encoding because an analyst folded a panel.
+test('closing the player does not cancel the export', async () => {
+  const { context, component } = componentUnderTest();
+  const methods = [];
+  context.fetch = async (url, opts) => {
+    methods.push(opts?.method ?? 'GET');
+    return { ok: true, json: async () => jobView() };
+  };
+  await component.startFullJob();
+  const before = methods.length;
+  component.closeVideoPlayback();
+  component.closeFullJob(); // see above: never leave the poll timer behind
+  assert.ok(!methods.slice(before).includes('DELETE'), 'closing the panel cancelled the job');
+});
+
+// The override disclosure belongs to the job and goes with it; the *offer*
+// belongs to the video and is re-established by the next playback-info load, so
+// a close must not leave a stale disclosure to be re-shown under a new video.
+test('closing the player clears the §6.3 disclosure it was showing', async () => {
+  const { context, component } = componentUnderTest();
+  context.fetch = async () => ({
+    ok: true,
+    json: async () => jobView({ override: overrideRecord() }),
+  });
+  await component.startFullJob();
+  assert.equal(component.fullJobOverridden, true);
+  component.closeVideoPlayback();
+  component.closeFullJob(); // see above: never leave the poll timer behind
+  assert.equal(component.fullJobOverridden, false);
+});
