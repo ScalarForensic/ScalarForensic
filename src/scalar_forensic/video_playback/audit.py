@@ -130,7 +130,22 @@ class Rendering:
         return AUDIO_REENCODED if self.has_audio else AUDIO_OMITTED
 
     def describe(self) -> dict:
-        """The §7.2 label payload: the pipeline that ran, and the rest of §7.2."""
+        """The §7.2 label payload: the pipeline that ran, and the rest of §7.2.
+
+        ``command_line`` is the argv as a line a reviewer can paste, and it exists
+        because §7.2's requirement is *reproduction*: the browser had been joining
+        the argv on spaces, which produces a line that does not survive being
+        copied — the filter chain carries ``'min(ih,1080)'``, and a shell hands
+        ffmpeg something it rejects with ``No such filter: '1080)'`` (measured
+        2026-08-14, `data/reports/c24-task2-label-vs-render.md`).  Quoting is
+        This is the one definition of that quoting for every record that carries
+        it, so the label and ``sfn-video render`` cannot print one argv two ways.
+        Two call sites of ``shlex.join`` remain and both are stated rather than
+        implicit: ``reproduction_report`` re-joins for records written before this
+        field existed (#193, #194), and the reconstruction branch has no record to
+        read a line from at all.  ``command`` stays alongside it because a list is
+        what a machine reads and what the audit log stores.
+        """
         return {
             **self.pipeline.describe(),
             "scope": self.scope,
@@ -141,6 +156,7 @@ class Rendering:
             "fell_back": self.fell_back,
             "fallback_reason": self.fallback_reason,
             "command": None if self.command is None else list(self.command),
+            "command_line": None if self.command is None else shlex.join(self.command),
         }
 
 
@@ -318,20 +334,105 @@ RENDER_NO_PIPELINE = (
 )
 
 
+# Display order, §7.2's own order where it states one — the same order the label
+# uses (`static/js/video_playback/rendering.js`), so a reviewer reading the screen
+# and a reviewer reading this command read the same fields in the same sequence.
+# Like that file's list, this one is a *display order* and not a filter: a key
+# absent from it is appended under its own name rather than dropped.
+_RENDER_ORDER = (
+    "scope",
+    "hwaccel",
+    "decoder",
+    "filter_chain",
+    "tone_mapped",
+    "encoder",
+    "rate_control",
+    "output_height",
+    "chunk_seconds",
+    "audio",
+    "audio_transformation",
+    "threads",
+    "start_seconds",
+    "duration_seconds",
+    "ffmpeg_version",
+    "fell_back",
+    "fallback_reason",
+)
+# Names, never glosses: the field's name with its unit where the value carries
+# none.  A sentence here would be a second wording of something the record
+# already states.
+_RENDER_LABELS = {
+    "scope": "scope",
+    "hwaccel": "hwaccel",
+    "decoder": "decoder",
+    "filter_chain": "filter chain",
+    "tone_mapped": "tone-mapped",
+    "encoder": "encoder",
+    "rate_control": "rate control",
+    "output_height": "output height",
+    "chunk_seconds": "chunk length (s)",
+    "audio": "audio args",
+    "audio_transformation": "audio",
+    "threads": "threads",
+    "start_seconds": "window start (s)",
+    "duration_seconds": "window length (s)",
+    "ffmpeg_version": "ffmpeg version",
+    "fell_back": "fell back to CPU",
+    "fallback_reason": "fallback reason",
+}
+# Printed elsewhere in the report, never as a field row: the fingerprint heads it
+# and the invocation is a line to copy, not a table cell.
+_RENDER_NOT_ROWS = frozenset({"fingerprint", "command", "command_line"})
+
+
+def _render_value(value: object) -> str | None:
+    """One value as the report prints it, or ``None`` for "do not print a row".
+
+    ``None`` is "the server did not state one", which is not a value and must not
+    print as ``None`` or as an invented zero.  A boolean prints yes/no because
+    ``False`` is a statement: dropping it would leave "did this fall back to the
+    CPU?" unanswered on every rendering that did not.  Both rules are the label's
+    (`rendering.js:_renderingValue`) — the two surfaces describe one record and
+    may not disagree about how it reads.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return str(value)
+
+
 def _pipeline_lines(rendering: dict) -> list[str]:
-    """The §7.2 fields, one per line, in the order §7.2 names them."""
-    return [
-        f"  hwaccel:          {rendering['hwaccel']}",
-        f"  decoder:          {rendering['decoder']}",
-        f"  filter chain:     {rendering['filter_chain']}",
-        f"  encoder:          {rendering['encoder']}",
-        f"  rate control:     {rendering['rate_control']}",
-        f"  output height:    {rendering['output_height']}",
-        f"  ffmpeg version:   {rendering['ffmpeg_version']}",
-        f"  tone-mapped:      {rendering['tone_mapped']}",
-        f"  audio:            {rendering['audio_transformation']}",
-        f"  threads:          {rendering['threads'] if rendering['threads'] is not None else '—'}",
-    ]
+    """Every §7.2 field of one rendering, one per line, in §7.2's order.
+
+    Walks the record rather than naming ten fields, and this is the whole point:
+    the hand-written list this replaces omitted seven fields the label showed —
+    including ``start_seconds``/``duration_seconds``, so ``--at 5`` answered with
+    the chunk at 0 and never said so, and ``fell_back``, so a rendering the GPU
+    declined read exactly like one it did not (measured 2026-08-14,
+    `data/reports/c24-task2-label-vs-render.md`).  It is the same defect
+    ``Pipeline.describe()`` derives itself from ``fields()`` to prevent, one layer
+    further out: a field added to ``Rendering`` now reaches both surfaces without
+    anyone remembering this list exists.
+    """
+    width = max(len(label) for label in _RENDER_LABELS.values()) + 2
+    lines = []
+    seen = set(_RENDER_NOT_ROWS)
+
+    def emit(key: str) -> None:
+        seen.add(key)
+        value = _render_value(rendering[key])
+        if value is None:
+            return
+        lines.append(f"  {(_RENDER_LABELS.get(key, key) + ':').ljust(width)}{value}")
+
+    for key in _RENDER_ORDER:
+        if key in rendering:
+            emit(key)
+    for key in rendering:
+        if key not in seen:
+            emit(key)
+    return lines
 
 
 def reproduction_report(
@@ -376,7 +477,12 @@ def reproduction_report(
             *_pipeline_lines(rendering),
             "",
             "Invocation that produced this rendering:",
-            f"  {shlex.join(rendering['command'])}",
+            # The record's own line when it has one, and it is the same string the
+            # label shows.  Records written before `command_line` existed (#193,
+            # #194) carry only the argv, so this re-joins for them — the stated
+            # fallback, not a second definition: an old record must still answer,
+            # and `shlex.join` of the same argv is what it would have stored.
+            f"  {rendering.get('command_line') or shlex.join(rendering['command'])}",
             "",
             RENDER_PART_NOTE,
         ]

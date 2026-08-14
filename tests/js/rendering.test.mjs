@@ -54,6 +54,11 @@ function payload(overrides = {}) {
     fell_back: false,
     fallback_reason: null,
     command: ['ffmpeg', '-ss', '30', '-i', '/evidence/clip.mov', '-t', '30', 'out.mp4'],
+    // The server's own `shlex.join` of the invocation (audit.py). Quoted the way
+    // a real payload is quoted — the filter chain is the argument that needs it,
+    // and a fixture that never needed quoting would test the easy half.
+    command_line:
+      "ffmpeg -ss 30 -i /evidence/clip.mov -vf 'scale=-2:min(ih,720),tonemap=hable' -t 30 out.mp4",
     ...overrides,
   };
 }
@@ -87,7 +92,7 @@ test('every pipeline field the server sends is rendered under a name', () => {
   const c = loadComponent();
   const named = c._renderingRows(payload()).filter((r) => r.label !== r.key).map((r) => r.key);
   for (const key of Object.keys(payload())) {
-    if (key === 'command' || payload()[key] === null) continue;
+    if (key === 'command' || key === 'command_line' || payload()[key] === null) continue;
     assert.ok(named.includes(key), `${key} reaches the screen without a row name`);
   }
 });
@@ -159,12 +164,32 @@ test('a GPU fallback shows the server reason beside the flag', () => {
 // process ran for that response. The label must not imply one did.
 test('a cache-served rendering shows no invocation', () => {
   const c = loadComponent();
-  assert.equal(c._renderingCommand(payload({ command: null })), '');
-  assert.equal(c._renderingCommand(payload({ command: [] })), '');
+  assert.equal(c._renderingCommand(payload({ command: null, command_line: null })), '');
   assert.equal(c._renderingCommand(null), '');
   assert.match(c._renderingCommand(payload()), /^ffmpeg -ss 30 -i /);
-  // ...and it is never smuggled into the rows either.
-  assert.ok(!c._renderingRows(payload()).some((r) => r.key === 'command'));
+  // ...and neither carrier is smuggled into the rows.
+  const keys = c._renderingRows(payload()).map((r) => r.key);
+  assert.ok(!keys.includes('command'));
+  assert.ok(!keys.includes('command_line'));
+});
+
+// THE FINDING OF 2026-08-14 (`data/reports/c24-task2-label-vs-render.md`), now a
+// test. The block above calls the invocation "a line to copy" and §7.2 asks for a
+// rendering a reviewer can reproduce; `command.join(' ')` produced a line that
+// does not survive being copied, because the real filter chain carries
+// `'min(ih,1080)'` and a shell hands ffmpeg `No such filter: '1080)'`. The label
+// therefore renders the server's `shlex.join`, verbatim, and never rebuilds one.
+test('the invocation is the server\'s quoted line, never a client join', () => {
+  const c = loadComponent();
+  const p = payload();
+  assert.equal(c._renderingCommand(p), p.command_line);
+  // The distinguishing case: an argv that needs quoting. A client join would put
+  // the array's own spacing on screen and drop the quotes the shell needs.
+  assert.notEqual(c._renderingCommand(p), p.command.join(' '));
+  // A payload carrying only the argv is a server that predates `command_line`.
+  // Nothing is printed rather than a line that does not run — the same rule as
+  // the cache hit: no invocation is honest, a broken one is not.
+  assert.equal(c._renderingCommand({ ...p, command_line: undefined }), '');
 });
 
 test('no payload, no rows', () => {
