@@ -135,3 +135,57 @@ test('byte counts pin a locale rather than taking the host\'s', () => {
 test('the progress bar is only drawn when there is a fraction', () => {
   assert.match(html, /class="vc-bar" x-show="fullJobPercent !== null"/);
 });
+
+// ── The §7.2 rendering record (phase 8, browser side) ───────────────────────
+// Text-level, and labelled as such: these pin that the record is bound to the
+// state cells. What the rows contain is `rendering.test.mjs`'s job, and that it
+// renders on screen is the live check's.
+test('rendering.js is loaded, and before app.js', () => {
+  const files = scriptPaths().map((f) => path.basename(f));
+  assert.ok(files.includes('rendering.js'));
+  assert.ok(
+    files.indexOf('rendering.js') < files.indexOf('app.js'),
+    'parts must load before the assembler (CLAUDE.md)',
+  );
+});
+
+test('both panels render the §7.2 record through the one shared renderer', () => {
+  assert.match(html, /x-for="row in chunkRenderingRows"/);
+  assert.match(html, /x-for="row in fullJobRenderingRows"/);
+  assert.match(html, /x-text="chunkRenderingCommand"/);
+  assert.match(html, /x-text="fullJobRenderingCommand"/);
+  // Rows carry their own name from the payload; a hand-written <dt> list in the
+  // markup would be the second renderer this file exists to prevent.
+  // Scoped to the two records: `x-text="row.label"` also belongs to the face
+  // basket, which is a different x-for over a different shape.
+  const records = [...html.matchAll(/<dl class="vc-rendering-rows">[\s\S]*?<\/dl>/g)];
+  assert.equal(records.length, 2);
+  for (const [record] of records) {
+    assert.match(record, /<dt x-text="row\.label">/);
+    assert.match(record, /<dd x-text="row\.value">/);
+  }
+});
+
+// The record is neither a failure nor a disclosure — it is what produced the
+// bytes on screen. #139's precedent: styling it as an error would tell the
+// analyst something untrue about what happened.
+test('the rendering record is not an error band, and is open by default', () => {
+  const record = html.slice(html.indexOf('class="vc-rendering"'));
+  assert.doesNotMatch(record.slice(0, 700), /vc-error/);
+  assert.equal((html.match(/class="vc-rendering"[^>]*open>/g) || []).length, 2);
+});
+
+// The invocation is gated on there being one. A cache hit sends `command: null`
+// because no process ran for that response (audit.py), and an argv shown anyway
+// would be a sentence about a process that never existed.
+test('the invocation block is gated on the server having recorded one', () => {
+  assert.match(html, /class="vc-rendering-cmd" x-show="chunkRenderingCommand"/);
+  assert.match(html, /class="vc-rendering-cmd" x-show="fullJobRenderingCommand"/);
+});
+
+// The old label was three fields, and the GPU fallback was a client sentence
+// glossing a boolean. Both are now rows of the record, rendered from the
+// server's own `fell_back` / `fallback_reason`.
+test('the fallback is the server\'s field and not a client gloss', () => {
+  assert.doesNotMatch(html, /encoded on the CPU after the GPU declined/);
+});

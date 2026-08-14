@@ -1586,9 +1586,41 @@
                           <div class="vc-label-body" x-show="chunkIsPlaying">
                             <span x-text="chunkWindowLabel"></span>
                             <span x-show="chunkPipelineLabel"> · <span x-text="chunkPipelineLabel"></span></span>
-                            <span x-show="chunk.fellBack"> · encoded on the CPU after the GPU declined</span>
                             <span x-show="chunk.next === null"> · last window of this video</span>
                           </div>
+
+                          <!-- §7.2: the rendering record for the window on screen.
+                               The line above is a summary; this is the record — the
+                               decoder, the filter chain with its parameters, the rate
+                               control, the output height, the ffmpeg build, the GPU
+                               fallback and its reason, and what became of the audio.
+                               Every row is a field of `audit.Rendering.describe()`
+                               rendered verbatim, never a client sentence about it: the
+                               audio transformation and the fallback reason have one
+                               definition each, server-side, for the same reason the
+                               §4.3 disclosure does.
+                               `<details open>`: nothing is hidden by default, and an
+                               analyst reading a long panel can still fold it. -->
+                          <details class="vc-rendering" x-show="chunkIsPlaying" open>
+                            <summary>Rendering record (§7.2)</summary>
+                            <dl class="vc-rendering-rows">
+                              <template x-for="row in chunkRenderingRows" :key="row.key">
+                                <div class="vc-rendering-row">
+                                  <dt x-text="row.label"></dt>
+                                  <dd x-text="row.value"></dd>
+                                </div>
+                              </template>
+                            </dl>
+                            <!-- The argv that ran. Absent for a rendering served from
+                                 the cache — no process ran for that response, and the
+                                 server sends `command: null` rather than a plausible
+                                 reconstruction (audit.py). `sfn-video render` is where
+                                 an invocation is retrieved or rebuilt. -->
+                            <div class="vc-rendering-cmd" x-show="chunkRenderingCommand">
+                              <div class="vc-rendering-cmd-hdr">Invocation</div>
+                              <code x-text="chunkRenderingCommand"></code>
+                            </div>
+                          </details>
 
                           <!-- states `chunk-failed`, `capacity-exhausted`,
                                `cache-disabled`, `unknown`. The reason is the server's
@@ -1653,6 +1685,27 @@
                               <span>▶</span>
                               <span x-text="`Play the full copy from ${fullJobSwitchAtSeconds.toFixed(0)} s`"></span>
                             </a>
+                            <!-- §7.2 for the copy this job produced, through the same
+                                 renderer the chunk record uses (`rendering.js`): one
+                                 requirement, one label. It carries the thread cap the
+                                 full copy was encoded under, which a chunk has none
+                                 of — libx264's output depends on it, so an invocation
+                                 printed without it does not reproduce these bytes. -->
+                            <details class="vc-rendering" x-show="fullJobRenderingRows.length" open>
+                              <summary>Rendering record (§7.2)</summary>
+                              <dl class="vc-rendering-rows">
+                                <template x-for="row in fullJobRenderingRows" :key="row.key">
+                                  <div class="vc-rendering-row">
+                                    <dt x-text="row.label"></dt>
+                                    <dd x-text="row.value"></dd>
+                                  </div>
+                                </template>
+                              </dl>
+                              <div class="vc-rendering-cmd" x-show="fullJobRenderingCommand">
+                                <div class="vc-rendering-cmd-hdr">Invocation</div>
+                                <code x-text="fullJobRenderingCommand"></code>
+                              </div>
+                            </details>
                           </div>
 
                           <!-- §6.3 refusal. THREE-VALUED, and the two sentences are
@@ -2576,8 +2629,9 @@
 <script src="/static/js/triage.js"></script>
 <script src="/static/js/reset.js"></script>
 <script src="/static/js/faces.js"></script>
-<!-- The video-playback subsystem owns its part file (spec §11); it must
+<!-- The video-playback subsystem owns its part files (spec §11); they must
      still load before app.js like every other part. -->
+<script src="/static/js/video_playback/rendering.js"></script>
 <script src="/static/js/video_playback/player.js"></script>
 <script src="/static/js/video_playback/full_job.js"></script>
 <script src="/static/app.js"></script>

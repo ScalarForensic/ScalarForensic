@@ -1348,6 +1348,31 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   background: var(--surface2); overflow: hidden;
 }
 .vc-bar-fill { height: 100%; background: var(--accent); transition: width 0.4s linear; }
+/* The §7.2 rendering record.  Deliberately neither .vc-error nor .vc-notice: it
+   is not a failure and not a disclosure but the record of what produced the
+   bytes on screen, so it reads as reference material — muted, monospace values,
+   and open by default, because nothing about a rendering should be hidden from
+   a reviewer unless they fold it themselves. */
+.vc-rendering { margin-top: 6px; font-size: 10px; color: var(--muted); }
+.vc-rendering > summary {
+  cursor: pointer; color: var(--text2); letter-spacing: 0.04em; text-transform: uppercase;
+}
+.vc-rendering-rows { margin: 4px 0 0; display: grid; gap: 2px; }
+.vc-rendering-row { display: grid; grid-template-columns: 150px 1fr; gap: 8px; }
+.vc-rendering-row dt { color: var(--muted); }
+/* Values are the server's strings verbatim, and a filter chain or an argv is
+   long: it wraps rather than being clipped.  A truncated pipeline record is a
+   label that does not say what ran. */
+.vc-rendering-row dd {
+  margin: 0; color: var(--text2); font-family: var(--mono); overflow-wrap: anywhere;
+}
+.vc-rendering-cmd { margin-top: 5px; }
+.vc-rendering-cmd-hdr { color: var(--muted); }
+.vc-rendering-cmd code {
+  display: block; margin-top: 2px; padding: 4px 6px;
+  background: var(--surface2); border-radius: 3px;
+  color: var(--text2); font-family: var(--mono); overflow-wrap: anywhere;
+}
 /* Wrapper that keeps each mode's badge and score pill one x-for root. */
 .hit-frame-score { display: inline-flex; align-items: center; gap: 3px; }
 
