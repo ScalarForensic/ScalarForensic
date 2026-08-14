@@ -27,6 +27,7 @@ eviction unit, which is right: they are two renderings of one piece of evidence.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import hashlib
 import logging
@@ -104,6 +105,38 @@ def artifact_dir(cache_dir: Path, source_digest: str, fingerprint: str) -> Path:
 def chunk_name(start: float) -> str:
     """``c{start}.mp4`` with a fixed rendering, so one window is one filename."""
     return f"c{start:.3f}.mp4"
+
+
+#: The §4.3 full copy, beside that pipeline's chunks and under the same key.
+FULL_NAME = "full.mp4"
+
+
+def full_path(cache_dir: Path, source_digest: str, fingerprint: str) -> Path:
+    return artifact_dir(cache_dir, source_digest, fingerprint) / FULL_NAME
+
+
+def relocate_to_pipeline_key(
+    published: Path, cache_dir: Path, source_digest: str, fingerprint: str, name: str
+) -> Path:
+    """Move an artifact under the key of the pipeline that **ran** (§6.1).
+
+    The destination has to be chosen before the encode, and a §8 GPU fallback
+    changes the pipeline mid-encode — so an artifact can land under the key of a
+    pipeline that did not produce it, which is precisely "one key holding two
+    pictures".  The move is a same-directory ``os.replace``, so it is atomic and
+    a reader either sees the old name or the new one.
+
+    Both writers of a pipeline-keyed artifact call this one function: the chunk
+    path in :mod:`.routes` and the full-video job in :mod:`.jobs`.
+    """
+    correct = artifact_dir(cache_dir, source_digest, fingerprint) / name
+    if correct == published:
+        return published
+    correct.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(published, correct)
+    with contextlib.suppress(OSError):
+        published.parent.rmdir()  # empty unless something else published there
+    return correct
 
 
 # ---------------------------------------------------------------------------

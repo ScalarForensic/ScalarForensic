@@ -23,6 +23,7 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
 import threading
 import time
 from fractions import Fraction
@@ -44,6 +45,7 @@ from scalar_forensic.video_playback import capability as vp_capability
 from scalar_forensic.video_playback import codecs as vp_codecs
 from scalar_forensic.video_playback import digest as vp_digest
 from scalar_forensic.video_playback import encode as vp_encode
+from scalar_forensic.video_playback import jobs as vp_jobs
 from scalar_forensic.video_playback import rewrap as vp_rewrap
 from scalar_forensic.video_playback import routes as vp_routes
 from scalar_forensic.video_playback import states as vp_states
@@ -961,25 +963,27 @@ FINGERPRINT = "f" * 64
 
 @pytest.fixture(autouse=True)
 def _clean_cache_state():
-    """Module-level lease, pin, sweep, probe and admission state (CLAUDE.md).
+    """Module-level lease, pin, sweep, probe, admission and job state (CLAUDE.md).
 
     Autouse because every one of these is silent when it leaks: an inherited
     lease changes what a later eviction test evicts, an inherited probe answer
-    decides a pipeline nobody selected, and an admission counter left above zero
-    turns a later chunk request into a spurious 503.  All three read as flakes.
+    decides a pipeline nobody selected, an admission counter left above zero
+    turns a later chunk request into a spurious 503, and a full-video job left in
+    the runner makes the next test's POST join it instead of starting one.  All
+    of them read as flakes.
     """
-    vp_cache.reset_leases()
-    vp_cache.artifact_locks.reset()
-    vp_cache._reset_sweep()
-    vp_capability.reset_cache()
-    vp_routes.admission.reset()
-    vp_routes.reset_substitutions()
+    _reset_module_state()
     yield
+    _reset_module_state()
+
+
+def _reset_module_state() -> None:
     vp_cache.reset_leases()
     vp_cache.artifact_locks.reset()
     vp_cache._reset_sweep()
     vp_capability.reset_cache()
-    vp_routes.admission.reset()
+    vp_jobs.admission.reset()
+    vp_jobs.runner.reset()
     vp_routes.reset_substitutions()
 
 
@@ -2130,7 +2134,7 @@ class TestChunkKeyingOnFallback:
         wrong.parent.mkdir(parents=True)
         wrong.write_bytes(b"chunk")
 
-        landed = vp_routes._relocate_on_fallback(wrong, cache_dir, DIGEST_A, cpu_fp, "c0.000.mp4")
+        landed = vp_cache.relocate_to_pipeline_key(wrong, cache_dir, DIGEST_A, cpu_fp, "c0.000.mp4")
 
         assert landed == vp_cache.artifact_dir(cache_dir, DIGEST_A, cpu_fp) / "c0.000.mp4"
         assert landed.read_bytes() == b"chunk"
@@ -2142,7 +2146,7 @@ class TestChunkKeyingOnFallback:
         p = vp_cache.artifact_dir(cache_dir, DIGEST_A, fp) / "c0.000.mp4"
         p.parent.mkdir(parents=True)
         p.write_bytes(b"chunk")
-        assert vp_routes._relocate_on_fallback(p, cache_dir, DIGEST_A, fp, "c0.000.mp4") == p
+        assert vp_cache.relocate_to_pipeline_key(p, cache_dir, DIGEST_A, fp, "c0.000.mp4") == p
         assert p.read_bytes() == b"chunk"
 
 
@@ -2190,13 +2194,17 @@ class TestPlayerStatesOnPlaybackInfo:
         # A state the UI has no branch for is a state the analyst never sees.
         assert set(vp_states.MODE_TO_STATE.values()) <= vp_states.PLAYER_STATES
 
-    def test_the_full_job_states_are_named_as_phase_sevens_not_shipped_empty(self):
-        assert not (vp_states.PHASE_7_STATES & vp_states.PLAYER_STATES)
-        assert vp_states.PHASE_7_STATES == {
+    def test_the_full_job_states_are_declared_now_that_something_can_enter_them(self):
+        # Phase 6 kept these out of PLAYER_STATES because §5 forbids inventing a
+        # state nothing can reach.  Phase 7 built /api/video-full, so they are
+        # ordinary states now — and each one is reachable, which the job tests
+        # below exercise rather than assert about.
+        assert vp_states.FULL_JOB_STATES == {
             "full-job-running",
             "full-job-done",
             "full-job-failed",
         }
+        assert vp_states.FULL_JOB_STATES <= vp_states.PLAYER_STATES
 
 
 class TestFailureMatrix:
@@ -2397,11 +2405,11 @@ class TestFailureMatrixOverHttp:
     ):
         monkeypatch.setenv("SFN_VIDEO_QUEUE_MAX", "1")
         monkeypatch.setenv("SFN_VIDEO_MAX_WORKERS", "1")
-        vp_routes.admission.admitted = 1  # one encode already in flight
+        vp_jobs.admission.admitted = 1  # one encode already in flight
         try:
             r = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
         finally:
-            vp_routes.admission.admitted = 0
+            vp_jobs.admission.admitted = 0
         assert r.status_code == 503
         assert r.json()["detail"]["error"] == "queue-full"
         assert r.json()["detail"]["player_state"] == "capacity-exhausted"
@@ -2412,7 +2420,7 @@ class TestFailureMatrixOverHttp:
             vp_encode, "_run", side_effect=vp_encode.EncodeError("boom", command=["ffmpeg"])
         ):
             assert client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").status_code == 422
-        assert vp_routes.admission.admitted == 0
+        assert vp_jobs.admission.admitted == 0
 
 
 class TestEncodeFallbackLimits:
@@ -2663,3 +2671,358 @@ class TestRemainingFailureRowsOverHttp:
             "malformed-duration",
             "queue-full",
         } <= kinds
+
+
+# ---------------------------------------------------------------------------
+# The full-video job (spec §4.3, §5, §6.3, §9, §10) — phase 7
+# ---------------------------------------------------------------------------
+
+
+def _await_terminal(c: TestClient, path: Path, *, timeout: float = 30.0) -> dict:
+    """Poll the status endpoint until the job stops running.
+
+    Polling and not a hook into the runner: a test that reached inside the job
+    would pass against a runner the browser cannot observe, and the status
+    endpoint is the only thing the player has.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        body = c.get(f"/api/video-job-status?path={path}").json()
+        if body.get("state") == "none" or body.get("player_state") != "full-job-running":
+            return body
+        time.sleep(0.05)
+    raise AssertionError("the job never left full-job-running")
+
+
+class TestFullJobCeiling:
+    """§6.3: the ceiling is *enforced* on the job path, not merely reported."""
+
+    def test_a_refused_estimate_never_starts_an_encode(self, client, hevc_10bit_mov, monkeypatch):
+        # 1 byte of cache: every estimate is over half of it.
+        monkeypatch.setenv("SFN_VIDEO_CACHE_MAX_BYTES", "1")
+        with patch.object(vp_jobs, "encode_full", side_effect=AssertionError("encoded anyway")):
+            r = client.post(f"/api/video-full?path={hevc_10bit_mov}")
+        assert r.status_code == 507
+        detail = r.json()["detail"]
+        assert detail["error"] == "full-copy-refused"
+        assert detail["player_state"] == "capacity-exhausted"
+        assert "download the original" in detail["reason"].lower()
+
+    def test_an_unknown_estimate_refuses_the_job_too(self, client, hevc_10bit_mov):
+        # §6.3: "this file would not say how big it is" is not permission to find
+        # out by filling the cache.
+        report = vp_codecs._stream_report(hevc_10bit_mov)
+        report.pop("bit_rate", None)
+        with (
+            patch.object(vp_routes, "_stream_report", return_value=report),
+            patch.object(vp_jobs, "encode_full", side_effect=AssertionError("encoded anyway")),
+        ):
+            r = client.post(f"/api/video-full?path={hevc_10bit_mov}")
+        assert r.status_code == 507
+        assert r.json()["detail"]["error"] == "full-copy-unknown"
+
+    def test_playback_info_reports_the_estimate_without_starting_anything(
+        self, client, hevc_10bit_mov
+    ):
+        body = client.get(f"/api/video-playback-info?path={hevc_10bit_mov}").json()
+        assert body["full_copy"]["state"] in ("fits", "refused", "unknown")
+        assert body["full_job"] is None
+
+
+@requires_ffmpeg
+class TestFullJobPartOvershoot:
+    """§6.3: the estimate is a screen; the growing `.part` is the guarantee."""
+
+    def test_an_overshooting_part_is_killed_and_leaves_nothing_behind(
+        self, client, hevc_10bit_mov, monkeypatch
+    ):
+        real = vp_jobs.encode_full
+
+        def _one_byte_limit(*args, **kw):
+            kw["limit_bytes"] = 1  # any real encode passes this immediately
+            return real(*args, **kw)
+
+        with TestClient(app) as c, patch.object(vp_jobs, "encode_full", _one_byte_limit):
+            assert c.post(f"/api/video-full?path={hevc_10bit_mov}").status_code == 200
+            body = _await_terminal(c, hevc_10bit_mov)
+        assert body["player_state"] == "full-job-failed"
+        assert body["error"]["error"] == "full-copy-overshoot"
+        assert body["error"]["retryable"] is False
+        cache_dir = Settings().video_cache_dir
+        assert not list(cache_dir.rglob("*.part"))
+        assert not list(cache_dir.rglob(vp_cache.FULL_NAME))
+
+    def test_the_overshoot_is_classified_without_a_second_table(self):
+        exc = vp_encode.CeilingExceeded("too big", written_bytes=3, limit_bytes=2)
+        row = vp_states.classify(exc)
+        assert row.kind == "full-copy-overshoot"
+        assert row.status == 507
+        assert vp_states.classify_full_job(exc).state == "full-job-failed"
+
+
+class TestFullJobFailureMapping:
+    """§10.1: the same rows, landing in `full-job-failed` — not a parallel matrix."""
+
+    def test_every_row_keeps_its_kind_status_and_retry_rule(self):
+        rows = [
+            v
+            for k, v in vars(vp_states).items()
+            if isinstance(v, vp_states.Failure) and k.isupper()
+        ]
+        for row in rows:
+            mapped = vp_states.classify_full_job(
+                vp_encode.EncodeError("x", command=[], returncode=1)
+            )
+            assert mapped.state == "full-job-failed"
+        for exc, kind in [
+            (vp_encode.EncodeError("t", command=[], timed_out=True), "job-timeout"),
+            (OSError(errno.ENOSPC, "no space"), "disk-full"),
+            (FileNotFoundError(), "source-disappeared"),
+            (vp_encode.EncodeError("k", command=[], returncode=-9), "encoder-killed"),
+        ]:
+            mapped = vp_states.classify_full_job(exc)
+            assert mapped.kind == kind
+            assert mapped.state == "full-job-failed"
+            assert mapped.status == vp_states.classify(exc).status
+            assert mapped.retryable == vp_states.classify(exc).retryable
+
+    def test_a_full_job_failure_state_is_a_declared_player_state(self):
+        assert "full-job-failed" in vp_states.PLAYER_STATES
+
+
+class TestFullJobRefcounts:
+    """§10.4: a cancel by one analyst must never kill a job another is waiting on."""
+
+    def _request(self, digest="d" * 64) -> vp_jobs.JobRequest:
+        return vp_jobs.JobRequest(
+            source=Path("/nowhere.MOV"),
+            digest=digest,
+            duration_seconds=10.0,
+            hdr=False,
+            has_audio=False,
+            capability=_capability(),
+            pipeline=_pipeline(),
+            cache_dir=Path("/tmp"),
+            limit_bytes=1,
+            estimate_bytes=1,
+        )
+
+    def test_the_second_claim_joins_the_running_job(self):
+        async def _go():
+            runner = vp_jobs.JobRunner()
+            with patch.object(runner, "_run", new=_never_finishing):
+                first = runner.start(self._request(), Settings())
+                second = runner.start(self._request(), Settings())
+                assert first is second
+                assert first.waiters == 2
+                assert runner.cancel(self._request().digest) == "released"
+                assert first.cancelled is False
+                assert runner.cancel(self._request().digest) == "cancelled"
+                assert first.cancelled is True
+                runner.reset()
+
+        asyncio.run(_go())
+
+    def test_a_cancel_that_races_the_encoder_still_stops_it(self):
+        # The window is between `Popen` returning and the runner being handed
+        # the handle: a DELETE landing inside it sets a flag with nobody left to
+        # read it, and a 51-minute encode runs on after the analyst was told it
+        # had stopped.  `attach` re-checks the flag, which is what closes it.
+        job = vp_jobs.FullJob(self._request(), Settings())
+        job.cancel()  # no process yet — this must not be lost
+        assert job.cancelled is True
+        proc = MagicMock()
+        with patch.object(vp_jobs, "_kill_group") as killed:
+            job.attach(proc)
+        assert killed.call_args.args == (proc,)
+
+    def test_cancelling_a_job_nobody_started_is_a_404(self, client, hevc_10bit_mov):
+        r = client.request("DELETE", f"/api/video-full?path={hevc_10bit_mov}")
+        assert r.status_code == 404
+        assert r.json()["detail"]["error"] == "no-such-job"
+
+    def test_a_status_call_for_no_job_says_none_and_not_finished(self, client, hevc_10bit_mov):
+        body = client.get(f"/api/video-job-status?path={hevc_10bit_mov}").json()
+        assert body["state"] == "none"
+        assert body["player_state"] is None
+
+
+async def _never_finishing(job) -> None:
+    """A job that runs until cancelled — the refcount is what is under test."""
+    while not job.cancelled:
+        await asyncio.sleep(0.01)
+
+
+@requires_ffmpeg
+class TestFullJobEndToEnd:
+    def test_a_finished_job_publishes_a_full_copy_under_the_pipeline_key(self, hevc_10bit_mov):
+        with TestClient(app) as c:
+            started = c.post(f"/api/video-full?path={hevc_10bit_mov}")
+            assert started.status_code == 200, started.text
+            assert started.json()["player_state"] == "full-job-running"
+            assert started.json()["contention_notice"]
+            body = _await_terminal(c, hevc_10bit_mov)
+            assert body["player_state"] == "full-job-done", body
+            assert body["fraction"] is not None
+            assert body["contention_notice"] is None
+            served = c.get(body["full_url"])
+            assert served.status_code == 200
+            assert served.headers["X-SFN-Full-Copy"] == "true"
+            assert len(served.content) > 0
+
+    def test_a_get_never_encodes_a_missing_full_copy(self, client, hevc_10bit_mov):
+        r = client.get(f"/api/video-full?path={hevc_10bit_mov}&fp={'a' * 64}")
+        assert r.status_code == 404
+        assert "POST" in r.json()["detail"]
+
+    def test_a_fingerprint_is_never_accepted_as_the_identity_of_a_full_copy(
+        self, client, hevc_10bit_mov
+    ):
+        r = client.get(f"/api/video-full?path={hevc_10bit_mov}&fp=../../etc/passwd")
+        assert r.status_code == 422
+
+    def test_cancelling_a_running_job_stops_it_and_leaves_no_part(self, hevc_long_mov):
+        with TestClient(app) as c:
+            assert c.post(f"/api/video-full?path={hevc_long_mov}").status_code == 200
+            c.request("DELETE", f"/api/video-full?path={hevc_long_mov}")
+            body = _await_terminal(c, hevc_long_mov)
+        assert body["cancelled"] is True
+        # A cancelled job is not a §5 state of its own: nothing is running, so
+        # the video is back to needing a transcode.
+        assert body["player_state"] == "needs-transcode"
+        assert not list(Settings().video_cache_dir.rglob("*.part"))
+
+
+@requires_ffmpeg
+class TestFullJobContentionDisclosure:
+    """§4.3 remedy (b): the degradation is disclosed, not left invisible."""
+
+    def test_a_chunk_response_says_a_full_export_is_slowing_it_down(self, hevc_long_mov):
+        with TestClient(app) as c:
+            c.post(f"/api/video-full?path={hevc_long_mov}")
+            body = c.post(f"/api/video-chunk?path={hevc_long_mov}&t=0").json()
+            notice = body["contention_notice"]
+            _await_terminal(c, hevc_long_mov, timeout=60)
+        # The wording is the module's one disclosure sentence; what the test
+        # pins is that a chunk answered under an export says the wait is worse,
+        # not that it uses any particular adjective.
+        assert notice == vp_jobs.CONTENTION_NOTICE
+        assert "longer" in notice.lower()
+
+    def test_a_chunk_with_no_export_running_claims_no_contention(self, client, hevc_10bit_mov):
+        body = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+        assert body["contention_notice"] is None
+
+
+class TestFullJobYield:
+    """§4.3 remedy (a): the export loses the contention on purpose."""
+
+    def test_the_job_runs_niced_and_thread_capped_and_a_chunk_does_not(self):
+        settings = Settings()
+        chunk = vp_encode.build_command(
+            settings, _pipeline(), Path("/in.MOV"), Path("/out.mp4"), start=0.0, duration=30.0
+        )
+        assert "-threads" not in chunk
+        assert "-progress" not in chunk
+        full = vp_encode.build_command(
+            settings,
+            _pipeline(),
+            Path("/in.MOV"),
+            Path("/out.mp4"),
+            threads=vp_encode.job_threads(settings),
+            progress=True,
+        )
+        assert full[full.index("-threads") + 1] == str(vp_encode.job_threads(settings))
+        assert full[full.index("-progress") + 1] == "pipe:1"
+        assert settings.video_job_nice == 10
+
+    def test_the_thread_cap_leaves_half_the_box_for_chunk_work(self, monkeypatch):
+        monkeypatch.setenv("SFN_VIDEO_JOB_THREADS", "0")
+        with patch.object(os, "cpu_count", return_value=8):
+            assert vp_encode.job_threads(Settings()) == 4
+        with patch.object(os, "cpu_count", return_value=1):
+            assert vp_encode.job_threads(Settings()) == 1
+        monkeypatch.setenv("SFN_VIDEO_JOB_THREADS", "3")
+        assert vp_encode.job_threads(Settings()) == 3
+
+    def test_the_renice_reaches_every_encoding_thread_and_not_just_the_pid(self):
+        # Niceness on Linux is a *per-thread* attribute: `PRIO_PROCESS` renices
+        # the one thread that called `Popen`, and every thread ffmpeg spawns to
+        # do the encoding keeps the parent's priority — the yield would then be
+        # measured on the one thread that does no work.  `PRIO_PGRP` is what
+        # makes it reach them, and it is why the child gets its own session.
+        with patch.object(os, "setpriority") as sp:
+            vp_encode._lower_priority(4321, 10)
+        assert sp.call_args.args == (os.PRIO_PGRP, 4321, 10)
+        with patch.object(os, "setpriority") as sp:
+            vp_encode._lower_priority(4321, 0)
+        assert sp.call_count == 0
+
+    def test_the_settings_are_validated_like_every_other(self, monkeypatch):
+        monkeypatch.setenv("SFN_VIDEO_JOB_NICE", "20")
+        with pytest.raises(ValueError, match="SFN_VIDEO_JOB_NICE"):
+            Settings()
+        monkeypatch.setenv("SFN_VIDEO_JOB_NICE", "10")
+        monkeypatch.setenv("SFN_VIDEO_JOB_THREADS", "-1")
+        with pytest.raises(ValueError, match="SFN_VIDEO_JOB_THREADS"):
+            Settings()
+
+
+class TestFullJobProgress:
+    """§4.3: progress from ffmpeg's own output; `#139`'s labelling, not a promise."""
+
+    def test_out_time_is_read_from_the_unambiguous_field(self):
+        # `out_time_ms` has carried *microseconds* under a millisecond name for
+        # years; reading it would report a 51-minute export as three seconds.
+        assert vp_encode._out_seconds("00:01:30.500000") == pytest.approx(90.5)
+        assert vp_encode._out_seconds("N/A") == 0.0
+        assert vp_encode._out_seconds(None) == 0.0
+
+    def test_the_watcher_reads_out_time_and_not_out_time_ms(self, tmp_path):
+        # The parser above is only half the guarantee: the other half is *which*
+        # field `_run_watched` hands it.  A progress block that reports the same
+        # instant in both fields is the only thing that can tell those apart, so
+        # this drives a real child emitting both — `out_time_ms` carries
+        # microseconds, and reading it as milliseconds would say 90500 s.
+        emitter = tmp_path / "emit.py"
+        emitter.write_text(
+            "print('frame=42')\n"
+            "print('out_time_ms=90500000')\n"
+            "print('out_time=00:01:30.500000')\n"
+            "print('progress=continue')\n"
+        )
+        seen: list[vp_encode.Progress] = []
+        vp_encode._run_watched([sys.executable, str(emitter)], timeout=30, on_progress=seen.append)
+        assert [p.out_seconds for p in seen] == [pytest.approx(90.5)]
+
+    def test_the_eta_is_labelled_as_an_extrapolation_and_never_as_a_time(self):
+        assert vp_jobs.eta_label(None) is None
+        assert vp_jobs.eta_label(45) == "~45 s remaining at current rate"
+        assert vp_jobs.eta_label(240) == "~4 min remaining at current rate"
+        assert "at current rate" in vp_jobs.eta_label(7200)
+        for seconds in (10, 240, 7200):
+            label = vp_jobs.eta_label(seconds)
+            assert "±" not in label and "confidence" not in label
+
+    def test_no_eta_is_offered_from_a_single_observation(self):
+        request = vp_jobs.JobRequest(
+            source=Path("/x.MOV"),
+            digest="e" * 64,
+            duration_seconds=100.0,
+            hdr=False,
+            has_audio=False,
+            capability=_capability(),
+            pipeline=_pipeline(),
+            cache_dir=Path("/tmp"),
+            limit_bytes=None,
+            estimate_bytes=None,
+        )
+        job = vp_jobs.FullJob(request, Settings())
+        assert job.eta_seconds is None
+        job.observe(vp_encode.Progress(frames=10, out_seconds=1.0, written_bytes=100))
+        assert job.eta_seconds is None  # one observation is not a rate
+        time.sleep(0.01)
+        job.observe(vp_encode.Progress(frames=20, out_seconds=2.0, written_bytes=200))
+        assert job.eta_seconds is not None
+        assert job.view()["fraction"] == pytest.approx(0.02)
+        assert job.view()["eta_label"].endswith("at current rate")

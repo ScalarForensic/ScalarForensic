@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 from fastapi import HTTPException
 
-from scalar_forensic.video_playback.encode import EncodeError
+from scalar_forensic.video_playback.encode import CeilingExceeded, EncodeError
 
 # ---------------------------------------------------------------------------
 # §5 player states
@@ -35,11 +35,19 @@ from scalar_forensic.video_playback.encode import EncodeError
 #
 # §5: "Every state below must be represented in the UI ... nothing here may
 # invent a state it cannot observe."  Both halves bind.  The list therefore
-# carries exactly what phase 6 can observe, and the three `full-job-*` states
-# are named as phase 7's rather than shipped as branches nothing can enter.
+# carries exactly what the server can observe — which since phase 7 built
+# /api/video-full includes the three `full-job-*` states it withheld.
 
-#: States phase 6 can put the player in.
-PLAYER_STATES: frozenset[str] = frozenset(
+#: The three §5 states the full-video job puts the player in.  Phase 6 named them
+#: separately because nothing could enter them; phase 7 built the endpoints that
+#: do, so they are ordinary members of :data:`PLAYER_STATES` now and this set is
+#: kept only to say which three the job owns.
+FULL_JOB_STATES: frozenset[str] = frozenset(
+    {"full-job-running", "full-job-done", "full-job-failed"}
+)
+
+#: Every state the server may put the player in.
+PLAYER_STATES: frozenset[str] = FULL_JOB_STATES | frozenset(
     {
         # --- §5, verbatim -------------------------------------------------
         "playable",  # plays directly, no controls added
@@ -56,9 +64,6 @@ PLAYER_STATES: frozenset[str] = frozenset(
         "unknown",  # the container could not be probed
     }
 )
-
-#: Named here so the set above is visibly incomplete on purpose, not by omission.
-PHASE_7_STATES: frozenset[str] = frozenset({"full-job-running", "full-job-done", "full-job-failed"})
 
 # `playable`, `needs-transcode` and `unknown` are the three answers to one
 # question, and the third is the one this project keeps dropping: `#147` shipped
@@ -270,6 +275,27 @@ ENCODER_KILLED = Failure(
     ),
 )
 
+FULL_COPY_OVERSHOOT = Failure(
+    kind="full-copy-overshoot",
+    status=507,
+    state="capacity-exhausted",
+    retryable=False,
+    reason=(
+        "The full viewing copy grew past the size a single rendering may occupy and was "
+        "stopped before it filled the cache. The estimate that admitted it is uncalibrated "
+        "— it applies no codec factor, because none is measured — and it under-reads on "
+        "10-bit HEVC sources. Play it in chunks, or download the original."
+    ),
+)
+
+NO_SUCH_JOB = Failure(
+    kind="no-such-job",
+    status=404,
+    state="needs-transcode",
+    retryable=False,
+    reason="No full-video job is running for this video in this worker process.",
+)
+
 ENCODE_FAILED = Failure(
     kind="encode-failed",
     status=422,
@@ -297,6 +323,17 @@ def classify(exc: BaseException) -> Failure:
     own words — a 422 the analyst can read and act on, rather than a 500 that
     says only that something happened.
     """
+    if isinstance(exc, CeilingExceeded):
+        return _with_reason(
+            FULL_COPY_OVERSHOOT,
+            (
+                f"The full viewing copy passed {exc.limit_bytes / 1024**3:.1f} GiB while "
+                f"encoding ({exc.written_bytes / 1024**3:.1f} GiB written) and was stopped "
+                "before it filled the cache. The estimate that admitted it is uncalibrated "
+                "— it applies no codec factor, because none is measured — and it under-reads "
+                f"on 10-bit HEVC sources. {_DOWNLOAD}"
+            ),
+        )
     if isinstance(exc, EncodeError):
         if exc.timed_out:
             return ENCODE_TIMEOUT
@@ -326,6 +363,28 @@ def classify(exc: BaseException) -> Failure:
         # on a build without libzimg — which is refused, never encoded badly).
         return _with_reason(NO_PIPELINE, str(exc))
     return _with_reason(ENCODE_FAILED, f"This chunk could not be produced: {exc}. {_DOWNLOAD}")
+
+
+def classify_full_job(exc: BaseException) -> Failure:
+    """The same §10.1 row, landing in ``full-job-failed`` (§5, §10.1).
+
+    A full-video job fails for exactly the conditions a chunk fails for — the
+    file, the encoder, the disk and the clock do not care which window was asked
+    for — so this is :func:`classify` with the *state* rewritten and **not** a
+    second table. §10.1 says so in as many words: "phase 7's job runner maps the
+    same conditions onto ``full-job-failed`` through the same function rather
+    than re-deriving them." The ``kind`` is untouched, because that is the
+    identity a log record and a test key on; only what the player renders moves.
+    """
+    row = classify(exc)
+    return Failure(
+        kind=row.kind,
+        status=row.status,
+        state="full-job-failed",
+        retryable=row.retryable,
+        reason=row.reason,
+        retry_after_seconds=row.retry_after_seconds,
+    )
 
 
 def _with_reason(base: Failure, reason: str) -> Failure:
