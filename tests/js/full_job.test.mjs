@@ -406,6 +406,22 @@ test('the override disclosure is never invented client-side, and does not stick'
   await component.startFullJob();
   component._stopFullJobPoll();
   assert.equal(component.fullJobOverridden, false);
+
+  // And on the path that has no job view to overwrite it: a start that is
+  // refused never reaches `_applyFullJobView`, so without the reset the record
+  // of the *previous* export stays on screen beside a refusal for a job that
+  // does not exist — a disclosure attached to nothing.
+  component._applyFullJobView(jobView({ override: overrideRecord() }));
+  context.fetch = async () => ({
+    ok: false,
+    status: 503,
+    json: async () => ({
+      detail: { error: 'queue-full', player_state: 'capacity-exhausted', reason: 'busy' },
+    }),
+  });
+  await component.startFullJob();
+  assert.equal(component.fullJobRefused, true);
+  assert.equal(component.fullJobOverridden, false, 'a refusal kept the previous override on screen');
 });
 
 // ── Cancel, completion, auto-switch ─────────────────────────────────────────
