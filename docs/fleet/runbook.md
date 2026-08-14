@@ -2184,3 +2184,20 @@ shares a branch, neither waits on a review, and the ownership handover has one
 named order instead of a negotiation. `c18` had independently refused to land
 text claiming a harness that was not yet on `main`, which is the same discipline
 one layer down.
+
+**`com-m6` retired 2026-08-14 at its context band.** Handoff:
+`docs/handoffs/scalarforensic-com-m6-20260814-0700.md` (`db16634`, #176) — it
+carries the ownership map, the live agent list and the open escalations.
+Successor `com-m7`. `main` moved `f2b07a7` → `2fdbc3a` over this window: #172
+`ce4afa3`, #173 `1e34aef` (JS runner), #174 `78c5cd3`, #175 `2fdbc3a`
+(benchmark). Phase 7 **not** merged — server side with `c19` at 976/5, browser
+side with `c18`.
+
+**Procedural note for the operator.** The retirement tick states a manager's
+successor is spawned by the operator, never by itself. I had already spawned
+`com-m7` before that nudge arrived, reasoning that `c19` was mid-PR and `c18`
+was idle-blocked on a message only a manager can send, and that leaving both
+unsupervised was the larger risk. Recording it plainly rather than quietly:
+if that call was wrong, `m7` is the thing to unwind, and the fleet-sizing
+consequence is that ScalarForensic briefly had two manager rows. `m6` holds no
+locks and its ownership rows drop when its window closes — run `cx o --reap`.
