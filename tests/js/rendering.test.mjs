@@ -79,6 +79,19 @@ test('every §7.2 requirement is rendered from the payload', () => {
   assert.equal(v.audio_transformation, AUDIO_REENCODED);
 });
 
+// Every field of `Pipeline` is in the fingerprint and therefore in the label
+// (capability.py). The live check found `chunk_seconds` reaching the screen as a
+// bare key because it had no row name — rendered, correctly, but unlabelled.
+// This pins that every pipeline field the server sends has one.
+test('every pipeline field the server sends is rendered under a name', () => {
+  const c = loadComponent();
+  const named = c._renderingRows(payload()).filter((r) => r.label !== r.key).map((r) => r.key);
+  for (const key of Object.keys(payload())) {
+    if (key === 'command' || payload()[key] === null) continue;
+    assert.ok(named.includes(key), `${key} reaches the screen without a row name`);
+  }
+});
+
 test('the audio omission is the server sentence, not a client one', () => {
   const c = loadComponent();
   const v = rowsByKey(c._renderingRows(payload({ audio: '-an', audio_transformation: AUDIO_OMITTED })));
