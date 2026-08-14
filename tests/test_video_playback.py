@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import os
+import shlex
 import shutil
 import struct
 import subprocess
@@ -3631,3 +3632,123 @@ class TestProvenanceAfterAGpuFallback:
         rec = _records(vp_audit.EVENT_TRANSCODE)[0]
         assert rec["rendering"]["encoder"] == "libx264"
         assert rec["pipeline_fingerprint"] != gpu_fingerprint
+
+
+class TestRenderCommand:
+    """§7.2: `sfn-video render` prints the invocation that produced a rendering."""
+
+    @staticmethod
+    def _render(*args) -> str:
+        result = CliRunner().invoke(cli.video_app, ["render", *args])
+        assert result.exit_code == 0, result.output
+        return result.output
+
+    @requires_ffmpeg
+    def test_the_recorded_invocation_is_printed_verbatim(self, client, hevc_10bit_mov, monkeypatch):
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        rec = _records(vp_audit.EVENT_TRANSCODE)[0]
+        out = self._render("--path", str(hevc_10bit_mov), "--at", "0")
+        assert "Invocation that produced this rendering:" in out
+        assert shlex.join(rec["rendering"]["command"]) in out
+        assert rec["video_sha256"] in out
+        assert "examiner-7" in out
+        assert vp_audit.RENDER_PART_NOTE in out
+
+    @requires_ffmpeg
+    def test_a_window_with_no_record_gets_a_recipe_and_is_never_dressed_as_one(
+        self, hevc_10bit_mov
+    ):
+        # The whole point of the command is the difference between "this ran" and
+        # "this is what would run".  Printing the second under the first's
+        # heading would be a reconstruction presented as evidence.
+        out = self._render("--path", str(hevc_10bit_mov), "--at", "0")
+        assert vp_audit.RENDER_NO_RECORD in out
+        assert "Invocation this host would run now:" in out
+        assert "Invocation that produced this rendering:" not in out
+
+    @requires_ffmpeg
+    def test_a_full_copy_reproduction_carries_the_thread_cap(self, hevc_10bit_mov):
+        out = self._render("--path", str(hevc_10bit_mov), "--full")
+        assert f"-threads {vp_encode.job_threads(Settings())}" in out
+
+    @requires_ffmpeg
+    def test_a_source_changed_since_the_rendering_is_reported_as_stale(
+        self, client, hevc_10bit_mov
+    ):
+        # §7.1: answering with the old record as though nothing happened would
+        # pair a rendering of the bytes that used to be here with the file that
+        # is here now.
+        client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        recorded = _records(vp_audit.EVENT_TRANSCODE)[0]["video_sha256"]
+        with hevc_10bit_mov.open("ab") as fh:
+            fh.write(b"\0" * 64)
+        out = self._render("--path", str(hevc_10bit_mov), "--at", "0")
+        assert vp_audit.RENDER_SOURCE_CHANGED in out
+        assert recorded in out
+        assert "Invocation that produced this rendering:" not in out
+
+    @requires_ffmpeg
+    def test_the_window_answered_is_the_one_the_analyst_watched(
+        self, client, hevc_long_mov, short_chunks
+    ):
+        client.post(f"/api/video-chunk?path={hevc_long_mov}&t=4.3")
+        assert "Invocation that produced this rendering:" in self._render(
+            "--path", str(hevc_long_mov), "--at", "5.0"
+        )
+        # 6.0 is the *next* chunk's first frame, not this one's last.
+        assert vp_audit.RENDER_NO_RECORD in self._render(
+            "--path", str(hevc_long_mov), "--at", "6.0"
+        )
+
+    @requires_ffmpeg
+    def test_the_latest_rendering_of_a_window_is_the_one_answered(self, client, hevc_10bit_mov):
+        # A window can be encoded more than once — evicted and re-encoded, or
+        # re-encoded after an ffmpeg upgrade.  The bytes in the cache are the
+        # last ones written, so the last record is the one that describes them.
+        client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        digest = _records(vp_audit.EVENT_TRANSCODE)[0]["video_sha256"]
+        assert CliRunner().invoke(cli.video_app, ["purge", "--media", digest]).exit_code == 0
+        client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        records = _records(vp_audit.EVENT_TRANSCODE)
+        assert len(records) == 2
+        assert records[1]["ts"] in self._render("--path", str(hevc_10bit_mov), "--at", "0")
+
+    def test_a_timecode_beside_full_is_refused(self, hevc_10bit_mov):
+        # --full has no window, so an --at would be silently ignored and a
+        # reviewer would read a timecode the answer never used.
+        result = CliRunner().invoke(
+            cli.video_app, ["render", "--path", str(hevc_10bit_mov), "--full", "--at", "3"]
+        )
+        assert result.exit_code == 1
+        assert "--full has no timecode" in result.output
+
+
+class TestPurgeIsFiled:
+    """§13 and §7.3: what was destroyed, when, and on whose act."""
+
+    @requires_ffmpeg
+    def test_a_purge_writes_a_record_that_survives_the_purge(
+        self, client, hevc_10bit_mov, monkeypatch
+    ):
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        digest = _records(vp_audit.EVENT_TRANSCODE)[0]["video_sha256"]
+        assert CliRunner().invoke(cli.video_app, ["purge", "--all"], input="y\n").exit_code == 0
+        rec = _records(vp_audit.EVENT_PURGE)[0]
+        assert rec["examiner_id"] == "examiner-7"
+        assert rec["scope"] == "all"
+        assert rec["videos"] == 1
+        assert rec["bytes_freed"] > 0
+        # The log is outside the directory that was just emptied, so the record
+        # of the deletion outlives it — and so does the transcode it deleted.
+        assert _records(vp_audit.EVENT_TRANSCODE)[0]["video_sha256"] == digest
+
+    @requires_ffmpeg
+    def test_a_media_purge_names_the_video_it_destroyed(self, client, hevc_10bit_mov):
+        client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        digest = _records(vp_audit.EVENT_TRANSCODE)[0]["video_sha256"]
+        CliRunner().invoke(cli.video_app, ["purge", "--media", digest])
+        rec = _records(vp_audit.EVENT_PURGE)[0]
+        assert rec["scope"] == "media"
+        assert rec["video_sha256"] == digest

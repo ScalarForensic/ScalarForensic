@@ -2159,9 +2159,21 @@ def video_purge(
         typer.echo(f"[ERROR] {exc}", err=True)
         raise typer.Exit(1) from exc
 
-    # The examiner is named on the record because a deletion is an examiner's
-    # act; the audit *log* for this subsystem is phase 8 (video_playback/audit.py
-    # does not exist yet), so it is printed and logged here, not filed.
+    # Filed, not only printed (§13, §7.3): "what derived renderings existed and
+    # when were they destroyed" is a question asked after the terminal that
+    # printed this has been closed.  The log lives beside the cache directory,
+    # so a purge does not delete the record of itself.
+    from scalar_forensic.video_playback.audit import record_purge
+
+    record_purge(
+        settings,
+        examiner_id=settings.examiner_id,
+        scope="all" if all_ else "media",
+        video_sha256=None if all_ else media,
+        videos=result.videos,
+        files=result.files,
+        bytes_freed=result.bytes_freed,
+    )
     typer.echo(
         f"Purged {result.videos:,} video(s), {result.files:,} file(s), "
         f"{result.bytes_freed:,} bytes from {cache_dir} "
@@ -2169,6 +2181,57 @@ def video_purge(
     )
     for digest in result.digests:
         typer.echo(f"  {digest}")
+
+
+@video_app.command("render")
+def video_render(
+    path: str = typer.Option(..., "--path", help="The source video file"),
+    at: float = typer.Option(
+        0.0, "--at", help="Timecode in seconds; the chunk containing it is described"
+    ),
+    full: bool = typer.Option(
+        False, "--full", help="Describe the full viewing copy instead of a chunk"
+    ),
+) -> None:
+    """Print the exact invocation that produced a rendering (spec §7.2).
+
+    A rendering an analyst watched is an interpretation of evidence — lossy,
+    possibly tone-mapped, possibly rescaled — and §7.2's answer to that is that a
+    reviewer must be able to reproduce it.  This prints the recorded argv, the
+    pipeline it ran under, when it ran and on whose act.
+
+    With no record for that window, it prints what *this host would run now*,
+    labelled as a reproduction recipe rather than a record: the two are different
+    claims and are never printed in the same shape.  A source whose bytes have
+    changed since the recorded rendering is reported as stale (§7.1) rather than
+    answered as though nothing had happened.
+
+    No allowed-root containment check here, deliberately, and this is **not** a
+    second implementation of ``_resolve_video_path``: that control exists to stop
+    a *remote* caller naming a file outside ``SFN_INPUT_DIR``, and an operator at
+    this shell already has the filesystem.
+    """
+    from scalar_forensic.video import VIDEO_EXTENSIONS
+    from scalar_forensic.video_playback.audit import SCOPE_CHUNK, SCOPE_FULL, reproduction_report
+
+    settings = Settings()
+    p = Path(path).expanduser().resolve()
+    if p.suffix.lower() not in VIDEO_EXTENSIONS:
+        typer.echo(f"[ERROR] {p.name} is not a video file this tool indexes or plays.", err=True)
+        raise typer.Exit(1)
+    if not p.is_file():
+        typer.echo(f"[ERROR] No such file: {p}", err=True)
+        raise typer.Exit(1)
+    if full and at:
+        # A full copy has no window, so an --at beside it would be silently
+        # ignored — and a reviewer would read a timecode the answer never used.
+        typer.echo("[ERROR] --at describes a chunk; --full has no timecode.", err=True)
+        raise typer.Exit(1)
+
+    for line in reproduction_report(
+        settings, p, scope=SCOPE_FULL if full else SCOPE_CHUNK, at=None if full else at
+    ):
+        typer.echo(line)
 
 
 def video_main() -> None:
