@@ -138,6 +138,20 @@ CONTENTION_NOTICE = (
 )
 
 
+#: Shown for the whole life of a job that was started over a §6.3 refusal, and
+#: after it, next to the copy it produced.  The ruling of 2026-08-14 requires the
+#: override to be **disclosed**, so this travels on every ``view()`` rather than
+#: being a one-off message at the moment of the click: an analyst who opens the
+#: page later must still be able to see that a capacity gate was set aside, and by
+#: whom.  It says what the override did *not* do, because that is the part a
+#: reader will otherwise assume wrongly.
+OVERRIDE_NOTICE = (
+    "The capacity estimate for this full viewing copy was refused and set aside by the "
+    "examiner named here. The estimate is advisory; the cache ceiling is not. This export "
+    "is still stopped if it passes the size a single rendering may occupy."
+)
+
+
 @dataclass(frozen=True)
 class JobRequest:
     """Everything the runner needs, already validated by the route (§9).
@@ -158,6 +172,32 @@ class JobRequest:
     cache_dir: Path
     limit_bytes: int | None
     estimate_bytes: int | None
+    #: Set only when this job was started over a §6.3 refusal (ruling
+    #: 2026-08-14).  ``overridden_by`` is ``SFN_EXAMINER_ID`` — the route refuses
+    #: an unattributable override rather than recording ``None`` — and
+    #: ``overridden_verdict`` is the verdict that was set aside, ``refused`` or
+    #: ``unknown``.  Both default to "no override", so every other caller and
+    #: every existing job is unchanged: this is per request and never a mode.
+    overridden_by: str | None = None
+    overridden_verdict: str | None = None
+
+    @property
+    def override(self) -> dict | None:
+        """The disclosure the browser renders, or ``None`` for a normal job.
+
+        ``estimate_bytes`` here is the forecast that was overridden — it is
+        ``None`` for an ``unknown`` verdict, which is the whole content of that
+        verdict and is reported as such rather than as a zero.
+        """
+        if self.overridden_by is None:
+            return None
+        return {
+            "examiner_id": self.overridden_by,
+            "verdict": self.overridden_verdict,
+            "estimate_bytes": self.estimate_bytes,
+            "limit_bytes": self.limit_bytes,
+            "notice": OVERRIDE_NOTICE,
+        }
 
 
 class FullJob:
@@ -261,6 +301,7 @@ class FullJob:
             "written_bytes": self.written_bytes,
             "estimate_bytes": self.request.estimate_bytes,
             "limit_bytes": self.request.limit_bytes,
+            "override": self.request.override,
             # media seconds encoded per wall second — the same number §3.1 quotes
             # as "2.7× realtime", so the label the analyst reads matches the
             # measurement the spec is argued from.
@@ -402,11 +443,16 @@ class JobRunner:
         job.artifact = published
         job.state = "full-job-done"
         _log.info(
-            "full-video job for %s done in %.1f s (%s bytes, estimate %s)",
+            "full-video job for %s done in %.1f s (%s bytes, estimate %s, override %s)",
             request.source,
             job.elapsed_seconds,
             published.stat().st_size if published.exists() else 0,
             request.estimate_bytes,
+            # Closes the audit line the route opened: the forecast that was set
+            # aside, next to the bytes that were actually written.  An examiner
+            # defending the override has both halves in the log, not just the
+            # decision.
+            request.overridden_by or "none",
         )
 
 

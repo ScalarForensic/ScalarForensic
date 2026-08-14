@@ -481,6 +481,18 @@ class CeilingVerdict:
     def allowed(self) -> bool:
         return self.state == "fits"
 
+    @property
+    def overridable(self) -> bool:
+        """Whether an examiner may start this job anyway (§6.3, ruling 2026-08-14).
+
+        Both refusing states are overridable, and ``unknown`` deliberately so: it
+        is a statement about what the *container* would say, not about the video,
+        and the number that is actually enforced — ``limit_bytes``, watched
+        against the growing ``.part`` — does not depend on the estimate existing.
+        A verdict of ``fits`` has nothing to override.
+        """
+        return self.state in {"refused", "unknown"}
+
 
 def estimate_full_output_bytes(info: dict, output_height: int) -> int | None:
     """Estimate the §4.3 full copy's size from the source's measured bitrate.

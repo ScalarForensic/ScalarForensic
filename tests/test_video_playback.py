@@ -19,6 +19,7 @@ import dataclasses
 import errno
 import hashlib
 import json
+import logging
 import os
 import shutil
 import struct
@@ -2727,6 +2728,197 @@ class TestFullJobCeiling:
         body = client.get(f"/api/video-playback-info?path={hevc_10bit_mov}").json()
         assert body["full_copy"]["state"] in ("fits", "refused", "unknown")
         assert body["full_job"] is None
+
+
+class TestFullCopyOverride:
+    """§6.3, ruling 2026-08-14: the refusal is the examiner's to set aside.
+
+    The estimate was measured wrong in both directions (over-reading HEVC 10-bit
+    HDR on the CPU pipeline on 8 of 8 samples, one by 8×), so it can refuse an
+    export whose real output would have fitted.  What the override may do and
+    what it may never do are both pinned here: it bypasses the **forecast**, and
+    `limit_bytes` — the number the `.part` watch aborts on — is untouched.
+    """
+
+    @staticmethod
+    def _recorder():
+        """A stand-in encoder that records its call and fails the job at once."""
+        calls: list[dict] = []
+
+        def _encode(*args, **kw):
+            calls.append(kw)
+            raise vp_encode.EncodeError("stopped by the test", command=[], returncode=1)
+
+        return calls, _encode
+
+    def _refusing(self, monkeypatch) -> None:
+        # Half of 2 bytes is 1: every estimate this suite can produce is over it,
+        # and the limit stays non-zero so the `.part` watch has a number.
+        monkeypatch.setenv("SFN_VIDEO_CACHE_MAX_BYTES", "2")
+
+    def test_an_override_starts_the_job_the_estimate_refused(self, hevc_10bit_mov, monkeypatch):
+        self._refusing(monkeypatch)
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        calls, encode = self._recorder()
+        with TestClient(app) as c, patch.object(vp_jobs, "encode_full", encode):
+            refused = c.post(f"/api/video-full?path={hevc_10bit_mov}")
+            assert refused.status_code == 507
+            started = c.post(f"/api/video-full?path={hevc_10bit_mov}&override=true")
+            assert started.status_code == 200, started.text
+            _await_terminal(c, hevc_10bit_mov)
+        assert len(calls) == 1
+
+    def test_the_override_never_relaxes_the_limit_the_part_watch_aborts_on(
+        self, hevc_10bit_mov, monkeypatch
+    ):
+        # Constraint 4 of the ruling, and the reason `limit_bytes` is read from
+        # the setting rather than from a falsy check: half of a 2-byte ceiling is
+        # 1, and an overridden job must still carry it into the encoder.
+        self._refusing(monkeypatch)
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        calls, encode = self._recorder()
+        with TestClient(app) as c, patch.object(vp_jobs, "encode_full", encode):
+            c.post(f"/api/video-full?path={hevc_10bit_mov}&override=true")
+            _await_terminal(c, hevc_10bit_mov)
+        assert calls[0]["limit_bytes"] == 1
+
+    def test_a_ceiling_too_small_to_halve_is_still_a_watched_limit(
+        self, hevc_10bit_mov, monkeypatch
+    ):
+        # 50% of 1 byte floors to 0.  Zero is a limit an override can reach, and
+        # reading it as "unbounded" would hand the one job that got past the
+        # forecast the one encode with no `.part` watch at all.
+        monkeypatch.setenv("SFN_VIDEO_CACHE_MAX_BYTES", "1")
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        calls, encode = self._recorder()
+        with TestClient(app) as c, patch.object(vp_jobs, "encode_full", encode):
+            c.post(f"/api/video-full?path={hevc_10bit_mov}&override=true")
+            _await_terminal(c, hevc_10bit_mov)
+        assert calls[0]["limit_bytes"] == 0
+
+    def test_an_unattributable_override_is_refused_and_encodes_nothing(
+        self, client, hevc_10bit_mov, monkeypatch
+    ):
+        self._refusing(monkeypatch)
+        monkeypatch.delenv("SFN_EXAMINER_ID", raising=False)
+        with patch.object(vp_jobs, "encode_full", side_effect=AssertionError("encoded anyway")):
+            r = client.post(f"/api/video-full?path={hevc_10bit_mov}&override=true")
+        assert r.status_code == 403
+        assert r.json()["detail"] == vp_states.OVERRIDE_UNATTRIBUTED.as_detail()
+
+    def test_the_audit_line_names_the_examiner_and_the_estimate_it_overrode(
+        self, hevc_10bit_mov, monkeypatch, caplog
+    ):
+        self._refusing(monkeypatch)
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        estimate = vp_cache.check_ceiling(
+            Settings(), vp_codecs._stream_report(hevc_10bit_mov)
+        ).estimate_bytes
+        _, encode = self._recorder()
+        with (
+            caplog.at_level(logging.WARNING, logger="scalar_forensic.video_playback.routes"),
+            TestClient(app) as c,
+            patch.object(vp_jobs, "encode_full", encode),
+        ):
+            c.post(f"/api/video-full?path={hevc_10bit_mov}&override=true")
+            _await_terminal(c, hevc_10bit_mov)
+        line = next(r for r in caplog.records if "OVERRIDDEN" in r.getMessage())
+        message = line.getMessage()
+        assert line.levelno == logging.WARNING
+        assert "examiner-7" in message
+        assert f"estimate_bytes={estimate}" in message
+        assert "limit_bytes=1" in message
+        assert "verdict=refused" in message
+        assert str(hevc_10bit_mov) in message
+
+    def test_the_job_view_discloses_the_override_for_the_browser(self, hevc_10bit_mov, monkeypatch):
+        self._refusing(monkeypatch)
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        _, encode = self._recorder()
+        with TestClient(app) as c, patch.object(vp_jobs, "encode_full", encode):
+            body = c.post(f"/api/video-full?path={hevc_10bit_mov}&override=true").json()
+            _await_terminal(c, hevc_10bit_mov)
+        assert body["override"]["examiner_id"] == "examiner-7"
+        assert body["override"]["verdict"] == "refused"
+        assert body["override"]["limit_bytes"] == 1
+        assert body["override"]["estimate_bytes"] == body["estimate_bytes"]
+        # The constant, never a paraphrase of it.
+        assert body["override"]["notice"] == vp_jobs.OVERRIDE_NOTICE
+
+    def test_a_job_nobody_overrode_discloses_nothing(self, hevc_10bit_mov, monkeypatch):
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        _, encode = self._recorder()
+        with TestClient(app) as c, patch.object(vp_jobs, "encode_full", encode):
+            body = c.post(f"/api/video-full?path={hevc_10bit_mov}").json()
+            _await_terminal(c, hevc_10bit_mov)
+        assert body["override"] is None
+
+    def test_the_override_applies_to_one_request_and_is_never_a_default(
+        self, hevc_10bit_mov, monkeypatch
+    ):
+        # Constraint 1: a later refusal must not be silent because an earlier one
+        # was set aside.  The second POST is the same client, the same video, the
+        # same process — and is refused again.
+        self._refusing(monkeypatch)
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        _, encode = self._recorder()
+        with TestClient(app) as c, patch.object(vp_jobs, "encode_full", encode):
+            assert c.post(f"/api/video-full?path={hevc_10bit_mov}&override=true").status_code == 200
+            _await_terminal(c, hevc_10bit_mov)
+            again = c.post(f"/api/video-full?path={hevc_10bit_mov}")
+        assert again.status_code == 507
+        assert again.json()["detail"]["error"] == "full-copy-refused"
+
+    def test_an_unknown_verdict_is_overridable_too(self, hevc_10bit_mov, monkeypatch):
+        # `unknown` says what the container would not report; it is not a claim
+        # about the video, and `limit_bytes` does not need the estimate to exist.
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        report = vp_codecs._stream_report(hevc_10bit_mov)
+        report.pop("bit_rate", None)
+        calls, encode = self._recorder()
+        with (
+            TestClient(app) as c,
+            patch.object(vp_routes, "_stream_report", return_value=report),
+            patch.object(vp_jobs, "encode_full", encode),
+        ):
+            body = c.post(f"/api/video-full?path={hevc_10bit_mov}&override=true").json()
+            _await_terminal(c, hevc_10bit_mov)
+        assert body["override"]["verdict"] == "unknown"
+        assert body["override"]["estimate_bytes"] is None
+        assert len(calls) == 1
+
+    def test_a_verdict_that_fits_has_nothing_to_override(self, hevc_10bit_mov, monkeypatch):
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        verdict = vp_cache.check_ceiling(Settings(), vp_codecs._stream_report(hevc_10bit_mov))
+        assert verdict.state == "fits"
+        assert verdict.overridable is False
+        _, encode = self._recorder()
+        with TestClient(app) as c, patch.object(vp_jobs, "encode_full", encode):
+            body = c.post(f"/api/video-full?path={hevc_10bit_mov}&override=true").json()
+            _await_terminal(c, hevc_10bit_mov)
+        assert body["override"] is None
+
+    def test_playback_info_says_whether_an_override_would_be_honoured(
+        self, client, hevc_10bit_mov, monkeypatch
+    ):
+        self._refusing(monkeypatch)
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        attributable = client.get(f"/api/video-playback-info?path={hevc_10bit_mov}").json()
+        assert attributable["full_copy"]["state"] == "refused"
+        assert attributable["full_copy"]["overridable"] is True
+        # No examiner identity, no attributable record, so the UI must not offer
+        # a button this server would refuse with a 403.
+        monkeypatch.delenv("SFN_EXAMINER_ID", raising=False)
+        anonymous = client.get(f"/api/video-playback-info?path={hevc_10bit_mov}").json()
+        assert anonymous["full_copy"]["overridable"] is False
+
+    def test_a_fitting_video_is_never_advertised_as_overridable(
+        self, client, hevc_10bit_mov, monkeypatch
+    ):
+        monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
+        body = client.get(f"/api/video-playback-info?path={hevc_10bit_mov}").json()
+        assert body["full_copy"]["state"] == "fits"
+        assert body["full_copy"]["overridable"] is False
 
 
 @requires_ffmpeg

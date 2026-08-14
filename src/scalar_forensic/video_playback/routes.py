@@ -282,6 +282,11 @@ async def video_playback_info(path: str, video_hash: str | None = None) -> JSONR
             "estimate_bytes": verdict.estimate_bytes,
             "limit_bytes": verdict.limit_bytes,
             "reason": verdict.reason,
+            # Whether POST /api/video-full?override=true would be honoured for
+            # this video, decided here so the UI never offers a button the
+            # server will refuse: an override that cannot be attributed to
+            # SFN_EXAMINER_ID is refused (§6.3, ruling 2026-08-14).
+            "overridable": verdict.overridable and bool(settings.examiner_id),
         }
         info["cache_enabled"] = settings.video_cache_dir is not None
         info["chunk_seconds"] = settings.video_chunk_seconds
@@ -620,7 +625,9 @@ async def video_chunk_get(path: str, start: float, fp: str) -> FileResponse:
 
 
 @router.post("/api/video-full")
-async def video_full_start(path: str, video_hash: str | None = None) -> JSONResponse:
+async def video_full_start(
+    path: str, video_hash: str | None = None, override: bool = False
+) -> JSONResponse:
     """Start the background full-video job, or join the one already running.
 
     **The §6.3 ceiling is enforced here, not merely reported.**  ``playback-info``
@@ -629,27 +636,69 @@ async def video_full_start(path: str, video_hash: str | None = None) -> JSONResp
     refuses too, because "this file would not say how big it is" is not
     permission to find out by filling the cache.
 
-    The estimate is a screen and not a guarantee: it applies no codec factor
-    (§6.3), so it under-reads on exactly the 10-bit HEVC corpus this feature
-    exists for.  The runner therefore also watches the growing ``.part`` against
-    the same limit and stops the encode on overshoot.
+    **``override=true`` sets that refusal aside** (ruling 2026-08-14, §6.3).  It
+    was measured wrong in both directions — over-reading HEVC 10-bit HDR on the
+    CPU pipeline on 8 of 8 samples, one by 8× — so a refusal can deny an export
+    whose real output would have fitted, and the analyst, not the forecast, is
+    who decides that.  Four things make it safe to allow and are not optional:
+
+    1. It is a **parameter of one request**.  There is no setting, no default and
+       no session flag: the next request is refused again, and a refusal is never
+       silent because someone overrode an earlier one.
+    2. It is **logged with ``SFN_EXAMINER_ID`` and the estimate it set aside**, and
+       an override that cannot be attributed is **refused** rather than recorded
+       against nobody — an examiner may have to defend this in a courtroom.
+    3. It is **disclosed** for the life of the job and on the copy it produces
+       (``override`` in the job view, :data:`~.jobs.OVERRIDE_NOTICE`).
+    4. **It bypasses the forecast and never the ceiling.**  ``limit_bytes`` is
+       passed to the runner exactly as an admitted job passes it, so the `.part`
+       watch still aborts the encode at the real 50% ceiling.  An override buys
+       the *chance* to find out that the estimate was wrong; it does not buy the
+       right to fill the cache.
     """
     p = _resolve_video_path(path)
     settings = Settings()
     src = await _validated_source(p, settings, video_hash=video_hash)
     verdict = check_ceiling(settings, src.info)
+    overridden_by: str | None = None
     if not verdict.allowed:
-        raise HTTPException(
-            status_code=507,
-            detail={
-                "error": f"full-copy-{verdict.state}",
-                "player_state": "capacity-exhausted",
-                "reason": verdict.reason,
-                "retryable": False,
-                "retry_after_seconds": None,
-                "estimate_bytes": verdict.estimate_bytes,
-                "limit_bytes": verdict.limit_bytes,
-            },
+        if not (override and verdict.overridable):
+            raise HTTPException(
+                status_code=507,
+                detail={
+                    "error": f"full-copy-{verdict.state}",
+                    "player_state": "capacity-exhausted",
+                    "reason": verdict.reason,
+                    "retryable": False,
+                    "retry_after_seconds": None,
+                    "estimate_bytes": verdict.estimate_bytes,
+                    "limit_bytes": verdict.limit_bytes,
+                    "overridable": verdict.overridable and bool(settings.examiner_id),
+                },
+            )
+        if not settings.examiner_id:
+            # Refusing here rather than logging `examiner_id: null` is the point
+            # of the second constraint: an override recorded against nobody is
+            # not a record, and this endpoint has no other way to learn who is
+            # asking.
+            raise HTTPException(
+                status_code=403,
+                detail=states.OVERRIDE_UNATTRIBUTED.as_detail(),
+            )
+        overridden_by = settings.examiner_id
+        # The audit line.  WARNING because a capacity gate being set aside is not
+        # routine traffic, and every field a later reader needs is on it: who,
+        # which file, which verdict, the estimate that was overridden and the
+        # ceiling that still applies.
+        _log.warning(
+            "SFN §6.3 full-copy refusal OVERRIDDEN by examiner %s: source=%s "
+            "video_sha256=%s verdict=%s estimate_bytes=%s limit_bytes=%s",
+            overridden_by,
+            p,
+            src.digest,
+            verdict.state,
+            verdict.estimate_bytes,
+            verdict.limit_bytes,
         )
     job = jobs.runner.start(
         jobs.JobRequest(
@@ -661,8 +710,17 @@ async def video_full_start(path: str, video_hash: str | None = None) -> JSONResp
             capability=src.capability_,
             pipeline=src.pipeline,
             cache_dir=src.cache_dir,
-            limit_bytes=verdict.limit_bytes or None,
+            # Unchanged by the override, deliberately: this is the number the
+            # runner aborts on, and the ruling bypasses the forecast, not the
+            # limit.  ``None`` means *no ceiling is configured* and is decided
+            # from the setting, not from the limit being falsy: half of a small
+            # ceiling floors to 0, and `or None` would read that as "unbounded"
+            # — turning the one case an override can reach into the one case
+            # with no `.part` watch at all.
+            limit_bytes=(verdict.limit_bytes if settings.video_cache_max_bytes > 0 else None),
             estimate_bytes=verdict.estimate_bytes,
+            overridden_by=overridden_by,
+            overridden_verdict=verdict.state if overridden_by else None,
         ),
         settings,
     )

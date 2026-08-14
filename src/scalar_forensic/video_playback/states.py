@@ -214,6 +214,22 @@ TIMECODE_OUT_OF_RANGE = Failure(
     reason="The requested timecode lies outside this video's duration.",
 )
 
+OVERRIDE_UNATTRIBUTED = Failure(
+    kind="override-unattributed",
+    status=403,
+    state="capacity-exhausted",
+    retryable=False,
+    # §6.3's override is a forensic act, so it is refused when it cannot be
+    # attributed: a record naming nobody is worse than the refusal it replaces,
+    # because it reads as authority in a log an examiner may have to defend.
+    reason=(
+        "Overriding the capacity refusal is recorded against the examiner who does it, "
+        "and SFN_EXAMINER_ID is not set on this server, so there is no one to record. "
+        "The full copy was not started. Set SFN_EXAMINER_ID and try again, or download "
+        "the original."
+    ),
+)
+
 QUEUE_FULL = Failure(
     kind="queue-full",
     status=503,
