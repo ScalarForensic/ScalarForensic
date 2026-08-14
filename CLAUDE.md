@@ -120,10 +120,12 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
   still load before `app.js`.
 - **A wiring test cannot tell you the browser can run the file.** `player.js` once
   shipped a `?? … ||` precedence `SyntaxError` — it did not parse at all — and all
-  fourteen of its text-level wiring tests passed against it. There is no JS test
-  harness here, so browser-side work is finished by starting a server, force-refetching
-  every `<script src>` **and** the stylesheet with `fetch(url, {cache: 'reload'})`,
-  reloading, and driving the component. Spec §14 records the gap.
+  fourteen of its text-level wiring tests passed against it. `npm test` closes the
+  **parse** half of that gap since `#173` — `tests/js/harness.mjs` compiles and runs
+  every part file — but not the **render** half: there is no DOM in it. Browser-side
+  work is still finished by starting a server, force-refetching every `<script src>`
+  **and** the stylesheet with `fetch(url, {cache: 'reload'})`, reloading, and driving
+  the component. Spec §14.
 
 ## Gotchas
 
