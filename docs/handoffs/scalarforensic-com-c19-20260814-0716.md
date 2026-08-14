@@ -72,16 +72,32 @@ lightly-compressed 8-bit sources, which is not the case the spec named. With n=3
 per cell the **ordering** is the finding; these ratios do not support a single
 multiplicative codec factor and §16 forbids inventing one from them.
 
-**The consequence is a named, open limitation and not a bug to fix quietly.** An
-estimate that over-reads by up to 8× can `refuse` a full-video job whose real
-output would have fit — a false refusal §6.3 does not contemplate. Loosening a
-forensic capacity gate is the **operator's** decision; `m6` escalated it on
-2026-08-14 and it is open. §6.3 records it with a pointer to the evidence, and
-phase 7 shipped without touching the gate. **Do not "fix" this by applying a codec
-factor, widening the 50% limit, or downgrading `refused` to a warning** until that
-decision comes back. If you are here because a 10-bit HDR export was refused and
-you believe it would have fit: you are probably right, and that is the known
-limitation, not a new discovery.
+The consequence is that an estimate over-reading by up to 8× can `refuse` a
+full-video job whose real output would have fit — a false refusal §6.3 did not
+contemplate, on the pipeline every host without a working GPU encoder always uses.
+Phase 7 shipped without touching the gate; `m6` escalated it on 2026-08-14.
+
+**RULED the same day (operator, delegated to `cfm-g3`): a §6.3 full-copy refusal
+IS examiner-overridable.** Full text in `docs/CTO_LEDGER.md`'s last section
+(`791a5b2`, merged as `#181`); `com-c20` is implementing it. The constraints are
+the ruling: the override is **explicit per job — never a default and never a
+config flag**, logged with `SFN_EXAMINER_ID` and the estimate it overrode,
+disclosed in the UI, and the `.part` watch still kills the job at the real
+ceiling. **The override bypasses the forecast, never the limit.** `limit_bytes`
+stays the invariant and the estimate is demoted to advisory, which is what the
+measurement showed it already was.
+
+**What the ruling does not license.** It does not repair the estimate, so: **do
+not apply a codec factor, do not widen the 50% limit, and do not downgrade
+`refused` to a warning.** The measured ratios (n=3–8 per cell) support an ordering
+and not a constant, and inventing one from them is §16's rule. An override is an
+examiner's recorded decision on one job; a tuned estimate is a silent change to
+everyone's gate, and the ruling deliberately chose the first.
+
+Note for whoever holds the spec: §6.3 still carries my "escalated 2026-08-14 and
+open" paragraph, written before the ruling. It must be **replaced** by the ruling,
+not left standing beside it. That is `c20`'s edit, in the PR that implements the
+override — I had released the file by the time the ruling landed.
 
 ### The yield is measured and it is not the remedy
 
