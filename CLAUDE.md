@@ -6,7 +6,7 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 
 ## Commands
 
-- `uv run pytest -q` — full suite (979 passed / 5 skipped at `911cf21`, 2026-08-14,
+- `uv run pytest -q` — full suite (979 passed / 5 skipped at `1bb24b0`, 2026-08-14,
   verified clean tree, measured in the `wt` worktree off that commit with `models/`
   copied in — a tree without `models/` reads 978/6; coverage 74.51% against the 65%
   floor — measured *after* video-playback phase 7's server side, so it describes the
