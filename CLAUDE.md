@@ -6,9 +6,11 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 
 ## Commands
 
-- `uv run pytest -q` — full suite (954 passed / 5 skipped at `8af5266`, 2026-08-14, verified
-  clean tree; coverage 73.09% against the 65% floor — measured *after* video-playback
-  phase 6, so it describes the layout below), needs no Qdrant; the 5 skips need
+- `uv run pytest -q` — full suite (979 passed / 5 skipped at `911cf21`, 2026-08-14,
+  verified clean tree, measured in the `wt` worktree off that commit with `models/`
+  copied in — a tree without `models/` reads 978/6; coverage 74.51% against the 65%
+  floor — measured *after* video-playback phase 7's server side, so it describes the
+  layout below), needs no Qdrant; the 5 skips need
   `SFN_TEST_QDRANT_URL` and are the only tests that can observe the face exclusion
   guarantee against a real store (CI runs them in a separate Qdrant service-container job).
   **No longer fully hermetic:** the video encode tests need `ffmpeg` on `PATH`. Without it
