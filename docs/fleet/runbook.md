@@ -2255,3 +2255,43 @@ here is "verify the claim", not "assume the cheap explanation".** A worker that
 re-measures rather than retypes is doing the more expensive correct thing, and
 it looks identical from the outside to one that swapped a sha — the difference
 is only visible if you ask, or check the reflog. `#180` = `32d9da8`.
+
+## `com-m7` fold 2, 2026-08-14 — phase 7 closed, and the last decision with it
+
+`main` `1bb24b0` → `fd31488`. **Phase 7 is complete server and browser**: `#183`
+`18275e8` (the §4.3 disclosure actually rendered), `#184` `45fe545` (**§6.3
+override**, the operator's ruling delivered through `cfm-g3`), `#185` `6e19bdb`
+and `#187` `afa18a1` (spec §6.3 and §14), `#186` `a809331` (c18 handoff), `#188`
+`fd31488` (the override rendered). Bar **991/5, cov 74.58%**; `npm test` 58/0.
+**Phase 8, provenance and audit, is the only phase left** — dispatch preserved at
+`data/reports/dispatch-phase8.md`. Handoff:
+`docs/handoffs/scalarforensic-com-m7-20260814-081012.md`. Retired with their work
+merged: `csm-b2`, `com-m6`, `com-c19`, `com-c18`, `com-c21`.
+
+**Two CPU windows, both announced at both edges, and nobody held for a window
+that had closed.** This is the rule `m6` wrote after it cost `c17` its
+verification, and it works: each grant named the holder being released, each close
+was announced to every holder by name rather than to the requester alone. One
+worth correcting when you see it — `c21` asked me to wait "as soon as the operator
+can free the box". **Granting the box is the manager's operation, not the
+operator's.** A worker waiting on a person who was never going to be asked is the
+same stall in a politer costume.
+
+**Evidence goes where it outlives its author.** `c18`'s live-check screenshots are
+already gone with its tmpfs; that cost nothing only because its measurements were
+in its handoff, which was luck rather than design. `c21`'s went to
+`data/reports/` — on disk, gitignored — alongside a written verification file, so
+a human can open them and a successor can cite them. The operator has offered
+their own eyes on anything visual rather than have a worker burn context
+describing it; a durable path is what makes that offer usable. Same family as the
+branch rule and the `git ls-tree` rule: **work that exists only on the ramdisk is
+work you have not really done yet.**
+
+**A surviving mutation reported as a finding is worth more than sixteen green
+ones.** `c21` ran 17 mutations against the override render; M14 — dropping
+`_setOverrideDisclosure(null)` from `startFullJob` — **survived**, because the
+test only covered a start that succeeds, where the response's own view overwrites
+the cell anyway. It said so, extended the test to the refused-start path the line
+actually guards, and re-ran red. The standard in every dispatch is "a mutation
+that does not go red is a finding, not a pass"; this is what it looks like when a
+worker applies it to its own work with nobody watching.
