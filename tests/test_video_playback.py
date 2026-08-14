@@ -3723,6 +3723,128 @@ class TestRenderCommand:
         assert result.exit_code == 1
         assert "--full has no timecode" in result.output
 
+    # ── The 2026-08-14 live check (`data/reports/c24-task2-label-vs-render.md`) ──
+    # The label and this command were each mutation-tested and had never been
+    # observed against one real encode.  Composed, they disagreed: the report
+    # printed ten hand-listed fields out of the seventeen the label showed, and
+    # printed the argv in a different form.  Both are pinned here.
+
+    def test_the_report_prints_every_field_of_the_record(self):
+        # The defect this replaces: `_pipeline_lines` named ten fields, so a field
+        # added to `Rendering` reached the screen and never the reviewer.  Derived
+        # from the record for the same reason `Pipeline.describe()` is derived
+        # from `fields()` — one layer further out, where the omission was.
+        described = vp_audit.Rendering(
+            pipeline=_pipeline(),
+            scope=vp_audit.SCOPE_CHUNK,
+            has_audio=True,
+            start_seconds=30.0,
+            duration_seconds=30.0,
+        ).describe()
+        printed = "\n".join(vp_audit._pipeline_lines(described))
+        for key, value in described.items():
+            if key in vp_audit._RENDER_NOT_ROWS or value is None or value == "":
+                continue
+            assert vp_audit._RENDER_LABELS.get(key, key) in printed, f"{key} is not printed"
+        # The fingerprint heads the report and the invocation is its own block;
+        # neither may also appear as a field row.
+        assert "fingerprint:" not in printed
+        assert "command:" not in printed
+
+    def test_a_field_the_report_has_never_heard_of_is_printed_and_not_dropped(self):
+        # The list is a display *order*, never a filter — the rule the label
+        # already follows.  A pipeline field added tomorrow must reach a reviewer
+        # without anyone remembering that this list exists.
+        lines = vp_audit._pipeline_lines({"hwaccel": "cuda", "sharpening_kernel": "lanczos-3"})
+        assert any("sharpening_kernel" in line for line in lines)
+
+    def test_the_window_the_rendering_covers_is_named(self):
+        # `--at 5` is answered by the chunk starting at 0.  That is correct — it
+        # is the window the analyst watched — but a report that never says so
+        # describes a rendering the reviewer did not ask for without telling them.
+        lines = "\n".join(
+            vp_audit._pipeline_lines(
+                vp_audit.Rendering(
+                    pipeline=_pipeline(),
+                    scope=vp_audit.SCOPE_CHUNK,
+                    has_audio=True,
+                    start_seconds=0.0,
+                    duration_seconds=30.0,
+                ).describe()
+            )
+        )
+        assert "window start (s):" in lines
+        assert "window length (s):" in lines
+
+    def test_a_fallback_is_named_in_the_report_and_so_is_its_absence(self):
+        # §8's GPU→CPU fallback is the §3.1-material fact about what produced the
+        # bytes.  `False` is a statement and prints as one: dropping it would
+        # leave "did this fall back?" unanswered on every rendering that did not.
+        def printed(**kw):
+            return "\n".join(
+                vp_audit._pipeline_lines(
+                    vp_audit.Rendering(
+                        pipeline=_pipeline(), scope=vp_audit.SCOPE_CHUNK, has_audio=True, **kw
+                    ).describe()
+                )
+            )
+
+        assert "fell back to CPU:" in printed()
+        assert "no" in printed().split("fell back to CPU:")[1].splitlines()[0]
+        loud = printed(fell_back=True, fallback_reason="no NVENC capable devices found")
+        assert "yes" in loud.split("fell back to CPU:")[1].splitlines()[0]
+        assert "no NVENC capable devices found" in loud
+
+    def test_the_invocation_is_quoted_once_and_survives_a_shell(self):
+        # THE finding: the label joined the argv on spaces and this command
+        # shlex-joined it, so one record printed as two lines and only one of them
+        # ran — `scale=-2:'min(ih,1080)'` reaches ffmpeg as `No such filter:
+        # '1080)'`.  `command_line` is the single definition of that quoting, and
+        # `shlex.split` round-tripping it is the property §7.2 actually asks for:
+        # a reviewer can paste it and get the same rendering.
+        argv = ["ffmpeg", "-vf", "scale=-2:'min(ih,1080)',tonemap=hable", "-y", "out .mp4"]
+        described = vp_audit.Rendering(
+            pipeline=_pipeline(),
+            scope=vp_audit.SCOPE_CHUNK,
+            has_audio=True,
+            command=tuple(argv),
+        ).describe()
+        assert described["command_line"] == shlex.join(argv)
+        assert shlex.split(described["command_line"]) == argv
+        # The naive join is what the label used to render, and it does not
+        # round-trip: this is the difference, asserted rather than described.
+        assert shlex.split(" ".join(argv)) != argv
+        # No argv, no line — a cache hit ran no process (§7.2), and the two
+        # carriers must agree about that.
+        assert (
+            vp_audit.Rendering(
+                pipeline=_pipeline(), scope=vp_audit.SCOPE_CHUNK, has_audio=True
+            ).describe()["command_line"]
+            is None
+        )
+
+    @requires_ffmpeg
+    def test_the_label_and_the_command_print_one_line_for_one_rendering(
+        self, client, hevc_10bit_mov
+    ):
+        # The composition the live check made: what the browser is handed and what
+        # `sfn-video render` prints are the same string, from the same record.
+        body = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+        out = self._render("--path", str(hevc_10bit_mov), "--at", "0")
+        assert body["pipeline"]["command_line"] in out
+
+    def test_the_two_surfaces_agree_on_which_fields_are_not_rows(self):
+        # One record, two renderers, and they may not disagree about what is a
+        # field.  Text-level on the JS side by necessity — a Python test cannot
+        # run the browser — and it is the cheapest guard against the pair drifting
+        # apart again, which is how this whole finding started.
+        rendering_js = (
+            Path(__file__).resolve().parents[1]
+            / "src/scalar_forensic/web/static/js/video_playback/rendering.js"
+        ).read_text(encoding="utf-8")
+        assert "new Set(['command', 'command_line'])" in rendering_js
+        assert {"command", "command_line"} <= vp_audit._RENDER_NOT_ROWS
+
 
 class TestPurgeIsFiled:
     """§13 and §7.3: what was destroyed, when, and on whose act."""

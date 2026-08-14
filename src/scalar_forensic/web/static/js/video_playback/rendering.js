@@ -98,7 +98,7 @@
   _renderingRows(payload) {
     if (!payload || typeof payload !== 'object') return [];
     const rows = [];
-    const seen = new Set(['command']);
+    const seen = new Set(['command', 'command_line']);
     const push = (key) => {
       seen.add(key);
       const value = this._renderingValue(payload[key]);
@@ -121,8 +121,18 @@
   // for a cache hit, and absent is the honest state: `sfn-video render` is
   // where an invocation is retrieved from the log or rebuilt as a clearly
   // labelled reproduction recipe (audit.py).
+  //
+  // `command_line`, never `command.join(' ')`. §7.2 asks for an invocation a
+  // reviewer can reproduce and the block above calls it "a line to copy"; joining
+  // the argv on spaces produced a line that does not survive being copied,
+  // because the filter chain carries `'min(ih,1080)'` and a shell hands ffmpeg
+  // `No such filter: '1080)'` (measured 2026-08-14 against a real encode,
+  // `data/reports/c24-task2-label-vs-render.md`). The quoting has one definition,
+  // `shlex.join` in `audit.py`, for the same reason the contention sentence has
+  // one: an argv printed two ways is one record with two readings, and only one
+  // of them runs.
   _renderingCommand(payload) {
-    const argv = payload?.command;
-    return Array.isArray(argv) && argv.length ? argv.join(' ') : '';
+    const line = payload?.command_line;
+    return typeof line === 'string' ? line : '';
   },
 });
