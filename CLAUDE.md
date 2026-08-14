@@ -16,6 +16,12 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
   **No longer fully hermetic:** the video encode tests need `ffmpeg` on `PATH`. Without it
   they skip locally and **fail** in CI (`CI` env var set) — a skip is how they went quiet
   for a day, so absence in CI is an error, not a shrug.
+- `npm test` — the JS suite (`node --test`, Node ≥22, zero dependencies; 41 tests
+  at PR #183). Runs as a step inside CI's `lint-and-test (3.12)` job. It
+  *executes* every `<script src>` in `static/index.html` in a `node:vm` context,
+  which is the only check that can catch a `SyntaxError` in a part file — 14
+  text-level wiring tests once passed against a `player.js` that did not parse.
+  No DOM: markup stays wiring-pinned. See `tests/js/harness.mjs`.
 - `uv run ruff check src tests scripts` and `uv run ruff format --check src tests scripts` — CI runs exactly these
 - `./run.sh sfn-web` — start web UI (wrapper exports venv CUDA libs); boots fine without
   Qdrant and degrades to exact-hash-only mode
