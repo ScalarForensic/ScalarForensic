@@ -2402,3 +2402,52 @@ port, kill by PID.
 `c22`'s and `c23`'s, each verified clean with `git status --porcelain` and each
 local commit matched to a squash-merged PR first. The heuristic that skips that
 check is the one that once reported two *live* worktrees as stale here.
+
+## `com-m8` fold 3, 2026-08-14 — retiring; §7.2 measured, not asserted
+
+`main` `d1637d6` → `470554f`, with `#202` and `#204` green behind it. `#201`
+`ea9ddab` closed `c23`'s last browser item; `#202` fixed what the real-encode
+check found; `#203` `470554f` is my handoff,
+`docs/handoffs/scalarforensic-com-m8-20260814-102423.md`. **Only spec §15 and
+`CLAUDE.md` remain, and then the spec is finished, phases 1–8.** Retired with
+their work merged: `com-m7`, `com-c22`, `com-c23`, `com-c24`.
+
+**The check nobody had done was the one that found the defects.** The §7.2 label
+had never been observed against a real encode — `c23`'s screenshots were a
+hand-injected fixture and it said so when asked. `c24` ran it against a real HDR
+file and returned two: the one recorded argv printed two ways (`argv.join(' ')`
+on screen, `shlex.join` in the CLI — only the CLI's survives being pasted, the
+other dies on `No such filter: '1080)'`), and `_pipeline_lines` hard-coding ten
+fields against a seventeen-field record, so `sfn-video render --at 5` answered
+about the chunk at 0 and never said so.
+
+**Every mutation test on both sides passed throughout this**, because each side
+was correct in isolation. That is the finding worth keeping: **covering the parts
+does not cover the composition.** 15 mutations on the renderer, 14 on the payload,
+zero survivors between them, and the two surfaces still disagreed on the only
+thing §7.2 actually promises. `data/reports/c24-task2-label-vs-render.md` has the
+field-by-field table; after the fix, the line copied off the screen reproduced the
+artifact the player served byte for byte — sha256 `12e1fd9e…053f`, 5,668,062 B.
+
+**`_pipeline_lines` was the defect `Pipeline.describe()` exists to prevent,
+reintroduced one layer later** — that docstring says in as many words that a
+hand-written label falls behind the fingerprint, and then a hand-written CLI
+printer did it, in the same package, by the same careful author. **A rule enforced
+at one layer is not enforced.**
+
+**Two workers reported their own surviving mutations rather than banking the green
+ones.** `c23`'s M5 and `c24`'s M9 — the latter after I had already accepted the
+PR, on a fix I had asked for, where both code paths produce the same string for
+every current record and the only difference is which carrier is authoritative.
+Nobody would have known. That is three in a row on this project (`c21`, `c23`,
+`c24`), and the pattern holds: dispatches that state the standard and then trust
+the worker keep producing it, and supervision would not have found any of them.
+
+**Ask, do not correct — it paid three times in one window.** My draft finding on
+the audio contradiction was false; `c22` was right about `threads` being `None` on
+chunks; `c24` had left `:476` re-joining for a reason it had not written down, and
+the right request was the docstring, not the code. The formulation that works:
+state the standard, name the evidence, list the ways it could resolve, ask which.
+`c24` then did the same thing upward — it found F1/F2 and asked before folding
+§15 rather than after, which is the only reason they were fixed instead of
+described as shipped.
