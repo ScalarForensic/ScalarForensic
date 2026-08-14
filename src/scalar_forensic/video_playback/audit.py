@@ -138,9 +138,13 @@ class Rendering:
         copied — the filter chain carries ``'min(ih,1080)'``, and a shell hands
         ffmpeg something it rejects with ``No such filter: '1080)'`` (measured
         2026-08-14, `data/reports/c24-task2-label-vs-render.md`).  Quoting is
-        ``shlex.join`` here and nowhere else, so the label and ``sfn-video render``
-        cannot print one argv two ways; ``command`` stays alongside it because a
-        list is what a machine reads and what the audit log stores.
+        This is the one definition of that quoting for every record that carries
+        it, so the label and ``sfn-video render`` cannot print one argv two ways.
+        Two call sites of ``shlex.join`` remain and both are stated rather than
+        implicit: ``reproduction_report`` re-joins for records written before this
+        field existed (#193, #194), and the reconstruction branch has no record to
+        read a line from at all.  ``command`` stays alongside it because a list is
+        what a machine reads and what the audit log stores.
         """
         return {
             **self.pipeline.describe(),
@@ -473,7 +477,12 @@ def reproduction_report(
             *_pipeline_lines(rendering),
             "",
             "Invocation that produced this rendering:",
-            f"  {shlex.join(rendering['command'])}",
+            # The record's own line when it has one, and it is the same string the
+            # label shows.  Records written before `command_line` existed (#193,
+            # #194) carry only the argv, so this re-joins for them — the stated
+            # fallback, not a second definition: an old record must still answer,
+            # and `shlex.join` of the same argv is what it would have stored.
+            f"  {rendering.get('command_line') or shlex.join(rendering['command'])}",
             "",
             RENDER_PART_NOTE,
         ]

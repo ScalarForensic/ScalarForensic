@@ -3833,6 +3833,41 @@ class TestRenderCommand:
         out = self._render("--path", str(hevc_10bit_mov), "--at", "0")
         assert body["pipeline"]["command_line"] in out
 
+    @requires_ffmpeg
+    def test_the_line_the_record_stored_is_the_line_that_is_printed(self, client, hevc_10bit_mov):
+        # Which of the two carriers is authoritative, asserted rather than left to
+        # the fact that they agree today.  `command_line` is what the label showed
+        # the analyst, so it is what a reviewer must be shown; re-deriving it from
+        # `command` would answer with a line this host built now for a rendering
+        # someone else's host produced.  They can only disagree across an ffmpeg
+        # or shlex change, which is exactly when it would matter.
+        client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        log = vp_audit.audit_dir(Settings()) / vp_audit.AUDIT_FILENAME
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        stored = "ffmpeg --the-line-this-record-stored"
+        for rec in records:
+            if (rec.get("rendering") or {}).get("command_line"):
+                rec["rendering"]["command_line"] = stored
+        log.write_text("".join(json.dumps(rec) + "\n" for rec in records))
+        assert stored in self._render("--path", str(hevc_10bit_mov), "--at", "0")
+
+    @requires_ffmpeg
+    def test_a_record_written_before_command_line_existed_still_answers(
+        self, client, hevc_10bit_mov
+    ):
+        # Records written by #193/#194 carry the argv and no `command_line`.  The
+        # report re-joins for them — the stated fallback, and the reason a second
+        # `shlex.join` call site is allowed to exist at all.  An old record that
+        # printed nothing would be the log going quiet about a rendering it holds.
+        client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0")
+        log = vp_audit.audit_dir(Settings()) / vp_audit.AUDIT_FILENAME
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        aged = [r for r in records if (r.get("rendering") or {}).pop("command_line", None)]
+        assert aged, "no transcode record to age"
+        log.write_text("".join(json.dumps(rec) + "\n" for rec in records))
+        out = self._render("--path", str(hevc_10bit_mov), "--at", "0")
+        assert shlex.join(aged[-1]["rendering"]["command"]) in out
+
     def test_the_two_surfaces_agree_on_which_fields_are_not_rows(self):
         # One record, two renderers, and they may not disagree about what is a
         # field.  Text-level on the JS side by necessity — a Python test cannot
