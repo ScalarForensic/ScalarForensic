@@ -3555,3 +3555,79 @@ class TestOverrideAudit:
             client.post(f"/api/video-full?path={hevc_10bit_mov}&override=true").status_code == 403
         )
         assert _records(vp_audit.EVENT_OVERRIDE) == []
+
+
+@requires_ffmpeg
+class TestProvenanceAfterAGpuFallback:
+    """§7.2's exact failure mode, on both writers: `request` is not `result`.
+
+    A GPU that probes clean and fails at job time is the one case where the
+    pipeline that was *selected* and the pipeline that *ran* name different
+    encoders — so it is the only case that can tell a label built from the
+    request apart from one built from the result.  Both writers are pinned here
+    because `request` is the object in scope for most of each of them.
+    """
+
+    @staticmethod
+    def _gpu_that_fails(monkeypatch):
+        """Select h264_nvenc, and make every nvenc invocation fail for real."""
+        monkeypatch.setattr(
+            vp_routes,
+            "capability",
+            lambda *a, **kw: _capability(encoder="h264_nvenc", hwaccel="cuda"),
+        )
+        for name in ("_run", "_run_watched"):
+            real = getattr(vp_encode, name)
+
+            def flaky(cmd, timeout, *args, _real=real, **kw):
+                if "h264_nvenc" in cmd:
+                    raise vp_encode.EncodeError(
+                        "no NVENC capable devices found", command=cmd, returncode=1
+                    )
+                return _real(cmd, timeout, *args, **kw)
+
+            monkeypatch.setattr(vp_encode, name, flaky)
+
+    def test_the_chunk_label_and_record_name_the_encoder_that_ran(
+        self, client, hevc_10bit_mov, monkeypatch
+    ):
+        gpu_fingerprint = vp_capability.select(
+            Settings(), _capability(encoder="h264_nvenc", hwaccel="cuda"), hdr=False
+        ).fingerprint()
+        self._gpu_that_fails(monkeypatch)
+        body = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+
+        assert body["fell_back"] is True
+        assert body["pipeline"]["encoder"] == "libx264"
+        assert body["pipeline"]["fingerprint"] != gpu_fingerprint
+        rec = _records(vp_audit.EVENT_TRANSCODE)[0]
+        assert rec["rendering"]["encoder"] == "libx264"
+        assert rec["pipeline_fingerprint"] == body["pipeline_fingerprint"]
+        assert rec["pipeline_fingerprint"] != gpu_fingerprint
+
+        # And the hit that follows is labelled with the pipeline that made the
+        # bytes, not the one selection would pick again today.
+        hit = client.post(f"/api/video-chunk?path={hevc_10bit_mov}&t=0").json()
+        assert hit["cached"] is True
+        assert hit["pipeline"]["encoder"] == "libx264"
+        assert hit["pipeline"]["fingerprint"] == body["pipeline"]["fingerprint"]
+
+    def test_the_full_copy_label_and_record_name_the_encoder_that_ran(
+        self, hevc_10bit_mov, monkeypatch
+    ):
+        gpu_fingerprint = vp_capability.select(
+            Settings(), _capability(encoder="h264_nvenc", hwaccel="cuda"), hdr=False
+        ).fingerprint()
+        self._gpu_that_fails(monkeypatch)
+        with TestClient(app) as c:
+            c.post(f"/api/video-full?path={hevc_10bit_mov}")
+            body = _await_terminal(c, hevc_10bit_mov)
+
+        assert body["player_state"] == "full-job-done", body
+        assert body["rendering"]["encoder"] == "libx264"
+        assert body["rendering"]["fingerprint"] != gpu_fingerprint
+        # And the file is served under the key the label names, not the other one.
+        assert f"fp={body['rendering']['fingerprint']}" in body["full_url"]
+        rec = _records(vp_audit.EVENT_TRANSCODE)[0]
+        assert rec["rendering"]["encoder"] == "libx264"
+        assert rec["pipeline_fingerprint"] != gpu_fingerprint
