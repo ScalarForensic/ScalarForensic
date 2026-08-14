@@ -934,18 +934,24 @@ src/scalar_forensic/video_playback/
 ├── codecs.py        browser-safe allowlist, mode decision            [carved]
 ├── digest.py        source SHA-256 + the process-wide HashCache handle [carved]
 ├── rewrap.py        the PyAV stream copy — lossless, never an encode  [carved]
-├── encode.py        chunk and full encode; one path, different -ss/-t
+├── encode.py        chunk and full encode; one path, different -ss/-t [phase 4]
 ├── jobs.py          admission gate, the full-video job, refcounts, cancel  [phase 7]
 ├── cache.py         keys, leases, eviction, purge (§6)               [carved]
 ├── states.py        §5 player states + the §10.1 failure matrix       [phase 6]
-├── audit.py         provenance + examiner record (§7.3), wrapping faces/ helpers
+├── audit.py         provenance + examiner record (§7.3), wrapping faces/ helpers [phase 8]
 └── routes.py        the APIRouter                                    [carved]
 
-src/scalar_forensic/web/static/js/video_playback/player.js   (double-buffered)
+src/scalar_forensic/web/static/js/video_playback/
+├── player.js        the double-buffered chunk player                 [phase 6]
+├── full_job.js      the phase 7 browser side: poll, progress, cancel,
+│                    the navigate-away prompt, auto-switch             [phase 7]
+└── rendering.js     the §7.2 rendering-record rows, one renderer for
+                     both the chunk and the full copy                  [phase 8]
 ```
 
-`[carved]` marks what exists as of the phase 1–3 carve; the rest arrive with
-their phases (§15).
+`[carved]` marked what existed as of the phase 1–3 carve; the phase tags mark
+when the rest arrived (§15). **Every module above is on `main` as of `5cfae82`**
+— the list is the tree, not a plan.
 
 `states.py` is a third addition, ruled in during phase 6. §5's state list and
 §10.1's failure matrix are two tables that have to agree — a failure whose state
@@ -967,8 +973,14 @@ Two modules are additions to v1's list, ruled in during the carve:
   `encode.py` is specified as the ffmpeg path. Keeping them apart is what stops
   a later reader from treating the rewrap as an encode.
 
-`_stale_evidence_report` stays in `routes.py` until `audit.py` arrives in phase
-8; `audit.py` is not created early for one function.
+`_stale_evidence_report` was to stay in `routes.py` until `audit.py` arrived in
+phase 8, on the grounds that `audit.py` is not created early for one function.
+`audit.py` has since arrived and the function **did not move** — it is still
+`routes.py:66`, and on the shape of the two modules that is the right place:
+`audit.py` writes the examiner record, whereas a stale-evidence *report* is a
+response field the `playback-info` handler assembles and never an audit-log
+entry. Recorded so the next reader does not take the original sentence for an
+unkept promise.
 
 Honest caveat on the precedent: `faces/` is genuinely optional and env-gated;
 video playback is core UI on the default path, so "removable without archaeology"
@@ -1159,8 +1171,13 @@ long-GOP and damaged-index seek behaviour, and multi-sample confirmation of
    `.part` watched, §10.1 mapped through `states.classify_full_job()`, and §4.3's
    contention both yielded (`SFN_VIDEO_JOB_NICE`, `SFN_VIDEO_JOB_THREADS`) and
    disclosed (`contention_notice`).
-   *Browser side not done*: the progress/cancel UI, the navigate-away prompt, the
-   completion notification and the auto-switch at the current timestamp.
+   *Browser side done* as well, in `static/js/video_playback/full_job.js` and the
+   `vc-job` / `vc-notice` blocks of `static/index.html`: the progress label and
+   bar (`fullJobProgressLabel`, `fullJobPercent`), **Cancel the export**
+   (`cancelFullJob()` → `DELETE /api/video-full`), the navigate-away prompt
+   (`fullJobWarnsOnLeave` behind a `beforeunload` handler armed while the job
+   runs), the completion notice (`x-show="fullJobDone"`) and the auto-switch at
+   the current timestamp (`_offerAutoSwitch`, `fullJobSwitchAtSeconds`).
 8. **Provenance and audit** — label with full pipeline record, examiner audit,
    `sfn-video render` reproduction command.
 
@@ -1171,9 +1188,18 @@ pure move: `tests/test_video_endpoints.py` and `tests/test_video_playback.py`
 patch `scalar_forensic.web.routes.video.*` by name, and `CLAUDE.md`'s first gotcha
 is that patch targets are per-module.
 
-Done: phases 1–3 and the carve. In the event only `tests/test_video_playback.py`
-needed rewiring — all six of `test_video_endpoints.py`'s string targets belong to
+On the carve itself: in the event only `tests/test_video_playback.py` needed
+rewiring — all six of `test_video_endpoints.py`'s string targets belong to
 `/api/video-frame` and `/api/video-timeline`, which stay put.
+
+**Done: phases 1–8 complete, and the carve.** Verified on `main` at `5cfae82`.
+Two rulings taken after the phases were written and folded back into the text
+above rather than appended to it: §7.2's rendering record is the *invocation that
+ran*, not a label reconstructed from the config (#202); and §6.3's `unknown` size
+estimate is **not** examiner-overridable — refused, with **Download original**
+offered and no escape hatch (operator, 2026-08-14, #206/#208). Nothing further is
+outstanding against this document: §17's remainder is measurement residue, not
+unbuilt behaviour.
 
 ---
 

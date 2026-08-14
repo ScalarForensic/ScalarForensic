@@ -6,18 +6,19 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 
 ## Commands
 
-- `uv run pytest -q` — full suite (991 passed / 5 skipped at `fd31488`, 2026-08-14,
+- `uv run pytest -q` — full suite (1036 passed / 5 skipped at `5cfae82`, 2026-08-14,
   verified clean tree, measured in a worktree off that commit with `models/`
-  copied in — a tree without `models/` reads 990/6; coverage 74.58% against the 65%
-  floor — measured *after* video-playback phase 7 and the §6.3 override, so it
+  copied in — a tree without `models/` reads one extra skip; coverage 75.10% against the 65%
+  floor — measured *after* video-playback phase 8 and the §6.3 narrowing, so it
   describes the layout below), needs no Qdrant; the 5 skips need
   `SFN_TEST_QDRANT_URL` and are the only tests that can observe the face exclusion
   guarantee against a real store (CI runs them in a separate Qdrant service-container job).
   **No longer fully hermetic:** the video encode tests need `ffmpeg` on `PATH`. Without it
   they skip locally and **fail** in CI (`CI` env var set) — a skip is how they went quiet
   for a day, so absence in CI is an error, not a shrug.
-- `npm test` — the JS suite (`node --test`, Node ≥22, zero dependencies; 58 tests
-  at `fd31488`, #188). Runs as a step inside CI's `lint-and-test (3.12)` job. It
+- `npm test` — the JS suite (`node --test`, Node ≥22, zero dependencies; 88 passed /
+  0 failed at `5cfae82`, same clean worktree as the bar above). Runs as a step
+  inside CI's `lint-and-test (3.12)` job — never its own job. It
   *executes* every `<script src>` in `static/index.html` in a `node:vm` context,
   which is the only check that can catch a `SyntaxError` in a part file — 14
   text-level wiring tests once passed against a `player.js` that did not parse.
@@ -29,6 +30,22 @@ decorative features get removed (precedent: the 3-D background viz, removed 2026
 - `./run.sh sfn <dir> --faces` — optional face modality (needs `SFN_FACES_ENABLED=true`,
   `SFN_EXAMINER_ID`, a YuNet ONNX and an operator-supplied embedder; `uv sync --group faces`).
   Purge via `uv run sfn-faces purge --media <sha256> | --all`
+- `uv run sfn-video render --path <file> [--at <seconds>] [--full]` — print the exact
+  ffmpeg invocation that produced a rendering the analyst watched (spec §7.2). It reads
+  the **recorded argv**, not a label reconstructed from the current config, so it
+  reproduces the bytes that were actually served (#202)
+- `uv run sfn-video purge --media <sha256> | --all` — delete derived viewing copies
+  (spec §13). The §6.2 LRU ceiling is the only *automatic* retention; this is the
+  explicit one
+- **Both audit logs live in `data/` under the default config**: `data/face_audit.log`
+  and `data/video_audit.log`. The video one sits **beside** `data/video_cache/` and
+  deliberately outside it (`video_playback/audit.py:audit_dir`, which returns
+  `video_cache_dir.parent`) — that is exactly what makes it survive
+  `sfn-video purge --all` and the LRU sweep, both of which empty the cache directory.
+  An audit log a retention sweep can delete is not an audit log. Note it is
+  **per-CWD**: `SFN_VIDEO_CACHE_DIR` defaults to the *relative* `data/video_cache`, so
+  the app and `sfn-video render` must run from the same directory or the CLI reads an
+  empty log
 
 ## Contributing workflow
 
@@ -71,8 +88,14 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
   ffmpeg probe and the pipeline fingerprint), `encode.py` (the ffmpeg re-encode
   — *not* a stream copy), `cache.py` (the bounded viewing-copy store),
   `jobs.py` (the §4.3 full-video job: `Admission`, `JobRequest`, `FullJob`,
-  `JobRunner`, and the module singletons `admission` and `runner`) and
-  `routes.py`. `cache.py`'s public surface is `cache_key`/`artifact_dir`/
+  `JobRunner`, and the module singletons `admission` and `runner`),
+  `states.py` (the §5 player states and the §10.1 failure matrix, in one module
+  because those two tables have to agree — `classify()` and
+  `classify_full_job()` are its callers' single entry point), `audit.py` (§7.2's
+  rendering record and the §7.3 examiner log; `audit_dir()` is the
+  beside-the-cache rule above), `__init__.py` (the public surface: `router`) and
+  `routes.py`. **That is the whole package as of `5cfae82` — eleven modules, no
+  others.** `cache.py`'s public surface is `cache_key`/`artifact_dir`/
   `chunk_name`/`rewrap_path` (§6.1 layout), `renew_lease`/`release_lease`/
   `lease_state`/`pin`/`protected_videos` (§6.2 protection), `scan`/`evict`
   (§6.2 whole-video LRU), `check_ceiling`/`estimate_full_output_bytes` (§6.3),
@@ -94,6 +117,15 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
   non-zero: 50% of a ceiling too small to halve floors to 0, and `or None` would
   read that as "unbounded" — handing the one job that got past the forecast the
   one encode with no `.part` watch at all.
+- **Only a `refused` verdict is overridable — an `unknown` estimate is not.**
+  `unknown` is refused outright, with **Download original** offered and no examiner
+  escape hatch (operator ruling 2026-08-14, #206/#208 — the narrowing that replaced
+  the spec's earlier reading rather than sitting beside it).
+  `cache.CeilingVerdict.overridable` is `self.state == "refused"` and nothing wider.
+  **Two places publish that flag to the client** — `routes.py:289` in the `full_copy`
+  dict and `routes.py:732` in the 507 detail — so a change that exercises only
+  `POST /api/video-full` passes clean while `playback-info` still advertises an
+  override the server will refuse.
 - **`rewrap.py` and `encode.py` must never merge.** A rewrap is a PyAV stream
   copy whose output bitstream is bit-identical to its input; an encode is lossy,
   tone-mapped and carries the §7.4 disclosure. Keeping them apart is what stops
@@ -115,9 +147,14 @@ Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr upd
   matching part file; computed getters belong in `computed.js`. Never merge parts with
   `Object.assign` — it evaluates getters instead of copying them. Part `<script>` tags
   in `index.html` must load before `app.js`. Two subsystems own a part file of their
-  own — `js/faces.js` and `js/video_playback/player.js` — for the same cohesion reason
-  their Python packages own a router; they still register on `window.__sfnParts` and
-  still load before `app.js`.
+  own — `js/faces.js` and the three files of `js/video_playback/` — for the same
+  cohesion reason their Python packages own a router; they still register on
+  `window.__sfnParts` and still load before `app.js`. The three are `player.js` (the
+  double-buffered chunk player), `full_job.js` (the phase 7 browser side: poll,
+  progress, cancel, the `beforeunload` navigate-away prompt, auto-switch) and
+  `rendering.js` (the §7.2 rendering-record rows — **one** renderer for both the chunk
+  and the full copy, because §7.2 is one requirement and two renderers are free to
+  disagree about what an examiner is shown).
 - **A wiring test cannot tell you the browser can run the file.** `player.js` once
   shipped a `?? … ||` precedence `SyntaxError` — it did not parse at all — and all
   fourteen of its text-level wiring tests passed against it. `npm test` closes the
