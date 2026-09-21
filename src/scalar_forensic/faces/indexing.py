@@ -36,7 +36,16 @@ from scalar_forensic.faces.embed import OnnxFaceEmbedder
 from scalar_forensic.faces.provenance import PipelineConfig
 from scalar_forensic.faces.quality import post_align_gate, pre_align_gate, review_gate
 from scalar_forensic.faces.store import FACE_VECTOR_NAME, FaceStore
-from scalar_forensic.media_access import decode_shared as decode_shared
+from scalar_forensic.media_access import decode_shared
+
+__all__ = [
+    "DEFAULT_FACE_WORKERS",
+    "FaceIndexResult",
+    "FacePipeline",
+    "build_pipeline_config",
+    "decode_shared",
+    "process_media_threaded",
+]
 
 
 @dataclass

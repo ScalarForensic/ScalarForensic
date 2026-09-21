@@ -20,21 +20,40 @@ from torchvision import transforms
 from transformers import AutoImageProcessor, AutoModel
 
 from scalar_forensic._model_hash import hash_dino_snapshot as _hash_dino_snapshot
-from scalar_forensic.media_access import (  # noqa: F401 — compatibility exports
+from scalar_forensic.media_access import (
     _open_rgb,
     extract_exif,
     extract_exif_detailed,
     preprocess_batch,
 )
-from scalar_forensic.media_decode import (  # noqa: F401 — compatibility exports
-    _EXIF_GPS_IFD_TAG,
-    _EXIF_ORIENTATION_FORMATS,
-    _EXIF_ORIENTATION_TAG,
-    _MAX_IMAGE_PIXELS_ENV,
+from scalar_forensic.media_decode import (
     ExifInfo,
     _cap_short_side,
     _configure_max_image_pixels_from_env,
 )
+
+# Preserve the decoding entrypoints used by existing CLI and web callers.
+__all__ = [
+    "AnyEmbedder",
+    "DINOv2Embedder",
+    "ExifInfo",
+    "HashCache",
+    "RemoteEmbedder",
+    "SSCDEmbedder",
+    "_open_rgb",
+    "effective_preprocessing_cap",
+    "extract_exif",
+    "extract_exif_detailed",
+    "get_library_versions",
+    "hash_bytes",
+    "hash_bytes_md5",
+    "hash_file",
+    "hash_file_both",
+    "load_embedder",
+    "preprocess_batch",
+    "preprocess_pil_batch",
+    "write_thumbnail",
+]
 
 _SSCD_INPUT_SIZE = 288
 # SSCD requires short-side ≥ 331 px before the 288×288 center-crop.
