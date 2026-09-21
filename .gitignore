@@ -211,6 +211,8 @@ __marimo__/
 # committed sample image set.
 data/*
 !data/sample_images/
+# Keep new local photos private; the curated images already tracked stay tracked.
+data/sample_images/*
 research/
 models/
 qdrant
