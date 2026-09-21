@@ -77,8 +77,28 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 **Source:** OpenCV Zoo (https://github.com/opencv/opencv_zoo)
 
 Fetched by `scripts/download_models.py --yunet` when the operator opts into the face modality.
-ScalarForensic bundles no model weights of any kind.
+The source repository does not track model weights. Airgap images copy the actual
+`models/` directory and therefore can distribute DINOv2/SSCD, YuNet, or any
+operator-added artifacts present there. Review that directory before release.
 
-**Note on recognition weights:** ScalarForensic ships and fetches *no* face-recognition model.
+**Note on recognition weights:** ScalarForensic does not fetch a face-recognition model.
 That model is operator-supplied, and its licence — commonly research-only in this model family
 — is the operator's responsibility. See INSTALL.md, "Face modality (optional)".
+
+## Release artifact inventory
+
+The notices above are not a complete inventory of an airgap image. Each release
+build emits `bundle-inventory.json` (wheel metadata, license declarations and file
+hashes, model hashes, lock/export hashes) and embeds it in `/app`. The built image
+also contains `/app/native-inventory.json` with OS package versions and native
+library/executable hashes. Native license records remain in `/usr/share/doc` and
+Python distribution metadata; retain those files during redistribution.
+
+The image includes Python/PyTorch and transitive CUDA or ROCm libraries, PyAV and
+its native libraries, system FFmpeg and dependencies, plus downloaded model
+artifacts. Qdrant is a separately saved image. License declarations in wheel
+metadata are evidence for review, not legal clearance. Model licenses and unclear
+native/transitive rights are explicitly UNKNOWN pending release-maintainer review.
+Do not claim a bundle is redistributable until its actual artifacts have been
+reviewed. Keep advisory output and image IDs alongside the archive; see the
+[current release procedure](docs/deployment.md#airgap-release-evidence).

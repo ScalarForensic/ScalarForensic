@@ -63,7 +63,7 @@ test('the unknown refusal does not restate the server\'s reason', () => {
   assert.doesNotMatch(html, /did not report the duration, bitrate and coded/);
 });
 
-// ── The §6.3 override (#184) ────────────────────────────────────────────────
+// The §6.3 override (#184)
 test('the override control is offered, and beside Download original', () => {
   const refusal = html.slice(
     html.indexOf('x-show="fullJobRefused"'),
@@ -136,7 +136,7 @@ test('the progress bar is only drawn when there is a fraction', () => {
   assert.match(html, /class="vc-bar" x-show="fullJobPercent !== null"/);
 });
 
-// ── The §7.2 rendering record (phase 8, browser side) ───────────────────────
+// The §7.2 rendering record (phase 8, browser side)
 // Text-level, and labelled as such: these pin that the record is bound to the
 // state cells. What the rows contain is `rendering.test.mjs`'s job, and that it
 // renders on screen is the live check's.
@@ -158,7 +158,7 @@ test('both panels render the §7.2 record through the one shared renderer', () =
   // markup would be the second renderer this file exists to prevent.
   // Scoped to the two records: `x-text="row.label"` also belongs to the face
   // basket, which is a different x-for over a different shape.
-  const records = [...html.matchAll(/<dl class="vc-rendering-rows">[\s\S]*?<\/dl>/g)];
+  const records = [...html.matchAll(/<dl class="vc-rendering-rows">\s*<template x-for="row in (?:chunk|fullJob)RenderingRows"[\s\S]*?<\/dl>/g)];
   assert.equal(records.length, 2);
   for (const [record] of records) {
     assert.match(record, /<dt x-text="row\.label">/);

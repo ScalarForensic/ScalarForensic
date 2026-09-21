@@ -15,6 +15,7 @@
 #   bash scripts/build_airgap_image.sh --no-models        # skip model download
 #   bash scripts/build_airgap_image.sh --no-deps          # skip wheel download
 #   bash scripts/build_airgap_image.sh --no-models --no-deps  # build only
+#   bash scripts/build_airgap_image.sh --scan             # scan both images with Trivy
 #
 # On the offline machine:
 #   docker load < scalarforensic-<tag>.tar.gz   # loads both images
@@ -24,10 +25,11 @@
 
 set -euo pipefail
 
-QDRANT_IMAGE="qdrant/qdrant:v1.17.1"
+QDRANT_IMAGE="qdrant/qdrant:v1.19.0"
 TAG="latest"
 SKIP_MODELS=false
 SKIP_DEPS=false
+SCAN=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -44,6 +46,7 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             shift ;;
+        --scan) SCAN=true; shift ;;
         --no-models) SKIP_MODELS=true; shift ;;
         --no-deps)   SKIP_DEPS=true; shift ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -59,7 +62,7 @@ echo "    qdrant image: ${QDRANT_IMAGE}"
 echo "    output:       ${OUTPUT}"
 echo ""
 
-# ── Step 1: Models ────────────────────────────────────────────────────────────
+# Step 1: Models
 if [ "$SKIP_MODELS" = false ]; then
     echo "==> [1/5] Downloading models ..."
     uv run python scripts/download_models.py
@@ -68,7 +71,7 @@ else
     echo "==> [1/5] Skipping model download (--no-models)"
 fi
 
-# ── Step 2: Python wheels ─────────────────────────────────────────────────────
+# Step 2: Python wheels
 if [ "$SKIP_DEPS" = false ]; then
     echo "==> [2/5] Downloading Python wheels (core + web group) ..."
     bash scripts/download_deps.sh --web
@@ -77,20 +80,34 @@ else
     echo "==> [2/5] Skipping wheel download (--no-deps)"
 fi
 
-# ── Step 3: Build ScalarForensic image ───────────────────────────────────────
+# Step 3: Build ScalarForensic image
 echo "==> [3/5] Building Docker image (${IMAGE}) ..."
 echo "    (the first build takes a while — PyTorch layers are large)"
+python3 scripts/bundle_inventory.py --output bundle-inventory.json
 docker build --tag "${IMAGE}" .
 echo ""
 
-# ── Step 4: Pull Qdrant ───────────────────────────────────────────────────────
+# Step 4: Pull Qdrant
 # Qdrant is a separate application used as the vector database backend.
 # Pull it here so it can be bundled into the same archive for offline transfer.
 echo "==> [4/5] Pulling Qdrant image (${QDRANT_IMAGE}) ..."
 docker pull "${QDRANT_IMAGE}"
 echo ""
 
-# ── Step 5: Save both images into one archive ─────────────────────────────────
+# Advisory scanning is opt-in for connected release hosts. Any tool/scan failure
+# aborts the release; an omitted scan is recorded, never described as clean.
+if [ "$SCAN" = true ]; then
+    trivy --version > "scalarforensic-${TAG}.scanner.txt"
+    trivy image --format json --output "scalarforensic-${TAG}.advisories.json" "${IMAGE}"
+    trivy image --format json --output "scalarforensic-${TAG}.qdrant-advisories.json" "${QDRANT_IMAGE}"
+else
+    for report in "scalarforensic-${TAG}.advisories.json" "scalarforensic-${TAG}.qdrant-advisories.json"; do
+        printf '%s\n' '{"status":"not-run","owner":"release maintainer","reason":"Run build with --scan on a connected host with trivy installed"}' > "$report"
+    done
+fi
+docker image inspect "${IMAGE}" "${QDRANT_IMAGE}" > "scalarforensic-${TAG}.images.json"
+
+# Step 5: Save both images into one archive
 echo "==> [5/5] Saving both images → ${OUTPUT} ..."
 echo "    (compression may take several minutes)"
 docker save "${IMAGE}" "${QDRANT_IMAGE}" | gzip > "${OUTPUT}"

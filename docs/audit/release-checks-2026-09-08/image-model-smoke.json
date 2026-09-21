@@ -1,0 +1,34 @@
+{
+  "gpu": "NVIDIA GeForce RTX 4060 Ti",
+  "models": {
+    "dino": {
+      "compiled": true,
+      "finite_normalized_distinct": true,
+      "shape": [
+        2,
+        1024
+      ]
+    },
+    "sface": {
+      "finite_normalized": true,
+      "inputs": "synthetic patterns, no face-accuracy claim",
+      "shape": [
+        2,
+        128
+      ]
+    },
+    "sscd": {
+      "compiled": true,
+      "finite_normalized_distinct": true,
+      "shape": [
+        2,
+        512
+      ]
+    },
+    "yunet": {
+      "detections_on_synthetic_pattern": 0
+    }
+  },
+  "torch": "2.11.0+cu128",
+  "uid": 10001
+}

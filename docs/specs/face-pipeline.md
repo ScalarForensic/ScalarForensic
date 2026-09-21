@@ -187,8 +187,8 @@ is part of the contract at every boundary: decode produces RGB; the YuNet adapte
 BGR internally; the aligned crop is RGB; the embedder manifest declares what it consumes (§6.3).
 
 **Default: YuNet** via `cv2.FaceDetectorYN`, model path `SFN_FACE_DETECTOR_MODEL` (no default
-download). A `FaceDetector` protocol (`detect(img) -> list[FaceDetection]`, `model_hash`,
-`detector_id`) leaves a seam for an operator-supplied ONNX SCRFD adapter later
+download). The detector is held structurally (`detect(img) -> list[FaceDetection]`, `model_hash`,
+`detector_id`), which leaves a seam for an operator-supplied ONNX SCRFD adapter later
 (`SFN_FACE_DETECTOR=scrfd`); the seam existing is Phase 1 scope, the adapter is not.
 
 ### 6.2 Quality gate — `faces/quality.py`
@@ -572,9 +572,21 @@ When Phase 1b lands, reconciliation must check the labels collection and say so 
 
 ## 8. Query semantics (Phase 1b+)
 
+- Disabling `SFN_FACES_ENABLED` gates inference and stored-face browsing,
+  explanation, chip serving and audit reads. When enabled, stored-data reads
+  do not require today's local model weights; new inference still validates
+  its configured models. A marker with no surviving observations has unknown
+  comparability (`compat.ok: null`), not a model mismatch or a proven match.
 - Probe = a stored face observation (click a face in the browser/results). Phase 2 adds uploaded
   probe images, processed identically in session scope and never persisted (the web analyze path
   is ephemeral by design and never writes to collections — indexing is CLI-only).
+- Uploaded-face identity is bound to the `detection_token` returned by
+  `POST /api/faces/query-faces`. Send it as a form field on `/api/faces/search`
+  when supplying `face_indices`, and on `/api/faces/compare` and
+  `/api/faces/dist-stats`. Missing or stale tokens return 409: rerun detection
+  and select faces from its response before retrying. A search containing only
+  stored `point_ids` needs no uploaded-detection token. The query-chip URL
+  independently validates the same detection identity.
 - **Search is exact by default** (`SearchParams(exact=True)`): at Phase 1 scale exact kNN is
   affordable, and "no further occurrences found" from an approximate index is not defensible
   testimony. ANN mode is an explicit opt-in for interactive exploration, and every logged query
@@ -768,9 +780,8 @@ active (§10.4).
 1. **Which embedder weights the first real deployment uses** — operator/legal decision; the spec
    guarantees the seam (manifest contract) and the documentation of the trade-off, nothing more.
 2. Whether the stored-frame **JPEG q=85 re-encode** costs small-face recall or embedding
-   fidelity (the frames are full-resolution; `SFN_FRAME_STORE_SIZE` exists in config but is
-   currently applied nowhere — decide during Phase 2 whether to wire it up or delete it, and
-   measure the recompression effect in calibration).
+   fidelity. Frames are stored at full resolution; the unused frame-store-size setting
+   was removed. Measure recompression effects in deployment calibration.
 3. Phase 3 clustering algorithm (HDBSCAN vs Chinese Whispers for buffer/cold-start) — decide on
    measured behaviour on our data at 512-d (or after PCA); the corpus's complexity argument for
    CW was unsupported, so the question is genuinely open.

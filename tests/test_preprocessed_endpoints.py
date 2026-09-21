@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from scalar_forensic.config import Settings
 from scalar_forensic.web.app import app
 from scalar_forensic.web.session import FileEntry
 
@@ -46,9 +47,7 @@ def _mock_session(entries):
     return sess
 
 
-# ---------------------------------------------------------------------------
 # /api/query-preprocessed
-# ---------------------------------------------------------------------------
 
 
 class TestQueryPreprocessed:
@@ -78,7 +77,7 @@ class TestQueryPreprocessed:
             patch("scalar_forensic.web.routes.files.get_session", return_value=sess),
             patch("scalar_forensic.web.routes.files.extract_frame_at", return_value=frame),
             patch(_BUILD_PREPROC, return_value=_PREPROC_PAYLOAD),
-            patch("scalar_forensic.web.routes.files.Settings"),
+            patch("scalar_forensic.web.routes.files.Settings", return_value=Settings()),
         ):
             r = client.get(f"/api/query-preprocessed/s1/{entry.file_id}?timecode_ms=0")
         assert r.status_code == 200
@@ -89,7 +88,7 @@ class TestQueryPreprocessed:
         with (
             patch("scalar_forensic.web.routes.files.get_session", return_value=sess),
             patch("scalar_forensic.web.routes.files.extract_frame_at", return_value=None),
-            patch("scalar_forensic.web.routes.files.Settings"),
+            patch("scalar_forensic.web.routes.files.Settings", return_value=Settings()),
         ):
             r = client.get(f"/api/query-preprocessed/s1/{entry.file_id}?timecode_ms=99999")
         assert r.status_code == 404
@@ -100,7 +99,7 @@ class TestQueryPreprocessed:
         with (
             patch("scalar_forensic.web.routes.files.get_session", return_value=sess),
             patch(_BUILD_PREPROC, return_value=_PREPROC_PAYLOAD),
-            patch("scalar_forensic.web.routes.files.Settings"),
+            patch("scalar_forensic.web.routes.files.Settings", return_value=Settings()),
         ):
             r = client.get(f"/api/query-preprocessed/s1/{entry.file_id}")
         assert r.status_code == 200
@@ -113,15 +112,13 @@ class TestQueryPreprocessed:
         sess = _mock_session([entry])
         with (
             patch("scalar_forensic.web.routes.files.get_session", return_value=sess),
-            patch("scalar_forensic.web.routes.files.Settings"),
+            patch("scalar_forensic.web.routes.files.Settings", return_value=Settings()),
         ):
             r = client.get("/api/query-preprocessed/s1/img1")
         assert r.status_code == 400
 
 
-# ---------------------------------------------------------------------------
 # /api/hit-preprocessed
-# ---------------------------------------------------------------------------
 
 
 class TestHitPreprocessed:

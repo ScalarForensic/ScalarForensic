@@ -1,0 +1,17 @@
+{
+  "gpu": "NVIDIA GeForce RTX 4060 Ti",
+  "torch": "2.11.0+cu128",
+  "cudnn": 91900,
+  "compiled": true,
+  "shape": [
+    2,
+    1024
+  ],
+  "norms": [
+    0.9999999938014417,
+    1.0000000054615725
+  ],
+  "finite": true,
+  "environment": "LD_PRELOAD and LD_LIBRARY_PATH unset; HF_HUB_OFFLINE=1; TRANSFORMERS_OFFLINE=1",
+  "inputs": "two synthetic RGB images; random seed 42; local models/dinov2-large"
+}

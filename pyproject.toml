@@ -28,6 +28,7 @@ sfn-faces = "scalar_forensic.cli:faces_main"
 sfn-video = "scalar_forensic.cli:video_main"
 
 [dependency-groups]
+build = ["hatchling==1.32.0"]
 dev = [
     { include-group = "web" },
     { include-group = "faces" },
@@ -92,7 +93,7 @@ torchvision = [{ index = "pytorch-cu128" }]
 #]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]

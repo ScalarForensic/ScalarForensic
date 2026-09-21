@@ -22,7 +22,6 @@ from scalar_forensic.discovery import (
     MAX_CONTEXT_PAIRS,
     _build_context_pairs,
     run_discovery,
-    run_triage,
 )
 from scalar_forensic.tags import Tag
 
@@ -58,9 +57,7 @@ def _pt(pid: str, score: float, *, payload: dict | None = None) -> MagicMock:
     return m
 
 
-# ---------------------------------------------------------------------------
 # _build_context_pairs
-# ---------------------------------------------------------------------------
 
 
 def test_build_pairs_cartesian_product_when_small():
@@ -86,9 +83,7 @@ def test_build_pairs_empty_when_one_side_missing():
     assert _build_context_pairs(["p1"], []) == []
 
 
-# ---------------------------------------------------------------------------
 # run_discovery — auto-target
-# ---------------------------------------------------------------------------
 
 
 def test_auto_target_uses_discover_query_when_positives_present():
@@ -240,15 +235,13 @@ def test_query_failure_propagates_to_caller():
         run_discovery(client, "sfn", tag, vector_name="dino", limit=5)
 
 
-# ---------------------------------------------------------------------------
-# run_triage — dino-only wrapper
-# ---------------------------------------------------------------------------
+# dino-only triage path
 
 
 def test_run_triage_returns_discovery_hits_via_dino():
     client = _client_returning([_pt("a", 4.0)])
     tag = _tag(positives=["p1"], negatives=["n1"])
-    hits = run_triage(client, "sfn", tag, limit=5)
+    hits = run_discovery(client, "sfn", tag, vector_name="dino", limit=5)
     assert len(hits) == 1
     assert hits[0].point_id == "a"
     assert hits[0].triplet_score == 4
@@ -257,9 +250,7 @@ def test_run_triage_returns_discovery_hits_via_dino():
     assert kwargs["using"] == "dino"
 
 
-# ---------------------------------------------------------------------------
 # cosine_threshold filtering (Recommend mode only)
-# ---------------------------------------------------------------------------
 
 
 def test_cosine_threshold_filters_recommend_hits_below_floor():
@@ -291,9 +282,7 @@ def test_cosine_threshold_ignored_in_discovery_mode():
     assert all(isinstance(h.triplet_score, int) for h in hits)
 
 
-# ---------------------------------------------------------------------------
 # Recommend fallback: negatives passed through when present
-# ---------------------------------------------------------------------------
 
 
 def test_recommend_with_target_and_negatives_passes_negatives_through():

@@ -1,243 +1,141 @@
 # ScalarForensic
 
-Forensic image-similarity tool (FastAPI + Qdrant + DINOv2/SSCD embeddings) built by two
-maintainers. Features must have forensic value and be legible to reviewers/courts;
-decorative features get removed (precedent: the 3-D background viz, removed 2026-08).
+Forensic image-similarity tool: FastAPI, Qdrant, DINOv2/SSCD embeddings and an
+optional face modality. Features must have forensic value; distinguish original
+evidence, derived renderings and model outputs.
 
-## Commands
+## Development and verification
 
-- `uv run pytest -q` — full suite (1036 passed / 5 skipped at `5cfae82`, 2026-08-14,
-  verified clean tree, measured in a worktree off that commit with `models/`
-  copied in — a tree without `models/` reads one extra skip; coverage 75.10% against the 65%
-  floor — measured *after* video-playback phase 8 and the §6.3 narrowing, so it
-  describes the layout below), needs no Qdrant; the 5 skips need
-  `SFN_TEST_QDRANT_URL` and are the only tests that can observe the face exclusion
-  guarantee against a real store (CI runs them in a separate Qdrant service-container job).
-  **No longer fully hermetic:** the video encode tests need `ffmpeg` on `PATH`. Without it
-  they skip locally and **fail** in CI (`CI` env var set) — a skip is how they went quiet
-  for a day, so absence in CI is an error, not a shrug.
-- `npm test` — the JS suite (`node --test`, Node ≥22, zero dependencies; 88 passed /
-  0 failed at `5cfae82`, same clean worktree as the bar above). Runs as a step
-  inside CI's `lint-and-test (3.12)` job — never its own job. It
-  *executes* every `<script src>` in `static/index.html` in a `node:vm` context,
-  which is the only check that can catch a `SyntaxError` in a part file — 14
-  text-level wiring tests once passed against a `player.js` that did not parse.
-  No DOM: markup stays wiring-pinned. See `tests/js/harness.mjs`.
-- `uv run ruff check src tests scripts` and `uv run ruff format --check src tests scripts` — CI runs exactly these
-- `./run.sh sfn-web` — start web UI (wrapper exports venv CUDA libs); boots fine without
-  Qdrant and degrades to exact-hash-only mode
-- `./run.sh sfn <dir> --dino --sscd` — CLI indexing
-- `./run.sh sfn <dir> --faces` — optional face modality (needs `SFN_FACES_ENABLED=true`,
-  `SFN_EXAMINER_ID`, a YuNet ONNX and an operator-supplied embedder; `uv sync --group faces`).
-  Purge via `uv run sfn-faces purge --media <sha256> | --all`
-- `uv run sfn-video render --path <file> [--at <seconds>] [--full]` — print the exact
-  ffmpeg invocation that produced a rendering the analyst watched (spec §7.2). It reads
-  the **recorded argv**, not a label reconstructed from the current config, so it
-  reproduces the bytes that were actually served (#202)
-- `uv run sfn-video purge --media <sha256> | --all` — delete derived viewing copies
-  (spec §13). The §6.2 LRU ceiling is the only *automatic* retention; this is the
-  explicit one
-- **Both audit logs live in `data/` under the default config**: `data/face_audit.log`
-  and `data/video_audit.log`. The video one sits **beside** `data/video_cache/` and
-  deliberately outside it (`video_playback/audit.py:audit_dir`, which returns
-  `video_cache_dir.parent`) — that is exactly what makes it survive
-  `sfn-video purge --all` and the LRU sweep, both of which empty the cache directory.
-  An audit log a retention sweep can delete is not an audit log. Note it is
-  **per-CWD**: `SFN_VIDEO_CACHE_DIR` defaults to the *relative* `data/video_cache`, so
-  the app and `sfn-video render` must run from the same directory or the CLI reads an
-  empty log
+- Python is pinned to 3.12. Use the repository's locked dependencies.
+- Full suite: `uv run pytest -q`. Keep coverage enabled (65% floor).
+- Subsets: `uv run pytest --no-cov -q tests/<file>.py`.
+- Lint: `uv run ruff check src tests scripts`.
+- Format: `uv run ruff format --check src tests scripts`.
+- JavaScript: `npm test`; the built-in Node runner executes component scripts
+  with `tests/js/harness.mjs`. Text-only wiring tests do not establish parsing,
+  rendering or browser behavior.
+- Browser: `npm run test:browser`, using the installed Playwright/Chromium
+  development dependencies. The smoke tests use synthetic API responses;
+  they do not replace live-store, real-model or release-hardware validation.
+- Live Qdrant tests require `SFN_TEST_QDRANT_URL` pointing at a disposable
+  server. Never run destructive integration fixtures against case storage.
+- Video encoding tests require `ffmpeg` on PATH. Missing ffmpeg causes local
+  skips and CI failures. YuNet model tests need the model under `models/`.
+- Record exact commands, tree state, skips and warnings with verification.
+  Do not attribute a dirty working-tree result to an unchanged commit.
 
-## Contributing workflow
+An editable install may point at a different checkout. In a worktree reusing
+another checkout's virtualenv, explicitly set `PYTHONPATH` to the worktree's
+`src` and invoke that virtualenv's Python with `-m pytest -p no:cacheprovider`.
+Do not run `uv sync` or `uv run` there unless a separate environment is intended.
 
-Work goes to `main` through a pull request, never a direct push:
+## Running the application
 
-```
-git switch -c fix/short-slug
-gh pr create --fill
-gh pr checks --watch          # lint-and-test (3.12) + qdrant-integration must pass
-gh pr merge --squash --delete-branch
-```
+- `./run.sh sfn-web` starts the web UI; the wrapper exports virtualenv CUDA libs.
+- `./run.sh sfn <directory> --dino --sscd` indexes images/videos.
+- `./run.sh sfn <directory> --faces` needs face enablement, examiner attribution,
+  YuNet and an operator-provisioned embedder/manifest.
+- `sfn-faces purge --media <sha256>` or `--all` removes face observations.
+- `sfn-video purge --media <sha256>` or `--all` removes managed viewing copies.
+- `sfn-video render --path <file> [--at <seconds>] [--full]` reads recorded argv,
+  not an invocation reconstructed from today's settings.
 
-Ruleset "standard" on GitHub enforces this (PR required, 0 approvals, no force-push, both
-CI jobs required). Note it is a **repository ruleset, not classic branch protection** — so
-`gh api repos/.../branches/main/protection` answers "Branch not protected"; look at
-`/rulesets` instead. Org owners retain a break-glass bypass, so a direct push to `main`
-will still succeed for them — treat that as a fire alarm, not a shortcut.
+Use the same configured state directories for web and CLI. Relative defaults
+are CWD-relative. The face/video audit logs default to `data/face_audit.log`
+and `data/video_audit.log`. Video audit lives beside the cache, not inside it,
+so cache eviction/purge cannot erase the audit trail.
 
-Dependabot PRs that touch `.github/workflows/` cannot be rebased with `gh pr update-branch`
-(the CLI token lacks `workflow` scope) — comment `@dependabot rebase` instead.
+## Repository hygiene
 
-## Architecture decisions (do not re-litigate)
+Preserve unrelated working-tree changes. Stage explicit reviewed paths, especially
+when models or dependency directories are shared symlinks. Respect operator
+restrictions on publishing branches containing private snapshots. Normal integration
+uses a reviewed PR with the existing Python/JS and Qdrant CI checks.
 
-- Target deployment is distributed across an isolated LAN (see `docs/deployment.md`):
-  `SFN_WEB_HOST=0.0.0.0` default and the remote-embeddings endpoint
-  (`SFN_EMBEDDING_ENDPOINT`) are intentional, not security oversights.
-- Embedding comparability is enforced by safeguards: `SFN_NORMALIZE_SIZE`,
-  `SFN_SSCD_N_CROPS`, and model hashes must match what the collection recorded.
+Keep durable specifications in `docs/specs/`, reproducible measurements in
+`docs/benchmarks/`, and substantive audit/release evidence in `docs/audit/`.
+Temporary plans, task ownership, session handoffs and cleanup reports belong in
+the ignored `.cleanup-notes/` directory or external local scratch space, not
+committed coordination trees. Do not create fleet/CTO ledgers or agent dispatch
+records in project documentation. Preserve unique engineering decisions before
+removing historical narratives; git history retains the originals.
 
-## Code structure conventions
+## Architecture and contracts
 
-- Web endpoints live in `src/scalar_forensic/web/routes/` (APIRouter per topic,
-  shared helpers in `_shared.py`); `app.py` keeps only app setup, lifespan, `/`.
-  **Exception: two subsystems own their routers.** `faces/` and
-  `video_playback/` are self-contained packages that export a `router` from
-  their `__init__.py`, which `app.py` includes like any other. Video playback
-  is split `codecs.py` (container/codec classification and the mode decision),
-  `digest.py` (the source SHA-256 and the process-wide `HashCache` handle),
-  `rewrap.py` (the PyAV stream copy — *not* an encode), `capability.py` (the
-  ffmpeg probe and the pipeline fingerprint), `encode.py` (the ffmpeg re-encode
-  — *not* a stream copy), `cache.py` (the bounded viewing-copy store),
-  `jobs.py` (the §4.3 full-video job: `Admission`, `JobRequest`, `FullJob`,
-  `JobRunner`, and the module singletons `admission` and `runner`),
-  `states.py` (the §5 player states and the §10.1 failure matrix, in one module
-  because those two tables have to agree — `classify()` and
-  `classify_full_job()` are its callers' single entry point), `audit.py` (§7.2's
-  rendering record and the §7.3 examiner log; `audit_dir()` is the
-  beside-the-cache rule above), `__init__.py` (the public surface: `router`) and
-  `routes.py`. **That is the whole package as of `5cfae82` — eleven modules, no
-  others.** `cache.py`'s public surface is `cache_key`/`artifact_dir`/
-  `chunk_name`/`rewrap_path` (§6.1 layout), `renew_lease`/`release_lease`/
-  `lease_state`/`pin`/`protected_videos` (§6.2 protection), `scan`/`evict`
-  (§6.2 whole-video LRU), `check_ceiling`/`estimate_full_output_bytes` (§6.3),
-  `publish`/`part_path`/`sweep_orphaned_parts`/`ensure_swept` (§10.2),
-  `KeyedLocks` (§10.4, single-worker dedup) and `purge` (§13). Never write into
-  the store by any other route. `routes/video.py` keeps only the indexing side:
-  `/api/video-frame` and `/api/video-timeline`. Spec:
-  `docs/specs/video-playback-transcode.md` §11.
-- **The §6.3 ceiling refusal is examiner-overridable, and the override is a
-  parameter of one request** — `POST /api/video-full?override=true`, never a
-  setting or a default (ruling 2026-08-14, spec §6.3). It is refused with 403
-  `override-unattributed` when `SFN_EXAMINER_ID` cannot attribute it, logged at
-  WARNING with the examiner and the estimate it set aside, and disclosed through
-  the job view's `override` field; `OVERRIDE_NOTICE` is defined once in
-  `jobs.py` and rendered from that field — never re-worded at a call site.
-  **It bypasses the forecast and never `limit_bytes`.** That is also why
-  `routes.py` decides `limit_bytes` from whether a ceiling is *configured*
-  (`settings.video_cache_max_bytes > 0`) and never from the limit being
-  non-zero: 50% of a ceiling too small to halve floors to 0, and `or None` would
-  read that as "unbounded" — handing the one job that got past the forecast the
-  one encode with no `.part` watch at all.
-- **Only a `refused` verdict is overridable — an `unknown` estimate is not.**
-  `unknown` is refused outright, with **Download original** offered and no examiner
-  escape hatch (operator ruling 2026-08-14, #206/#208 — the narrowing that replaced
-  the spec's earlier reading rather than sitting beside it).
-  `cache.CeilingVerdict.overridable` is `self.state == "refused"` and nothing wider.
-  **Two places publish that flag to the client** — `routes.py:289` in the `full_copy`
-  dict and `routes.py:732` in the 507 detail — so a change that exercises only
-  `POST /api/video-full` passes clean while `playback-info` still advertises an
-  override the server will refuse.
-- **`rewrap.py` and `encode.py` must never merge.** A rewrap is a PyAV stream
-  copy whose output bitstream is bit-identical to its input; an encode is lossy,
-  tone-mapped and carries the §7.4 disclosure. Keeping them apart is what stops
-  a later reader treating a re-encode as a lossless copy in an evidence viewer.
-- **Everything that changes a rendered pixel is a field of
-  `capability.Pipeline`, and every field is hashed into the cache key.** No third
-  answer: a pixel-affecting setting outside the fingerprint gives one cache entry
-  two pictures under one label. A test pins the field set, and `describe()` (the
-  §7.2 label) derives from the same fields, so a new field cannot change the key
-  while the label keeps describing the old pipeline. Spec §6.1.
-- Path-validating security controls get exactly one definition, in
-  `routes/_shared.py`: `_check_allowed_path` and `_resolve_video_path`. Never
-  re-implement either at a call site.
-- Pipeline logic is the package `src/scalar_forensic/web/pipeline/`; public API is
-  re-exported in its `__init__.py` — import sites use `from scalar_forensic.web.pipeline import X`.
-- Frontend: the Alpine `sfn()` component is split into part files under
-  `web/static/js/` (state/computed/helpers/lifecycle/analysis/evidence/triage/reset),
-  merged by `static/app.js` via property descriptors. New component code goes into the
-  matching part file; computed getters belong in `computed.js`. Never merge parts with
-  `Object.assign` — it evaluates getters instead of copying them. Part `<script>` tags
-  in `index.html` must load before `app.js`. Two subsystems own a part file of their
-  own — `js/faces.js` and the three files of `js/video_playback/` — for the same
-  cohesion reason their Python packages own a router; they still register on
-  `window.__sfnParts` and still load before `app.js`. The three are `player.js` (the
-  double-buffered chunk player), `full_job.js` (the phase 7 browser side: poll,
-  progress, cancel, the `beforeunload` navigate-away prompt, auto-switch) and
-  `rendering.js` (the §7.2 rendering-record rows — **one** renderer for both the chunk
-  and the full copy, because §7.2 is one requirement and two renderers are free to
-  disagree about what an examiner is shown).
-- **A wiring test cannot tell you the browser can run the file.** `player.js` once
-  shipped a `?? … ||` precedence `SyntaxError` — it did not parse at all — and all
-  fourteen of its text-level wiring tests passed against it. `npm test` closes the
-  **parse** half of that gap since `#173` — `tests/js/harness.mjs` compiles and runs
-  every part file — but not the **render** half: there is no DOM in it. Browser-side
-  work is still finished by starting a server, force-refetching every `<script src>`
-  **and** the stylesheet with `fetch(url, {cache: 'reload'})`, reloading, and driving
-  the component. Spec §14.
+- Deployment across an isolated LAN is intentional: the `0.0.0.0` web bind and
+  remote embeddings endpoint are not accidental internet-exposure assumptions.
+  See `docs/deployment.md`; do not silently redesign access control.
+- Safeguards enforce normalization size, SSCD crop count and model identity at
+  ingestion and similarity-query boundaries. A configuration-mismatch inspection
+  override permits metadata/original viewing, not incompatible vector comparison.
+- Topic routers live in `web/routes/`; shared path validators live in
+  `web/routes/_shared.py`. Video playback owns its router in
+  `video_playback/routes.py`; face HTTP endpoints live in `web/routes/faces.py`.
+- Ingestion decisions live in `ingestion/`; web computation lives in
+  `web/pipeline/`. Import helpers from their owning modules unless intentionally
+  exported by the package facade.
+- The indexer cannot add a new named vector to an existing collection through
+  `VectorParamsDiff`: choose intended modalities at collection creation or
+  explicitly rebuild. Never silently delete a collection.
+- Frontend `sfn()` is assembled from `web/static/js/` parts by property
+  descriptors. Never replace this with `Object.assign`, which evaluates getters.
+  Part scripts load before `app.js`. Use the matching part for new behavior.
+- Superseded responses must not publish after a session/selection reset.
+  Check identity after asynchronous JSON parsing too, not only after fetch.
+- When checking a live browser, refresh CSS and every script as well as HTML;
+  a query-string cache bust on the HTML alone does not refresh its assets.
 
-## Gotchas
+## Video playback invariants
 
-- **`ffmpeg` is a declared external dependency** (spec §8), installed by CI and the
-  Dockerfile, documented in `INSTALL.md`. PyAV covers indexing and the rewrap; only the
-  re-encode shells out. The build needs `--enable-libzimg` for `zscale`/`tonemap` — without
-  it an HDR source is *refused*, not encoded, because 8-bit output still tagged `bt2020`/HLG
-  is the defect §3.1 measured. The capability probe runs a real six-frame
-  decode→tone-map→encode→mux; never "fix" it into reading `ffmpeg -encoders`, which is the
-  false positive §8 exists to reject.
-- **The GPU is used for the *encoder* only.** `-hwaccel_output_format cuda` bypasses
-  ffmpeg's autorotate and every portrait clip comes out on its side (§3.1, measured).
-  Decode and filtering stay in software; `tests/test_video_playback.py` pins it with a
-  fixture carrying a real display matrix, and adding `-noautorotate` fails that test.
-- ffmpeg 6 **cannot write rotation side data on an output stream** (`-metadata:s:v rotate=`
-  is gone), so the generated HDR fixture gets a display matrix patched into its `tkhd` box.
-  Do not replace that with a weakened assertion — the rotation test is one of the two §14
-  tests the whole encode path exists to keep honest.
-- **`video_playback/` holds process-wide state that a test fixture must reset on both
-  sides**, or one test inherits another's answer and it reads as a flake:
-  `capability.reset_cache()` (the probe), `digest._reset_hash_cache()` (the `HashCache`
-  handle), and `cache.reset_leases()` + `cache.artifact_locks.reset()` +
-  `cache._reset_sweep()` (leases, pins, the lock table, the once-per-process `.part`
-  sweep), and `jobs.admission.reset()` + `jobs.runner.reset()` +
-  `routes.reset_substitutions()` (the shared admission counter, the full-video job
-  table — `runner.reset()` kills what is still running — and the GPU→CPU
-  cache-lookup hint). `tests/test_video_playback.py`
-  has a module-scope **autouse** fixture doing all of them; keep it autouse.
-- `unittest.mock.patch` targets are per-module: patch where the name is *used*
-  (e.g. `scalar_forensic.web.routes.files.Settings`, `...pipeline.query.QdrantClient`),
-  not the package that re-exports it.
-- `scripts/` ignores E402 (imports follow an intentional `sys.path` bootstrap).
-- `data/` is gitignored except `data/sample_images/`; huge local test sets
-  (`data/images/`, zips) live there untracked. Ingestion CSVs go to `data/reports/`.
-- The app sends **no cache headers on `/`**, and `ignoreCache` does not defeat the browser
-  cache — use `/?cachebust=N` when testing UI changes, or you will debug a stale page.
-  **`/?cachebust=N` busts only the HTML.** It busts neither `style.css` **nor any
-  `/static/js/` part file**, so a live check can measure old CSS *and* old JS and report a
-  false pass — or a false RED: on 2026-08-12 a stale `computed.js` made `mergedHits`
-  undefined and the feature look broken when it was not. Force-refetch every `<script src>`
-  and the stylesheet with `fetch(url, {cache: 'reload'})`, then reload.
-- **Never measure the suite against a dirty tree and attribute the number to a commit.**
-  `pytest` collects from disk, not from git, so a parallel worker's uncommitted tests are
-  counted in *your* run. On 2026-08-12 this published 526/5 for a commit whose real bar was
-  521/5. Check `git status --porcelain` is 0 before quoting a bar against a sha.
-- The 15 pytest warnings are both third-party: 14 are a torch `jit.script_method` deprecation
-  (all from `test_embedder_preprocessing.py`), and since the 2026-08-13 fastapi bump one is
-  `StarletteDeprecationWarning: Using httpx with starlette.testclient is deprecated; install
-  httpx2 instead`. Neither is ours; the starlette one is a live TODO, not noise.
-- The face real-model test skips unless a YuNet ONNX is present (`models/` is gitignored; fetch
-  with `scripts/download_models.py --yunet`). It is the only check that can catch a wrong YuNet
-  landmark-column map — the other detector tests build rows from the same assumption as the code.
-- Faces have two gates: review (keep the native-resolution crop) and embedding (align + vector).
-  Review-only observations are vectorless points — that is what keeps them out of search, not a
-  payload filter. Never give them a vector.
-- `tests/faces/test_store_integration.py` skips unless `SFN_TEST_QDRANT_URL` is set; it is the
-  only test that can observe the exclusion guarantee, since a hermetic test can inspect only the
-  `PointStruct` constructor. Run it against a throwaway Qdrant before touching demotion or purge.
-- Face search is uncalibrated by deliberate ruling (2026-08-12): the raw cosine is displayed and
-  labelled as such. SFace's 0.363 is the model authors' reference figure only — never a default, a
-  filter or a deployment threshold. See `docs/specs/face-pipeline.md` §10.
-- **`requires-python = "==3.12.*"` is load-bearing — do not "modernise" it.** `37a8b4b` moved
-  the project *down* from 3.13 to 3.12 because the ROCm path pins `pytorch-triton-rocm` by
-  literal cp312 wheel URL with a `python_version == '3.12'` marker (`pyproject.toml:89`;
-  PyTorch tags that wheel `linux_x86_64`, not manylinux, so uv's index resolver rejects it).
-  cp314 wheels do now exist for torch/triton-rocm/onnxruntime, so a bump is *possible* — but
-  it means touching 7 places (`requires-python`, the triton URL+marker, `run.sh:8`'s hardcoded
-  `.venv/lib/python3.12/...` path, the CI matrix, `uv.lock`, the Dockerfile, and the
-  regenerated `vendor/` airgap bundle). 3.12 is supported to Oct 2028 and the hot paths are
-  torch/Qdrant, not the interpreter. Dependabot reopens this as a docker base-image bump;
-  close it. (Precedent: PR #100, closed 2026-08-13.)
-- Pytest's `addopts` in `pyproject.toml` carries `--cov-fail-under=65`, which applies to
-  **every** invocation. Any CI job or local run of a test *subset* must pass `--no-cov` or it
-  fails on coverage while its tests pass — this silently red-lit `qdrant-integration` for a
-  day (fixed in `ci.yml`, see the comment there).
-- `indexer.py:96-104` claims Qdrant can add a named vector to an existing collection. It cannot
-  (`VectorParamsDiff` has no `size`), so `--dino` now and `--sscd` later is impossible — adding a
-  modality means dropping the collection and re-indexing.
+See `docs/specs/video-playback-transcode.md` for decisions, limits and rationale.
+
+- Rewrap is a bitstream-preserving PyAV copy; encoding is lossy and separately
+  disclosed. Keep `rewrap.py` and `encode.py` distinct.
+- `ffmpeg` is an external dependency. HDR probing must exercise actual
+  decode/filter/encode with libzimg; an encoder-name listing is insufficient.
+- GPU acceleration applies to encoding, not hardware decoding/filtering:
+  the latter bypasses autorotation on measured portrait inputs.
+- Every pixel-affecting pipeline setting is fingerprinted into the cache key
+  and described by the same rendering record.
+- Use cache ownership/layout/lease APIs; do not write or delete arbitrary
+  files in the store. Keep audit outside automatic retention.
+- Full-copy forecast override applies only to a refused estimate and one
+  attributed request. Unknown estimates are not overridable. Actual output-size
+  limits remain enforced even after forecast override.
+- `_override_offered()` supplies both playback-info and start-refusal fields.
+  Keep the two response carriers consistent.
+- Full-export cancellation requires the private claim returned on start.
+  Observing or closing a panel does not authorize cancelling another claim.
+- Rendering rows and recorded command come from server audit data, not frontend
+  inference. `rendering.js` is the shared renderer for chunks and full copies.
+- Tests must reset process-wide probe/hash/cache/lease/admission/job state on
+  both sides; retain the autouse lifecycle fixtures.
+- Generated rotation fixtures patch the MP4 display matrix because ffmpeg 6
+  cannot set output rotation through the old metadata option. Preserve the
+  orientation assertions rather than weakening the fixture.
+
+## Face invariants
+
+- Review and embedding gates serve different purposes. Native review crops
+  never upscale; aligned embeddings may resample and must be labeled.
+- Review-only observations have no named vector. Do not substitute a display
+  filter for structural exclusion from similarity search.
+- Face observations are scoped to source media and video timecode; content-addressed
+  chips can be shared. Purging one observation must not break another's chips.
+- Uploaded face indices are bound to a detection token; consumers must carry it.
+- Raw face cosine is deliberately shown as uncalibrated, without a confidence
+  interval or deployment-calibrated threshold. SFace's reference figure is not
+  a deployment threshold. See face spec §10.
+- Face enablement gates biometric viewing; stored evidence must not require
+  today's inference weights to be available. New inference requires startup
+  validation.
+- Keep counts, quality exclusions, model provenance and comparability caveats
+  visible; unknown compatibility is not a demonstrated mismatch.
+
+## Other pitfalls
+
+- Patch dependencies where used, not merely where re-exported.
+- `Settings` reads CWD configuration; hermetic tests isolate operator settings.
+- `data/` is ignored except sample images. Never commit case material or models.
+- Changing Python requires coordinating the ROCm cp312 wheel/marker, wrapper
+  library paths, CI, Docker, lockfile and airgap exports—not just requires-python.

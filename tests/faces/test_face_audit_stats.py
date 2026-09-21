@@ -18,7 +18,7 @@ from scalar_forensic.web.pipeline.faces_stats import face_score_stats
 client = TestClient(app)
 
 
-def test_face_score_stats_has_the_same_field_set_as_the_dino_stats():
+def test_face_score_stats_preserves_dino_fields_and_identifies_the_scales():
     from scalar_forensic.web.pipeline.stats import SemanticStats
 
     store = MagicMock()
@@ -26,7 +26,10 @@ def test_face_score_stats_has_the_same_field_set_as_the_dino_stats():
         {"point_id": f"p{i}", "score": s} for i, s in enumerate([0.1, 0.2, 0.6, 0.9])
     ]
     stats = face_score_stats(store, [1.0, 0.0], sample_size=100)
-    assert set(vars(stats)) == set(SemanticStats.__dataclass_fields__)
+    assert set(vars(stats)) == set(SemanticStats.__dataclass_fields__) | {
+        "score_scale",
+        "histogram_scale",
+    }
     assert len(stats.histogram) == 20
     assert stats.max_score == pytest.approx(0.9)
     assert stats.count == 4
@@ -37,7 +40,7 @@ def test_face_score_stats_are_computed_with_exact_search():
     store.search_faces.return_value = [{"point_id": "p", "score": 0.5}]
     face_score_stats(store, [1.0], sample_size=50)
     assert store.search_faces.call_args.kwargs["exact"] is True
-    assert store.search_faces.call_args.kwargs["threshold"] == 0.0
+    assert store.search_faces.call_args.kwargs["threshold"] is None
 
 
 def test_face_score_stats_match_the_dino_percentiles_line_for_line():
@@ -79,7 +82,7 @@ def _audit_store() -> MagicMock:
         "n_kept": 2,
         "n_review_only": 3,
         "review_only_reasons": {"size": 3},
-        "rejected": {"confidence": 1},
+        "n_rejected": {"confidence": 1},
     }
     store.list_faces.return_value = [
         {
@@ -128,6 +131,13 @@ def test_face_audit_reports_index_time_thresholds_not_current_env():
     assert "caveat" in body
 
 
+def test_face_audit_reads_rejection_breakdown_from_persisted_marker():
+    from scalar_forensic.web.pipeline.faces_stats import face_audit
+
+    body = face_audit(_audit_store(), "a" * 64)
+    assert body["file_totals"]["rejected"] == {"confidence": 1}
+
+
 def test_face_audit_rejects_a_malformed_hash():
     with patch("scalar_forensic.web.routes.faces.Settings"):
         assert client.get("/api/faces/audit?image_hash=zz").status_code == 400
@@ -165,6 +175,10 @@ def _query_face(vector):
 
 
 def _post_dist_stats(entry, store=None):
+    from scalar_forensic.web.routes.faces import _detection_token
+
+    entry.query_faces_timecode_ms = None
+    token = _detection_token(entry.query_faces, entry.query_faces_cfg)
     patches = [
         patch("scalar_forensic.web.routes.faces.Settings"),
         patch("scalar_forensic.web.routes.faces._require_faces"),
@@ -181,7 +195,7 @@ def _post_dist_stats(entry, store=None):
             stack.enter_context(p)
         return client.post(
             "/api/faces/dist-stats",
-            data={"session_id": "s", "file_id": "f", "face_index": 0},
+            data={"session_id": "s", "file_id": "f", "face_index": 0, "detection_token": token},
         )
 
 
@@ -195,12 +209,32 @@ def test_dist_stats_names_its_population_and_quotes_the_reference_figure():
 
     assert body["count"] == 3
     assert len(body["histogram"]) == 20
-    assert "review-only" in body["population"]
+    assert "review-only" in body["population"].lower()
+    assert "top-N" in body["population"]
     assert "structurally absent" in body["population"]
     assert body["model_reference_threshold"] == 0.363
     assert "not a threshold calibrated" in body["model_reference_note"]
     # The reference figure is quoted, never applied.
-    assert store.search_faces.call_args.kwargs["threshold"] == 0.0
+    assert store.search_faces.call_args.kwargs["threshold"] is None
+
+
+@pytest.mark.parametrize("scores", [[], [-1.0, 0.0, 1.0]])
+def test_dist_stats_identifies_raw_scores_and_normalized_histogram_on_the_wire(scores):
+    store = MagicMock()
+    store.search_faces.return_value = [{"score": score} for score in scores]
+    entry = MagicMock(query_faces=[_query_face([1.0, 0.0])])
+    response = _post_dist_stats(entry, store)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["score_scale"] == "raw_cosine"
+    assert body["histogram_scale"] == "normalized_cosine"
+    if scores:
+        assert body["min_score"] == -1.0
+        assert body["median"] == 0.0
+        assert body["max_score"] == 1.0
+        assert body["histogram"] == [1] + [0] * 9 + [1] + [0] * 8 + [1]
+    else:
+        assert body["histogram"] == [0] * 20
 
 
 def test_dist_stats_refuses_a_review_only_face():

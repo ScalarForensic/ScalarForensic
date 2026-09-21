@@ -54,7 +54,7 @@ def test_payload_round_trip_contains_everything():
 
 
 def test_review_thresholds_change_config_hash():
-    # Must change: processed_hashes() keys on this, and a retuned review floor
+    # Must change: processed_units() keys on this, and a retuned review floor
     # has to force reprocessing or it silently admits nothing new.
     assert _cfg().config_hash != _cfg(review_min_size=32).config_hash
     assert _cfg().config_hash != _cfg(review_min_conf=0.5).config_hash

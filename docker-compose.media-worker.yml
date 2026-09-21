@@ -1,0 +1,38 @@
+services:
+  media-worker:
+    image: ${SCALARFORENSIC_MEDIA_WORKER_IMAGE:?Specify a pinned CPU worker image}
+    entrypoint: [python, -m, scalar_forensic.media_worker.server]
+    command:
+      - --socket
+      - /ipc/media.sock
+      - --generation
+      - ${SFN_MEDIA_WORKER_GENERATION:?Assign a new generation for each replacement}
+      - --concurrency
+      - ${SFN_MEDIA_WORKER_CONCURRENCY:-4}
+      - --max-queued
+      - ${SFN_MEDIA_WORKER_MAX_QUEUED:-4}
+      - --request-timeout
+      - ${SFN_MEDIA_WORKER_REQUEST_TIMEOUT:-30}
+      - --max-requests
+      - ${SFN_MEDIA_WORKER_MAX_REQUESTS:-10000}
+      - --max-seconds
+      - ${SFN_MEDIA_WORKER_MAX_SECONDS:-3600}
+    network_mode: none
+    environment:
+      - SFN_MAX_IMAGE_PIXELS=${SFN_MAX_IMAGE_PIXELS:-}
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: ${SFN_MEDIA_WORKER_PIDS_LIMIT:-256}
+    mem_limit: ${SFN_MEDIA_WORKER_MEMORY:-4g}
+    cpus: ${SFN_MEDIA_WORKER_CPUS:-4}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${SFN_MEDIA_WORKER_TMP_SIZE:-256m},mode=1777
+    volumes:
+      - type: bind
+        source: ${SFN_MEDIA_WORKER_IPC_DIR:?Precreate a dedicated IPC directory owned by UID 10001}
+        target: /ipc
+        bind:
+          create_host_path: false
+    restart: "no"

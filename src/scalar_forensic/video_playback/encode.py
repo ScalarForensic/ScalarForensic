@@ -15,13 +15,14 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import selectors
 import signal
 import subprocess
-import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from scalar_forensic.config import Settings
 from scalar_forensic.video_playback.cache import part_path, publish
@@ -33,6 +34,9 @@ from scalar_forensic.video_playback.capability import (
 )
 
 _log = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from scalar_forensic.media_worker.video_client import Cancellation
 
 
 class CeilingExceeded(RuntimeError):
@@ -109,6 +113,7 @@ class EncodeResult:
     wall_seconds: float
     fell_back: bool
     fallback_reason: str | None
+    runtime: dict | None = None
 
 
 def build_command(
@@ -189,9 +194,9 @@ def _run(cmd: list[str], timeout: int) -> str:
         _, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
-        proc.communicate()
+        _, stderr = proc.communicate()
         raise EncodeError(
-            f"encode timed out after {timeout}s", command=cmd, timed_out=True
+            f"encode timed out after {timeout}s", command=cmd, stderr=stderr or "", timed_out=True
         ) from None
     if proc.returncode != 0:
         detail = (stderr or "").strip().splitlines()
@@ -257,7 +262,7 @@ def _run_watched(
     :class:`CeilingExceeded` for why that watch is against ``limit_bytes``.
 
     The process gets its own session so a kill reaches ffmpeg's children as well
-    (§10.3), and stderr is drained by a thread and bounded, so a chatty encoder
+    (§10.3), and both pipes are drained without blocking and bounded, so a chatty encoder
     can neither deadlock the pipe nor grow this process without limit.
     """
     proc = subprocess.Popen(  # noqa: S603 - operator-configured binary, built argv
@@ -268,68 +273,89 @@ def _run_watched(
         text=True,
         start_new_session=True,
     )
-    _lower_priority(proc.pid, nice)
-    if on_start is not None:
-        on_start(proc)
-
-    stderr_tail: list[str] = []
-
-    def _drain() -> None:
-        assert proc.stderr is not None
-        for line in proc.stderr:
-            stderr_tail.append(line)
-            del stderr_tail[:-_STDERR_LINES]
-
-    drainer = threading.Thread(target=_drain, daemon=True)
-    drainer.start()
-
     deadline = time.monotonic() + timeout
     fields: dict[str, str] = {}
+    stderr_tail: list[str] = []
     overshoot: CeilingExceeded | None = None
     timed_out = False
-    assert proc.stdout is not None
-    try:
-        for line in proc.stdout:
-            key, _, value = line.strip().partition("=")
-            fields[key] = value
-            if key != "progress":
-                continue
-            written = part.stat().st_size if part is not None and part.exists() else 0
-            if on_progress is not None:
-                on_progress(
-                    Progress(
-                        frames=_as_int(fields.get("frame")),
-                        out_seconds=_out_seconds(fields.get("out_time")),
+    # Read pipes without blocking on a newline (or on progress). The clock and
+    # disk ceiling must still be checked when an encoder stops saying anything.
+    pending = b""
+    stderr_bytes = b""
+    with selectors.DefaultSelector() as selector:
+        assert proc.stdout is not None and proc.stderr is not None
+        for stream in (proc.stdout, proc.stderr):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ)
+        try:
+            _lower_priority(proc.pid, nice)
+            if on_start is not None:
+                on_start(proc)
+            while True:
+                try:
+                    written = part.stat().st_size if part is not None else 0
+                except FileNotFoundError:
+                    written = 0
+                if limit_bytes is not None and written > limit_bytes:
+                    overshoot = CeilingExceeded(
+                        f"the full copy passed {limit_bytes} bytes while encoding "
+                        f"({written} written)",
                         written_bytes=written,
+                        limit_bytes=limit_bytes,
                     )
-                )
-            fields.clear()
-            if limit_bytes is not None and written > limit_bytes:
-                overshoot = CeilingExceeded(
-                    f"the full copy passed {limit_bytes} bytes while encoding ({written} written)",
-                    written_bytes=written,
-                    limit_bytes=limit_bytes,
-                )
-                break
-            if time.monotonic() > deadline:
-                timed_out = True
-                break
-    finally:
-        if overshoot is not None or timed_out:
+                    break
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    break
+                if not selector.get_map() and proc.poll() is not None:
+                    break
+                for key, _ in selector.select(
+                    timeout=min(0.05, max(0, deadline - time.monotonic()))
+                ):
+                    data = os.read(key.fd, 65536)
+                    if not data:
+                        selector.unregister(key.fileobj)
+                        continue
+                    if key.fileobj is proc.stderr:
+                        stderr_bytes = (stderr_bytes + data)[-65536:]
+                        continue
+                    pending += data
+                    while b"\n" in pending:
+                        line, pending = pending.split(b"\n", 1)
+                        name, _, value = (
+                            line.decode("utf-8", errors="replace").strip().partition("=")
+                        )
+                        if name in {"frame", "out_time", "progress"}:
+                            fields[name] = value
+                        if name == "progress":
+                            if on_progress is not None:
+                                on_progress(
+                                    Progress(
+                                        frames=_as_int(fields.get("frame")),
+                                        out_seconds=_out_seconds(fields.get("out_time")),
+                                        written_bytes=written,
+                                    )
+                                )
+                            fields.clear()
+                    pending = pending[-65536:]
+        finally:
+            # Also covers exceptions raised by callbacks and inherited pipes
+            # held open by descendants after their parent exits.
             _kill_group(proc)
-        proc.wait()
-        drainer.join(timeout=5)
-        with contextlib.suppress(OSError):
+            proc.wait(timeout=5)
             proc.stdout.close()
-        if proc.stderr is not None:
-            with contextlib.suppress(OSError):
-                proc.stderr.close()
+            proc.stderr.close()
+    stderr_tail = stderr_bytes.decode("utf-8", errors="replace").splitlines(keepends=True)[
+        -_STDERR_LINES:
+    ]
 
     stderr = "".join(stderr_tail)
     if overshoot is not None:
         raise overshoot
     if timed_out:
-        raise EncodeError(f"encode timed out after {timeout}s", command=cmd, timed_out=True)
+        raise EncodeError(
+            f"encode timed out after {timeout}s", command=cmd, stderr=stderr, timed_out=True
+        )
     if proc.returncode != 0:
         detail = stderr.strip().splitlines()
         raise EncodeError(
@@ -348,7 +374,7 @@ _STDERR_LINES = 40
 def _kill_group(proc: subprocess.Popen) -> None:
     """Kill the encoder and anything it started (§10.3)."""
     with contextlib.suppress(OSError, ProcessLookupError):
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        os.killpg(proc.pid, signal.SIGKILL)
     with contextlib.suppress(OSError):
         proc.kill()
 
@@ -383,7 +409,7 @@ class Watch:
     threads: int | None = None
     limit_bytes: int | None = None
     on_progress: Callable[[Progress], None] | None = None
-    on_start: Callable[[subprocess.Popen], None] | None = None
+    on_start: Callable[[subprocess.Popen | Cancellation], None] | None = None
 
 
 def encode(
@@ -410,6 +436,20 @@ def encode(
     different fingerprint and a different cache key (§6.1), and the label must
     name the encoder that actually ran (§7.2).
     """
+    from scalar_forensic import video_access
+
+    if video_access.configured():
+        return video_access.encode(
+            settings,
+            src,
+            dst,
+            hdr=hdr,
+            start=start,
+            duration=duration,
+            has_audio=has_audio,
+            watch=watch,
+        )
+
     pipeline = select(settings, cap, hdr=hdr)
     part = part_path(dst)
     part.parent.mkdir(parents=True, exist_ok=True)
@@ -429,18 +469,32 @@ def encode(
             threads=watch.threads if watch else None,
             progress=watch is not None,
         )
-        if watch is None:
-            _run(argv, settings.video_job_timeout)
-        else:
-            _run_watched(
-                argv,
-                settings.video_job_timeout,
-                nice=watch.nice,
-                on_progress=watch.on_progress,
-                on_start=watch.on_start,
-                part=part,
-                limit_bytes=watch.limit_bytes,
+        try:
+            if watch is None:
+                _run(argv, settings.video_job_timeout)
+            else:
+                _run_watched(
+                    argv,
+                    settings.video_job_timeout,
+                    nice=watch.nice,
+                    on_progress=watch.on_progress,
+                    on_start=watch.on_start,
+                    part=part,
+                    limit_bytes=watch.limit_bytes,
+                )
+        except EncodeError as exc:
+            # Keep the diagnostic context for every failed attempt, including a
+            # GPU attempt followed by a successful CPU fallback. Bound bytes as
+            # well as lines: ffmpeg can emit a single very long line.
+            tail = exc.stderr.encode("utf-8")[-65536:].decode("utf-8", errors="replace")
+            tail = "\n".join(tail.splitlines()[-_STDERR_LINES:])
+            _log.warning(
+                "ffmpeg attempt failed: %s; command=%r; stderr tail=%s",
+                exc,
+                exc.command,
+                tail,
             )
+            raise
         return argv
 
     started = time.monotonic()

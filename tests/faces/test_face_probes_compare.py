@@ -17,19 +17,54 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from scalar_forensic.faces.provenance import PipelineConfig
 from scalar_forensic.faces.store import FACE_VECTOR_NAME
 from scalar_forensic.web.app import app
 
 client = TestClient(app)
 
+
+@pytest.fixture(autouse=True)
+def detection_fingerprint():
+    # Geometry is mocked in these search tests; identity is tested separately.
+    with patch("scalar_forensic.web.routes.faces._detection_token", return_value="detection"):
+        yield
+
+
 PID_EMB = "11111111-1111-1111-1111-111111111111"
 PID_REV = "22222222-2222-2222-2222-222222222222"
+
+
+def _config():
+    return PipelineConfig(
+        detector_id="yunet",
+        detector_model_hash="d" * 64,
+        detector_score_threshold=0.5,
+        detect_max_size=1600,
+        embedder_model_name="face.onnx",
+        embedder_model_hash="e" * 64,
+        manifest_hash="f" * 64,
+        embedder_dim=2,
+        alignment_version="arcface-112-v1",
+        normalization_id="test",
+        min_conf=0.8,
+        min_size=40,
+        min_sharpness=20,
+        max_clipped=0.2,
+        max_pose=30,
+        crop_dilation=1.2,
+        review_min_conf=0.5,
+        review_min_size=20,
+        sfn_version="test",
+        cv2_version="test",
+        ort_version="test",
+    )
 
 
 def _entry(query_faces):
     return MagicMock(
         query_faces=query_faces,
-        query_faces_cfg=MagicMock(config_hash="9f2c"),
+        query_faces_cfg=_config(),
         file_hash="a" * 64,
     )
 
@@ -41,6 +76,7 @@ def _session_face(index=0, vector=(1.0, 0.0)):
 def _record(pid, vector):
     rec = MagicMock()
     rec.id = pid
+    rec.payload = _config().to_payload()
     rec.vector = {} if vector is None else {FACE_VECTOR_NAME: list(vector)}
     return rec
 
@@ -82,11 +118,16 @@ def _post_compare(store, entry, image_hash="b" * 64):
     ):
         return client.post(
             "/api/faces/compare",
-            data={"session_id": "s", "file_id": "f", "image_hash": image_hash},
+            data={
+                "session_id": "s",
+                "detection_token": "detection",
+                "file_id": "f",
+                "image_hash": image_hash,
+            },
         )
 
 
-# ── POST /api/faces/compare ────────────────────────────────────────────────
+# POST /api/faces/compare
 
 
 def test_compare_pairs_cover_comparable_faces_only():
@@ -155,7 +196,7 @@ def test_compare_validates_the_image_hash_before_store_access():
     store.list_faces.assert_not_called()
 
 
-# ── POST /api/faces/search with stored point_ids ───────────────────────────
+# POST /api/faces/search with stored point_ids
 
 
 def _post_search(store, entry, data):
@@ -174,7 +215,10 @@ def _post_search(store, entry, data):
         patches[7],
         patches[8] as search,
     ):
-        resp = client.post("/api/faces/search", data={"session_id": "s", "file_id": "f", **data})
+        resp = client.post(
+            "/api/faces/search",
+            data={"session_id": "s", "detection_token": "detection", "file_id": "f", **data},
+        )
     return resp, search
 
 
@@ -228,3 +272,66 @@ def test_search_with_neither_probe_kind_keeps_the_existing_400():
     resp, _ = _post_search(store, entry, {"face_indices": " ", "point_ids": ""})
     assert resp.status_code == 400
     assert "no face indices given" in resp.json()["detail"]
+
+
+def test_compare_before_detection_returns_400():
+    entry = _entry(None)
+    entry.query_faces_cfg = None
+    store = _store()
+    response = _post_compare(store, entry)
+    assert response.status_code == 400
+    assert "detect" in response.json()["detail"].lower()
+    store.list_faces.assert_not_called()
+
+
+def test_stored_only_probe_uses_its_persisted_config():
+    entry = _entry(None)
+    entry.query_faces_cfg = None
+    record = _record(PID_EMB, (0.5, 0.5))
+    store = _store(records=[record])
+    response, search = _post_search(store, entry, {"point_ids": PID_EMB})
+    assert response.status_code == 200
+    assert store.check_compat.call_args.args[0] is not None
+    assert search.called
+
+
+def test_stored_probe_without_provenance_is_refused():
+    entry = _entry(None)
+    entry.query_faces_cfg = None
+    record = _record(PID_EMB, (0.5, 0.5))
+    record.payload = {}
+    response, search = _post_search(_store(records=[record]), entry, {"point_ids": PID_EMB})
+    assert response.status_code == 409
+    search.assert_not_called()
+
+
+def test_mixed_probes_with_different_provenance_are_refused():
+    entry = _entry([_session_face()])
+    record = _record(PID_EMB, (1.0, 0.0))
+    record.payload["embedder_model_hash"] = "incompatible-model"
+    response, search = _post_search(
+        _store(records=[record]), entry, {"face_indices": "0", "point_ids": PID_EMB}
+    )
+    assert response.status_code == 409
+    search.assert_not_called()
+
+
+def test_video_face_lookup_carries_source_and_timecode(monkeypatch):
+    monkeypatch.setenv("SFN_FACES_ENABLED", "true")
+    from scalar_forensic.web.routes.faces import faces_by_image
+
+    store = _store()
+    with patch("scalar_forensic.web.routes.faces._store", return_value=store):
+        response = faces_by_image("a" * 64, "b" * 64, 1200)
+    assert response.status_code == 200
+    store.list_faces.assert_called_once_with("a" * 64, video_hash="b" * 64, frame_timecode_ms=1200)
+
+
+def test_video_face_lookup_refuses_incomplete_source_scope():
+    from fastapi import HTTPException
+
+    from scalar_forensic.web.routes.faces import faces_by_image
+
+    with pytest.raises(HTTPException) as error:
+        faces_by_image("a" * 64, "b" * 64, None)
+    assert error.value.status_code == 400

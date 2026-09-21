@@ -8,6 +8,18 @@ from dataclasses import asdict, dataclass
 
 _VERSION_INFO_FIELDS = {"sfn_version", "cv2_version", "ort_version"}
 
+# The embedder identity every face endpoint reports: the query-side block and the
+# audit report's "embedder" section are one statement about one model, so they
+# read the same fields in the same order.
+EMBEDDER_IDENTITY_FIELDS = (
+    "embedder_model_name",
+    "embedder_model_hash",
+    "manifest_hash",
+    "embedder_dim",
+    "normalization_id",
+    "alignment_version",
+)
+
 
 @dataclass(frozen=True)
 class PipelineConfig:

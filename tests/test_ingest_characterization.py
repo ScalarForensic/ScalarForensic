@@ -14,6 +14,7 @@ File scanning, hashing, preprocessing, and CSV writing are real.
 from __future__ import annotations
 
 import csv
+import os
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,27 +25,28 @@ from PIL import Image
 from qdrant_client.models import (
     Distance,
     FieldCondition,
+    Filter,
     HasVectorCondition,
     VectorParams,
 )
 
-from scalar_forensic.cli import (
+from scalar_forensic.embedder import hash_file_both
+from scalar_forensic.indexer import Indexer, qdrant_scroll_all
+from scalar_forensic.ingestion.models import (
     _S_FAIL_EMB,
     _S_INDEXED,
     _S_SKIP_DUP,
     _S_SKIP_FRAME_DUP,
     _S_SKIP_IDX,
-    _dedup_by_hash,
     _FileRecord,
-    _video_status,
-    _write_csv,
 )
-from scalar_forensic.embedder import hash_file_both
-from scalar_forensic.indexer import Indexer, qdrant_scroll_all
+from scalar_forensic.ingestion.planning import plan_images
+from scalar_forensic.ingestion.reporting import _write_csv
+from scalar_forensic.ingestion.video import _video_status
 
-# ---------------------------------------------------------------------------
+_TEST_QDRANT_URL = os.environ.get("SFN_TEST_QDRANT_URL")
+
 # Fakes
-# ---------------------------------------------------------------------------
 
 
 class _StoredPoint:
@@ -72,7 +74,13 @@ class FakeQdrantStore:
 def _matches(point: _StoredPoint, flt) -> bool:
     if flt is None:
         return True
+    if any(_matches(point, cond) for cond in flt.must_not or []):
+        return False
     for cond in flt.must or []:
+        if isinstance(cond, Filter):
+            if not _matches(point, cond):
+                return False
+            continue
         if isinstance(cond, HasVectorCondition):
             if cond.has_vector not in point.vectors:
                 return False
@@ -88,7 +96,7 @@ class FakeQdrantClient:
     def __init__(self, store: FakeQdrantStore) -> None:
         self._store = store
 
-    # -- collection management ------------------------------------------------
+    # collection management
     def get_collections(self):
         return SimpleNamespace(
             collections=[SimpleNamespace(name=n) for n in self._store.collections]
@@ -109,7 +117,7 @@ class FakeQdrantClient:
         self._store.calls.append(("create_payload_index", field_name))
         self._store.collections[collection_name].payload_indexes[field_name] = field_schema
 
-    # -- point I/O -------------------------------------------------------------
+    # point I/O
     def scroll(
         self,
         collection_name: str,
@@ -127,23 +135,31 @@ class FakeQdrantClient:
         ]
         return hits, None  # single page
 
+    def count(self, collection_name, count_filter=None, exact=True):
+        return SimpleNamespace(
+            count=sum(
+                _matches(point, count_filter)
+                for point in self._store.collections[collection_name].points.values()
+            )
+        )
+
     def retrieve(self, collection_name: str, ids, with_vectors=False, with_payload=False):
         coll = self._store.collections[collection_name]
         return [SimpleNamespace(id=pid) for pid in ids if pid in coll.points]
 
-    def upsert(self, collection_name: str, points) -> None:
+    def upsert(self, collection_name: str, points, wait=True) -> None:
         self._store.calls.append(("upsert", collection_name, [p.id for p in points]))
         coll = self._store.collections[collection_name]
         for p in points:
             coll.points[p.id] = _StoredPoint(vectors=p.vector, payload=p.payload or {})
 
-    def update_vectors(self, collection_name: str, points) -> None:
+    def update_vectors(self, collection_name: str, points, wait=True) -> None:
         self._store.calls.append(("update_vectors", collection_name, [p.id for p in points]))
         coll = self._store.collections[collection_name]
         for pv in points:
             coll.points[pv.id].vectors.update(pv.vector)
 
-    def set_payload(self, collection_name: str, payload: dict, points) -> None:
+    def set_payload(self, collection_name: str, payload: dict, points, wait=True) -> None:
         self._store.calls.append(("set_payload", collection_name))
         coll = self._store.collections[collection_name]
         if isinstance(points, list):
@@ -166,9 +182,6 @@ class FakeEmbedder:
         self.device = "cpu"
         self.compiled = False
         self._counter = 0
-
-    def normalize_batch_bytes(self, pil_images):
-        return list(pil_images)
 
     def embed_images(self, images):
         out = []
@@ -204,9 +217,7 @@ def make_indexer(fake_client_cls, store, vector_name="dino", dim=4, **kwargs) ->
         )
 
 
-# ---------------------------------------------------------------------------
 # qdrant_scroll_all
-# ---------------------------------------------------------------------------
 
 
 class _PagingClient:
@@ -238,9 +249,7 @@ def test_scroll_all_stops_on_empty_page():
     assert client.calls == 1
 
 
-# ---------------------------------------------------------------------------
 # Indexer._ensure_collection
-# ---------------------------------------------------------------------------
 
 _ALL_PAYLOAD_INDEXES = {
     "image_hash",
@@ -297,9 +306,7 @@ def test_dimension_mismatch_is_rejected(fake_client_cls, store):
         make_indexer(fake_client_cls, store, dim=8)
 
 
-# ---------------------------------------------------------------------------
 # Indexer.upsert_batch — payloads, IDs, and the update-vs-insert split
-# ---------------------------------------------------------------------------
 
 _META = {
     "model_name": "fake-dino",
@@ -469,9 +476,7 @@ def test_upsert_batch_length_mismatches_raise(fake_client_cls, store, tmp_path, 
         idx.upsert_batch(**base)
 
 
-# ---------------------------------------------------------------------------
 # Indexer — dedup lookups and video bookkeeping
-# ---------------------------------------------------------------------------
 
 
 def _put(store, pid, vectors, payload):
@@ -490,7 +495,12 @@ def test_get_all_indexed_hashes_and_paths_only_count_own_vector(fake_client_cls,
 def test_get_all_video_info_reports_completeness(fake_client_cls, store):
     idx = make_indexer(fake_client_cls, store)
     frame = {"is_video_frame": True, "extraction_fps": 1.0, "max_frames_cap": 100}
-    _put(store, "f1", {"dino": [1.0]}, {**frame, "video_hash": "vh-done", "video_frames_total": 2})
+    _put(
+        store,
+        "f1",
+        {"dino": [1.0]},
+        {**frame, "video_hash": "vh-done", "dino_video_frames_total": 2},
+    )
     _put(store, "f2", {"dino": [1.0]}, {**frame, "video_hash": "vh-partial"})
     info = idx.get_all_video_info()
     assert info["vh-done"]["complete"] is True
@@ -505,9 +515,9 @@ def test_mark_video_complete_stamps_only_matching_frames(fake_client_cls, store)
     _put(store, "i1", {"dino": [1.0]}, {"image_hash": "h1"})
     idx.mark_video_complete("vh-1", 7)
     pts = store.collections["case"].points
-    assert pts["f1"].payload["video_frames_total"] == 7
-    assert "video_frames_total" not in pts["f2"].payload
-    assert "video_frames_total" not in pts["i1"].payload
+    assert pts["f1"].payload["dino_video_frames_total"] == 7
+    assert "dino_video_frames_total" not in pts["f2"].payload
+    assert "dino_video_frames_total" not in pts["i1"].payload
 
 
 def test_upsert_video_records_are_vectorless_anchors_with_stable_ids(fake_client_cls, store):
@@ -539,9 +549,7 @@ def test_upsert_video_records_empty_list_is_a_noop(fake_client_cls, store):
     assert len(store.calls) == before
 
 
-# ---------------------------------------------------------------------------
-# cli._dedup_by_hash — winner election and skip classification
-# ---------------------------------------------------------------------------
+# plan_images — winner election and skip classification
 
 
 def _dedup_fixture(tmp_path, n_specs=1):
@@ -555,9 +563,10 @@ def _dedup_fixture(tmp_path, n_specs=1):
 
 def test_dedup_elects_first_path_per_hash_and_marks_run_duplicates(tmp_path):
     paths, hashes, records, skipped = _dedup_fixture(tmp_path)
-    needs, any_needs, n_run_dups, n_all_indexed = _dedup_by_hash(
-        paths, hashes, records, [set()], [set()], 1, skipped
-    )
+    plan = plan_images(paths, hashes, [set()], [set()], 1)
+    plan.record(records, skipped)
+    needs, any_needs = plan.needs_per_spec, plan.any_needs
+    n_run_dups, n_all_indexed = len(plan.duplicates), len(plan.already_indexed)
     a, b, c = paths
     assert needs[0] == {a, c}
     assert any_needs == {a, c}
@@ -570,9 +579,10 @@ def test_dedup_elects_first_path_per_hash_and_marks_run_duplicates(tmp_path):
 
 def test_dedup_skips_already_indexed_by_hash(tmp_path):
     paths, hashes, records, skipped = _dedup_fixture(tmp_path)
-    needs, any_needs, n_run_dups, n_all_indexed = _dedup_by_hash(
-        paths, hashes, records, [{"h2"}], [set()], 1, skipped
-    )
+    plan = plan_images(paths, hashes, [{"h2"}], [set()], 1)
+    plan.record(records, skipped)
+    needs = plan.needs_per_spec
+    n_run_dups, n_all_indexed = len(plan.duplicates), len(plan.already_indexed)
     a, b, c = paths
     assert needs[0] == {a}
     assert (n_run_dups, n_all_indexed) == (1, 1)
@@ -584,7 +594,7 @@ def test_dedup_skips_already_indexed_by_hash(tmp_path):
 def test_dedup_skips_already_indexed_by_resolved_path(tmp_path):
     paths, hashes, records, skipped = _dedup_fixture(tmp_path)
     c = paths[2]
-    _dedup_by_hash(paths, hashes, records, [set()], [{str(c.resolve())}], 1, skipped)
+    plan_images(paths, hashes, [set()], [{str(c.resolve())}], 1).record(records, skipped)
     assert records[c].status == _S_SKIP_IDX
 
 
@@ -592,9 +602,10 @@ def test_dedup_per_spec_needs_differ_but_skip_counts_are_shared(tmp_path):
     """Characterizes current behavior: a file needed by only one spec is NOT
     counted as skipped for the other — n_all_indexed uses the union."""
     paths, hashes, records, skipped = _dedup_fixture(tmp_path, n_specs=2)
-    needs, any_needs, n_run_dups, n_all_indexed = _dedup_by_hash(
-        paths, hashes, records, [{"h2"}, set()], [set(), set()], 2, skipped
-    )
+    plan = plan_images(paths, hashes, [{"h2"}, set()], [set(), set()], 2)
+    plan.record(records, skipped)
+    needs, any_needs = plan.needs_per_spec, plan.any_needs
+    n_all_indexed = len(plan.already_indexed)
     a, b, c = paths
     assert needs[0] == {a}
     assert needs[1] == {a, c}
@@ -604,9 +615,7 @@ def test_dedup_per_spec_needs_differ_but_skip_counts_are_shared(tmp_path):
     assert skipped == [1, 1]
 
 
-# ---------------------------------------------------------------------------
 # cli._video_status — three-way split of a video's frame outcomes
-# ---------------------------------------------------------------------------
 
 
 def test_video_status_indexed_when_any_frame_produced_a_vector():
@@ -644,9 +653,7 @@ def test_video_status_still_fails_when_frames_are_unaccounted_for():
     assert reason == "10 frames extracted but no new vectors were indexed"
 
 
-# ---------------------------------------------------------------------------
 # cli._write_csv
-# ---------------------------------------------------------------------------
 
 
 def test_write_csv_rows_sorted_with_processed_flag(tmp_path):
@@ -674,9 +681,7 @@ def test_write_csv_rows_sorted_with_processed_flag(tmp_path):
     assert rows[2] == [str(tmp_path / "b.png"), "yes", "", "m1", "s1", "False"]
 
 
-# ---------------------------------------------------------------------------
 # End-to-end: cli.index() with fake embedders against the fake store
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -728,7 +733,6 @@ def _run_index(images: Path, csv_path: Path, *, dino=True, sscd=False):
         report=csv_path,
         allow_online=False,
         reference=False,
-        ignore_config_mismatch=False,
     )
 
 
@@ -802,3 +806,239 @@ def test_index_dual_modality_run_shares_points_across_models(ingest_env, store):
     methods = [c[0] for c in store.calls if c[0] in ("upsert", "update_vectors")]
     assert "update_vectors" in methods
     assert methods.index("upsert") < methods.index("update_vectors")
+
+
+def test_interrupted_video_400_of_500_resumes_then_skips_extraction(ingest_env, store, monkeypatch):
+    """A partial write never completes; stored source slots count on resume."""
+    for path in ingest_env.images.iterdir():
+        path.unlink()
+    video = ingest_env.images / "same.mp4"
+    video.write_bytes(b"fake video")
+    monkeypatch.setenv("SFN_BATCH_SIZE", "100")
+    monkeypatch.setenv("SFN_VIDEO_MAX_FRAMES", "500")
+    monkeypatch.setenv("SFN_FRAME_STORE_DIR", str(ingest_env.tmp / "frames"))
+    frames = [
+        SimpleNamespace(
+            timecode_ms=i * 1000, frame_index=i, image=Image.new("RGB", (16, 16), "red")
+        )
+        for i in range(500)
+    ]
+    original = FakeQdrantClient.upsert
+    written = 0
+
+    def fail_fifth(self, collection_name, points, wait=True):
+        nonlocal written
+        assert wait is True
+        if points and (points[0].payload or {}).get("is_video_frame"):
+            if written == 400:
+                raise RuntimeError("injected failed durable write")
+            written += len(points)
+        return original(self, collection_name, points, wait=wait)
+
+    with (
+        patch("scalar_forensic.cli.extract_frames", return_value=iter(frames)),
+        patch("scalar_forensic.cli.get_video_info", return_value={"duration_s": 500}),
+        patch.object(FakeQdrantClient, "upsert", fail_fifth),
+    ):
+        with pytest.raises(RuntimeError, match="failed durable write"):
+            _run_index(ingest_env.images, ingest_env.tmp / "failed.csv")
+    points = store.collections["sfn"].points
+    partial = [p for p in points.values() if p.payload.get("is_video_frame")]
+    assert len(partial) == 400
+    assert all("dino_video_frames_total" not in p.payload for p in partial)
+
+    with (
+        patch("scalar_forensic.cli.extract_frames", return_value=iter(frames)),
+        patch("scalar_forensic.cli.get_video_info", return_value={"duration_s": 500}),
+    ):
+        _run_index(ingest_env.images, ingest_env.tmp / "resumed.csv")
+    completed = [p for p in points.values() if p.payload.get("is_video_frame")]
+    assert len(completed) == 500
+    assert all(p.payload["dino_video_frames_total"] == 500 for p in completed)
+    with patch("scalar_forensic.cli.extract_frames") as extract:
+        _run_index(ingest_env.images, ingest_env.tmp / "third.csv")
+        extract.assert_not_called()
+
+
+def test_completion_is_independent_per_named_vector(fake_client_cls, store):
+    dino = make_indexer(fake_client_cls, store)
+    _put(
+        store,
+        "frame",
+        {"dino": [1.0], "sscd": [1.0]},
+        {"is_video_frame": True, "video_hash": "video", "frame_timecode_ms": 0},
+    )
+    dino.mark_video_complete("video", 1)
+    dino.vector_name = "sscd"
+    assert dino.get_all_video_info()["video"]["complete"] is False
+
+
+def test_live_interrupted_ingestion_converges(ingest_env, monkeypatch):
+    """Exercise the same resume boundary against the isolated CI Qdrant service."""
+    from qdrant_client import QdrantClient
+
+    url = _TEST_QDRANT_URL
+    if not url:
+        pytest.skip("SFN_TEST_QDRANT_URL not set")
+    client = QdrantClient(url=url)
+    name = "sfn_resume_" + uuid.uuid4().hex
+    monkeypatch.setenv("SFN_COLLECTION", name)
+    monkeypatch.setenv("SFN_BATCH_SIZE", "100")
+    monkeypatch.setenv("SFN_VIDEO_MAX_FRAMES", "500")
+    monkeypatch.setenv("SFN_FRAME_STORE_DIR", str(ingest_env.tmp / "frames"))
+    for p in ingest_env.images.iterdir():
+        p.unlink()
+    (ingest_env.images / "clip.mp4").write_bytes(b"isolated synthetic source")
+    frames = [
+        SimpleNamespace(
+            timecode_ms=i * 1000, frame_index=i, image=Image.new("RGB", (16, 16), "red")
+        )
+        for i in range(500)
+    ]
+    original = client.upsert
+    written = 0
+
+    def fail_fifth(*, collection_name, points, wait=True):
+        nonlocal written
+        assert wait is True
+        if points and (points[0].payload or {}).get("is_video_frame"):
+            if written == 400:
+                raise RuntimeError("injected failed durable write")
+            written += len(points)
+        return original(collection_name=collection_name, points=points, wait=wait)
+
+    try:
+        with (
+            patch("scalar_forensic.indexer.QdrantClient", return_value=client),
+            patch("scalar_forensic.cli.get_video_info", return_value={"duration_s": 500}),
+        ):
+            with (
+                patch("scalar_forensic.cli.extract_frames", return_value=iter(frames)),
+                patch.object(client, "upsert", side_effect=fail_fifth),
+            ):
+                with pytest.raises(RuntimeError, match="failed durable write"):
+                    _run_index(ingest_env.images, ingest_env.tmp / "failed.csv")
+            idx = Indexer.__new__(Indexer)
+            idx.client, idx.collection, idx.vector_name = client, name, "dino"
+            assert len(idx.get_indexed_frame_units()) == 400
+            assert all(not v["complete"] for v in idx.get_all_video_info().values())
+            with patch("scalar_forensic.cli.extract_frames", return_value=iter(frames)):
+                _run_index(ingest_env.images, ingest_env.tmp / "resumed.csv")
+            assert len(idx.get_indexed_frame_units()) == 500
+            assert all(v["complete"] for v in idx.get_all_video_info().values())
+            with patch("scalar_forensic.cli.extract_frames") as extract:
+                _run_index(ingest_env.images, ingest_env.tmp / "third.csv")
+                extract.assert_not_called()
+    finally:
+        if client.collection_exists(name):
+            client.delete_collection(name)
+        client.close()
+
+
+def test_identical_frames_across_videos_keep_each_source_slot(ingest_env, store, monkeypatch):
+    for p in ingest_env.images.iterdir():
+        p.unlink()
+    (ingest_env.images / "one.mp4").write_bytes(b"first source")
+    (ingest_env.images / "two.mp4").write_bytes(b"second source")
+    monkeypatch.setenv("SFN_FRAME_STORE_DIR", str(ingest_env.tmp / "frames"))
+
+    def frames(*args, **kwargs):
+        return iter(
+            [
+                SimpleNamespace(
+                    timecode_ms=t, frame_index=i, image=Image.new("RGB", (16, 16), "red")
+                )
+                for i, t in enumerate((0, 1000))
+            ]
+        )
+
+    with (
+        patch("scalar_forensic.cli.extract_frames", side_effect=frames),
+        patch("scalar_forensic.cli.get_video_info", return_value={"duration_s": 2}),
+    ):
+        _run_index(ingest_env.images, ingest_env.tmp / "sources.csv")
+    frames = [
+        p for p in store.collections["sfn"].points.values() if p.payload.get("is_video_frame")
+    ]
+    assert len(frames) == 4
+    assert len({p.payload["image_hash"] for p in frames}) == 1
+    assert len({(p.payload["video_hash"], p.payload["frame_timecode_ms"]) for p in frames}) == 4
+    assert all(p.payload["dino_video_frames_total"] == 2 for p in frames)
+
+
+def test_ingestion_rejects_unknown_preprocessing_provenance(ingest_env, store):
+    import typer
+
+    _run_index(ingest_env.images, ingest_env.tmp / "first.csv")
+    for point in store.collections["sfn"].points.values():
+        point.payload.pop("dino_normalize_size", None)
+    writes_before = list(store.calls)
+    with pytest.raises(typer.Exit):
+        _run_index(ingest_env.images, ingest_env.tmp / "blocked.csv")
+    assert store.calls == writes_before
+
+
+def test_duplicate_whole_video_is_one_source_with_complete_slots(ingest_env, store, monkeypatch):
+    for p in ingest_env.images.iterdir():
+        p.unlink()
+    (ingest_env.images / "one.mp4").write_bytes(b"same source")
+    (ingest_env.images / "copy.mp4").write_bytes(b"same source")
+    monkeypatch.setenv("SFN_FRAME_STORE_DIR", str(ingest_env.tmp / "frames"))
+
+    def frames(*args, **kwargs):
+        return iter(
+            [
+                SimpleNamespace(
+                    timecode_ms=t, frame_index=i, image=Image.new("RGB", (16, 16), "red")
+                )
+                for i, t in enumerate((0, 1000))
+            ]
+        )
+
+    with (
+        patch("scalar_forensic.cli.extract_frames", side_effect=frames) as extract,
+        patch("scalar_forensic.cli.get_video_info", return_value={"duration_s": 2}),
+    ):
+        _run_index(ingest_env.images, ingest_env.tmp / "copies.csv")
+    assert extract.call_count == 1
+    frames = [
+        p for p in store.collections["sfn"].points.values() if p.payload.get("is_video_frame")
+    ]
+    assert len(frames) == 2
+    assert all(p.payload["dino_video_frames_total"] == 2 for p in frames)
+
+
+@pytest.mark.parametrize("rejection", ["compatibility", "reference"])
+def test_rejected_ingestion_never_activates_face_collection(
+    ingest_env, store, monkeypatch, rejection
+):
+    from unittest.mock import MagicMock
+
+    import typer
+
+    from scalar_forensic.cli import index
+    from tests.faces.test_cli_faces import _enable_faces
+
+    if rejection == "compatibility":
+        _run_index(ingest_env.images, ingest_env.tmp / "initial.csv")
+        monkeypatch.setenv("SFN_NORMALIZE_SIZE", "448")
+    _enable_faces(monkeypatch, ingest_env.tmp)
+    pipeline = MagicMock()
+    pipeline.store.collection_is_new.return_value = True
+    pipeline.store.check_compat.return_value = []
+    with (
+        patch("scalar_forensic.faces.indexing.FacePipeline.from_settings", return_value=pipeline),
+        patch("scalar_forensic.cli.typer.prompt", return_value="test authorization"),
+    ):
+        with pytest.raises(typer.Exit):
+            index(
+                input_dir=ingest_env.images,
+                dino=True,
+                sscd=False,
+                faces=True,
+                report=ingest_env.tmp / "blocked.csv",
+                allow_online=False,
+                reference=rejection == "reference",
+            )
+    pipeline.store.ensure_collection.assert_not_called()
+    pipeline.audit.append.assert_not_called()

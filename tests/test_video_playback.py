@@ -35,6 +35,7 @@ from unittest.mock import MagicMock, patch
 import av
 import numpy as np
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
@@ -56,9 +57,7 @@ from scalar_forensic.video_playback import states as vp_states
 from scalar_forensic.web.app import app
 from scalar_forensic.web.routes import _shared as shared_routes
 
-# ---------------------------------------------------------------------------
 # Fixtures
-# ---------------------------------------------------------------------------
 
 
 def _write_clip(path: Path, container_format: str, *, frames: int = 8) -> Path:
@@ -163,9 +162,7 @@ def hevc_10bit_mov(roots):
     return _write_encoded(input_dir / "IMG_0010.MOV", "mov", "libx265", "yuv420p10le")
 
 
-# ---------------------------------------------------------------------------
 # The HDR fixture (spec §14): env gate → tracked test_data/ → generated
-# ---------------------------------------------------------------------------
 
 FFMPEG = os.environ.get("SFN_FFMPEG_PATH", "ffmpeg")
 FFPROBE = str(Path(FFMPEG).with_name("ffprobe")) if os.sep in FFMPEG else "ffprobe"
@@ -356,9 +353,7 @@ def _packet_payloads(path: Path) -> list[bytes]:
         return [bytes(p) for p in c.demux(stream) if p.dts is not None]
 
 
-# ---------------------------------------------------------------------------
 # Container classification
-# ---------------------------------------------------------------------------
 
 
 class TestContainerClassification:
@@ -382,9 +377,7 @@ class TestContainerClassification:
         assert vp_codecs._needs_remux(p) is False
 
 
-# ---------------------------------------------------------------------------
 # The rewrap itself — streams must survive bit for bit
-# ---------------------------------------------------------------------------
 
 
 class TestRemux:
@@ -474,9 +467,7 @@ class TestTimestampRepair:
         assert report["timestamp_repairs"] == len(_packet_payloads(mov))
 
 
-# ---------------------------------------------------------------------------
 # Path safety and the playable-type set
-# ---------------------------------------------------------------------------
 
 
 class TestPathSafety:
@@ -512,9 +503,7 @@ class TestPathSafety:
             assert shared_routes._resolve_video_path(str(p)) == p
 
 
-# ---------------------------------------------------------------------------
 # /api/video-playback
-# ---------------------------------------------------------------------------
 
 
 class TestVideoPlayback:
@@ -566,9 +555,7 @@ class TestVideoPlayback:
         assert r.status_code == 422
 
 
-# ---------------------------------------------------------------------------
 # /api/video-playback-info
-# ---------------------------------------------------------------------------
 
 
 class TestPlaybackInfo:
@@ -603,9 +590,156 @@ class TestPlaybackInfo:
         assert "probe_error" in body
 
 
-# ---------------------------------------------------------------------------
 # Codec allowlist and playback mode (spec §5, §15.3, ruling §16)
-# ---------------------------------------------------------------------------
+
+
+class TestVideoAuditRegressions:
+    @pytest.mark.parametrize("protection", ["lease", "pin"])
+    def test_eviction_rechecks_protection_acquired_after_its_snapshot(
+        self, tmp_path, monkeypatch, protection
+    ):
+        cache_dir = tmp_path / "cache"
+        artifact = _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
+        original_protected = vp_cache.protected_videos
+        with contextlib.ExitStack() as stack:
+
+            def snapshot_then_protect():
+                snapshot = original_protected()
+                if protection == "lease":
+                    vp_cache.renew_lease(DIGEST_A, 120)
+                else:
+                    stack.enter_context(vp_cache.pin(DIGEST_A))
+                return snapshot
+
+            monkeypatch.setattr(vp_cache, "protected_videos", snapshot_then_protect)
+            report = vp_cache.evict(cache_dir, 1)
+            assert artifact.exists()
+            assert report.videos_removed == 0
+            assert report.over_ceiling is True
+            assert DIGEST_A in report.protected
+
+    def test_explicit_eviction_protection_cannot_override_a_live_lease(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        artifact = _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
+        vp_cache.renew_lease(DIGEST_A, 120)
+        report = vp_cache.evict(cache_dir, 1, protect=set())
+        assert artifact.exists()
+        assert report.videos_removed == 0
+
+    def test_eviction_serializes_lease_registration_with_removal(self, tmp_path, monkeypatch):
+        cache_dir = tmp_path / "cache"
+        _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
+        attempted = threading.Event()
+        order = []
+        lock = threading.Lock()
+
+        class ObservedLock:
+            def __enter__(self):
+                acquired = lock.acquire(blocking=False)
+                if threading.current_thread().name == "renew-during-eviction":
+                    order.append("acquired" if acquired else "blocked")
+                    attempted.set()
+                if not acquired:
+                    lock.acquire()
+
+            def __exit__(self, *args):
+                lock.release()
+
+        monkeypatch.setattr(vp_cache, "_lease_lock", ObservedLock())
+        original_remove = vp_cache._remove
+        worker = threading.Thread(
+            target=vp_cache.renew_lease,
+            args=(DIGEST_A, 120),
+            name="renew-during-eviction",
+        )
+
+        def remove_with_concurrent_reader(entry):
+            worker.start()
+            assert attempted.wait(2), "reader did not attempt registration"
+            original_remove(entry)
+
+        monkeypatch.setattr(vp_cache, "_remove", remove_with_concurrent_reader)
+        try:
+            vp_cache.evict(cache_dir, 1)
+        finally:
+            worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert order[0] == "blocked"
+
+    def test_full_job_preserves_admission_failure_and_retry_delay(self):
+        failure = vp_states.classify_full_job(vp_states.QUEUE_FULL.as_http())
+        assert failure.kind == "queue-full"
+        assert failure.state == "full-job-failed"
+        assert failure.status == 503
+        assert failure.retryable is True
+        assert failure.retry_after_seconds == 15
+
+    @pytest.mark.parametrize(
+        ("pix_fmt", "mode"),
+        [
+            ("gbrp", "transcode"),
+            ("gray", "transcode"),
+            ("rgb24", "transcode"),
+            ("nv12", "original"),
+            ("not-a-format", "unknown"),
+            (None, "unknown"),
+        ],
+    )
+    def test_pixel_layout_without_subsampling_digits(self, pix_fmt, mode):
+        actual, _ = vp_codecs._playback_mode(
+            {"video_codec": "h264", "video_pix_fmt": pix_fmt}, needs_remux=False
+        )
+        assert actual == mode
+
+    def test_unmanaged_directories_count_without_becoming_purge_targets(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        unmanaged = cache_dir / "future-layout"
+        unmanaged.mkdir(parents=True)
+        content = unmanaged / "render.mp4"
+        content.write_bytes(b"x" * 200)
+        _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
+        report = vp_cache.evict(cache_dir, 150, protect=set())
+        assert report.bytes_before == 300
+        assert report.bytes_after == 200
+        assert report.over_ceiling is True
+        assert report.videos_removed == 1
+        vp_cache.purge(cache_dir, all_=True)
+        assert content.read_bytes() == b"x" * 200
+
+    def test_cache_scan_never_treats_external_symlink_as_a_video(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        external = tmp_path / "external"
+        external.mkdir()
+        content = external / "evidence.mp4"
+        content.write_bytes(b"evidence")
+        link = cache_dir / DIGEST_A
+        link.symlink_to(external, target_is_directory=True)
+        assert vp_cache.scan(cache_dir) == []
+        vp_cache.evict(cache_dir, 1, protect=set())
+        vp_cache.purge(cache_dir, all_=True)
+        assert link.is_symlink()
+        assert content.read_bytes() == b"evidence"
+
+    def test_chunk_get_registers_lease_before_cache_existence_check(
+        self, client, mov, roots, monkeypatch
+    ):
+        _, cache_dir = roots
+        digest = hash_file(mov)
+        chunk = vp_cache.artifact_dir(cache_dir, digest, DIGEST_B) / vp_cache.chunk_name(0)
+        chunk.parent.mkdir(parents=True)
+        chunk.write_bytes(b"cached chunk")
+        original_is_file = Path.is_file
+
+        def evict_at_existence_check(path):
+            if path == chunk:
+                vp_cache.evict(cache_dir, 1)
+            return original_is_file(path)
+
+        monkeypatch.setattr(Path, "is_file", evict_at_existence_check)
+        response = client.get(f"/api/video-chunk?path={mov}&start=0&fp={DIGEST_B}")
+        assert response.status_code == 200
+        assert response.content == b"cached chunk"
 
 
 class TestPixelProfile:
@@ -617,7 +751,7 @@ class TestPixelProfile:
             ("yuv420p10le", (10, "420")),
             ("yuv422p10le", (10, "422")),
             ("yuv444p", (8, "444")),
-            ("gray", (8, None)),
+            ("gray", (8, "400")),
         ],
     )
     def test_bit_depth_and_chroma_are_read_from_the_pixel_format(self, pix_fmt, expected):
@@ -726,9 +860,7 @@ class TestPlaybackMode:
         assert not cache_dir.exists() or not list(cache_dir.iterdir())
 
 
-# ---------------------------------------------------------------------------
 # /api/video-download (spec §7.5)
-# ---------------------------------------------------------------------------
 
 
 class TestVideoDownload:
@@ -829,9 +961,7 @@ class TestVideoDownload:
         assert client.get(body["download_url"]).status_code == 200
 
 
-# ---------------------------------------------------------------------------
 # Digest correctness (spec §7.1)
-# ---------------------------------------------------------------------------
 
 
 class TestSourceDigest:
@@ -913,9 +1043,7 @@ class TestSourceDigest:
         assert calls and all(name != "MainThread" for name in calls)
 
 
-# ---------------------------------------------------------------------------
 # Stale evidence (spec §7.1)
-# ---------------------------------------------------------------------------
 
 
 class TestStaleEvidence:
@@ -954,9 +1082,7 @@ class TestStaleEvidence:
         assert body["stale_evidence"] is None
 
 
-# ---------------------------------------------------------------------------
 # Cache bounding
-# ---------------------------------------------------------------------------
 
 
 DIGEST_A = "a" * 64
@@ -966,7 +1092,7 @@ FINGERPRINT = "f" * 64
 
 
 @pytest.fixture(autouse=True)
-def _clean_cache_state():
+def _clean_cache_state(monkeypatch):
     """Module-level lease, pin, sweep, probe, admission and job state (CLAUDE.md).
 
     Autouse because every one of these is silent when it leaks: an inherited
@@ -976,6 +1102,9 @@ def _clean_cache_state():
     the runner makes the next test's POST join it instead of starting one.  All
     of them read as flakes.
     """
+    monkeypatch.setattr(
+        "scalar_forensic.web.app._check_collection_compat", lambda settings, **kwargs: None
+    )
     _reset_module_state()
     yield
     _reset_module_state()
@@ -991,8 +1120,8 @@ def _reset_module_state() -> None:
     vp_routes.reset_substitutions()
 
 
-def _pipeline(**kw) -> vp_capability.Pipeline:
-    base = vp_capability.select(Settings(), _capability(), hdr=False)
+def _pipeline(*, hdr: bool = False, **kw) -> vp_capability.Pipeline:
+    base = vp_capability.select(Settings(), _capability(), hdr=hdr)
     return dataclasses.replace(base, **kw) if kw else base
 
 
@@ -1201,27 +1330,16 @@ class TestCacheEviction:
         assert report.over_ceiling is False
         assert p.exists()
 
-    def test_a_legacy_top_level_rewrap_is_accounted_and_evictable(self, tmp_path):
-        # The layout before the per-video directories.  Still a valid rewrap, so
-        # it retires by LRU rather than being deleted on sight.
-        cache_dir = tmp_path / "cache"
-        cache_dir.mkdir()
-        legacy = cache_dir / (DIGEST_A + ".mp4")
-        legacy.write_bytes(b"\0" * 100)
-        os.utime(legacy, (1_000, 1_000))
-        keeper = _video(cache_dir, DIGEST_B, size=100, mtime=3_000)
-        report = vp_cache.evict(cache_dir, 150, protect=set())
-        assert report.bytes_before == 200
-        assert not legacy.exists() and keeper.exists()
-
-    def test_foreign_files_are_neither_counted_nor_deleted(self, tmp_path):
+    def test_foreign_files_are_counted_but_not_deleted(self, tmp_path):
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
         stray = cache_dir / "notes.txt"
         stray.write_bytes(b"\0" * 5000)
         _video(cache_dir, DIGEST_A, size=100, mtime=1_000)
         report = vp_cache.evict(cache_dir, 50, protect=set())
-        assert report.bytes_before == 100
+        assert report.bytes_before == 5100
+        assert report.bytes_after == 5000
+        assert report.over_ceiling is True
         assert stray.exists()
 
     def test_a_missing_cache_dir_is_not_an_error(self, tmp_path):
@@ -1302,6 +1420,12 @@ class TestCeilingRefusal:
         s = self._settings(monkeypatch, 0)
         info = {"duration_ms": 3_600_000, "bit_rate": 100_000_000, "video_height": 1080}
         assert vp_cache.check_ceiling(s, info).state == "fits"
+
+    @pytest.mark.parametrize("height, expected", [(720, 1_111_111), (2160, 10_000_000)])
+    def test_no_ceiling_estimate_uses_configured_height(self, monkeypatch, height, expected):
+        settings = self._settings(monkeypatch, 0, height)
+        info = {"duration_ms": 10_000, "bit_rate": 8_000_000, "video_height": 2160}
+        assert vp_cache.check_ceiling(settings, info).estimate_bytes == expected
 
     def test_the_stream_report_carries_the_estimate_inputs(self, mov):
         info = vp_codecs._stream_report(mov)
@@ -1471,9 +1595,7 @@ class TestAtomicPublication:
         assert not orphan.exists()
 
 
-# ---------------------------------------------------------------------------
 # Settings
-# ---------------------------------------------------------------------------
 
 
 class TestPlaybackSettings:
@@ -1549,9 +1671,7 @@ class TestTranscodeSettings:
         assert Settings().video_hwaccel == "cuda"
 
 
-# ---------------------------------------------------------------------------
 # Capability probe and pipeline fingerprint (spec §6.1, §8)
-# ---------------------------------------------------------------------------
 
 
 def _capability(**kw) -> vp_capability.Capability:
@@ -1689,14 +1809,14 @@ class TestCapabilityRefusal:
 
     def test_no_encoder_is_unavailable(self):
         cap = _capability(encoder=None, tonemap_ok=False, notes=("libx264: not found",))
-        assert cap.available is False
+        assert cap.encoder is None
         assert "libx264: not found" in cap.unavailable_reason(hdr=False)
         with pytest.raises(RuntimeError):
             vp_capability.select(Settings(), cap, hdr=False)
 
     def test_a_build_without_tonemap_still_serves_sdr(self):
         cap = _capability(tonemap_ok=False, notes=("zscale not found",))
-        assert cap.available is True
+        assert cap.encoder is not None
         assert cap.unavailable_reason(hdr=False) is None
         assert vp_capability.select(Settings(), cap, hdr=False).encoder == "libx264"
 
@@ -1723,7 +1843,7 @@ class TestCapabilityProbe:
     def test_missing_binary_is_reported_not_raised(self, monkeypatch, tmp_path):
         monkeypatch.setenv("SFN_FFMPEG_PATH", str(tmp_path / "no-such-ffmpeg"))
         cap = vp_capability.probe(Settings())
-        assert cap.available is False
+        assert cap.encoder is None
         assert cap.ffmpeg_version is None
         assert "not found" in cap.unavailable_reason(hdr=False)
 
@@ -1731,7 +1851,6 @@ class TestCapabilityProbe:
     def test_real_probe_finds_a_working_pipeline(self, monkeypatch):
         monkeypatch.setenv("SFN_VIDEO_HWACCEL", "none")
         cap = vp_capability.probe(Settings())
-        assert cap.available is True
         assert cap.encoder == "libx264"
         assert cap.hwaccel == "none"
         assert cap.ffmpeg_version.startswith("ffmpeg version")
@@ -1768,21 +1887,16 @@ class TestCapabilityProbe:
         assert err is not None and err.startswith("not_an_encoder:")
 
 
-# ---------------------------------------------------------------------------
 # Chunk encode (spec §4, §10) — the two defects §3.1 found
-# ---------------------------------------------------------------------------
 
 
 class TestEncodeCommand:
     """Pure argv construction — no ffmpeg needed, so these always run."""
 
-    def _pipeline(self, **kw):
-        return vp_capability.select(Settings(), _capability(**kw), hdr=kw.pop("hdr", True))
-
     def test_seek_is_an_input_option(self):
         """`-ss` before `-i` is the whole reason chunk cost is flat (§3.2, §3.5)."""
         cmd = vp_encode.build_command(
-            Settings(), self._pipeline(), Path("/src.mov"), Path("/out.mp4"), start=90.0
+            Settings(), _pipeline(hdr=True), Path("/src.mov"), Path("/out.mp4"), start=90.0
         )
         assert cmd.index("-ss") < cmd.index("-i")
         assert cmd[cmd.index("-ss") + 1] == "90.000"
@@ -1790,19 +1904,21 @@ class TestEncodeCommand:
     def test_output_seeking_is_never_used(self):
         """A `-ss` after `-i` decodes and discards everything before the window."""
         cmd = vp_encode.build_command(
-            Settings(), self._pipeline(), Path("/src.mov"), Path("/o.mp4"), start=5, duration=30
+            Settings(), _pipeline(hdr=True), Path("/src.mov"), Path("/o.mp4"), start=5, duration=30
         )
         assert cmd.count("-ss") == 1
         assert cmd.index("-t") > cmd.index("-i")
 
     def test_zero_offset_omits_the_seek(self):
         cmd = vp_encode.build_command(
-            Settings(), self._pipeline(), Path("/s.mov"), Path("/o.mp4"), start=0
+            Settings(), _pipeline(hdr=True), Path("/s.mov"), Path("/o.mp4"), start=0
         )
         assert "-ss" not in cmd
 
     def test_tonemapped_output_is_tagged_bt709(self):
-        cmd = vp_encode.build_command(Settings(), self._pipeline(), Path("/s.mov"), Path("/o.mp4"))
+        cmd = vp_encode.build_command(
+            Settings(), _pipeline(hdr=True), Path("/s.mov"), Path("/o.mp4")
+        )
         for flag in ("-colorspace", "-color_primaries", "-color_trc"):
             assert cmd[cmd.index(flag) + 1] == "bt709"
 
@@ -1814,13 +1930,15 @@ class TestEncodeCommand:
 
     def test_a_source_without_audio_gets_an(self):
         cmd = vp_encode.build_command(
-            Settings(), self._pipeline(), Path("/s.mov"), Path("/o.mp4"), has_audio=False
+            Settings(), _pipeline(hdr=True), Path("/s.mov"), Path("/o.mp4"), has_audio=False
         )
         assert "-an" in cmd
         assert "-c:a" not in cmd
 
     def test_faststart_is_always_set(self):
-        cmd = vp_encode.build_command(Settings(), self._pipeline(), Path("/s.mov"), Path("/o.mp4"))
+        cmd = vp_encode.build_command(
+            Settings(), _pipeline(hdr=True), Path("/s.mov"), Path("/o.mp4")
+        )
         assert cmd[cmd.index("-movflags") + 1] == "+faststart"
 
 
@@ -2003,9 +2121,7 @@ class TestGpuFallback:
         assert gpu.fingerprint() != cpu.fingerprint()
 
 
-# ---------------------------------------------------------------------------
 # Phase 6 — chunk playback (§4.2), player states (§5), failure matrix (§10.1)
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -2250,7 +2366,7 @@ class TestFailureMatrix:
     def test_a_retryable_failure_sets_retry_after(self):
         assert vp_states.DISK_FULL.as_http().headers["Retry-After"] == "60"
 
-    # --- the rows only ffmpeg can report ---------------------------------
+    # the rows only ffmpeg can report
 
     def test_ffmpeg_non_zero_exit_is_a_non_retryable_encode_failure(self):
         f = vp_states.classify(
@@ -2430,6 +2546,34 @@ class TestFailureMatrixOverHttp:
 class TestEncodeFallbackLimits:
     """§8's CPU fallback answers a GPU fault — and only a GPU fault."""
 
+    @pytest.mark.parametrize("watched", [False, True])
+    def test_timeout_retains_encoder_diagnostics(self, watched):
+        cmd = [
+            sys.executable,
+            "-c",
+            "import sys,time; print('stalled encoder', file=sys.stderr, flush=True); "
+            "time.sleep(30)",
+        ]
+        run = vp_encode._run_watched if watched else vp_encode._run
+        with pytest.raises(vp_encode.EncodeError) as error:
+            run(cmd, 1)
+        assert error.value.timed_out
+        assert "stalled encoder" in error.value.stderr
+
+    @pytest.mark.parametrize("hwaccel", ["none", "cuda"])
+    def test_failed_attempt_preserves_bounded_diagnostics(self, tmp_path, caplog, hwaccel):
+        cap = _capability(encoder="libx264" if hwaccel == "none" else "h264_nvenc", hwaccel=hwaccel)
+        diagnostic = "discarded-old-line\n" * 100 + "x" * 100_000 + "\nroot cause\nlast line"
+
+        def fail(cmd, timeout):
+            raise vp_encode.EncodeError("last line", command=cmd, stderr=diagnostic, returncode=1)
+
+        with patch.object(vp_encode, "_run", fail), pytest.raises(vp_encode.EncodeError):
+            vp_encode.encode(Settings(), cap, tmp_path / "src.mov", tmp_path / "out.mp4", hdr=False)
+        assert "root cause" in caplog.text
+        assert "discarded-old-line" not in caplog.text
+        assert len(caplog.text) < 140_000
+
     def test_a_timeout_on_the_gpu_is_not_retried_on_the_cpu(self, tmp_path):
         cap = _capability(encoder="h264_nvenc", hwaccel="cuda")
         calls = []
@@ -2521,13 +2665,11 @@ class TestFallbackCacheLookup:
         assert hit.fingerprint == gpu.fingerprint()
 
 
-# ---------------------------------------------------------------------------
 # The double-buffered player, read the way the browser reads it
-# ---------------------------------------------------------------------------
 #
-# These cannot execute the JS — there is no JS test harness in this repository —
-# so they pin the wiring and the call sites that a live defect would come from,
-# in the style of `tests/test_static_wiring_web.py`.  Behaviour was verified in
+# These Python tests pin the wiring and call sites, in the style of
+# `tests/test_static_wiring_web.py`; tests/js/harness.mjs executes the JS
+# separately without a DOM.  Behaviour was verified in
 # a real browser; that check is recorded in the PR, not here.
 
 STATIC = Path(__file__).resolve().parents[1] / "src" / "scalar_forensic" / "web" / "static"
@@ -2598,7 +2740,7 @@ class TestPlayerWiring:
     def test_closing_the_player_releases_the_lease_before_dropping_the_payload(self):
         # The release needs source_path, which lives on the payload.
         js = (STATIC / "js" / "evidence.js").read_text()
-        body = js.split("closeVideoPlayback()")[1].split("\n    },")[0]
+        body = js.split("    closeVideoPlayback() {")[1].split("\n    },")[0]
         assert body.index("closeChunkPlayback()") < body.index("this.videoPlayback = null")
 
     def test_a_stale_response_cannot_overwrite_a_newer_seek(self):
@@ -2677,9 +2819,7 @@ class TestRemainingFailureRowsOverHttp:
         } <= kinds
 
 
-# ---------------------------------------------------------------------------
 # The full-video job (spec §4.3, §5, §6.3, §9, §10) — phase 7
-# ---------------------------------------------------------------------------
 
 
 def _await_terminal(c: TestClient, path: Path, *, timeout: float = 30.0) -> dict:
@@ -2879,7 +3019,7 @@ class TestFullCopyOverride:
         return report
 
     def test_an_unknown_verdict_is_never_overridable(self, hevc_10bit_mov, monkeypatch):
-        # Operator narrowing, 2026-08-14 (`docs/CTO_LEDGER.md`, spec §6.3): the
+        # Operator narrowing, 2026-08-14 (video playback spec §6.3): the
         # override exists to correct a forecast measured erring high.  `unknown`
         # is the *absence* of a forecast, so there is nothing to set aside and no
         # escape hatch behind the refusal.  The predicate is the whole defect: a
@@ -2922,7 +3062,7 @@ class TestFullCopyOverride:
     def test_playback_info_never_advertises_an_override_for_unknown(
         self, hevc_10bit_mov, monkeypatch
     ):
-        # The first carrier (routes.py:289).  A named examiner is set, so the
+        # The playback-info carrier.  A named examiner is set, so the
         # `and bool(settings.examiner_id)` clause cannot be what makes this false.
         monkeypatch.setenv("SFN_EXAMINER_ID", "examiner-7")
         with (
@@ -3036,6 +3176,35 @@ class TestFullJobFailureMapping:
 class TestFullJobRefcounts:
     """§10.4: a cancel by one analyst must never kill a job another is waiting on."""
 
+    def test_delete_releases_only_its_own_claim_once(self, hevc_10bit_mov):
+        path = str(hevc_10bit_mov)
+        with TestClient(app) as client, patch.object(vp_jobs.runner, "_run", _never_finishing):
+            first = client.post("/api/video-full", params={"path": path}).json()
+            second = client.post("/api/video-full", params={"path": path}).json()
+            assert "claim_id" in first
+            assert first["claim_id"] != second["claim_id"]
+            status = client.get("/api/video-job-status", params={"path": path}).json()
+            assert "claim_id" not in status
+            assert client.delete("/api/video-full", params={"path": path}).status_code == 422
+            assert (
+                client.delete(
+                    "/api/video-full", params={"path": path, "claim_id": "unknown"}
+                ).status_code
+                == 404
+            )
+            for _ in range(2):
+                released = client.delete(
+                    "/api/video-full", params={"path": path, "claim_id": first["claim_id"]}
+                ).json()
+                assert released["outcome"] == "released"
+                assert released["waiters"] == 1
+            for _ in range(2):
+                cancelled = client.delete(
+                    "/api/video-full", params={"path": path, "claim_id": second["claim_id"]}
+                ).json()
+                assert cancelled["outcome"] == "cancelled"
+                assert cancelled["waiters"] == 0
+
     def _request(self, digest="d" * 64) -> vp_jobs.JobRequest:
         return vp_jobs.JobRequest(
             source=Path("/nowhere.MOV"),
@@ -3054,17 +3223,32 @@ class TestFullJobRefcounts:
         async def _go():
             runner = vp_jobs.JobRunner()
             with patch.object(runner, "_run", new=_never_finishing):
-                first = runner.start(self._request(), Settings())
-                second = runner.start(self._request(), Settings())
+                first = runner.start(self._request(), Settings(), claim_id="first")
+                second = runner.start(self._request(), Settings(), claim_id="second")
                 assert first is second
                 assert first.waiters == 2
-                assert runner.cancel(self._request().digest) == "released"
+                assert runner.cancel(self._request().digest, "first") == "released"
                 assert first.cancelled is False
-                assert runner.cancel(self._request().digest) == "cancelled"
+                assert runner.cancel(self._request().digest, "second") == "cancelled"
                 assert first.cancelled is True
                 runner.reset()
 
         asyncio.run(_go())
+
+    def test_restart_waits_for_cancelled_encoder_cleanup(self):
+        async def run():
+            runner = vp_jobs.JobRunner()
+            with patch.object(runner, "_run", new=_never_finishing):
+                job = runner.start(self._request(), Settings(), claim_id="first")
+                runner.cancel(self._request().digest, "first")
+                with pytest.raises(HTTPException) as error:
+                    runner.start(self._request(), Settings(), claim_id="second")
+                assert error.value.status_code == 409
+                assert error.value.detail["error"] == "job-cancelling"
+                assert runner.get(self._request().digest) is job
+                await runner.shutdown()
+
+        asyncio.run(run())
 
     def test_a_cancel_that_races_the_encoder_still_stops_it(self):
         # The window is between `Popen` returning and the runner being handed
@@ -3080,7 +3264,7 @@ class TestFullJobRefcounts:
         assert killed.call_args.args == (proc,)
 
     def test_cancelling_a_job_nobody_started_is_a_404(self, client, hevc_10bit_mov):
-        r = client.request("DELETE", f"/api/video-full?path={hevc_10bit_mov}")
+        r = client.request("DELETE", f"/api/video-full?path={hevc_10bit_mov}&claim_id=unknown")
         assert r.status_code == 404
         assert r.json()["detail"]["error"] == "no-such-job"
 
@@ -3126,8 +3310,13 @@ class TestFullJobEndToEnd:
 
     def test_cancelling_a_running_job_stops_it_and_leaves_no_part(self, hevc_long_mov):
         with TestClient(app) as c:
-            assert c.post(f"/api/video-full?path={hevc_long_mov}").status_code == 200
-            c.request("DELETE", f"/api/video-full?path={hevc_long_mov}")
+            started = c.post(f"/api/video-full?path={hevc_long_mov}")
+            assert started.status_code == 200
+            c.request(
+                "DELETE",
+                "/api/video-full",
+                params={"path": str(hevc_long_mov), "claim_id": started.json()["claim_id"]},
+            )
             body = _await_terminal(c, hevc_long_mov)
         assert body["cancelled"] is True
         # A cancelled job is not a §5 state of its own: nothing is running, so
@@ -3271,9 +3460,7 @@ class TestFullJobProgress:
         assert job.view()["eta_label"].endswith("at current rate")
 
 
-# ---------------------------------------------------------------------------
 # Phase 8 — provenance and audit (§7.1, §7.2, §7.3)
-# ---------------------------------------------------------------------------
 
 
 def _records(event: str | None = None) -> list[dict]:
@@ -3371,7 +3558,7 @@ class TestRenderingLabel:
         assert label["ffmpeg_version"]
         assert label["audio_transformation"] == vp_audit.AUDIO_OMITTED
         assert label["start_seconds"] == 0.0
-        assert label["duration_seconds"] == float(Settings().video_chunk_seconds)
+        assert label["duration_seconds"] == pytest.approx(0.6)
         assert "-c:v" in label["command"]
         assert label["command"][-1].endswith(".part")  # §10.2: published by rename
 
@@ -3385,6 +3572,7 @@ class TestRenderingLabel:
         assert second["pipeline"]["fingerprint"] == first["pipeline"]["fingerprint"]
         assert second["pipeline"]["encoder"] == first["pipeline"]["encoder"]
         assert second["pipeline"]["command"] is None
+        assert second["pipeline"]["duration_seconds"] == pytest.approx(0.6)
 
     @requires_ffmpeg
     def test_a_full_copy_records_the_thread_cap_it_was_encoded_under(self, hevc_10bit_mov):
@@ -3527,13 +3715,18 @@ class TestTranscodeAudit:
     @requires_ffmpeg
     def test_a_cancelled_export_is_recorded_as_cancelled_and_not_as_a_failure(self, hevc_long_mov):
         with TestClient(app) as c:
-            c.post(f"/api/video-full?path={hevc_long_mov}")
-            c.request("DELETE", f"/api/video-full?path={hevc_long_mov}")
+            started = c.post(f"/api/video-full?path={hevc_long_mov}")
+            c.request(
+                "DELETE",
+                "/api/video-full",
+                params={"path": str(hevc_long_mov), "claim_id": started.json()["claim_id"]},
+            )
             _await_terminal(c, hevc_long_mov)
         rec = _records(vp_audit.EVENT_TRANSCODE)[0]
         assert rec["outcome"] == vp_audit.OUTCOME_CANCELLED
         assert rec["error"] is None
         assert rec["rendering"] is None
+        assert rec["waiters"] == 0
 
     def test_a_failed_export_is_recorded(self, hevc_10bit_mov):
         with (
@@ -3771,7 +3964,7 @@ class TestRenderCommand:
         assert result.exit_code == 1
         assert "--full has no timecode" in result.output
 
-    # ── The 2026-08-14 live check (`data/reports/c24-task2-label-vs-render.md`) ──
+    # The 2026-08-14 live check (`data/reports/c24-task2-label-vs-render.md`)
     # The label and this command were each mutation-tested and had never been
     # observed against one real encode.  Composed, they disagreed: the report
     # printed ten hand-listed fields out of the seventeen the label showed, and

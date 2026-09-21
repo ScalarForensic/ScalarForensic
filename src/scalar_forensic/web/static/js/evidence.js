@@ -1,14 +1,34 @@
 // Part of the sfn() Alpine component — merged by app.js. See app.js for load order.
 (window.__sfnParts = window.__sfnParts || []).push({
-    // ── Metadata loading ──────────────────────────────────────────────────
+    _viewRequests: null,
+    // A response belongs to one view, selection, and invocation. Check again
+    // after decoding JSON: headers arriving does not finish an async request.
+    _beginViewRequest(name, fields = []) {
+      const requests = this._viewRequests ??= Object.create(null);
+      const sequence = requests[name] = (requests[name] ?? 0) + 1;
+      const keys = ['_viewGeneration', 'sessionId', ...fields];
+      const read = key => {
+        const value = this[key];
+        // mergedHits may synthesize a new object on every getter evaluation.
+        return key === 'selectedHit'
+          ? JSON.stringify([value?.path, value?.image_hash, value?.video_hash, value?.frame_timecode_ms])
+          : value;
+      };
+      const values = keys.map(read);
+      return () => requests[name] === sequence && keys.every((key, i) => read(key) === values[i]);
+    },
+    // Metadata loading
     async _loadQueryMeta() {
       if (!this.sessionId || !this.selectedFileId) return;
+      const current = this._beginViewRequest('queryMeta', ['selectedFileId']);
       try {
-        this.queryMeta = await fetch(
+        const data = await fetch(
           `/api/query-metadata/${this.sessionId}/${this.selectedFileId}`
         ).then(r => r.json());
+        if (!current()) return;
+        this.queryMeta = data;
         this.loadHitTags().catch(() => {});
-      } catch { this.queryMeta = null; }
+      } catch { if (current()) this.queryMeta = null; }
     },
 
     async _loadMatchMeta() {
@@ -24,54 +44,54 @@
       }
     },
 
-    async _loadMatchMetaFor(path) {
+    async _loadMetaFrom(url) {
+      const current = this._beginViewRequest('matchMeta', ['selectedFileId', 'selectedHit', 'selectedHitKey', 'selectedMatchedFrameKey']);
       this.matchMetaError = null;
       try {
-        const r = await fetch(`/api/metadata?path=${encodeURIComponent(path)}`);
+        const r = await fetch(url);
         if (!r.ok) {
           const body = await r.json().catch(() => ({}));
+          if (!current()) return;
           this.matchMetaError = body.detail ?? `HTTP ${r.status}`;
           this.matchMeta = null;
         } else {
-          this.matchMeta = await r.json();
+          const data = await r.json();
+          if (!current()) return;
+          this.matchMeta = data;
         }
       } catch (e) {
+        if (!current()) return;
         this.matchMeta = null;
         this.matchMetaError = e?.message || 'Metadata request failed';
       }
+    },
+
+    async _loadMatchMetaFor(path) {
+      await this._loadMetaFrom(`/api/metadata?path=${encodeURIComponent(path)}`);
     },
 
     async _loadFrameMeta(videoHash, timecodeMs) {
-      this.matchMetaError = null;
-      try {
-        const r = await fetch(`/api/frame-metadata?video_hash=${encodeURIComponent(videoHash)}&timecode_ms=${timecodeMs}`);
-        if (!r.ok) {
-          const body = await r.json().catch(() => ({}));
-          this.matchMetaError = body.detail ?? `HTTP ${r.status}`;
-          this.matchMeta = null;
-        } else {
-          this.matchMeta = await r.json();
-        }
-      } catch (e) {
-        this.matchMeta = null;
-        this.matchMetaError = e?.message || 'Metadata request failed';
-      }
+      await this._loadMetaFrom(`/api/frame-metadata?video_hash=${encodeURIComponent(videoHash)}&timecode_ms=${timecodeMs}`);
     },
 
     async _loadVideoTimeline(videoHash) {
+      const current = this._beginViewRequest('timeline', ['selectedFileId', 'selectedHit', 'selectedHitKey']);
       try {
-        this.videoTimeline = await fetch(
+        const data = await fetch(
           `/api/video-timeline?video_hash=${encodeURIComponent(videoHash)}`
         ).then(r => r.json());
-      } catch { this.videoTimeline = null; }
+        if (current()) this.videoTimeline = data;
+      } catch { if (current()) this.videoTimeline = null; }
     },
 
-    // ── Source-video playback ─────────────────────────────────────────────
+    // Source-video playback
     // Opening the player asks the server what it would serve *before* asking
     // for the bytes, so the viewing-copy label is on screen from the first
     // frame rather than appearing once the rewrap finishes.
     async openVideoPlayback(videoPath, timecodeMs) {
       if (!videoPath) return;
+      this.closeVideoPlayback();
+      const generation = this._videoPlaybackGeneration;
       this.videoPlayback = null;
       this.videoPlaybackError = null;
       this.videoPlaybackLoading = true;
@@ -85,6 +105,7 @@
         const q = indexed ? `&video_hash=${encodeURIComponent(indexed)}` : '';
         const r = await fetch(`/api/video-playback-info?path=${encodeURIComponent(videoPath)}${q}`);
         const body = await r.json().catch(() => ({}));
+        if (generation !== this._videoPlaybackGeneration) return;
         if (!r.ok) {
           this.videoPlaybackError = body.detail ?? `HTTP ${r.status}`;
         } else {
@@ -97,13 +118,15 @@
           this._adoptPlaybackInfo(body);
         }
       } catch (e) {
+        if (generation !== this._videoPlaybackGeneration) return;
         this.videoPlaybackError = e?.message || 'Playback request failed';
       } finally {
-        this.videoPlaybackLoading = false;
+        if (generation === this._videoPlaybackGeneration) this.videoPlaybackLoading = false;
       }
     },
 
     closeVideoPlayback() {
+      this._videoPlaybackGeneration += 1;
       // Before the payload goes, not after: closeChunkPlayback() releases the
       // §6.2 lease, and the release needs the source_path that lives on it.
       // Dropping the payload first would leave the video protected from
@@ -141,9 +164,10 @@
       }
     },
 
-    // ── Semantic stats ────────────────────────────────────────────────────
+    // Semantic stats
     async calcSemanticStats() {
       if (!this.sessionId || !this.selectedFileId) return;
+      const current = this._beginViewRequest('semanticStats', ['selectedFileId']);
       this.semanticStats = null;
       this.semanticStatsError = null;
       this.semanticStatsLoading = true;
@@ -152,18 +176,20 @@
         const resp = await fetch(`/api/semantic-stats/${this.sessionId}/${this.selectedFileId}`);
         if (!resp.ok) {
           const d = await resp.json().catch(() => ({}));
+          if (!current()) return;
           this.semanticStatsError = d.detail || `Stats request failed (HTTP ${resp.status})`;
         } else {
-          this.semanticStats = await resp.json();
+          const data = await resp.json();
+          if (current()) this.semanticStats = data;
         }
       } catch (e) {
-        this.semanticStatsError = e?.message || 'Stats request failed';
+        if (current()) this.semanticStatsError = e?.message || 'Stats request failed';
       } finally {
-        this.semanticStatsLoading = false;
+        if (current()) this.semanticStatsLoading = false;
       }
     },
 
-    // ── Provenance ────────────────────────────────────────────────────────
+    // Provenance
     async copyProvenance() {
       if (!this.provenance) return;
       try { await navigator.clipboard.writeText(JSON.stringify(this.provenance, null, 2)); }
@@ -192,9 +218,10 @@
       this.runQuery();
     },
 
-    // ── Forensic Audit ────────────────────────────────────────────────────
+    // Forensic Audit
     async openAudit() {
       if (!this.sessionId || !this.selectedFileId || !this.selectedHit) return;
+      const current = this._beginViewRequest('audit', ['selectedFileId', 'selectedHit', 'selectedHitKey', 'selectedMatchedFrameKey', 'queryFrameIdx']);
       this.showAudit = true;
       this.auditLoading = true;
       this.auditError = null;
@@ -209,9 +236,16 @@
           fetch('/api/library-versions'),
           hash ? fetch(`/api/hit-provenance?image_hash=${encodeURIComponent(hash)}`) : Promise.resolve(null),
         ]);
+        if (!current()) return;
         if (!lvResp.ok) throw new Error(`Library versions request failed (HTTP ${lvResp.status})`);
-        this.auditQueryLibVersions = await lvResp.json();
-        if (hpResp?.ok) this.auditHitProvenance = await hpResp.json();
+        const versions = await lvResp.json();
+        if (!current()) return;
+        this.auditQueryLibVersions = versions;
+        if (hpResp?.ok) {
+          const provenance = await hpResp.json();
+          if (!current()) return;
+          this.auditHitProvenance = provenance;
+        }
         else if (hpResp) this.auditHitProvenance = {};
 
         // Phase 2: preprocessing previews (non-fatal if unavailable)
@@ -235,21 +269,26 @@
             fetch(queryUrl),
             hitUrl ? fetch(hitUrl) : Promise.resolve(null),
           ]);
+          if (!current()) return;
           if (qpResp.ok) {
-            this.auditQueryPreproc = await qpResp.json();
+            const data = await qpResp.json();
+            if (!current()) return;
+            this.auditQueryPreproc = data;
           } else {
             console.error(`query-preprocessed failed: HTTP ${qpResp.status}`, queryUrl);
           }
           if (hpPrep?.ok) {
-            this.auditHitPreproc = await hpPrep.json();
+            const data = await hpPrep.json();
+            if (!current()) return;
+            this.auditHitPreproc = data;
           } else if (hpPrep) {
             console.error(`hit-preprocessed failed: HTTP ${hpPrep.status}`, hitUrl);
           }
         }
       } catch (e) {
-        this.auditError = e?.message || 'Audit data fetch failed';
+        if (current()) this.auditError = e?.message || 'Audit data fetch failed';
       } finally {
-        this.auditLoading = false;
+        if (current()) this.auditLoading = false;
       }
     },
 
@@ -259,12 +298,17 @@
       } catch { /* clipboard unavailable */ }
     },
 
-    _dbLibVersions() {
-      if (!this.auditHitProvenance) return {};
-      for (const prov of Object.values(this.auditHitProvenance)) {
-        if (prov?.library_versions) return prov.library_versions;
+    // The modes' provenance blocks agree on these; the first that carries one
+    // answers for the hit.
+    _firstProvenance(key) {
+      for (const prov of Object.values(this.auditHitProvenance ?? {})) {
+        if (prov?.[key]) return prov[key];
       }
-      return {};
+      return null;
+    },
+
+    _dbLibVersions() {
+      return this._firstProvenance('library_versions') ?? {};
     },
 
     _auditLibRows() {
@@ -286,11 +330,7 @@
     },
 
     _firstIndexedAt() {
-      if (!this.auditHitProvenance) return null;
-      for (const prov of Object.values(this.auditHitProvenance)) {
-        if (prov?.indexed_at) return prov.indexed_at;
-      }
-      return null;
+      return this._firstProvenance('indexed_at');
     },
 
     _scoreRows() {

@@ -12,11 +12,9 @@ from __future__ import annotations
 
 import inspect
 
-from scalar_forensic.cli import _fmt_duration, _progress_bar, _RateTracker
+from scalar_forensic.ingestion.reporting import _fmt_duration, _progress_bar, _RateTracker
 
-# ---------------------------------------------------------------------------
 # _progress_bar
-# ---------------------------------------------------------------------------
 
 
 def test_bar_is_empty_at_zero_and_full_at_hundred():
@@ -40,9 +38,7 @@ def test_bar_keeps_its_width_at_every_percentage():
         assert len(_progress_bar(float(pct), width=28)) == 28
 
 
-# ---------------------------------------------------------------------------
 # _RateTracker
-# ---------------------------------------------------------------------------
 
 
 def test_rate_is_unknown_before_any_observation():
@@ -96,9 +92,7 @@ def test_eta_is_remaining_over_the_current_rate():
     assert t.eta(45) == 4.5
 
 
-# ---------------------------------------------------------------------------
 # Honesty of the displayed numbers
-# ---------------------------------------------------------------------------
 
 
 def test_tracker_publishes_no_uncertainty_band():

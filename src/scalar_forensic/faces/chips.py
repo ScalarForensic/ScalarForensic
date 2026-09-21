@@ -24,6 +24,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from scalar_forensic.media_access import display_rgb, read_source
+
 _REVIEW_QUALITY = 95
 
 _ALIGNED_DOMAIN = b"aligned-rgb-v1\0"
@@ -87,8 +89,7 @@ def write_thumbnail(review_path: Path, thumb_path: Path, thumb_size: int) -> Non
     Standalone so the browse endpoint can regenerate a deleted thumbnail
     without re-running the pipeline.
     """
-    with Image.open(review_path) as img:
-        img = img.convert("RGB")
+    with display_rgb(read_source(review_path)) as img:
         if max(img.size) > thumb_size:
             img.thumbnail((thumb_size, thumb_size), Image.LANCZOS)
         thumb_path.parent.mkdir(parents=True, exist_ok=True)

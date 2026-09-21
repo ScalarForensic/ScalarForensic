@@ -25,15 +25,7 @@ import argparse
 import json
 import random
 import shutil
-import sys
 from pathlib import Path
-
-# ---------------------------------------------------------------------------
-# Bootstrap: allow running without an editable install
-# ---------------------------------------------------------------------------
-_src = Path(__file__).parent.parent / "src"
-if _src.exists():
-    sys.path.insert(0, str(_src))
 
 DEFAULT_SEED = 20260813
 DEFAULT_FRACTION = 0.10

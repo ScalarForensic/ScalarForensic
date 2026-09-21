@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import closing, contextmanager
 from typing import Literal, cast
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -15,7 +16,13 @@ from scalar_forensic.config import Settings
 from scalar_forensic.discovery import MAX_CONTEXT_PAIRS, DiscoveryHit, run_discovery, run_explore
 from scalar_forensic.indexer import qdrant_scroll_all
 from scalar_forensic.query_eval import QueryEvalHit, score_query_entries
+from scalar_forensic.safeguards import (
+    CompatibilityError,
+    QdrantUnavailable,
+    require_collection_compatible,
+)
 from scalar_forensic.tags import Tag, TagStore
+from scalar_forensic.web.pipeline._embedders import validate_cached_embedder_settings
 from scalar_forensic.web.session import get_session
 
 _log = logging.getLogger(__name__)
@@ -28,9 +35,7 @@ _MAX_TAG_NAME_LEN = 200
 _MAX_TAG_NOTES_LEN = 4000
 
 
-# ---------------------------------------------------------------------------
 # Tag Triage — investigator-in-the-loop Discovery
-# ---------------------------------------------------------------------------
 
 
 def _tag_client_and_store() -> tuple[QdrantClient, TagStore]:
@@ -44,12 +49,43 @@ def _tag_client_and_store() -> tuple[QdrantClient, TagStore]:
     """
     settings = Settings()
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-    return client, TagStore(client, settings.tags_collection)
+    try:
+        return client, TagStore(client, settings.tags_collection)
+    except BaseException:
+        client.close()
+        raise
+
+
+def _require_tag_compat(client, settings, *collections: str, uploaded: bool = False) -> None:
+    """Read-only tag metadata remains available; vector operations fail closed."""
+    try:
+        if uploaded:
+            validate_cached_embedder_settings(settings, {"dino"})
+        for collection in dict.fromkeys(c for c in collections if c):
+            require_collection_compatible(client, collection, settings, needed_vectors={"dino"})
+    except CompatibilityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except QdrantUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def _tag_store() -> TagStore:
     """Construct a fresh :class:`TagStore` per request."""
     return _tag_client_and_store()[1]
+
+
+@contextmanager
+def _tag_session():
+    client, store = _tag_client_and_store()
+    with closing(client):
+        yield client, store
+
+
+@contextmanager
+def _managed_tag_store():
+    store = _tag_store()
+    with closing(store.client):
+        yield store
 
 
 def _triplet_threshold(pos_dino: list, neg_dino: list) -> int:
@@ -126,46 +162,18 @@ def _fetch_tag_ref_records(
     return records
 
 
-# In-process cache of
-# (tag_id, updated_at, vector_name, case_collection, reference_collection)
-# → {point_id: vector}.  Keyed on updated_at so any tag edit invalidates
-# the entry automatically.  Both collection names participate in the key
-# because :func:`_fetch_tag_ref_records` falls back to the reference
-# collection when an ID isn't in the case collection — changing either
-# at runtime must invalidate the cache.  Caches the raw per-ID vector
-# map rather than a positive/negative split so callers keep their own
-# positive-set policy (different endpoints treat the optional target
-# anchor differently).  FIFO-evicted at a size cap to keep worst-case
-# memory bounded.
-_TAG_REF_VECS_CACHE: dict[tuple[str, str, str, str, str], dict[str, list[float]]] = {}
-_TAG_REF_VECS_CACHE_MAX = 256
-
-
-def _get_cached_tag_ref_vecs(
+def _get_tag_ref_vecs(
     client: QdrantClient,
     settings: Settings,
     tag: Tag,
     *,
     vector_name: str = "dino",
 ) -> dict[str, list[float]]:
-    """Return ``{str(point_id): vec}`` for every referenced point on *tag*.
+    """Retrieve current vectors after compatibility validation.
 
-    Includes positives, negatives, and the target anchor (deduplicated).  The
-    result is cached per ``(tag_id, updated_at, vector_name, collection)``, so
-    repeated classification passes reuse a single Qdrant retrieval — typical
-    badge refreshes see near-zero Qdrant traffic once the cache is warm.
+    A tag's timestamp does not identify the referenced collection generation.
+    Keeping these vectors across requests could mix models after an index rebuild.
     """
-    cache_key = (
-        str(tag.tag_id),
-        tag.updated_at,
-        vector_name,
-        settings.collection,
-        settings.reference_collection or "",
-    )
-    cached = _TAG_REF_VECS_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-
     all_ref_ids = [str(i) for i in tag.positive_ids + tag.negative_ids]
     if tag.target_id is not None and str(tag.target_id) not in all_ref_ids:
         all_ref_ids.append(str(tag.target_id))
@@ -181,16 +189,13 @@ def _get_cached_tag_ref_vecs(
                 continue
             vecs_by_id[str(rec.id)] = list(v)
 
-    if len(_TAG_REF_VECS_CACHE) >= _TAG_REF_VECS_CACHE_MAX:
-        _TAG_REF_VECS_CACHE.pop(next(iter(_TAG_REF_VECS_CACHE)))
-    _TAG_REF_VECS_CACHE[cache_key] = vecs_by_id
     return vecs_by_id
 
 
 def _split_cached_vecs(
     vecs_by_id: dict[str, list[float]],
     pos_ids: list[str],
-    neg_ids: list[str] | None = None,
+    neg_ids: list[str],
 ) -> tuple[list[list[float]], list[list[float]]]:
     """Return ``(pos_vecs, neg_vecs)`` from a cached id→vec map.
 
@@ -199,18 +204,15 @@ def _split_cached_vecs(
     that match neither are silently ignored — guarding against phantom
     negatives if the cache ever contained an ID the tag no longer
     references (e.g. anchor stripped before splitting).
-
-    For backward compatibility, when *neg_ids* is None every non-positive
-    entry in *vecs_by_id* is treated as a negative.
     """
     pos_set = set(pos_ids)
-    neg_set = set(neg_ids) if neg_ids is not None else None
+    neg_set = set(neg_ids)
     pos_vecs: list[list[float]] = []
     neg_vecs: list[list[float]] = []
     for pid, v in vecs_by_id.items():
         if pid in pos_set:
             pos_vecs.append(v)
-        elif neg_set is None or pid in neg_set:
+        elif pid in neg_set:
             neg_vecs.append(v)
     return pos_vecs, neg_vecs
 
@@ -238,7 +240,8 @@ async def list_tags() -> JSONResponse:
     try:
 
         def _run() -> list:
-            return _tag_store().list()
+            with _managed_tag_store() as store:
+                return store.list()
 
         tags = await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
@@ -279,9 +282,10 @@ async def create_tag(
     try:
 
         def _run():
-            return _tag_store().create(
-                name, positive_ids=pos, negative_ids=neg, target_id=tgt, notes=notes
-            )
+            with _managed_tag_store() as store:
+                return store.create(
+                    name, positive_ids=pos, negative_ids=neg, target_id=tgt, notes=notes
+                )
 
         tag = await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
@@ -294,7 +298,8 @@ async def get_tag(tag_id: str) -> JSONResponse:
     try:
 
         def _run():
-            return _tag_store().get(tag_id)
+            with _managed_tag_store() as store:
+                return store.get(tag_id)
 
         tag = await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
@@ -320,7 +325,8 @@ async def mark_tag(
 
         def _run():
             role_lit = cast(Literal["positive", "negative"], role)
-            return _tag_store().mark(tag_id, point_id, role_lit)
+            with _managed_tag_store() as store:
+                return store.mark(tag_id, point_id, role_lit)
 
         tag = await asyncio.to_thread(_run)
     except LookupError:
@@ -338,7 +344,8 @@ async def unmark_tag(
     try:
 
         def _run():
-            return _tag_store().unmark(tag_id, point_id)
+            with _managed_tag_store() as store:
+                return store.unmark(tag_id, point_id)
 
         tag = await asyncio.to_thread(_run)
     except LookupError:
@@ -366,7 +373,8 @@ async def set_tag_target(
     try:
 
         def _run():
-            return _tag_store().set_target(tag_id, tgt)
+            with _managed_tag_store() as store:
+                return store.set_target(tag_id, tgt)
 
         tag = await asyncio.to_thread(_run)
     except LookupError:
@@ -381,7 +389,8 @@ async def delete_tag(tag_id: str) -> JSONResponse:
     try:
 
         def _run() -> bool:
-            return _tag_store().delete(tag_id)
+            with _managed_tag_store() as store:
+                return store.delete(tag_id)
 
         existed = await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
@@ -412,25 +421,26 @@ async def triage(
     settings = Settings()
     triage_collection = settings.collection
     try:
-        client, store = _tag_client_and_store()
+        with _tag_session() as (client, store):
 
-        def _get_tag() -> Tag | None:
-            return store.get(tag_id)
+            def _get_tag() -> Tag | None:
+                return store.get(tag_id)
 
-        tag = await asyncio.to_thread(_get_tag)
-        if tag is None:
-            raise HTTPException(status_code=404, detail="Tag not found")
-        hits = await asyncio.to_thread(
-            run_discovery,
-            client,
-            triage_collection,
-            tag,
-            vector_name="dino",
-            limit=limit,
-            reverse=reverse,
-            reference_collection=None,
-            cosine_threshold=cosine_threshold,
-        )
+            tag = await asyncio.to_thread(_get_tag)
+            if tag is None:
+                raise HTTPException(status_code=404, detail="Tag not found")
+            await asyncio.to_thread(_require_tag_compat, client, settings, triage_collection)
+            hits = await asyncio.to_thread(
+                run_discovery,
+                client,
+                triage_collection,
+                tag,
+                vector_name="dino",
+                limit=limit,
+                reverse=reverse,
+                reference_collection=None,
+                cosine_threshold=cosine_threshold,
+            )
     except HTTPException:
         raise
     except ValueError as exc:
@@ -484,43 +494,44 @@ async def explore(
     else:
         explore_collection = settings.collection
     try:
-        client, store = _tag_client_and_store()
-        tag = await asyncio.to_thread(store.get, tag_id)
-        if tag is None:
-            raise HTTPException(status_code=404, detail="Tag not found")
-        pos_ids = list(tag.positive_ids)
-        if tag.target_id is not None and tag.target_id not in {str(i) for i in pos_ids}:
-            pos_ids = pos_ids + [tag.target_id]
-        neg_ids = list(tag.negative_ids)
-        all_ids = pos_ids + neg_ids
-        if all_ids:
+        with _tag_session() as (client, store):
+            tag = await asyncio.to_thread(store.get, tag_id)
+            if tag is None:
+                raise HTTPException(status_code=404, detail="Tag not found")
+            pos_ids = list(tag.positive_ids)
+            if tag.target_id is not None and tag.target_id not in {str(i) for i in pos_ids}:
+                pos_ids = pos_ids + [tag.target_id]
+            neg_ids = list(tag.negative_ids)
+            all_ids = pos_ids + neg_ids
+            if all_ids:
 
-            def _filter_to_collection() -> tuple[list, list]:
-                try:
-                    found = client.retrieve(
-                        explore_collection,
-                        ids=all_ids,
-                        with_payload=False,
-                        with_vectors=False,
-                    )
-                    found_set = {str(p.id) for p in found}
-                    return (
-                        [i for i in pos_ids if str(i) in found_set],
-                        [i for i in neg_ids if str(i) in found_set],
-                    )
-                except Exception:
-                    return [], []
+                def _filter_to_collection() -> tuple[list, list]:
+                    try:
+                        found = client.retrieve(
+                            explore_collection,
+                            ids=all_ids,
+                            with_payload=False,
+                            with_vectors=False,
+                        )
+                        found_set = {str(p.id) for p in found}
+                        return (
+                            [i for i in pos_ids if str(i) in found_set],
+                            [i for i in neg_ids if str(i) in found_set],
+                        )
+                    except Exception:
+                        return [], []
 
-            pos_ids, neg_ids = await asyncio.to_thread(_filter_to_collection)
-        hits, strategy = await asyncio.to_thread(
-            run_explore,
-            client,
-            explore_collection,
-            pos_ids,
-            neg_ids,
-            vector_name="dino",
-            limit=limit,
-        )
+                pos_ids, neg_ids = await asyncio.to_thread(_filter_to_collection)
+            await asyncio.to_thread(_require_tag_compat, client, settings, explore_collection)
+            hits, strategy = await asyncio.to_thread(
+                run_explore,
+                client,
+                explore_collection,
+                pos_ids,
+                neg_ids,
+                vector_name="dino",
+                limit=limit,
+            )
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -574,103 +585,108 @@ async def classify_tags_for_hashes(request: Request) -> JSONResponse:
     settings = Settings()
 
     def _classify():
-        client, store = _tag_client_and_store()
-        tags = store.list()
-
-        # Resolve all hashes → point_ids in one scroll using a should-filter.
-        # ``image_hashes`` is already deduplicated by the request handler.
-        hash_set = set(image_hashes)
-        hash_to_pid: dict[str, str] = {}
-        for record in qdrant_scroll_all(
-            client,
-            settings.collection,
-            scroll_filter=Filter(
-                should=[
-                    FieldCondition(key="image_hash", match=MatchValue(value=h))
-                    for h in image_hashes
-                ]
-            ),
-            limit=256,
-            with_payload=["image_hash"],
-            with_vectors=False,
-        ):
-            h = (record.payload or {}).get("image_hash")
-            if isinstance(h, str) and h in hash_set and h not in hash_to_pid:
-                hash_to_pid[h] = str(record.id)
-            if len(hash_to_pid) == len(image_hashes):
-                break
-
-        if not hash_to_pid:
-            return {h: [] for h in image_hashes}, []
-
-        candidate_records = client.retrieve(
-            collection_name=settings.collection,
-            ids=list(hash_to_pid.values()),
-            with_vectors=True,
-            with_payload=False,
-        )
-        # Build (file_id, filename, dino_vec) entries reusing score_query_entries
-        pid_to_hash = {v: k for k, v in hash_to_pid.items()}
-        entries: list[tuple[str, str, list[float] | None]] = []
-        for rec in candidate_records:
-            pid = str(rec.id)
-            image_hash = pid_to_hash.get(pid)
-            if image_hash is None:
-                continue
-            vecs = rec.vector or {}
-            dino_vec = (
-                list(vecs.get("dino")) if isinstance(vecs, dict) and vecs.get("dino") else None
+        with _tag_session() as (client, store):
+            _require_tag_compat(
+                client, settings, settings.collection, settings.reference_collection
             )
-            entries.append((pid, image_hash, dino_vec))
+            tags = store.list()
 
-        by_hash: dict[str, list[str]] = {h: [] for h in image_hashes}
-        skipped_tags: list[str] = []
+            # Resolve all hashes → point_ids in one scroll using a should-filter.
+            # ``image_hashes`` is already deduplicated by the request handler.
+            hash_set = set(image_hashes)
+            hash_to_pid: dict[str, str] = {}
+            for record in qdrant_scroll_all(
+                client,
+                settings.collection,
+                scroll_filter=Filter(
+                    should=[
+                        FieldCondition(key="image_hash", match=MatchValue(value=h))
+                        for h in image_hashes
+                    ]
+                ),
+                limit=256,
+                with_payload=["image_hash"],
+                with_vectors=False,
+            ):
+                h = (record.payload or {}).get("image_hash")
+                if isinstance(h, str) and h in hash_set and h not in hash_to_pid:
+                    hash_to_pid[h] = str(record.id)
+                if len(hash_to_pid) == len(image_hashes):
+                    break
 
-        for tag in tags:
-            # classify_tags_for_hashes folds target into positives for scoring.
-            effective_pos = [str(i) for i in tag.positive_ids]
-            if tag.target_id is not None and str(tag.target_id) not in effective_pos:
-                effective_pos.append(str(tag.target_id))
-            if not effective_pos:
-                continue
-            try:
-                vecs_by_id = _get_cached_tag_ref_vecs(client, settings, tag, vector_name="dino")
-            except Exception:  # noqa: BLE001
-                skipped_tags.append(tag.name)
-                continue
-            pos_dino, neg_dino = _split_cached_vecs(
-                vecs_by_id,
-                effective_pos,
-                [str(i) for i in tag.negative_ids],
+            if not hash_to_pid:
+                return {h: [] for h in image_hashes}, []
+
+            candidate_records = client.retrieve(
+                collection_name=settings.collection,
+                ids=list(hash_to_pid.values()),
+                with_vectors=True,
+                with_payload=False,
             )
-
-            # Fail safe: the tag declares negatives but none could be retrieved
-            # (stale point IDs, re-indexed collection, wrong collection).
-            # Do not fall back to permissive cosine classification — skip.
-            if tag.negative_ids and not neg_dino:
-                _log.warning(
-                    "classify: tag %r has %d negative ID(s) but none resolved — skipping",
-                    tag.name,
-                    len(tag.negative_ids),
-                )
-                skipped_tags.append(tag.name)
-                continue
-
-            threshold = _triplet_threshold(pos_dino, neg_dino)
-
-            hits = score_query_entries(entries, pos_dino, neg_dino, limit=len(entries))
-            for hit in hits:
-                if not _hit_passes_classify_threshold(
-                    hit.triplet_score, hit.raw_score, threshold, cosine_threshold
-                ):
+            # Build (file_id, filename, dino_vec) entries reusing score_query_entries
+            pid_to_hash = {v: k for k, v in hash_to_pid.items()}
+            entries: list[tuple[str, str, list[float] | None]] = []
+            for rec in candidate_records:
+                pid = str(rec.id)
+                image_hash = pid_to_hash.get(pid)
+                if image_hash is None:
                     continue
-                # hit.filename holds the image_hash (we used it as the filename field)
-                by_hash[hit.filename].append(tag.name)
+                vecs = rec.vector or {}
+                dino_vec = (
+                    list(vecs.get("dino")) if isinstance(vecs, dict) and vecs.get("dino") else None
+                )
+                entries.append((pid, image_hash, dino_vec))
 
-        return by_hash, skipped_tags
+            by_hash: dict[str, list[str]] = {h: [] for h in image_hashes}
+            skipped_tags: list[str] = []
+
+            for tag in tags:
+                # classify_tags_for_hashes folds target into positives for scoring.
+                effective_pos = [str(i) for i in tag.positive_ids]
+                if tag.target_id is not None and str(tag.target_id) not in effective_pos:
+                    effective_pos.append(str(tag.target_id))
+                if not effective_pos:
+                    continue
+                try:
+                    vecs_by_id = _get_tag_ref_vecs(client, settings, tag, vector_name="dino")
+                except Exception:  # noqa: BLE001
+                    skipped_tags.append(tag.name)
+                    continue
+                pos_dino, neg_dino = _split_cached_vecs(
+                    vecs_by_id,
+                    effective_pos,
+                    [str(i) for i in tag.negative_ids],
+                )
+
+                # Fail safe: the tag declares negatives but none could be retrieved
+                # (stale point IDs, re-indexed collection, wrong collection).
+                # Do not fall back to permissive cosine classification — skip.
+                if tag.negative_ids and not neg_dino:
+                    _log.warning(
+                        "classify: tag %r has %d negative ID(s) but none resolved — skipping",
+                        tag.name,
+                        len(tag.negative_ids),
+                    )
+                    skipped_tags.append(tag.name)
+                    continue
+
+                threshold = _triplet_threshold(pos_dino, neg_dino)
+
+                hits = score_query_entries(entries, pos_dino, neg_dino, limit=len(entries))
+                for hit in hits:
+                    if not _hit_passes_classify_threshold(
+                        hit.triplet_score, hit.raw_score, threshold, cosine_threshold
+                    ):
+                        continue
+                    # hit.filename holds the image_hash (we used it as the filename field)
+                    by_hash[hit.filename].append(tag.name)
+
+            return by_hash, skipped_tags
 
     try:
         by_hash, skipped_tags = await asyncio.to_thread(_classify)
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
     return JSONResponse({"by_hash": by_hash, "skipped_tags": skipped_tags})
@@ -713,67 +729,77 @@ async def classify_tags_for_session(request: Request) -> JSONResponse:
     settings = Settings()
 
     def _classify_session():
-        cs_client, store = _tag_client_and_store()
-        tags = store.list()
-
-        entries = [
-            (f.file_id, f.filename, f.dino_embedding)
-            for f in session.files
-            if not f.is_video and f.dino_embedding
-        ]
-        file_id_to_hash = {f.file_id: f.file_hash for f in session.files if f.file_hash}
-
-        by_hash: dict[str, list[str]] = {}
-        skipped_tags: list[str] = []
-        if not entries or not tags:
-            return by_hash, skipped_tags
-
-        for tag in tags:
-            if not tag.positive_ids:
-                continue
-            try:
-                vecs_by_id = _get_cached_tag_ref_vecs(cs_client, settings, tag, vector_name="dino")
-            except Exception:  # noqa: BLE001
-                skipped_tags.append(tag.name)
-                continue
-            # classify_tags_for_session intentionally ignores target: only the
-            # explicit positive/negative lists contribute to scoring here.
-            pos_dino, neg_dino = _split_cached_vecs(
-                vecs_by_id,
-                [str(i) for i in tag.positive_ids],
-                [str(i) for i in tag.negative_ids],
+        with _tag_session() as (cs_client, store):
+            _require_tag_compat(
+                cs_client,
+                settings,
+                settings.collection,
+                settings.reference_collection,
+                uploaded=True,
             )
+            tags = store.list()
 
-            if tag.negative_ids and not neg_dino:
-                _log.warning(
-                    "classify-session: tag %r has %d negative ID(s) but none resolved — skipping",
-                    tag.name,
-                    len(tag.negative_ids),
-                )
-                skipped_tags.append(tag.name)
-                continue
+            entries = [
+                (f.file_id, f.filename, f.dino_embedding)
+                for f in session.files
+                if not f.is_video and f.dino_embedding
+            ]
+            file_id_to_hash = {f.file_id: f.file_hash for f in session.files if f.file_hash}
 
-            threshold = _triplet_threshold(pos_dino, neg_dino)
+            by_hash: dict[str, list[str]] = {}
+            skipped_tags: list[str] = []
+            if not entries or not tags:
+                return by_hash, skipped_tags
 
-            hits = score_query_entries(
-                entries,
-                pos_dino,
-                neg_dino,
-                limit=len(entries),
-            )
-            for hit in hits:
-                if not _hit_passes_classify_threshold(
-                    hit.triplet_score, hit.raw_score, threshold, cosine_threshold
-                ):
+            for tag in tags:
+                if not tag.positive_ids:
                     continue
-                image_hash = file_id_to_hash.get(hit.file_id)
-                if image_hash:
-                    by_hash.setdefault(image_hash, []).append(tag.name)
+                try:
+                    vecs_by_id = _get_tag_ref_vecs(cs_client, settings, tag, vector_name="dino")
+                except Exception:  # noqa: BLE001
+                    skipped_tags.append(tag.name)
+                    continue
+                # classify_tags_for_session intentionally ignores target: only the
+                # explicit positive/negative lists contribute to scoring here.
+                pos_dino, neg_dino = _split_cached_vecs(
+                    vecs_by_id,
+                    [str(i) for i in tag.positive_ids],
+                    [str(i) for i in tag.negative_ids],
+                )
 
-        return by_hash, skipped_tags
+                if tag.negative_ids and not neg_dino:
+                    _log.warning(
+                        "classify-session: tag %r has %d negative ID(s) "
+                        "but none resolved — skipping",
+                        tag.name,
+                        len(tag.negative_ids),
+                    )
+                    skipped_tags.append(tag.name)
+                    continue
+
+                threshold = _triplet_threshold(pos_dino, neg_dino)
+
+                hits = score_query_entries(
+                    entries,
+                    pos_dino,
+                    neg_dino,
+                    limit=len(entries),
+                )
+                for hit in hits:
+                    if not _hit_passes_classify_threshold(
+                        hit.triplet_score, hit.raw_score, threshold, cosine_threshold
+                    ):
+                        continue
+                    image_hash = file_id_to_hash.get(hit.file_id)
+                    if image_hash:
+                        by_hash.setdefault(image_hash, []).append(tag.name)
+
+            return by_hash, skipped_tags
 
     try:
         by_hash, skipped_tags = await asyncio.to_thread(_classify_session)
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
     return JSONResponse({"by_hash": by_hash, "skipped_tags": skipped_tags})
@@ -795,53 +821,59 @@ async def triage_query_images(
     settings = Settings()
 
     def _run():
-        _client, store = _tag_client_and_store()
-        tag = store.get(tag_id)
-        if tag is None:
-            return None, None, False
-
-        if not tag.positive_ids and tag.target_id is None and not tag.negative_ids:
-            return tag, [], False
-
-        vecs_by_id = _get_cached_tag_ref_vecs(_client, settings, tag, vector_name="dino")
-        # Mirror classify_tags_for_hashes: fold target into effective_pos so
-        # it does not fall through to neg_vecs in _split_cached_vecs.
-        effective_pos = [str(i) for i in tag.positive_ids]
-        if tag.target_id is not None and str(tag.target_id) not in set(effective_pos):
-            effective_pos.append(str(tag.target_id))
-        pos_dino, neg_dino = _split_cached_vecs(
-            vecs_by_id,
-            effective_pos,
-            [str(i) for i in tag.negative_ids],
-        )
-
-        if tag.negative_ids and not neg_dino:
-            _log.warning(
-                "triage-query-images: tag %r has %d negative ID(s) but none resolved — skipping",
-                tag.name,
-                len(tag.negative_ids),
+        with _tag_session() as (_client, store):
+            _require_tag_compat(
+                _client, settings, settings.collection, settings.reference_collection, uploaded=True
             )
-            return tag, [], True
+            tag = store.get(tag_id)
+            if tag is None:
+                return None, None, False
 
-        threshold = _triplet_threshold(pos_dino, neg_dino)
+            if not tag.positive_ids and tag.target_id is None and not tag.negative_ids:
+                return tag, [], False
 
-        entries = [
-            (f.file_id, f.filename, f.dino_embedding)
-            for f in session.files
-            if not f.is_video and f.dino_embedding
-        ]
-        all_hits = score_query_entries(entries, pos_dino, neg_dino, limit=limit)
-        hits = [
-            h
-            for h in all_hits
-            if _hit_passes_classify_threshold(
-                h.triplet_score, h.raw_score, threshold, cosine_threshold
+            vecs_by_id = _get_tag_ref_vecs(_client, settings, tag, vector_name="dino")
+            # Mirror classify_tags_for_hashes: fold target into effective_pos so
+            # it does not fall through to neg_vecs in _split_cached_vecs.
+            effective_pos = [str(i) for i in tag.positive_ids]
+            if tag.target_id is not None and str(tag.target_id) not in set(effective_pos):
+                effective_pos.append(str(tag.target_id))
+            pos_dino, neg_dino = _split_cached_vecs(
+                vecs_by_id,
+                effective_pos,
+                [str(i) for i in tag.negative_ids],
             )
-        ]
-        return tag, hits, False
+
+            if tag.negative_ids and not neg_dino:
+                _log.warning(
+                    "triage-query-images: tag %r has %d negative ID(s) "
+                    "but none resolved — skipping",
+                    tag.name,
+                    len(tag.negative_ids),
+                )
+                return tag, [], True
+
+            threshold = _triplet_threshold(pos_dino, neg_dino)
+
+            entries = [
+                (f.file_id, f.filename, f.dino_embedding)
+                for f in session.files
+                if not f.is_video and f.dino_embedding
+            ]
+            all_hits = score_query_entries(entries, pos_dino, neg_dino, limit=limit)
+            hits = [
+                h
+                for h in all_hits
+                if _hit_passes_classify_threshold(
+                    h.triplet_score, h.raw_score, threshold, cosine_threshold
+                )
+            ]
+            return tag, hits, False
 
     try:
         tag, hits, skipped = await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
 
@@ -875,9 +907,7 @@ async def triage_query_images(
     )
 
 
-# ---------------------------------------------------------------------------
 # Point-ID and payload lookup (bridge from image hashes to Qdrant IDs)
-# ---------------------------------------------------------------------------
 
 
 @router.get("/api/point-id")
@@ -894,17 +924,19 @@ async def lookup_point_id(image_hash: str) -> JSONResponse:
     settings = Settings()
 
     def _scroll(collection_name: str):
-        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-        records, _ = client.scroll(
-            collection_name=collection_name,
-            scroll_filter=Filter(
-                must=[FieldCondition(key="image_hash", match=MatchValue(value=image_hash))]
-            ),
-            limit=1,
-            with_payload=False,
-            with_vectors=False,
-        )
-        return records
+        with closing(
+            QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+        ) as client:
+            records, _ = client.scroll(
+                collection_name=collection_name,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="image_hash", match=MatchValue(value=image_hash))]
+                ),
+                limit=1,
+                with_payload=False,
+                with_vectors=False,
+            )
+            return records
 
     try:
         records = await asyncio.to_thread(_scroll, settings.collection)
@@ -940,13 +972,15 @@ async def get_point_payload(point_id: str) -> JSONResponse:
     settings = Settings()
 
     def _retrieve(collection_name: str):
-        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-        return client.retrieve(
-            collection_name=collection_name,
-            ids=[point_id],
-            with_payload=["image_hash", "image_path"],
-            with_vectors=False,
-        )
+        with closing(
+            QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+        ) as client:
+            return client.retrieve(
+                collection_name=collection_name,
+                ids=[point_id],
+                with_payload=["image_hash", "image_path"],
+                with_vectors=False,
+            )
 
     try:
         records = await asyncio.to_thread(_retrieve, settings.collection)

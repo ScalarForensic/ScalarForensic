@@ -1,4 +1,4 @@
-// ── The §7.2 rendering record, for both scopes ───────────────────────────────
+// The §7.2 rendering record, for both scopes
 //
 // One `sfn()` part file, loaded before app.js like every other part and merged
 // with property descriptors — never Object.assign, which would evaluate the

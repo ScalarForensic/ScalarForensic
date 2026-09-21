@@ -1,7 +1,5 @@
-/* =========================================================
-   ScalarForensic — Evidence Room
-   Dark forensic workstation aesthetic.
-   ========================================================= */
+/* ScalarForensic — Evidence Room
+   Dark forensic workstation aesthetic. */
 
 @font-face {
   font-family: 'BarlowCondensed';
@@ -32,7 +30,7 @@
   font-display: swap;
 }
 
-/* ── Tokens ── */
+/* Tokens */
 :root {
   --bg:         #0d0f12;
   --bg2:        #101318;
@@ -70,13 +68,13 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* ── Scrollbar ── */
+/* Scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 
-/* ── Layout ── */
+/* Layout */
 #app {
   display: flex;
   flex-direction: column;
@@ -84,7 +82,7 @@ html, body {
   overflow: hidden;
 }
 
-/* ── Error banner ── */
+/* Error banner */
 .error-banner {
   display: block;
   padding: 10px 18px;
@@ -96,7 +94,7 @@ html, body {
   text-align: center;
 }
 
-/* ── Header ── */
+/* Header */
 header {
   position: relative;
   display: flex;
@@ -132,7 +130,7 @@ header::after {
   flex-shrink: 0;
 }
 
-/* ── Pre-analysis mode toggles ── */
+/* Pre-analysis mode toggles */
 .mode-toggles {
   display: flex;
   gap: 6px;
@@ -173,7 +171,7 @@ header::after {
   flex-shrink: 0;
 }
 
-/* ── Post-analysis run pills (header right side, non-interactive) ── */
+/* Post-analysis run pills (header right side, non-interactive) */
 .analysis-pills {
   display: flex;
   gap: 6px;
@@ -196,7 +194,7 @@ header::after {
 .analysis-pill-semantic { background: rgba(74,158,224,0.12);  color: var(--semantic); border: 1px solid rgba(74,158,224,0.25); }
 .analysis-pill-faces    { background: rgba(46,204,113,0.12);  color: var(--success);  border: 1px solid rgba(46,204,113,0.25); }
 
-/* ── Upload section ── */
+/* Upload section */
 .upload-section {
   padding: 20px 24px;
   flex: 1;
@@ -319,7 +317,7 @@ header::after {
 }
 .btn-ghost:hover { opacity: 1; color: var(--accent); }
 
-/* ── Drop-zone progress overlay ── */
+/* Drop-zone progress overlay */
 .drop-zone-progress {
   display: flex;
   flex-direction: column;
@@ -347,7 +345,7 @@ header::after {
   white-space: nowrap;
 }
 
-/* ── Progress bar ── */
+/* Progress bar */
 .progress-track {
   height: 3px;
   background: var(--border);
@@ -370,7 +368,7 @@ header::after {
 }
 
 
-/* ── Results layout: 4 panels ── */
+/* Results layout: 4 panels */
 .results-layout {
   display: grid;
   grid-template-columns: 230px 1fr 1fr 270px;
@@ -382,7 +380,7 @@ header::after {
   margin-top: 16px;
 }
 
-/* ── Panel shared ── */
+/* Panel shared */
 .panel-header {
   height: 38px;
   box-sizing: border-box;
@@ -421,7 +419,7 @@ header::after {
   overflow: hidden;
 }
 
-/* ── Left panel ── */
+/* Left panel */
 .left-panel {
   display: flex;
   flex-direction: column;
@@ -511,7 +509,7 @@ input[type="range"]::-webkit-slider-thumb:hover { box-shadow: 0 0 0 3px rgba(232
 input.range-altered::-webkit-slider-thumb { background: var(--altered); box-shadow: 0 0 0 1px var(--altered); }
 input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-shadow: 0 0 0 1px var(--semantic); }
 
-/* ── File lists ── */
+/* File lists */
 .file-list {
   overflow-y: auto;
 }
@@ -575,7 +573,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   border-top: 1px solid var(--border);
 }
 
-/* ── Video file-item (collapsible parent + frame children) ── */
+/* Video file-item (collapsible parent + frame children) */
 .video-expand-btn {
   flex-shrink: 0;
   width: 16px;
@@ -634,7 +632,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 }
 .frame-child-item.selected .frame-child-tc { color: var(--text); }
 
-/* ── Image panels (panels 2 & 3) ── */
+/* Image panels (panels 2 & 3) */
 .image-panel {
   display: flex;
   flex-direction: column;
@@ -694,7 +692,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   transform-origin: center center;
 }
 
-/* ── In-panel zoom buttons ── */
+/* In-panel zoom buttons */
 .image-zoom-btns {
   position: absolute;
   bottom: 10px;
@@ -722,7 +720,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 }
 .zoom-btn:hover { color: var(--text); border-color: var(--accent); }
 
-/* ── Query-video frame navigation row ── */
+/* Query-video frame navigation row */
 .frame-nav-row {
   display: flex;
   align-items: center;
@@ -756,7 +754,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   text-align: center;
 }
 
-/* ── Image subtitles ── */
+/* Image subtitles */
 .image-subs {
   padding: 8px 12px;
   border-top: 1px solid var(--border);
@@ -804,7 +802,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 
 .muted-text { font-size: 11px; color: var(--muted); }
 
-/* ── Metadata box ── */
+/* Metadata box */
 .meta-box {
   border-top: 1px solid var(--border);
   flex-shrink: 0;
@@ -879,7 +877,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .meta-item.meta-partial .meta-k { color: var(--altered); }
 .meta-item.meta-partial .meta-v { color: var(--altered); }
 
-/* ── Embedding model box ── */
+/* Embedding model box */
 .emb-box {
   border-top: 1px solid var(--border);
   flex-shrink: 0;
@@ -928,7 +926,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .emb-row.emb-mismatch .emb-hash { color: var(--accent); }
 
 
-/* ── Badges ── */
+/* Badges */
 .badge {
   padding: 1px 6px;
   border-radius: 3px;
@@ -948,7 +946,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
    the label has to be the first thing seen next to the player. */
 .badge-viewing-copy { background: rgba(232,147,32,0.12); color: var(--accent); border: 1px solid rgba(232,147,32,0.3); }
 
-/* ── Tag strip (below image box in query and match panels) ── */
+/* Tag strip (below image box in query and match panels) */
 .tag-strip {
   display: flex;
   flex-wrap: wrap;
@@ -1020,7 +1018,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   color: var(--text2);
 }
 
-/* ── Meta tags ── */
+/* Meta tags */
 .meta-tag {
   font-family: var(--mono);
   font-size: 10px;
@@ -1044,7 +1042,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   letter-spacing: 0.01em;
 }
 
-/* ── Right panel: hits ── */
+/* Right panel: hits */
 .right-panel {
   display: flex;
   flex-direction: column;
@@ -1052,7 +1050,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   min-height: 0;
 }
 
-/* ── Hits filter pills row ── */
+/* Hits filter pills row */
 .hits-filters {
   display: flex;
   align-items: center;
@@ -1081,7 +1079,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .hit-filter-pill-unify    { color: var(--muted);    border-color: rgba(154,163,178,0.25); background: rgba(154,163,178,0.06); margin-left: auto; }
 .hit-filter-pill.off      { opacity: 0.3; }
 
-/* ── Hits list ── */
+/* Hits list */
 .hits-list {
   overflow-y: auto;
   flex: 1;
@@ -1091,7 +1089,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   gap: 4px;
 }
 
-/* ── Hit card: grid layout ── */
+/* Hit card: grid layout */
 .hit-card {
   display: grid;
   grid-template-columns: 80px 1fr;
@@ -1237,7 +1235,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .hit-frame-play:hover { color: var(--accent); border-color: var(--accent-dim); }
 .hit-frame-scores { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
 
-/* ── Source-video playback (viewing copy) ── */
+/* Source-video playback (viewing copy) */
 .vc-block { margin-top: 8px; }
 .vc-open-btn {
   display: flex;
@@ -1402,7 +1400,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   color: var(--muted);
 }
 
-/* ── Stats bar ── */
+/* Stats bar */
 .stats-bar {
   display: flex;
   gap: 20px;
@@ -1433,7 +1431,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   color: var(--muted);
 }
 
-/* ── Lightbox ── */
+/* Lightbox */
 .lightbox {
   position: fixed;
   inset: 0;
@@ -1492,10 +1490,10 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 }
 .lightbox-btn:hover { color: var(--text); border-color: var(--accent); }
 
-/* ── Utility ── */
+/* Utility */
 [x-cloak] { display: none !important; }
 
-/* ── Query error indicators ── */
+/* Query error indicators */
 .error-chip {
   background: rgba(220,50,50,0.15);
   color: #e05555;
@@ -1535,7 +1533,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   word-break: break-all;
 }
 
-/* ── Provenance panel ── */
+/* Provenance panel */
 .provenance-box {
   padding: 8px 10px;
   background: var(--bg2);
@@ -1588,7 +1586,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   border-color: var(--accent);
 }
 
-/* ── Semantic stats modal ── */
+/* Semantic stats modal */
 .stats-modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1722,7 +1720,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   font-style: italic;
 }
 
-/* ── Face explainer modals ──
+/* Face explainer modals
    Same shells as the DINO pair, so the two modalities read alike. */
 .face-stats-modal-backdrop,
 .face-audit-modal-backdrop {
@@ -1773,7 +1771,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   letter-spacing: 0;
 }
 
-/* ── Forensic Audit modal ── */
+/* Forensic Audit modal */
 .audit-modal-backdrop {
   position: fixed;
   inset: 0;
@@ -2027,7 +2025,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   cursor: zoom-in;
 }
 
-/* ── Concept Triage ─────────────────────────────────────────────────────── */
+/* Concept Triage */
 
 /* Mode switch pill in stats bar */
 .mode-switch {
@@ -2060,33 +2058,6 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .mode-switch-btn:hover:not(.active) {
   color: var(--text);
   background: var(--surface2);
-}
-
-/* Concept selector in stats bar (search mode) */
-.stats-tag-bar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--text2);
-  flex-shrink: 0;
-}
-.stats-tag-bar select {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--text);
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: var(--radius);
-  cursor: pointer;
-  max-width: 150px;
-}
-.stats-tag-bar select:focus { outline: none; border-color: var(--accent); }
-.stats-tag-label {
-  color: var(--muted);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
 }
 
 /* Triage 4-panel layout (same grid as results-layout) */
@@ -2247,7 +2218,6 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 }
 
 /* Concept editor panel */
-.tag-editor-inner { overflow-y: auto; flex: 1; padding-bottom: 8px; }
 .tag-editor-hdr {
   padding: 10px 14px 4px;
 }
@@ -2324,26 +2294,6 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
   line-height: 1.5;
   word-break: break-word;
 }
-.tag-target-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--text2);
-}
-.tag-target-id {
-  font-family: var(--mono);
-  font-size: 10px;
-  background: var(--surface2);
-  padding: 2px 5px;
-  border-radius: 2px;
-  color: var(--text);
-  max-width: 110px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* Triage results (Panel 4) */
 .triage-hit-card {
   display: grid;
@@ -2388,8 +2338,6 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 }
 .triage-score-num.zero { color: var(--muted); }
 .badge-dino { background: rgba(74,158,224,0.1);  color: var(--semantic); border: 1px solid rgba(74,158,224,0.2); }
-.badge-sscd { background: rgba(232,147,32,0.1);  color: var(--altered);  border: 1px solid rgba(232,147,32,0.2); }
-.badge-dual { background: rgba(46,204,113,0.1);  color: var(--success);  border: 1px solid rgba(46,204,113,0.25); }
 .triage-hit-path {
   font-size: 11px; color: var(--text);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -2467,7 +2415,7 @@ input.range-semantic::-webkit-slider-thumb { background: var(--semantic); box-sh
 .hit-mark-btn.neg-btn.is-active { background: rgba(192,57,43,0.15); border-color: var(--danger); }
 .hit-mark-spinner { font-size: 9px; color: var(--muted); }
 
-/* ── Face observations panel (optional modality, browse only) ───────────── */
+/* Face observations panel (optional modality, browse only) */
 .faces-panel {
   border-top: 1px solid var(--border);
   padding: 8px 0 4px;

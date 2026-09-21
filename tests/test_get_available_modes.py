@@ -35,9 +35,7 @@ def _make_collection_info(vector_names: list[str]) -> MagicMock:
     return info
 
 
-# ---------------------------------------------------------------------------
 # Success paths
-# ---------------------------------------------------------------------------
 
 
 def test_get_available_modes_both_vectors():
@@ -122,9 +120,7 @@ def test_get_available_modes_collection_absent():
     assert error is None
 
 
-# ---------------------------------------------------------------------------
 # Failure paths (issue #8: retry with exponential backoff)
-# ---------------------------------------------------------------------------
 
 
 def test_get_available_modes_all_retries_exhausted():

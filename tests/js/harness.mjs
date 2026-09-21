@@ -1,4 +1,4 @@
-// ── The JS harness: execute the frontend, do not read it ─────────────────────
+// The JS harness: execute the frontend, do not read it
 //
 // WHY THIS EXISTS.  `player.js` once shipped a `?? … ||` precedence
 // SyntaxError — the file did not parse at all — and all fourteen text-level
@@ -112,4 +112,12 @@ export function loadFrontend() {
 
 export function loadComponent() {
   return loadFrontend().component;
+}
+
+// A promise whose settlement a test controls, for pinning what happens while a
+// request is still in flight.
+export function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 }

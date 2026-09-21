@@ -178,7 +178,7 @@ def test_basket_box_sits_in_the_left_panel_with_three_state_rows():
     assert "basketClear()" in head
     css = (STATIC / "style.css").read_text()
     basket = css[css.index(".face-basket {") :].split("}")[0]
-    assert "overflow-y: auto" in basket  # scrollable
+    assert "overflow-y: auto" in basket
 
 
 def test_ctrl_click_adds_faces_to_the_basket_on_both_sides():
@@ -291,7 +291,8 @@ def test_query_image_buttons_name_their_model():
 def test_face_dist_stats_modal_scopes_the_reference_threshold():
     html = (STATIC / "index.html").read_text()
     start = html.index('<div class="face-stats-modal-backdrop"')
-    block = html[start : start + 4000]
+    end = html.index('<div class="face-audit-modal-backdrop"', start)
+    block = html[start:end]
     assert "model_reference_note" in block
     assert "review-only" in block  # the population statement
 

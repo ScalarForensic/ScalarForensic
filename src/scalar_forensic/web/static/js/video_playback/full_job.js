@@ -1,4 +1,4 @@
-// ── The full-video job: progress, cancel, completion, auto-switch (§4.3, §5) ─
+// The full-video job: progress, cancel, completion, auto-switch (§4.3, §5)
 //
 // One `sfn()` part file, loaded before app.js and merged with property
 // descriptors — never Object.assign, which would evaluate the getters below once
@@ -25,9 +25,6 @@
     etaLabel: null,
     rate: null,
     elapsedS: 0,
-    outSeconds: 0,
-    durationSeconds: 0,
-    writtenBytes: 0,
     estimateBytes: null,
     limitBytes: null,
     waiters: 0,
@@ -38,7 +35,7 @@
     // pipeline before one has produced anything is a claim, not a record.
     rendering: null,
   },
-  // ── The §6.3 override (ruling 2026-08-14, #184) ──────────────────────────
+  // The §6.3 override (ruling 2026-08-14, #184)
   // Two cells, each with exactly one writer, for the same reason
   // `contentionNotice` has one (player.js): the server sends each of these on
   // more than one payload, and two carriers writing two cells is two answers
@@ -47,8 +44,8 @@
   // `overrideOffer` — whether the server would honour an override for *this
   // video*. It is a fact about the video and not about a job, so it does not
   // live inside `fullJob`. Carriers: `playback-info.full_copy.overridable`
-  // (routes.py:289) and the 507 refusal detail's `overridable`
-  // (routes.py:676). Both are already `verdict.overridable AND an examiner id`
+  // (routes.py:video_playback_info) and the 507 refusal detail's `overridable`
+  // (routes.py:video_full_start). Both are already `verdict.overridable AND an examiner id`
   // — the server refuses an override it cannot attribute (403
   // `override-unattributed`), so a button offered without this would produce a
   // 403 and that is worse than no button.
@@ -63,10 +60,30 @@
   overrideDisclosure: null,
   _fullJobPollTimer: null,
   _fullJobLeaveHandler: null,
+  // POST-only capabilities belong to this browser component, never a job view.
+  _fullJobClaimsByPath: null,
+  _fullJobStartsByPath: null,
+  _fullJobCancelsByPath: null,
+  // The assembler copies descriptors, so allocate mutable maps per instance.
+  get _fullJobClaims() {
+    return this._fullJobClaimsByPath ??= Object.create(null);
+  },
+  get _fullJobStarts() {
+    return this._fullJobStartsByPath ??= Object.create(null);
+  },
+  get _fullJobCancels() {
+    return this._fullJobCancelsByPath ??= Object.create(null);
+  },
+  _fullJobGeneration: 0,
+  fullJobCancelError: '',
 
-  // ── Computed ─────────────────────────────────────────────────────────────
+  // Computed
   get fullJobRunning() {
     return this.fullJob.state === 'full-job-running';
+  },
+  get fullJobCancelOffered() {
+    const path = this.videoPlayback?.source_path;
+    return this.fullJobRunning && !!this._fullJobClaims[path] && !this._fullJobCancels[path];
   },
   get fullJobDone() {
     return this.fullJob.state === 'full-job-done';
@@ -117,16 +134,13 @@
     return r === null || r === undefined ? '' : `${r.toFixed(2)}× realtime`;
   },
 
-  // ── The §6.3 refusal ─────────────────────────────────────────────────────
+  // The §6.3 refusal
   // Three-valued on purpose (`cache.py`): `fits` / `refused` / `unknown`, and
   // `unknown` refuses too.  "This video is too big for the cache" and "this file
   // would not say how big it is" are different sentences, and collapsing them
   // reproduces #147's "unknown displayed as mismatch" — rejected at three layers
   // already.  On `unknown` the server sends `estimate_bytes: null`, so there is
   // no number to print and printing a zero would read as measured.
-  get fullJobRefusedUnknown() {
-    return this.fullJobRefused && this.fullJob.kind === 'full-copy-unknown';
-  },
   get fullJobRefusedTooBig() {
     return this.fullJobRefused && this.fullJob.estimateBytes !== null;
   },
@@ -152,16 +166,17 @@
     return this._bytesLabel(this.fullJob.limitBytes);
   },
 
-  // ── The §6.3 override: the offer, and the disclosure ─────────────────────
-  // The control is offered for the two refusals an override can actually set
+  // The §6.3 override: the offer, and the disclosure
+  // The control is offered for the one refusal an override can actually set
   // aside, named explicitly rather than inferred from `capacity-exhausted`:
   // `queue-full` is that state too (states.py:232) and is a wait, not a
-  // verdict — an override would neither help it nor be honoured. Naming the
-  // kinds keeps a later refusal in that state from silently acquiring a button.
+  // verdict — an override would neither help it nor be honoured, and per the
+  // 2026-08-14 narrowing `full-copy-unknown` is refused outright. Naming the
+  // kind keeps a later refusal in that state from silently acquiring a button.
   get fullJobOverrideOffered() {
     return (
       this.fullJobRefused &&
-      ['full-copy-refused', 'full-copy-unknown'].includes(this.fullJob.kind) &&
+      this.fullJob.kind === 'full-copy-refused' &&
       this.overrideOffer
     );
   },
@@ -203,7 +218,14 @@
     this.overrideDisclosure = value && typeof value === 'object' ? value : null;
   },
 
-  // ── Starting, polling, cancelling ────────────────────────────────────────
+  // Starting, polling, cancelling
+  _fullJobContext() {
+    return [this.videoPlayback?.source_path, this._viewGeneration,
+      this._videoPlaybackGeneration, this._fullJobGeneration];
+  },
+  _fullJobContextCurrent(context) {
+    return context.every((value, index) => value === this._fullJobContext()[index]);
+  },
   _fullJobQuery() {
     const path = this.videoPlayback?.source_path;
     if (!path) return null;
@@ -216,13 +238,13 @@
 
   _applyFullJobView(view) {
     this.fullJob.state = view.player_state ?? 'full-job-failed';
+    if (['full-job-done', 'full-job-failed', 'needs-transcode'].includes(this.fullJob.state)) {
+      delete this._fullJobClaims[this.videoPlayback?.source_path];
+    }
     this.fullJob.fraction = view.fraction ?? null;
     this.fullJob.etaLabel = view.eta_label ?? null;
     this.fullJob.rate = view.rate ?? null;
     this.fullJob.elapsedS = view.elapsed_seconds ?? 0;
-    this.fullJob.outSeconds = view.out_seconds ?? 0;
-    this.fullJob.durationSeconds = view.duration_seconds ?? 0;
-    this.fullJob.writtenBytes = view.written_bytes ?? 0;
     this.fullJob.estimateBytes = view.estimate_bytes ?? null;
     this.fullJob.limitBytes = view.limit_bytes ?? null;
     this.fullJob.waiters = view.waiters ?? 0;
@@ -253,7 +275,7 @@
       detail?.reason ?? (plain || `The export could not start (HTTP ${status ?? '?'}).`);
     this.fullJob.estimateBytes = detail?.estimate_bytes ?? null;
     this.fullJob.limitBytes = detail?.limit_bytes ?? null;
-    // The refusal's own carrier of the offer (routes.py:676). The second one is
+    // The refusal's own carrier of the offer (routes.py:video_full_start). The second one is
     // playback-info; both land in the one cell, so a page that was opened before
     // the refusal and one that was reloaded after it show the same control.
     this._setOverrideOffer(detail?.overridable);
@@ -266,29 +288,42 @@
   async startFullJob(override = false) {
     const q = this._fullJobQuery();
     if (!q) return;
+    const context = this._fullJobContext();
+    const path = context[0];
+    if (this._fullJobStarts[path] || this._fullJobClaims[path] || this._fullJobCancels[path]) return;
+    this._fullJobStarts[path] = true;
+    this.fullJobCancelError = '';
     this.fullJob.switched = false;
     // A new attempt has not been overridden until the server says it was. The
     // disclosure is re-established from the response, so a stale one cannot
     // survive onto a job that carries no override.
     this._setOverrideDisclosure(null);
-    let r;
     try {
-      r = await fetch(`/api/video-full?${q}${override ? '&override=true' : ''}`, { method: 'POST' });
+      const r = await fetch(`/api/video-full?${q}${override ? '&override=true' : ''}`, { method: 'POST' });
+      const body = await r.json().catch(() => ({}));
+      if (r.ok && typeof body.claim_id === 'string' && body.player_state === 'full-job-running') {
+        this._fullJobClaims[path] = body.claim_id;
+      }
+      if (!this._fullJobContextCurrent(context)) return;
+      if (!r.ok) {
+        this._applyFullJobRefusal(body?.detail ?? null, r.status);
+        return;
+      }
+      this._applyFullJobView(body);
+      if (this.fullJobRunning) {
+        this._startFullJobPoll();
+        this._armLeavePrompt();
+      }
     } catch (e) {
-      this._applyFullJobRefusal({ reason: e?.message || 'The export request failed.' }, null);
-      return;
+      if (this._fullJobContextCurrent(context)) {
+        this._applyFullJobRefusal({ reason: e?.message || 'The export request failed.' }, null);
+      }
+    } finally {
+      delete this._fullJobStarts[path];
     }
-    const body = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      this._applyFullJobRefusal(body?.detail ?? null, r.status);
-      return;
-    }
-    this._applyFullJobView(body);
-    this._startFullJobPoll();
-    this._armLeavePrompt();
   },
 
-  // ── What a freshly opened panel already knows ────────────────────────────
+  // What a freshly opened panel already knows
   // §9: playback-info carries `full_job` so a reloaded page rejoins the running
   // export instead of offering to start a second one — and, for §6.3, so the
   // override disclosure outlives the job that carried it. An analyst who opens
@@ -303,6 +338,7 @@
     this._setOverrideOffer(info?.full_copy?.overridable);
     const view = info?.full_job;
     if (!view) {
+      delete this._fullJobClaims[this.videoPlayback?.source_path];
       this.closeFullJob();
       return;
     }
@@ -328,17 +364,22 @@
   async pollFullJob() {
     const q = this._fullJobQuery();
     if (!q) return;
+    const context = this._fullJobContext();
+    if (this._fullJobCancels[context[0]]) return;
     let body;
     try {
       const r = await fetch(`/api/video-job-status?${q}`);
       body = await r.json();
+      if (!r.ok) return;
     } catch {
       return; // a dropped poll is not a job failure; the next one asks again
     }
+    if (!this._fullJobContextCurrent(context) || this._fullJobCancels[context[0]]) return;
     // `state: "none"` means the runner has no job for this source — it finished
     // and was reaped, or the server restarted. Not a failure, and not a reason
     // to overwrite a terminal state we already have.
     if (body?.state === 'none') {
+      delete this._fullJobClaims[context[0]];
       this._stopFullJobPoll();
       return;
     }
@@ -349,23 +390,36 @@
 
   async cancelFullJob() {
     const q = this._fullJobQuery();
-    if (!q) return;
-    this._stopFullJobPoll();
-    let body = {};
+    if (!q || !this.fullJobCancelOffered) return;
+    // Invalidate polls already in flight before releasing the claim.
+    this._fullJobGeneration++;
+    const context = this._fullJobContext();
+    const path = context[0];
+    const claim = this._fullJobClaims[path];
+    this._fullJobCancels[path] = true;
+    this.fullJobCancelError = '';
     try {
-      const r = await fetch(`/api/video-full?${q}`, { method: 'DELETE' });
-      body = await r.json().catch(() => ({}));
-    } catch {
-      /* the job is the server's; a failed cancel leaves the poll stopped */
+      const r = await fetch(`/api/video-full?${q}&claim_id=${encodeURIComponent(claim)}`, { method: 'DELETE' });
+      const body = await r.json();
+      if (!r.ok) throw new Error(body?.detail?.reason || body?.detail || `Cancellation failed (HTTP ${r.status}).`);
+      if (!body?.outcome || !body?.player_state) throw new Error('The cancellation response was incomplete.');
+      if (this._fullJobClaims[path] === claim) delete this._fullJobClaims[path];
+      if (!this._fullJobContextCurrent(context)) return;
+      this.fullJob.state = body.player_state;
+      this.fullJob.waiters = body.waiters ?? 0;
+      if (this.fullJobRunning) this._startFullJobPoll();
+      else this._stopFullJobPoll();
+    } catch (error) {
+      if (this._fullJobContextCurrent(context)) {
+        this.fullJobCancelError = error?.message || 'The cancellation request failed.';
+        if (this.fullJobRunning) this._startFullJobPoll();
+      }
+    } finally {
+      delete this._fullJobCancels[path];
     }
-    // The server states the state here too: a cancel with other waiters does not
-    // stop the job, and it says so by returning 'full-job-running'.
-    this.fullJob.state = body?.player_state ?? 'idle';
-    this.fullJob.waiters = body?.waiters ?? 0;
-    if (this.fullJob.state === 'full-job-running') this._startFullJobPoll();
   },
 
-  // ── Completion: notify, then switch at the current timestamp ──────────────
+  // Completion: notify, then switch at the current timestamp
   // The switch keeps the analyst's position.  Jumping to zero on completion
   // would lose the frame they were looking at, which for a long source is the
   // whole reason they waited for the export.
@@ -379,7 +433,7 @@
       : this.chunk.start;
   },
 
-  // ── The navigate-away prompt ──────────────────────────────────────────────
+  // The navigate-away prompt
   // A running export is server-side work the analyst cannot see from another
   // page, and leaving abandons a job that is still holding an encode worker.
   // The predicate is a getter so it can be tested; whether the browser actually
@@ -405,6 +459,8 @@
   },
 
   closeFullJob() {
+    this._fullJobGeneration++;
+    this.fullJobCancelError = '';
     this._stopFullJobPoll();
     // The disclosure belongs to the job and goes with it; `overrideOffer` does
     // not — it is a property of the video, re-established by whichever
@@ -412,8 +468,7 @@
     this._setOverrideDisclosure(null);
     this.fullJob = {
       state: 'idle', reason: '', kind: '', fraction: null, etaLabel: null, rate: null,
-      elapsedS: 0, outSeconds: 0, durationSeconds: 0, writtenBytes: 0,
-      estimateBytes: null, limitBytes: null, waiters: 0, url: '', switched: false,
+      elapsedS: 0, estimateBytes: null, limitBytes: null, waiters: 0, url: '', switched: false,
       rendering: null,
     };
   },

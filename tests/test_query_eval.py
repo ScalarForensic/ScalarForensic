@@ -10,11 +10,9 @@ import math
 
 import pytest
 
-from scalar_forensic.discovery import _build_context_pairs
+from scalar_forensic.discovery import MAX_CONTEXT_PAIRS, _build_context_pairs, pair_indices
 from scalar_forensic.query_eval import (
-    MAX_CONTEXT_PAIRS,
     _cosine_sims,
-    pair_indices,
     score_query_entries,
     score_query_vector,
 )
@@ -23,9 +21,6 @@ from scalar_forensic.query_eval import (
 def _unit(v: list[float]) -> list[float]:
     norm = math.sqrt(sum(x * x for x in v))
     return [x / norm for x in v]
-
-
-# ── _cosine_sims ─────────────────────────────────────────────────────────────
 
 
 def test_cosine_sims_identical_vectors_score_one():
@@ -49,9 +44,6 @@ def test_cosine_sims_zero_query_returns_zeros():
     assert sims[0] == 0.0
 
 
-# ── pair_indices ─────────────────────────────────────────────────────────────
-
-
 def testpair_indices_covers_all_pairs_under_cap():
     pairs = pair_indices(3, 2)
     assert len(pairs) == 6  # 3 × 2 = 6, below cap
@@ -71,7 +63,7 @@ def testpair_indices_diagonal_first():
     assert pairs[2] == (2, 2)
 
 
-# ── cross-module parity ──────────────────────────────────────────────────────
+# cross-module parity
 # The NumPy path (pair_indices) and the Qdrant path (_build_context_pairs)
 # MUST emit pairs in the same order: the Qdrant server scores the Nth pair
 # using the Nth (positive, negative) reference on its side, and our NumPy
@@ -97,9 +89,6 @@ def test_pair_ordering_matches_discovery_builder(n_pos, n_neg):
         "pair ordering drift: _build_context_pairs (discovery.py) and "
         "pair_indices (query_eval.py) must emit pairs in the same order"
     )
-
-
-# ── score_query_vector ────────────────────────────────────────────────────────
 
 
 def test_score_query_vector_all_pairs_satisfied():
@@ -144,9 +133,6 @@ def test_score_query_vector_three_pairs_two_satisfied():
     query = _unit([1.0, 0.0])  # close to both positives, far from negative
     score, _ = score_query_vector(query, pos, neg)
     assert score == 2
-
-
-# ── score_query_entries ───────────────────────────────────────────────────────
 
 
 def test_score_query_entries_ranks_by_triplet_score():

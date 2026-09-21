@@ -6,11 +6,9 @@ back-compatible across configuration changes — a collection populated with
 ``SFN_NORMALIZE_SIZE=224`` cannot be safely queried with ``=512`` because
 cosine distances between the two embedding spaces are meaningless.
 
-The functions in this module read one existing point per vector type and
-compare its provenance payload (``{vn}_model_hash``, ``{vn}_normalize_size``,
-``sscd_n_crops``) against the current settings.  Older indexes that lack
-these fields are skipped — the absence of a field is treated as "unknown",
-not "mismatch", to avoid retroactively breaking existing deployments.
+Sampled provenance gives useful mismatch diagnostics, and every vector-bearing
+point whose model/preprocessing payload fails to match is then counted exactly —
+including missing provenance beyond the sample — without transferring all points.
 """
 
 from __future__ import annotations
@@ -21,12 +19,16 @@ from typing import TYPE_CHECKING
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
-from qdrant_client.models import Filter, HasVectorCondition
+from qdrant_client.models import FieldCondition, Filter, HasVectorCondition, MatchValue
 
 from scalar_forensic._model_hash import hash_dino_snapshot
 
 if TYPE_CHECKING:
     from scalar_forensic.config import Settings
+
+
+class CompatibilityError(ValueError):
+    """Similarity is refused; metadata and original evidence remain inspectable."""
 
 
 class QdrantUnavailable(Exception):
@@ -84,9 +86,8 @@ def compute_remote_model_hash(endpoint: str, model_name: str, embedding_dim: int
 
 
 # Maximum points to inspect per vector type when looking for collection-internal
-# provenance inconsistency.  Large enough to almost certainly catch a mixed
-# corpus (any reasonable mix has the second config show up well before 1024
-# points), small enough that the scan runs in tens of milliseconds at startup.
+# provenance inconsistency. This sample supplies concise diagnostics; acceptance
+# additionally requires an exact count over all vector-bearing points.
 _INCONSISTENCY_SAMPLE_LIMIT = 1024
 _SCROLL_PAGE = 256
 
@@ -102,9 +103,8 @@ def _sample_provenance_tuples(
     Tuples are ``(model_hash, normalize_size, sscd_n_crops_or_None)``.  Stops
     early as soon as a *second* distinct tuple appears — we only need to
     distinguish "collection is internally consistent" from "collection has
-    multiple configs".  Points whose provenance fields are entirely absent
-    (older indexes that pre-date the payload schema) are skipped so they do
-    not register as a phantom "(None, None, None)" tuple.
+    multiple configs".  A point whose provenance fields are entirely absent
+    keeps its missing tuple and is refused.
     """
     seen: set[tuple] = set()
     next_offset = None
@@ -128,9 +128,6 @@ def _sample_provenance_tuples(
                 payload.get(f"{vector_name}_normalize_size"),
                 payload.get("sscd_n_crops") if vector_name == "sscd" else None,
             )
-            if tup == (None, None, None):
-                # Pre-provenance index — skip rather than treat as a real tuple.
-                continue
             seen.add(tup)
             if len(seen) > 1:
                 return seen
@@ -158,14 +155,14 @@ def check_collection_compat(
     *,
     expected_dino_hash: str | None = None,
     expected_sscd_hash: str | None = None,
-    check_normalize_size: bool = True,
+    needed_vectors: set[str] | None = None,
 ) -> list[str]:
     """Return a list of human-readable mismatch descriptions.
 
     An empty return value means *no detectable mismatch* — either everything
-    matches, the collection does not exist yet, the collection has no points
-    of that vector type, or the existing points pre-date the provenance
-    payload fields.
+    matches, the collection does not exist yet, or the collection has no points
+    of that vector type.  All nonmatching points are counted exactly after the
+    bounded diagnostic sample succeeds.
 
     Both ``sfn index`` and ``sfn-web`` enforce all three fields by default —
     drift in any of them changes the embedding function (model_hash → different
@@ -183,9 +180,6 @@ def check_collection_compat(
        run (probably with ``--ignore-config-mismatch``) merged two embedding
        configurations into one collection; nothing the caller does to .env
        will fix it — the collection itself must be re-indexed.
-
-    The ``check_normalize_size`` flag exists for tests that want to assert
-    individual checks in isolation, not as a phase-discrimination knob.
 
     :raises QdrantUnavailable: when Qdrant is unreachable or returns an
         unexpected response.  Callers decide whether that is fatal.
@@ -205,8 +199,8 @@ def check_collection_compat(
 
     vectors_cfg = info.config.params.vectors
     if not isinstance(vectors_cfg, dict):
-        # Single-vector legacy collection — provenance fields not used.
-        return []
+        # Single-vector legacy collection has no verifiable named-vector provenance.
+        return ["Legacy vector layout; rebuild before ingestion or similarity"]
 
     errors: list[str] = []
 
@@ -216,7 +210,7 @@ def check_collection_compat(
     }
 
     for vn in ("dino", "sscd"):
-        if vn not in vectors_cfg:
+        if vn not in vectors_cfg or (needed_vectors is not None and vn not in needed_vectors):
             continue
 
         fields = [f"{vn}_model_hash", f"{vn}_normalize_size"]
@@ -234,12 +228,11 @@ def check_collection_compat(
             raise QdrantUnavailable(str(exc)) from exc
 
         if not seen:
-            # Either no points of this vector type, or all sampled points
-            # pre-date the provenance schema.  Nothing to compare.
+            # No points of this vector type.  Nothing to compare.
             continue
 
         if len(seen) > 1:
-            tuple_lines = "\n".join(_format_provenance_tuple(vn, t) for t in sorted(seen))
+            tuple_lines = "\n".join(_format_provenance_tuple(vn, t) for t in sorted(seen, key=repr))
             errors.append(
                 f"[{vn}] collection contains multiple embedding configurations "
                 f"(found {len(seen)} distinct provenance tuples in a sample of "
@@ -254,12 +247,19 @@ def check_collection_compat(
         (stored_hash, stored_norm, stored_crops) = next(iter(seen))
 
         expected_hash = expected_hash_by_vector[vn]
+        if (
+            not expected_hash
+            or not stored_hash
+            or (vn == "dino" and stored_norm is None)
+            or (vn == "sscd" and stored_crops is None)
+        ):
+            errors.append(f"[{vn}] unverifiable model/preprocessing provenance; rebuild the index")
         if expected_hash is not None and stored_hash and stored_hash != expected_hash:
             errors.append(f"[{vn}] model_hash: stored={stored_hash}  current={expected_hash}")
 
         # normalize_size — SSCD's is fixed (288 px) regardless of SFN_NORMALIZE_SIZE,
         # so only DINOv2's is user-controlled and worth comparing here.
-        if check_normalize_size and vn == "dino":
+        if vn == "dino":
             if stored_norm is not None and stored_norm != settings.normalize_size:
                 errors.append(
                     f"[{vn}] normalize_size: stored={stored_norm}"
@@ -270,6 +270,48 @@ def check_collection_compat(
             if stored_crops is not None and stored_crops != settings.sscd_n_crops:
                 errors.append(
                     f"[sscd] sscd_n_crops: stored={stored_crops}  current={settings.sscd_n_crops}"
+                )
+
+    if not errors:
+        for vn in ("dino", "sscd"):
+            if vn not in vectors_cfg or (needed_vectors is not None and vn not in needed_vectors):
+                continue
+            expected_hash = expected_hash_by_vector[vn]
+            matches = []
+            if expected_hash:
+                matches.append(
+                    FieldCondition(key=f"{vn}_model_hash", match=MatchValue(value=expected_hash))
+                )
+                if vn == "dino":
+                    matches.append(
+                        FieldCondition(
+                            key="dino_normalize_size",
+                            match=MatchValue(value=settings.normalize_size),
+                        )
+                    )
+                else:
+                    matches.append(
+                        FieldCondition(
+                            key="sscd_n_crops", match=MatchValue(value=settings.sscd_n_crops)
+                        )
+                    )
+            # NOT(all expected fields match) catches absent fields as well as
+            # differing values. HasVector excludes metadata/vectorless points.
+            # If no expected hash can be verified, every populated vector fails.
+            mismatch_filter = Filter(
+                must=[HasVectorCondition(has_vector=vn)],
+                must_not=[Filter(must=matches)] if matches else None,
+            )
+            try:
+                count = client.count(
+                    collection_name=collection, count_filter=mismatch_filter, exact=True
+                ).count
+            except (ResponseHandlingException, UnexpectedResponse, ConnectionError, OSError) as exc:
+                raise QdrantUnavailable(str(exc)) from exc
+            if count:
+                errors.append(
+                    f"[{vn}] {count} vector-bearing points have incompatible or missing "
+                    "model/preprocessing provenance; rebuild the index"
                 )
 
     return errors
@@ -317,3 +359,51 @@ def expected_model_hashes_from_settings(
         except (FileNotFoundError, OSError):
             pass
     return hashes
+
+
+def require_collection_compatible(
+    client: QdrantClient,
+    collection: str,
+    settings: Settings,
+    *,
+    needed_vectors: set[str] | None = None,
+    expected_hashes: dict[str, str] | None = None,
+) -> None:
+    """Validate at use, never cache a database verdict across requests/recovery.
+
+    Hashes supplied by query code identify the models that actually produced
+    its cached embeddings. Unknown populated indexes require a rebuild. An
+    absent collection is left to the query's ordinary not-found handling.
+    """
+    try:
+        existing = {c.name for c in client.get_collections().collections}
+        if collection not in existing:
+            return
+        vectors = client.get_collection(collection).config.params.vectors
+    except (ResponseHandlingException, UnexpectedResponse, ConnectionError, OSError) as exc:
+        raise QdrantUnavailable(str(exc)) from exc
+    if not isinstance(vectors, dict):
+        raise CompatibilityError(
+            f"{collection}: legacy vector layout; rebuild before similarity search"
+        )
+    needed = set(vectors) & (needed_vectors if needed_vectors is not None else {"dino", "sscd"})
+    if not needed:
+        return
+    hashes = dict(expected_hashes or {})
+    missing = needed - hashes.keys()
+    if missing:
+        hashes.update(expected_model_hashes_from_settings(settings, needed_vectors=missing))
+    errors = check_collection_compat(
+        client,
+        collection,
+        settings,
+        expected_dino_hash=hashes.get("dino"),
+        expected_sscd_hash=hashes.get("sscd"),
+        needed_vectors=needed,
+    )
+    if errors:
+        raise CompatibilityError(
+            f"Similarity disabled for {collection!r}: "
+            + "; ".join(errors)
+            + ". Metadata and original evidence remain available. Rebuild with matching models."
+        )

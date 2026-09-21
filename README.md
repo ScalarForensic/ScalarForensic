@@ -15,6 +15,8 @@ Large-scale image vector indexer for forensic use. Embeds images into a Qdrant v
 
 **→ [Deployment topologies (single machine / distributed LAN)](docs/deployment.md)**
 
+**→ [Optional image and video parser isolation](docs/deployment.md#optional-media-parser-isolation)**
+
 ---
 
 ## What it does
@@ -55,7 +57,7 @@ Modes are automatically disabled in the UI if the corresponding collection has n
 
 **Supported image formats:** `.jpg` `.jpeg` `.png` `.bmp` `.tiff` `.tif` `.webp` `.gif` `.jp2` `.ico` `.psd` — plus `.heic`/`.heif` via an optional dependency group.
 
-**Supported video formats:** `.mp4` `.avi` `.mov` `.mkv` `.wmv` `.flv` `.webm` `.m4v` `.mpg` `.mpeg` `.3gp` `.ts` `.mts` — decoded via [PyAV](https://pyav.org) (FFmpeg, bundled in the wheel, no system dependency). Frame extraction rate and per-file frame cap are configurable via `SFN_VIDEO_FPS` and `SFN_VIDEO_MAX_FRAMES`.
+**Supported video formats:** `.mp4` `.avi` `.mov` `.mkv` `.wmv` `.flv` `.webm` `.m4v` `.mpg` `.mpeg` `.3gp` `.ts` `.mts` — frame extraction uses [PyAV](https://pyav.org), whose wheels bundle FFmpeg libraries. Transcoded browser playback additionally requires the system `ffmpeg` executable with `zscale`/`tonemap` support (see [INSTALL.md](INSTALL.md)). Frame extraction rate and per-file frame cap are configurable via `SFN_VIDEO_FPS` and `SFN_VIDEO_MAX_FRAMES`.
 
 **Deduplication modes** (controlled by `SFN_DUPLICATE_CHECK_MODE`):
 
@@ -67,7 +69,7 @@ Modes are automatically disabled in the UI if the corresponding collection has n
 
 **EXIF metadata extraction** (`SFN_EXTRACT_EXIF=true`): stores two boolean fields on every indexed point — `exif` (any EXIF data present) and `exif_geo_data` (GPS coordinates present).
 
-**Configuration stability after indexing:** `SFN_SSCD_N_CROPS`, `SFN_NORMALIZE_SIZE`, and the model paths (`SFN_MODEL_DINO`, `SFN_MODEL_SSCD`) are baked into every embedding and must not change after a collection has been indexed. Every Phase-2 query is re-embedded with the *current* values and cosine-compared against vectors produced under the *previous* ones — any drift puts query and corpus vectors in different embedding spaces and silently invalidates the calibrated similarity thresholds. Both `sfn` and `sfn-web` refuse to start on mismatch; pass `--ignore-config-mismatch` to either for read-only inspection (results will be silently wrong — never use for forensic conclusions). The check also samples up to 1 024 existing points per vector type and rejects collections that already contain *multiple* embedding configurations (the symptom of a previous `--ignore-config-mismatch` indexing run); such collections are unrecoverable and must be re-indexed from scratch — no .env change can make queries against them meaningful.
+**Configuration stability after indexing:** `SFN_SSCD_N_CROPS`, `SFN_NORMALIZE_SIZE`, and the model paths (`SFN_MODEL_DINO`, `SFN_MODEL_SSCD`) are baked into every embedding and must not change after a collection has been indexed. Every Phase-2 query is re-embedded with the *current* values and cosine-compared against vectors produced under the *previous* ones — any drift puts query and corpus vectors in different embedding spaces and silently invalidates the calibrated similarity thresholds. Both `sfn` and `sfn-web` refuse to start on mismatch; `sfn-web` accepts `--ignore-config-mismatch` for read-only inspection (results will be silently wrong — never use for forensic conclusions), indexing has no such override. The check also samples up to 1 024 existing points per vector type and rejects collections that already contain *multiple* embedding configurations (the symptom of a previous `--ignore-config-mismatch` indexing run); such collections are unrecoverable and must be re-indexed from scratch — no .env change can make queries against them meaningful.
 
 **Offline / airgapped by default:** the HuggingFace SDK is blocked from making any network requests at runtime. Connections to Qdrant and any configured remote embedder endpoint are the only outward traffic. Pass `--allow-online` (or set `SFN_ALLOW_ONLINE=true`) for first-time model downloads; omit it for all subsequent runs. Models and Python wheels can also be pre-bundled for fully airgapped deployment. See [INSTALL.md § Network policy](INSTALL.md#network-policy) and [INSTALL.md § Offline deployment](INSTALL.md#offline--airgapped-deployment).
 
@@ -80,11 +82,11 @@ Modes are automatically disabled in the UI if the corresponding collection has n
 ```bash
 git clone https://github.com/ScalarForensic/ScalarForensic
 cd ScalarForensic
-uv sync --group web
+uv sync --locked --no-default-groups --group web
 cp .env.example .env
 
 # Start Qdrant
-docker run -p 6333:6333 qdrant/qdrant
+docker run -p 6333:6333 qdrant/qdrant:v1.19.0
 
 # Download models once (requires internet — set SFN_MODEL_DINO=models/dinov2-large in .env afterwards)
 uv run python scripts/download_models.py
@@ -104,3 +106,8 @@ reference, see **[INSTALL.md](INSTALL.md)**.
 ## Third-party licenses
 
 Bundled assets and their licenses are listed in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md). All are compatible with GPL-3.
+
+The [current operations guide](docs/deployment.md) covers durable state, backup and
+restore, compatibility inspection, and release inventories. Model weights are not
+tracked in this repository; airgap bundles include the artifacts copied into them
+and require artifact-specific redistribution review.

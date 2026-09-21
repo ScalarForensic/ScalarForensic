@@ -25,9 +25,7 @@ from scalar_forensic.safeguards import (
     expected_model_hashes_from_settings,
 )
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 DINO_HASH = "a" * 64
 SSCD_HASH = "b" * 64
@@ -65,6 +63,7 @@ def _make_client(
     vectors_cfg: dict[str, VectorParams] | None,
     payload_by_vector: dict[str, dict | list[dict] | None],
     fail_on: str | None = None,
+    mismatch_count: int = 0,
 ) -> MagicMock:
     """Build a MagicMock QdrantClient covering the surface used by the safeguard.
 
@@ -74,6 +73,8 @@ def _make_client(
 
     *fail_on* makes one of (``get_collections``, ``get_collection``, ``scroll``)
     raise ``ResponseHandlingException`` so we can exercise the error path.
+
+    *mismatch_count* is what the exact-count pass reports for every vector.
     """
     client = MagicMock()
 
@@ -110,6 +111,7 @@ def _make_client(
         points = [SimpleNamespace(payload=p) for p in payloads]
         return (points, "DONE")
 
+    client.count.side_effect = lambda **_kw: SimpleNamespace(count=mismatch_count)
     client.get_collections.side_effect = _get_collections
     client.get_collection.side_effect = _get_collection
     client.scroll.side_effect = _scroll
@@ -123,9 +125,18 @@ def _vp() -> VectorParams:
     return VectorParams(size=4, distance=Distance.COSINE)
 
 
-# ---------------------------------------------------------------------------
+def test_missing_geometry_does_not_hide_known_hash_mismatch():
+    client = _make_client(
+        collections=["sfn"],
+        vectors_cfg={"dino": _vp()},
+        payload_by_vector={"dino": {"dino_model_hash": "c" * 64}},
+    )
+    errors = check_collection_compat(client, "sfn", _settings(), expected_dino_hash=DINO_HASH)
+    assert any("unverifiable" in error for error in errors)
+    assert any("model_hash:" in error for error in errors)
+
+
 # Pure hash helpers
-# ---------------------------------------------------------------------------
 
 
 def test_compute_sscd_model_hash_matches_sha256(tmp_path: Path):
@@ -215,9 +226,7 @@ def test_compute_remote_model_hash_has_config_prefix():
     assert all(c in "0123456789abcdef" for c in h[len("config:") :])
 
 
-# ---------------------------------------------------------------------------
 # expected_model_hashes_from_settings
-# ---------------------------------------------------------------------------
 
 
 def test_expected_hashes_for_remote_returns_same_hash_per_vector():
@@ -251,9 +260,7 @@ def test_expected_hashes_only_computes_requested_vectors(tmp_path: Path):
     assert set(out) == {"sscd"}
 
 
-# ---------------------------------------------------------------------------
 # check_collection_compat — happy paths
-# ---------------------------------------------------------------------------
 
 
 def test_check_returns_empty_when_collection_missing():
@@ -274,20 +281,19 @@ def test_check_returns_empty_when_no_points():
     assert check_collection_compat(client, "sfn", _settings()) == []
 
 
-def test_check_returns_empty_when_payload_lacks_provenance_fields():
-    """Old indexes pre-date the provenance fields — must not flag a mismatch."""
+def test_check_refuses_payloads_without_provenance_fields():
+    """Points that pre-date the provenance fields are unverifiable, not clean."""
     client = _make_client(
         collections=["sfn"],
         vectors_cfg={"dino": _vp(), "sscd": _vp()},
         payload_by_vector={"dino": {}, "sscd": {}},
     )
     s = _settings(normalize_size=512, sscd_n_crops=5)
-    assert (
-        check_collection_compat(
-            client, "sfn", s, expected_dino_hash=DINO_HASH, expected_sscd_hash=SSCD_HASH
-        )
-        == []
+    errors = check_collection_compat(
+        client, "sfn", s, expected_dino_hash=DINO_HASH, expected_sscd_hash=SSCD_HASH
     )
+    assert len(errors) == 2
+    assert all("unverifiable model/preprocessing provenance" in e for e in errors)
 
 
 def test_check_returns_empty_when_everything_matches():
@@ -324,21 +330,22 @@ def test_check_handles_legacy_single_vector_collection():
         vectors_cfg=_vp(),  # not a dict — single-vector legacy schema
         payload_by_vector={},
     )
-    assert check_collection_compat(client, "sfn", _settings()) == []
+    errors = check_collection_compat(client, "sfn", _settings())
+    assert errors == ["Legacy vector layout; rebuild before ingestion or similarity"]
 
 
-# ---------------------------------------------------------------------------
 # check_collection_compat — mismatch detection
-# ---------------------------------------------------------------------------
 
 
 def test_check_detects_dino_normalize_size_mismatch():
     client = _make_client(
         collections=["sfn"],
         vectors_cfg={"dino": _vp()},
-        payload_by_vector={"dino": {"dino_normalize_size": 224}},
+        payload_by_vector={"dino": {"dino_model_hash": DINO_HASH, "dino_normalize_size": 224}},
     )
-    errors = check_collection_compat(client, "sfn", _settings(normalize_size=512))
+    errors = check_collection_compat(
+        client, "sfn", _settings(normalize_size=512), expected_dino_hash=DINO_HASH
+    )
     assert len(errors) == 1
     assert "normalize_size" in errors[0]
     assert "stored=224" in errors[0]
@@ -349,9 +356,11 @@ def test_check_detects_sscd_n_crops_mismatch():
     client = _make_client(
         collections=["sfn"],
         vectors_cfg={"sscd": _vp()},
-        payload_by_vector={"sscd": {"sscd_n_crops": 5}},
+        payload_by_vector={"sscd": {"sscd_model_hash": SSCD_HASH, "sscd_n_crops": 5}},
     )
-    errors = check_collection_compat(client, "sfn", _settings(sscd_n_crops=1))
+    errors = check_collection_compat(
+        client, "sfn", _settings(sscd_n_crops=1), expected_sscd_hash=SSCD_HASH
+    )
     assert len(errors) == 1
     assert "sscd_n_crops" in errors[0]
     assert "stored=5" in errors[0]
@@ -363,7 +372,7 @@ def test_check_detects_dino_model_hash_mismatch():
     client = _make_client(
         collections=["sfn"],
         vectors_cfg={"dino": _vp()},
-        payload_by_vector={"dino": {"dino_model_hash": stored}},
+        payload_by_vector={"dino": {"dino_model_hash": stored, "dino_normalize_size": 224}},
     )
     errors = check_collection_compat(client, "sfn", _settings(), expected_dino_hash=DINO_HASH)
     assert len(errors) == 1
@@ -378,7 +387,7 @@ def test_check_detects_sscd_model_hash_mismatch():
     client = _make_client(
         collections=["sfn"],
         vectors_cfg={"sscd": _vp()},
-        payload_by_vector={"sscd": {"sscd_model_hash": stored}},
+        payload_by_vector={"sscd": {"sscd_model_hash": stored, "sscd_n_crops": 1}},
     )
     errors = check_collection_compat(client, "sfn", _settings(), expected_sscd_hash=SSCD_HASH)
     assert len(errors) == 1
@@ -386,17 +395,18 @@ def test_check_detects_sscd_model_hash_mismatch():
     assert SSCD_HASH in errors[0]
 
 
-def test_check_skips_model_hash_when_no_expected_value():
-    """Web startup does not compute the hash if no model is reachable —
-    in that case the safeguard must not flag a stored hash as a mismatch."""
+def test_check_refuses_when_no_expected_hash_can_be_computed():
+    """If no model is reachable the stored hash cannot be verified at all —
+    that is a refusal, not a clean bill of health."""
     stored = "e" * 64
     client = _make_client(
         collections=["sfn"],
         vectors_cfg={"dino": _vp()},
-        payload_by_vector={"dino": {"dino_model_hash": stored}},
+        payload_by_vector={"dino": {"dino_model_hash": stored, "dino_normalize_size": 224}},
     )
-    # No expected_dino_hash → no mismatch possible.
-    assert check_collection_compat(client, "sfn", _settings()) == []
+    errors = check_collection_compat(client, "sfn", _settings())
+    assert len(errors) == 1
+    assert "unverifiable model/preprocessing provenance" in errors[0]
 
 
 def test_check_aggregates_multiple_mismatches():
@@ -419,9 +429,7 @@ def test_check_aggregates_multiple_mismatches():
     assert len(errors) == 4
 
 
-# ---------------------------------------------------------------------------
 # check_collection_compat — collection-internal inconsistency
-# ---------------------------------------------------------------------------
 
 
 def test_check_detects_two_distinct_dino_hashes_in_collection():
@@ -508,65 +516,30 @@ def test_check_internal_inconsistency_skips_current_vs_stored_comparison():
     assert "multiple embedding configurations" in errors[0]
 
 
-def test_check_ignores_pre_provenance_points_in_inconsistency_scan():
-    """An older index whose points lack the provenance fields entirely must
-    not register as a phantom (None, None, None) tuple alongside a newer
-    point with real provenance — that would falsely flag inconsistency."""
-    client = _make_client(
-        collections=["sfn"],
-        vectors_cfg={"dino": _vp()},
-        payload_by_vector={
-            "dino": [
-                {},  # pre-provenance point
-                {"dino_model_hash": "a" * 64, "dino_normalize_size": 224},
-            ],
-        },
-    )
-    # Current settings match the one real tuple — should be clean.
-    errors = check_collection_compat(
-        client, "sfn", _settings(normalize_size=224), expected_dino_hash="a" * 64
-    )
-    assert errors == []
-
-
-def test_check_normalize_size_flag_suppresses_dino_resolution_check_only():
-    """The check_normalize_size knob exists for unit-testing isolation, not as
-    a phase-discrimination flag — n_crops and hash checks must still run when
-    it is False."""
-    client = _make_client(
-        collections=["sfn"],
-        vectors_cfg={"dino": _vp(), "sscd": _vp()},
-        payload_by_vector={
-            "dino": {"dino_normalize_size": 224},
-            "sscd": {"sscd_n_crops": 5},
-        },
-    )
-    errors = check_collection_compat(
-        client,
-        "sfn",
-        _settings(normalize_size=512, sscd_n_crops=1),
-        check_normalize_size=False,
-    )
-    # normalize_size mismatch suppressed; n_crops mismatch still flagged.
-    assert len(errors) == 1
-    assert "sscd_n_crops" in errors[0]
-
-
 def test_check_ignores_stored_normalize_size_for_sscd():
     """SSCD's normalize_size is fixed at 288 inside the embedder — only DINO's
     user-controlled normalize_size should ever be compared."""
     client = _make_client(
         collections=["sfn"],
         vectors_cfg={"sscd": _vp()},
-        payload_by_vector={"sscd": {"sscd_normalize_size": 288}},
+        payload_by_vector={
+            "sscd": {
+                "sscd_model_hash": SSCD_HASH,
+                "sscd_n_crops": 1,
+                "sscd_normalize_size": 288,
+            }
+        },
     )
     # SFN_NORMALIZE_SIZE=512 must not flag a mismatch on the sscd vector.
-    assert check_collection_compat(client, "sfn", _settings(normalize_size=512)) == []
+    assert (
+        check_collection_compat(
+            client, "sfn", _settings(normalize_size=512), expected_sscd_hash=SSCD_HASH
+        )
+        == []
+    )
 
 
-# ---------------------------------------------------------------------------
 # check_collection_compat — Qdrant connectivity errors surface, not swallow
-# ---------------------------------------------------------------------------
 
 
 def test_check_raises_qdrant_unavailable_on_get_collections_failure():

@@ -7,7 +7,6 @@ reordered into the canonical order, RGB in / BGR handled internally.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
 
 import cv2
 import numpy as np
@@ -29,16 +28,6 @@ _YUNET_TO_CANONICAL = [0, 1, 2, 3, 4]
 def _create_yunet(model_path: str, score_threshold: float):
     """Seam for tests — cv2's extension types cannot be mock-patched directly."""
     return cv2.FaceDetectorYN.create(model_path, "", (0, 0), score_threshold=score_threshold)
-
-
-class FaceDetector(Protocol):
-    def detect(self, img_rgb: np.ndarray) -> list[FaceDetection]: ...
-
-    @property
-    def detector_id(self) -> str: ...
-
-    @property
-    def model_hash(self) -> str: ...
 
 
 def _scaled_size(w: int, h: int, max_size: int) -> tuple[int, int, float]:

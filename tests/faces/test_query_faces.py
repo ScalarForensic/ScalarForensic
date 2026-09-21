@@ -9,6 +9,7 @@ query path — not a payload filter, not a flag consulted at search time.
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from scalar_forensic.faces.types import FaceDetection
@@ -189,7 +190,9 @@ def _query_face(**over):
 
 def test_query_faces_endpoint_never_returns_a_vector(tmp_path):
     face = _query_face()
-    entry = MagicMock(is_video=False, temp_path=tmp_path / "q.jpg", query_faces=[face])
+    entry = MagicMock(
+        is_video=False, temp_path=tmp_path / "q.jpg", query_faces=[face], _query_faces_generation=0
+    )
     (tmp_path / "q.jpg").write_bytes(b"jpegbytes")
     session = MagicMock(files=[entry])
 
@@ -236,7 +239,9 @@ def test_query_faces_endpoint_marks_review_only_as_not_searchable(tmp_path):
             "exposure": None,
         },
     )
-    entry = MagicMock(is_video=False, temp_path=tmp_path / "q.jpg", query_faces=[face])
+    entry = MagicMock(
+        is_video=False, temp_path=tmp_path / "q.jpg", query_faces=[face], _query_faces_generation=0
+    )
     (tmp_path / "q.jpg").write_bytes(b"jpegbytes")
     result = MagicMock(
         faces=[face],
@@ -271,12 +276,15 @@ def _entry_and_token(faces):
     stringifies its ``config_hash``, which is stable for one mock object — so
     the token must be computed from the very entry the test patches in.
     """
-    entry = MagicMock(query_faces=faces)
+    entry = MagicMock(query_faces=faces, query_faces_timecode_ms=None)
     return entry, _detection_token(faces, entry.query_faces_cfg)
 
 
 def _get_chip(entry, token, index):
     with (
+        patch(
+            "scalar_forensic.web.routes.faces.Settings", return_value=MagicMock(faces_enabled=True)
+        ),
         patch("scalar_forensic.web.routes.faces.get_session", return_value=MagicMock()),
         patch("scalar_forensic.web.routes.faces._entry_for", return_value=entry),
     ):
@@ -351,7 +359,7 @@ def test_the_token_changes_when_the_detection_changes(tmp_path):
     assert _detection_token(base, MagicMock(config_hash="a")) != _detection_token(
         base, MagicMock(config_hash="b")
     )
-    assert token  # non-empty
+    assert token
 
 
 def test_re_detecting_the_identical_view_reproduces_the_token(tmp_path):
@@ -364,3 +372,67 @@ def test_re_detecting_the_identical_view_reproduces_the_token(tmp_path):
     first = [_query_face(), _query_face(index=1, bbox=(5.0, 6.0, 7.0, 8.0))]
     second = [_query_face(), _query_face(index=1, bbox=(5.0, 6.0, 7.0, 8.0))]
     assert _detection_token(first, cfg) == _detection_token(second, cfg)
+
+
+def test_detection_token_distinguishes_changed_crop_and_probe_vector():
+    cfg = MagicMock(config_hash="same-config")
+    original = _query_face()
+    assert _detection_token([original], cfg) != _detection_token(
+        [_query_face(review_jpeg=b"different crop")], cfg
+    )
+    assert _detection_token([original], cfg) != _detection_token(
+        [_query_face(vector=[0.0, 1.0])], cfg
+    )
+
+
+def test_late_detection_cannot_replace_newer_session_faces(monkeypatch, tmp_path):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from fastapi import HTTPException
+
+    from scalar_forensic.web.routes import faces as routes
+
+    entry = MagicMock(is_video=False, temp_path=tmp_path / "q.jpg", query_faces=None)
+    entry.temp_path.write_bytes(b"jpegbytes")
+    old_started = threading.Event()
+    release_old = threading.Event()
+    calls = 0
+
+    def detect(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        first = calls == 1
+        if first:
+            old_started.set()
+            assert release_old.wait(2)
+        face = _query_face(bbox=(10.0 if first else 20.0, 2, 3, 4))
+        return MagicMock(
+            faces=[face],
+            n_detected=1,
+            n_searchable=1,
+            n_review_only=0,
+            rejected={},
+            truncated=False,
+            cfg=MagicMock(config_hash="config"),
+        )
+
+    from scalar_forensic.web.session import Session
+
+    session = Session("session", [entry])
+    monkeypatch.setattr(routes, "get_session", lambda _: session)
+    monkeypatch.setattr(routes, "_resolve_entry", lambda *args: entry)
+    monkeypatch.setattr(routes, "Settings", lambda: _settings(tmp_path))
+    monkeypatch.setattr(routes, "_require_faces", lambda _: None)
+    monkeypatch.setattr(routes, "detect_query_faces", detect)
+    monkeypatch.setattr(routes, "query_embedder_block", lambda _: {})
+    with ThreadPoolExecutor(2) as pool:
+        old = pool.submit(routes.query_faces, "session", "file", None)
+        assert old_started.wait(2)
+        newer = pool.submit(routes.query_faces, "session", "file", None)
+        assert newer.result(timeout=2).status_code == 200
+        release_old.set()
+        with pytest.raises(HTTPException) as error:
+            old.result(timeout=2)
+        assert error.value.status_code == 409
+    assert entry.query_faces[0].bbox[0] == 20

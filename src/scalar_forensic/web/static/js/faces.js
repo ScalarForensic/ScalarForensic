@@ -4,7 +4,7 @@
 // face *observations*, never identifications.  Copy in the UI says "face
 // observations" / "similar faces" — never "identified person".
 (window.__sfnParts = window.__sfnParts || []).push({
-    // ── Error text ────────────────────────────────────────────────────────
+    // Error text
     // FastAPI's `detail` is a string for our own HTTPExceptions but an array of
     // validation objects for a 422, which renders as "[object Object]" — the
     // examiner is then told nothing at all about why a search failed.  Flatten
@@ -26,43 +26,49 @@
       return fallback;
     },
 
-    // ── Availability ──────────────────────────────────────────────────────
+    // Availability
     async checkFacesAvailability() {
       try {
         const body = await fetch('/api/faces/availability').then(r => r.json());
         this.facesAvailable = body.faces_available === true;
-        this.facesReason = body.reason || '';
-        this.facesNote = body.note || '';
       } catch {
         this.facesAvailable = false;
-        this.facesReason = 'Face availability check failed.';
       }
     },
 
-    // ── Per-hit face observations ─────────────────────────────────────────
+    // Per-hit face observations
+    faceSourceScope(imageHash) {
+      const hit = this.selectedHit;
+      if (hit?.image_hash !== imageHash || !hit.video_hash || hit.frame_timecode_ms == null) return {};
+      return { video_hash: hit.video_hash, frame_timecode_ms: String(hit.frame_timecode_ms) };
+    },
+    faceSelectionIdentity() {
+      const hit = this.selectedHit;
+      return JSON.stringify([this.sessionId, this.selectedFileId, hit?.image_hash,
+        hit?.video_hash, hit?.frame_timecode_ms]);
+    },
     async loadFacesForHit(imageHash) {
+      const request = this._faceBrowseRequest = (this._faceBrowseRequest || 0) + 1;
+      const source = this.faceSelectionIdentity();
+      const current = () => request === this._faceBrowseRequest && source === this.faceSelectionIdentity();
       if (!this.facesAvailable || !imageHash) { this.facesForHit = []; return; }
       this.facesLoading = true;
       try {
-        const body = await fetch(`/api/faces/by-image/${imageHash}`).then(r => r.json());
-        this.facesForHit = Array.isArray(body.faces) ? body.faces : [];
+        const body = await fetch(`/api/faces/by-image/${imageHash}?${new URLSearchParams(this.faceSourceScope(imageHash))}`).then(r => r.json());
+        if (current()) this.facesForHit = Array.isArray(body.faces) ? body.faces : [];
       } catch {
-        this.facesForHit = [];
+        if (current()) this.facesForHit = [];
       } finally {
-        this.facesLoading = false;
+        if (request === this._faceBrowseRequest) this.facesLoading = false;
       }
     },
 
-    // ── Chip URLs ─────────────────────────────────────────────────────────
+    // Chip URLs
     // Grid renders thumbnails; clicking opens the full-resolution review chip.
-    // The two chip kinds live in separate hash domains: the aligned PNG is
-    // addressed by aligned_chip_hash, every review artefact by review_chip_hash.
-    // Passing the wrong one names a file that can never exist.
-    faceChipUrl(chipHash) { return `/api/faces/chip/${chipHash}`; },
     faceReviewUrl(chipHash) { return `/api/faces/chip/${chipHash}/review`; },
     faceThumbUrl(chipHash) { return `/api/faces/chip/${chipHash}/thumb`; },
 
-    // ── Review-only vs comparable ─────────────────────────────────────────
+    // Review-only vs comparable
     // Review-only observations are kept for examination by eye and are never
     // compared against anything.  The distinction must be visible, not a tooltip.
     faceIsReviewOnly(face) { return face?.embedding_status === 'review_only'; },
@@ -78,20 +84,26 @@
       return this.faceIsReviewOnly(face) && reason ? `${reason} below threshold` : '';
     },
 
-    // ── Pipeline explainer ────────────────────────────────────────────────
+    // Pipeline explainer
     // "How was this face processed?" — assembled server-side from persisted
     // data only, so it describes what happened at index time.
     async explainFace(pointId) {
+      const request = this._faceExplainRequest = (this._faceExplainRequest || 0) + 1;
+      const source = this.faceSelectionIdentity();
+      const current = () => request === this._faceExplainRequest && source === this.faceSelectionIdentity() && this.faceExplainOpen;
       this.faceExplain = null;
+      this.faceExplainError = '';
       this.faceExplainOpen = true;
       try {
-        this.faceExplain = await fetch(`/api/faces/explain/${pointId}`).then(r => r.json());
+        const body = await fetch(`/api/faces/explain/${pointId}`).then(r => r.json());
+        if (current()) this.faceExplain = body;
       } catch {
-        this.faceExplainError = 'Could not load the processing details for this face.';
+        if (current()) this.faceExplainError = 'Could not load the processing details for this face.';
       }
     },
 
     closeFaceExplain() {
+      this._faceExplainRequest = (this._faceExplainRequest || 0) + 1;
       this.faceExplainOpen = false;
       this.faceExplain = null;
       this.faceExplainError = '';
@@ -102,7 +114,7 @@
       return typeof q === 'number' ? q.toFixed(2) : '—';
     },
 
-    // ── Query-side faces (session-scoped, never persisted) ────────────────
+    // Query-side faces (session-scoped, never persisted)
     // The vectors stay in the server-side Session; the browser only ever holds
     // face *indices*.  A face that failed the embedding gate is vectorless and
     // therefore cannot be a probe — toggleQueryFace refuses it.
@@ -114,14 +126,16 @@
     async loadQueryFaces() {
       if (!this.facesAvailable || !this.sessionId || !this.selectedFileId) return;
       const fileId = this.selectedFileId;
+      const sessionId = this.sessionId;
       const seq = ++this._queryFacesSeq;
-      // Superseded = a newer request exists, which now owns the loading flag
-      // and the panel.  Current also requires the file to still be selected.
+      // Superseded = a newer request exists, which now owns the panel.
+      // Current also requires the file to still be selected.
       const superseded = () => seq !== this._queryFacesSeq;
-      const current = () => !superseded() && fileId === this.selectedFileId;
-      this.queryFacesLoading = true;
+      const current = () => !superseded() && fileId === this.selectedFileId && sessionId === this.sessionId;
       this.queryFacesError = '';
       this.queryFaces = [];
+      this.queryFacesToken = null;
+      this.queryFaceEmbedder = null;
       this.queryFacesStale = {};
       this.queryFacesTruncated = false;
       try {
@@ -136,6 +150,8 @@
           return;
         }
         this.queryFaces = Array.isArray(body.faces) ? body.faces : [];
+        this.queryFacesToken = body.detection_token || null;
+        this.queryFaceEmbedder = body.embedder || null;
         this.queryFacesTruncated = body.truncated === true;
         // Pre-select every searchable face: the examiner de-selects, rather than
         // starting from an empty selection that looks like "no faces found".
@@ -145,8 +161,6 @@
         for (const f of this.queryFaces) if (f.searchable) this._basketAddQuery(f);
       } catch (e) {
         if (current()) this.queryFacesError = String(e);
-      } finally {
-        if (!superseded()) this.queryFacesLoading = false;
       }
       // A dropped response must not drive the searches either: they read the
       // basket, which still describes the file that is actually selected.
@@ -172,7 +186,7 @@
       return this.selectedQueryFaceIndices.includes(index);
     },
 
-    // ── Selection basket (change-set 2026-08-13 item 3) ───────────────────
+    // Selection basket (change-set 2026-08-13 item 3)
     // Ctrl+click on a chip *selects* (idempotent — deselection lives on the
     // basket row, removal on ctrl+click of the row).  Both add-paths refuse a
     // review-only face: it has no vector, so it can never be a probe, and a
@@ -249,15 +263,22 @@
       this.runFaceSearch();
     },
 
-    // ── Cross-file face search ────────────────────────────────────────────
+    // Cross-file face search
     // Aggregated many-to-many from the basket: every selected face — session
     // query faces and stored points alike — probes the collection, one kNN
     // per probe, and the backend collapses to the best-scoring observation
     // per medium.  Hit order is therefore max-score-per-hit.
     async runFaceSearch() {
+      const request = this._faceSearchRequest = (this._faceSearchRequest || 0) + 1;
+      const source = this.faceSelectionIdentity();
+      const queryFaces = this.queryFaces;
+      const current = () => request === this._faceSearchRequest && source === this.faceSelectionIdentity() && queryFaces === this.queryFaces;
       const idxs = this.selectedQueryFaceIndices;
       const pids = this.selectedFacePointIds;
+      this.faceSearchEmbedder = null;
+      this.faceSearchCompat = null;
       if (!this.facesAvailable || (!idxs.length && !pids.length)) {
+        this.faceSearchLoading = false;
         this.faceHits = [];
         this.faceMatchScores = {};
         return;
@@ -269,55 +290,69 @@
         fd.append('session_id', this.sessionId);
         fd.append('file_id', this.selectedFileId);
         fd.append('face_indices', idxs.join(','));
+        if (idxs.length) fd.append('detection_token', this.queryFacesToken || '');
         fd.append('point_ids', pids.join(','));
         fd.append('limit', this.faceLimit);
         fd.append('threshold', this.faceThreshold);
         fd.append('exact', this.faceExactSearch ? 'true' : 'false');
         const resp = await fetch('/api/faces/search', { method: 'POST', body: fd });
         const body = await resp.json();
+        if (!current()) return;
         if (!resp.ok) {
           this.faceSearchError = this.faceErrText(body.detail, 'face search failed');
           return;
         }
         this.faceHits = Array.isArray(body.hits) ? body.hits : [];
         this.faceCalibration = body.calibration || null;
+        this.faceSearchEmbedder = body.embedder || null;
+        this.faceSearchCompat = body.compat || null;
         // Keyed as strings: /api/faces/by-image returns the raw point id while
         // the search returns str(id) — an unstringified key never matches.
         const scores = {};
         for (const h of this.faceHits) scores[String(h.face.point_id)] = h.score;
         this.faceMatchScores = scores;
       } catch (e) {
-        this.faceSearchError = String(e);
+        if (current()) this.faceSearchError = String(e);
       } finally {
-        this.faceSearchLoading = false;
+        if (request === this._faceSearchRequest) this.faceSearchLoading = false;
       }
     },
 
-    // ── Pairwise compare against the selected match (item 3d) ─────────────
+    // Pairwise compare against the selected match (item 3d)
     // Auto-runs on match selection.  The response is the full matrix of raw
     // cosines over comparable faces; the operator's faceCrossThreshold floor
     // is applied client-side in faceCrossHighlight, so moving the slider
     // never re-queries.  Against a server without the endpoint (deployed
     // statics before restart) this fails soft: no highlight, error shown.
     async runFaceCompare(imageHash) {
+      const request = this._faceCompareRequest = (this._faceCompareRequest || 0) + 1;
+      const source = this.faceSelectionIdentity();
+      const queryFaces = this.queryFaces;
+      const current = () => request === this._faceCompareRequest && source === this.faceSelectionIdentity() && queryFaces === this.queryFaces;
       this.faceComparePairs = [];
       this.faceCompareCounts = null;
+      this.faceCompareEmbedder = null;
+      this.faceCompareCompat = null;
       this.faceCompareError = '';
       if (!this.facesAvailable || !this.sessionId || !this.selectedFileId || !imageHash) return;
-      if (!this.queryFaces.some(f => f.searchable)) return;
-      this.faceCompareLoading = true;
+      if (!this.queryFaces.length) return;
       try {
         const fd = new FormData();
         fd.append('session_id', this.sessionId);
         fd.append('file_id', this.selectedFileId);
         fd.append('image_hash', imageHash);
+        fd.append('detection_token', this.queryFacesToken || '');
+        for (const [key, value] of Object.entries(this.faceSourceScope(imageHash))) fd.append(key, value);
         const resp = await fetch('/api/faces/compare', { method: 'POST', body: fd });
         const body = await resp.json();
+        if (!current()) return;
         if (!resp.ok) {
           this.faceCompareError = this.faceErrText(body.detail, 'face compare unavailable');
           return;
         }
         this.faceComparePairs = Array.isArray(body.pairs) ? body.pairs : [];
+        this.faceCompareEmbedder = body.embedder || null;
+        this.faceCompareCompat = body.compat || null;
         this.faceCompareCounts = {
           queryComparable: body.n_query_comparable,
           queryReviewOnly: body.n_query_review_only,
@@ -325,9 +360,7 @@
           matchReviewOnly: body.n_match_review_only,
         };
       } catch (e) {
-        this.faceCompareError = String(e);
-      } finally {
-        this.faceCompareLoading = false;
+        if (current()) this.faceCompareError = String(e);
       }
     },
 
@@ -339,11 +372,15 @@
       return this.faceCrossHighlight.queryIndices.has(index);
     },
 
-    // ── Per-model explainer surfaces (face pair) ──────────────────────────
+    // Per-model explainer surfaces (face pair)
     // The distribution is drawn by *one* probe: a mean over several faces would
     // describe no face in particular.  The first selected face is the probe,
     // and it is always a searchable one — the selection cannot hold any other.
     async openFaceStats() {
+      const request = this._faceStatsRequest = (this._faceStatsRequest || 0) + 1;
+      const source = this.faceSelectionIdentity();
+      const queryFaces = this.queryFaces;
+      const current = () => request === this._faceStatsRequest && source === this.faceSelectionIdentity() && queryFaces === this.queryFaces && this.showFaceStats;
       const index = this.selectedQueryFaceIndices[0];
       this.showFaceStats = true;
       this.faceStatsError = '';
@@ -359,24 +396,23 @@
         fd.append('session_id', this.sessionId);
         fd.append('file_id', this.selectedFileId);
         fd.append('face_index', index);
+        fd.append('detection_token', this.queryFacesToken || '');
         const resp = await fetch('/api/faces/dist-stats', { method: 'POST', body: fd });
         const body = await resp.json();
+        if (!current()) return;
         if (!resp.ok) { this.faceStatsError = this.faceErrText(body.detail, 'distribution query failed'); return; }
         this.faceStats = body;
       } catch (e) {
-        this.faceStatsError = String(e);
+        if (current()) this.faceStatsError = String(e);
       } finally {
-        this.faceStatsLoading = false;
+        if (current()) this.faceStatsLoading = false;
       }
     },
 
-    closeFaceStats() {
-      this.showFaceStats = false;
-      this.faceStats = null;
-      this.faceStatsError = '';
-    },
-
     async openFaceAudit() {
+      const request = this._faceAuditRequest = (this._faceAuditRequest || 0) + 1;
+      const source = this.faceSelectionIdentity();
+      const current = () => request === this._faceAuditRequest && source === this.faceSelectionIdentity() && this.showFaceAudit;
       const hash = this.selectedHit?.image_hash;
       this.showFaceAudit = true;
       this.faceAuditError = '';
@@ -388,27 +424,23 @@
       this.faceAuditLoading = true;
       this.faceAudit = null;
       try {
-        const resp = await fetch(`/api/faces/audit?image_hash=${encodeURIComponent(hash)}`);
+        const resp = await fetch(`/api/faces/audit?${new URLSearchParams({ image_hash: hash, ...this.faceSourceScope(hash) })}`);
         const body = await resp.json();
+        if (!current()) return;
         if (!resp.ok) { this.faceAuditError = this.faceErrText(body.detail, 'audit lookup failed'); return; }
         this.faceAudit = body;
       } catch (e) {
-        this.faceAuditError = String(e);
+        if (current()) this.faceAuditError = String(e);
       } finally {
-        this.faceAuditLoading = false;
+        if (current()) this.faceAuditLoading = false;
       }
-    },
-
-    closeFaceAudit() {
-      this.showFaceAudit = false;
-      this.faceAudit = null;
-      this.faceAuditError = '';
     },
 
     // Mirrors debouncedQuery() in analysis.js: one search per drag, not one per
     // slider step.  The selection handlers call runFaceSearch() directly — the
     // two paths are disjoint, so a drag never fires both.
     debouncedFaceQuery() {
+      this._faceSearchRequest = (this._faceSearchRequest || 0) + 1;
       clearTimeout(this._faceQueryTimer);
       this._faceQueryTimer = setTimeout(() => this.runFaceSearch(), 300);
     },

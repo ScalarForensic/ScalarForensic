@@ -22,7 +22,6 @@ import torch
 from PIL import Image, ImageCms
 
 from scalar_forensic.embedder import (
-    _SHARED_CAP,
     _SSCD_INPUT_SIZE,
     _SSCD_SCALE,
     DINOv2Embedder,
@@ -35,9 +34,7 @@ from scalar_forensic.embedder import (
     preprocess_pil_batch,
 )
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def _solid_image(w: int, h: int, color: tuple = (128, 64, 32)) -> Image.Image:
@@ -80,9 +77,7 @@ def _make_png_with_icc(w: int, h: int, icc_bytes: bytes) -> bytes:
     return buf.getvalue()
 
 
-# ---------------------------------------------------------------------------
 # Group A: _open_rgb — EXIF orientation
-# ---------------------------------------------------------------------------
 
 
 class TestOpenRgbExifOrientation:
@@ -118,9 +113,7 @@ class TestOpenRgbExifOrientation:
         assert result.size == (80, 60)
 
 
-# ---------------------------------------------------------------------------
 # Group B & C: _open_rgb — ICC profile metadata is ignored (no conversion)
-# ---------------------------------------------------------------------------
 
 
 class TestOpenRgbIccProfile:
@@ -148,18 +141,16 @@ class TestOpenRgbIccProfile:
         assert result.mode == "RGB"
 
 
-# ---------------------------------------------------------------------------
 # Group D & E: _cap_short_side — cap parameter
-# ---------------------------------------------------------------------------
 
 
 class TestCapShortSide:
-    def test_default_cap_downscales_oversized(self):
-        """Default cap (331) downscales a 400×600 image."""
+    def test_sscd_cap_downscales_oversized(self):
+        """cap=331 downscales a 400×600 image."""
         img = _solid_image(400, 600)
-        result = _cap_short_side(img)
+        result = _cap_short_side(img, cap=_SSCD_SCALE)
         w, h = result.size
-        assert min(w, h) == _SHARED_CAP
+        assert min(w, h) == _SSCD_SCALE
         # Aspect ratio must be preserved.
         assert abs(w / h - 400 / 600) < 0.02
 
@@ -188,21 +179,19 @@ class TestCapShortSide:
         assert min(result.size) == 512
 
 
-# ---------------------------------------------------------------------------
 # Group F: preprocess_batch / preprocess_pil_batch — cap forwarding
-# ---------------------------------------------------------------------------
 
 
 class TestPreprocessBatchCap:
-    def test_preprocess_batch_default_cap(self):
-        """preprocess_batch with default cap produces short side ≤ 331."""
+    def test_preprocess_batch_sscd_cap(self):
+        """preprocess_batch(cap=331) produces short side ≤ 331."""
         img = _solid_image(600, 800)
         data = _jpeg_bytes(img)
-        results = preprocess_batch([data])
+        results = preprocess_batch([data], cap=_SSCD_SCALE)
         assert len(results) == 1
         result = results[0]
         assert not isinstance(result, Exception)
-        assert min(result.size) <= _SHARED_CAP
+        assert min(result.size) <= _SSCD_SCALE
 
     def test_preprocess_batch_explicit_cap_512(self):
         """preprocess_batch(cap=512) allows short sides up to 512."""
@@ -224,13 +213,11 @@ class TestPreprocessBatchCap:
         """preprocess_batch always returns RGB mode images."""
         img = _solid_image(200, 300)
         data = _jpeg_bytes(img)
-        results = preprocess_batch([data])
+        results = preprocess_batch([data], cap=_SSCD_SCALE)
         assert results[0].mode == "RGB"
 
 
-# ---------------------------------------------------------------------------
 # Group G & H: _sscd_crops — count and dimensions
-# ---------------------------------------------------------------------------
 
 
 class TestSscdCrops:
@@ -270,9 +257,7 @@ class TestSscdCrops:
         assert min(result.size) == _SSCD_SCALE
 
 
-# ---------------------------------------------------------------------------
 # Group I: Multi-crop averaging — L2-normalisation invariant
-# ---------------------------------------------------------------------------
 
 
 class TestMultiCropAveraging:
@@ -321,18 +306,20 @@ class TestMultiCropAveraging:
         assert not torch.isnan(result).any(), "Result contains NaN for opposing unit vectors"
 
 
-# ---------------------------------------------------------------------------
 # Group J: DINOv2Embedder — processor reconfiguration
-# ---------------------------------------------------------------------------
 
 
 class TestDINOv2EmbedderProcessorKwargs:
     """Verify that DINOv2Embedder passes size/crop_size to AutoImageProcessor
-    and emits a warning when the processor silently ignores them."""
+    and refuses a processor that silently ignores them."""
 
     def _make_mock_processor(self, returned_size: dict) -> mock.MagicMock:
         proc = mock.MagicMock()
         proc.size = returned_size
+        proc.crop_size = {
+            "height": returned_size["shortest_edge"],
+            "width": returned_size["shortest_edge"],
+        }
         return proc
 
     def _make_mock_model(self) -> mock.MagicMock:
@@ -364,30 +351,23 @@ class TestDINOv2EmbedderProcessorKwargs:
             crop_size={"height": normalize_size, "width": normalize_size},
         )
 
-    def test_warning_when_processor_ignores_size(self):
-        """A UserWarning is emitted when the processor's resolved size does not
-        match the requested normalize_size."""
-        normalize_size = 336
-        # Processor reports a different size — simulates a variant that ignores kwargs.
-        processor = self._make_mock_processor({"shortest_edge": 224})
-
+    @pytest.mark.parametrize("geometry", ["resize", "crop"])
+    def test_refuses_ignored_geometry_before_model_load(self, geometry):
+        processor = self._make_mock_processor({"shortest_edge": 336})
+        if geometry == "resize":
+            processor.size = {"shortest_edge": 224}
+        else:
+            processor.crop_size = {"height": 224, "width": 224}
         with (
             mock.patch(
                 "scalar_forensic.embedder.AutoImageProcessor.from_pretrained",
                 return_value=processor,
             ),
-            mock.patch(
-                "scalar_forensic.embedder.AutoModel.from_pretrained",
-                return_value=self._make_mock_model(),
-            ),
+            mock.patch("scalar_forensic.embedder.AutoModel.from_pretrained") as load_model,
+            pytest.raises(ValueError, match="geometry"),
         ):
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                DINOv2Embedder("fake/model", normalize_size=normalize_size)
-
-        assert any("normalize_size" in str(w.message) for w in caught), (
-            "Expected a warning about processor ignoring normalize_size"
-        )
+            DINOv2Embedder("fake/model", normalize_size=336)
+        load_model.assert_not_called()
 
     def test_no_warning_when_processor_accepts_size(self):
         """No warning is emitted when the processor correctly reflects the requested size."""
@@ -413,9 +393,7 @@ class TestDINOv2EmbedderProcessorKwargs:
         )
 
 
-# ---------------------------------------------------------------------------
 # Group K: RemoteEmbedder — PNG encoding and MIME type
-# ---------------------------------------------------------------------------
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
@@ -478,3 +456,26 @@ class TestRemoteEmbedderPngEncoding:
         assert raw_bytes[:8] == _PNG_SIGNATURE, (
             "Decoded payload bytes do not start with the PNG file signature"
         )
+
+
+def test_dino_rejects_effective_tensor_geometry_when_transforms_disabled():
+    from transformers import BitImageProcessor
+
+    processor = BitImageProcessor(
+        size={"shortest_edge": 224},
+        crop_size={"height": 224, "width": 224},
+        do_resize=False,
+        do_center_crop=False,
+    )
+    with (
+        mock.patch(
+            "scalar_forensic.embedder.AutoImageProcessor.from_pretrained", return_value=processor
+        ),
+        mock.patch("scalar_forensic.embedder.AutoModel.from_pretrained") as loader,
+    ):
+        model = loader.return_value.to.return_value
+        model.return_value.last_hidden_state = torch.ones((1, 1, 2))
+        embedder = DINOv2Embedder("synthetic", device="cpu", normalize_size=224)
+        with pytest.raises(ValueError, match="effective tensor geometry"):
+            embedder.embed_images([_solid_image(336, 336)])
+        model.assert_not_called()

@@ -21,6 +21,7 @@ looping on a condition that will not change.
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import signal
 from dataclasses import dataclass
@@ -29,9 +30,7 @@ from fastapi import HTTPException
 
 from scalar_forensic.video_playback.encode import CeilingExceeded, EncodeError
 
-# ---------------------------------------------------------------------------
 # §5 player states
-# ---------------------------------------------------------------------------
 #
 # §5: "Every state below must be represented in the UI ... nothing here may
 # invent a state it cannot observe."  Both halves bind.  The list therefore
@@ -49,7 +48,7 @@ FULL_JOB_STATES: frozenset[str] = frozenset(
 #: Every state the server may put the player in.
 PLAYER_STATES: frozenset[str] = FULL_JOB_STATES | frozenset(
     {
-        # --- §5, verbatim -------------------------------------------------
+        # §5, verbatim
         "playable",  # plays directly, no controls added
         "needs-transcode",  # reason + Play + Request full video + Download original
         "chunk-encoding",  # spinner with elapsed time; no fabricated percentage
@@ -57,8 +56,8 @@ PLAYER_STATES: frozenset[str] = FULL_JOB_STATES | frozenset(
         "chunk-failed",  # the failure reason, and Download original
         "cache-disabled",  # SFN_VIDEO_CACHE_DIR unset or unwritable
         "capacity-exhausted",  # queue or cache full
-        # --- added in phase 6, because §5's list has no answer for "we have
-        #     not asked yet" or "we asked and the file would not say" --------
+        # added in phase 6, because §5's list has no answer for "we have
+        # not asked yet" or "we asked and the file would not say"
         "idle",  # no video selected; the player is not claiming anything
         "probing",  # playback-info is in flight — NOT a verdict
         "unknown",  # the container could not be probed
@@ -81,9 +80,7 @@ MODE_TO_STATE: dict[str, str] = {
 }
 
 
-# ---------------------------------------------------------------------------
 # §10.1 failure matrix
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -312,6 +309,15 @@ NO_SUCH_JOB = Failure(
     reason="No full-video job is running for this video in this worker process.",
 )
 
+JOB_CANCELLING = Failure(
+    kind="job-cancelling",
+    status=409,
+    state="needs-transcode",
+    retryable=True,
+    retry_after_seconds=1,
+    reason="The previous full-video job is still stopping. Try again after it finishes cleanup.",
+)
+
 ENCODE_FAILED = Failure(
     kind="encode-failed",
     status=422,
@@ -339,6 +345,14 @@ def classify(exc: BaseException) -> Failure:
     own words — a 422 the analyst can read and act on, rather than a 500 that
     says only that something happened.
     """
+    if (
+        isinstance(exc, HTTPException)
+        and exc.status_code == QUEUE_FULL.status
+        and isinstance(exc.detail, dict)
+        and exc.detail.get("error") == QUEUE_FULL.kind
+    ):
+        # Admission also runs inside the full-job task, after its HTTP response.
+        return QUEUE_FULL
     if isinstance(exc, CeilingExceeded):
         return _with_reason(
             FULL_COPY_OVERSHOOT,
@@ -392,23 +406,8 @@ def classify_full_job(exc: BaseException) -> Failure:
     than re-deriving them." The ``kind`` is untouched, because that is the
     identity a log record and a test key on; only what the player renders moves.
     """
-    row = classify(exc)
-    return Failure(
-        kind=row.kind,
-        status=row.status,
-        state="full-job-failed",
-        retryable=row.retryable,
-        reason=row.reason,
-        retry_after_seconds=row.retry_after_seconds,
-    )
+    return dataclasses.replace(classify(exc), state="full-job-failed")
 
 
 def _with_reason(base: Failure, reason: str) -> Failure:
-    return Failure(
-        kind=base.kind,
-        status=base.status,
-        state=base.state,
-        retryable=base.retryable,
-        reason=reason,
-        retry_after_seconds=base.retry_after_seconds,
-    )
+    return dataclasses.replace(base, reason=reason)

@@ -1,6 +1,7 @@
 """Runtime configuration loaded from environment variables and an optional .env file."""
 
 import os
+import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -51,7 +52,7 @@ class Settings:
         self.duplicate_check_mode: str = self._parse_dedup_mode()
         self.extract_exif: bool = self._parse_bool("SFN_EXTRACT_EXIF", default=False)
 
-        # --- Thumbnail cache ---
+        # Thumbnail cache
         # 128×128 JPEG thumbnails are written during indexing and served at
         # /api/thumbnail/{sha256} by sfn-web.  Defaults to data/thumbnails
         # (relative to CWD).  Set SFN_THUMBNAIL_DIR= (empty) to disable.
@@ -60,7 +61,7 @@ class Settings:
         )
         self.thumbnail_size: int = self._parse_int("SFN_THUMBNAIL_SIZE", 128)
 
-        # --- Video frame store ---
+        # Video frame store
         # Long-side-capped video frames are stored here during
         # indexing, keyed by frame hash, so thumbnails can be regenerated later when
         # the source video is no longer present.  Defaults to data/frames.
@@ -68,12 +69,7 @@ class Settings:
         self.frame_store_dir: Path | None = self._parse_optional_path(
             "SFN_FRAME_STORE_DIR", "data/frames"
         )
-        # Maximum pixel dimension (long side) at which frames are stored.
-        # Keeping this smaller than the source resolution reduces disk use while
-        # still producing high-quality thumbnails.  Default: 512.
-        self.frame_store_size: int = self._parse_int("SFN_FRAME_STORE_SIZE", 512)
-
-        # --- Playback viewing-copy cache ---
+        # Playback viewing-copy cache
         # Source videos whose container the browser cannot open (QuickTime .MOV
         # above all) are losslessly rewrapped into MP4 on demand and parked here,
         # keyed by the SHA-256 of the source file.  Streams are copied bit for
@@ -103,7 +99,7 @@ class Settings:
         if not (1 <= self.video_lease_seconds <= 3600):
             raise ValueError("SFN_VIDEO_LEASE_SECONDS must be between 1 and 3600")
 
-        # --- Transcoded playback (spec docs/specs/video-playback-transcode.md §12) ---
+        # Transcoded playback (spec docs/specs/video-playback-transcode.md §12)
         # ffmpeg is a declared external dependency (§8): the rewrap above is PyAV,
         # but a re-encode shells out to the binary named here.  A bare name is
         # resolved on PATH; an absolute path pins a specific build.
@@ -151,7 +147,7 @@ class Settings:
         self.video_job_timeout: int = self._parse_int("SFN_VIDEO_JOB_TIMEOUT", 3600)
         if self.video_job_timeout < 1:
             raise ValueError("SFN_VIDEO_JOB_TIMEOUT must be >= 1")
-        # --- §4.3's contention, remedy (a): the full-video job yields ---
+        # §4.3's contention, remedy (a): the full-video job yields
         # A full copy holds a worker for ~51 minutes and puts chunk encoding at
         # k=2 — 8.21 s → 16.35 s (§3.5), outside §4.2's 6–10 s window.  Chunk
         # work is what an analyst is waiting on; a background export is not, so
@@ -172,15 +168,15 @@ class Settings:
         if not (0 <= self.video_job_threads <= 256):
             raise ValueError("SFN_VIDEO_JOB_THREADS must be between 0 and 256")
 
-        # --- Network policy ---
+        # Network policy
         # Default: offline — no outward connections to HuggingFace or any other service.
         # Set to true (or pass --allow-online) only for first-time model downloads.
         self.allow_online: bool = self._parse_bool(ENV_ALLOW_ONLINE, default=False)
 
-        # --- Qdrant auth (optional) ---
+        # Qdrant auth (optional)
         self.qdrant_api_key: str | None = os.environ.get("SFN_QDRANT_API_KEY") or None
 
-        # --- Tag Triage (Qdrant Discovery API) ---
+        # Tag Triage (Qdrant Discovery API)
         # Sidecar collection storing payload-only points — one per "tag".
         # A tag is a named set of positive and negative reference point IDs
         # (and optionally a target anchor) used as input to Qdrant's Discovery
@@ -194,13 +190,13 @@ class Settings:
         # case collection never has to ingest those vectors.  Unset by default.
         self.reference_collection: str | None = os.environ.get("SFN_REFERENCE_COLLECTION") or None
 
-        # --- Remote embeddings endpoint (optional, OpenAI-compatible) ---
+        # Remote embeddings endpoint (optional, OpenAI-compatible)
         self.embedding_endpoint: str | None = os.environ.get("SFN_EMBEDDING_ENDPOINT") or None
         self.embedding_api_key: str | None = os.environ.get("SFN_EMBEDDING_API_KEY") or None
         self.embedding_model: str | None = os.environ.get("SFN_EMBEDDING_MODEL") or None
         self.embedding_dim: int = self._parse_int("SFN_EMBEDDING_DIM", 0)
 
-        # --- Video frame extraction ---
+        # Video frame extraction
         # SFN_VIDEO_FPS: how many frames to extract per second of video (default 1).
         # SFN_VIDEO_MAX_FRAMES: hard cap on frames yielded per video file (0 = no cap).
         self.video_fps: float = self._parse_float("SFN_VIDEO_FPS", 1.0)
@@ -208,7 +204,7 @@ class Settings:
         if self.video_max_frames < 0:
             raise ValueError("SFN_VIDEO_MAX_FRAMES must be >= 0 (use 0 for no cap)")
 
-        # --- Hash cache ---
+        # Hash cache
         # Persistent on-disk SHA-256 cache keyed by (path, mtime_ns, size).
         # Eliminates redundant disk reads for files whose content has not changed
         # since the last indexing run.  Defaults to data/hash_cache.db
@@ -218,7 +214,7 @@ class Settings:
             "SFN_HASH_CACHE_PATH", _DEFAULT_HASH_CACHE_PATH
         )
 
-        # --- Ingestion reports & per-run manifests ---
+        # Ingestion reports & per-run manifests
         # CSV ingestion reports and the paired <stem>.manifest.json land here
         # by default; the CLI's --report flag still overrides the CSV path per
         # run.  Not disableable: every ingestion run writes its report.
@@ -230,7 +226,7 @@ class Settings:
             )
         self.report_dir: Path = report_dir
 
-        # --- SSCD multi-crop ensemble ---
+        # SSCD multi-crop ensemble
         # SFN_SSCD_N_CROPS controls how many spatial crops are taken per image when
         # embedding with SSCD.  Allowed values:
         #   1 — center crop only.
@@ -246,7 +242,7 @@ class Settings:
                 "Allowed values: 1 (center crop only) or 5 (center + 4 corners)."
             )
 
-        # --- Web server ---
+        # Web server
         self.web_host: str = os.environ.get("SFN_WEB_HOST", "0.0.0.0")
         self.web_port: int = self._parse_int("SFN_WEB_PORT", 8080)
         if not (1 <= self.web_port <= 65535):
@@ -268,7 +264,24 @@ class Settings:
         if self.max_active_sessions < 0:
             raise ValueError("SFN_MAX_ACTIVE_SESSIONS must be >= 0 (0 disables the cap)")
 
-        # --- Face modality (optional; spec docs/specs/face-pipeline.md) ---
+        self.max_concurrent_uploads = self._parse_int("SFN_MAX_CONCURRENT_UPLOADS", 2)
+        self.video_completed_job_ttl_seconds = self._parse_int(
+            "SFN_VIDEO_COMPLETED_JOB_TTL_SECONDS", 3600
+        )
+        self.video_completed_job_max = self._parse_int("SFN_VIDEO_COMPLETED_JOB_MAX", 256)
+        for name, value in (
+            ("SFN_MAX_CONCURRENT_UPLOADS", self.max_concurrent_uploads),
+            ("SFN_VIDEO_COMPLETED_JOB_TTL_SECONDS", self.video_completed_job_ttl_seconds),
+            ("SFN_VIDEO_COMPLETED_JOB_MAX", self.video_completed_job_max),
+        ):
+            if value < 1:
+                raise ValueError(f"{name} must be >= 1")
+        self.session_temp_root = Path(
+            os.environ.get("SFN_SESSION_TEMP_ROOT")
+            or str(Path(tempfile.gettempdir()) / "scalar-forensic-sessions")
+        )
+
+        # Face modality (optional; spec docs/specs/face-pipeline.md)
         # Disabled by default.  Enabling requires a detector model, an
         # embedder model + manifest, and SFN_EXAMINER_ID; validated by
         # face_startup_error() so entry points fail fast with guidance.

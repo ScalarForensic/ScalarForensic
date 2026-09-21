@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
-import re
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -29,7 +29,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from scalar_forensic.config import Settings
 from scalar_forensic.video_playback import audit, jobs, states
 from scalar_forensic.video_playback.cache import (
-    FULL_NAME,
+    _SHA256_RE,
+    CeilingVerdict,
     _cache_dir_or_503,
     _touch,
     artifact_dir,
@@ -37,6 +38,7 @@ from scalar_forensic.video_playback.cache import (
     check_ceiling,
     chunk_name,
     evict,
+    full_path,
     pin,
     release_lease,
     relocate_to_pipeline_key,
@@ -60,7 +62,17 @@ _log = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+def _override_offered(verdict: CeilingVerdict, settings: Settings) -> bool:
+    """Whether ``POST /api/video-full?override=true`` would be honoured (§6.3).
+
+    Decided in one place because two surfaces publish it — ``playback-info``'s
+    ``full_copy`` block and the 507 detail — and a UI that offers a button the
+    server refuses is the defect a second copy of this expression produces.
+    An override that cannot be attributed to ``SFN_EXAMINER_ID`` is refused
+    (ruling 2026-08-14).
+    """
+    return verdict.overridable and bool(settings.examiner_id)
 
 
 def _stale_evidence_report(computed: str, indexed: str | None) -> dict:
@@ -70,7 +82,7 @@ def _stale_evidence_report(computed: str, indexed: str | None) -> dict:
     ``stale_evidence: None``, which is "not checked", not "checked and fine".
     Only a real comparison can clear a file.
     """
-    if not indexed or not re.fullmatch(r"[0-9a-f]{64}", indexed):
+    if not indexed or not _SHA256_RE.fullmatch(indexed):
         return {"indexed_video_hash": None, "stale_evidence": None, "stale_reason": None}
     if indexed == computed:
         return {"indexed_video_hash": indexed, "stale_evidence": False, "stale_reason": None}
@@ -282,11 +294,7 @@ async def video_playback_info(path: str, video_hash: str | None = None) -> JSONR
             "estimate_bytes": verdict.estimate_bytes,
             "limit_bytes": verdict.limit_bytes,
             "reason": verdict.reason,
-            # Whether POST /api/video-full?override=true would be honoured for
-            # this video, decided here so the UI never offers a button the
-            # server will refuse: an override that cannot be attributed to
-            # SFN_EXAMINER_ID is refused (§6.3, ruling 2026-08-14).
-            "overridable": verdict.overridable and bool(settings.examiner_id),
+            "overridable": _override_offered(verdict, settings),
         }
         info["cache_enabled"] = settings.video_cache_dir is not None
         info["chunk_seconds"] = settings.video_chunk_seconds
@@ -314,9 +322,7 @@ async def video_playback_info(path: str, video_hash: str | None = None) -> JSONR
     return JSONResponse(info)
 
 
-# ---------------------------------------------------------------------------
 # Chunk playback (spec §4.2, §5, §9, §10.1)
-# ---------------------------------------------------------------------------
 
 
 def chunk_start_for(t: float, chunk_seconds: int) -> float:
@@ -421,7 +427,7 @@ async def _validated_source(p: Path, settings: Settings, *, video_hash: str | No
 
     cache_dir = _cache_dir_or_503(settings)
     digest = await asyncio.to_thread(_source_digest, p, settings)
-    if video_hash and _HEX64.fullmatch(video_hash) and video_hash != digest:
+    if video_hash and _SHA256_RE.fullmatch(video_hash) and video_hash != digest:
         # §7.1: the file changed under the session.  Encoding from it would hand
         # the analyst pixels that no timecode in the UI describes.
         raise states.SOURCE_CHANGED.as_http()
@@ -503,7 +509,7 @@ async def _prepare_chunk(p: Path, settings: Settings, t: float, *, video_hash: s
             scope=audit.SCOPE_CHUNK,
             has_audio=has_audio,
             start_seconds=start,
-            duration_seconds=float(settings.video_chunk_seconds),
+            duration_seconds=min(float(settings.video_chunk_seconds), duration - start),
         )
         report.update(
             cached=True,
@@ -578,7 +584,7 @@ async def _prepare_chunk(p: Path, settings: Settings, t: float, *, video_hash: s
         scope=audit.SCOPE_CHUNK,
         has_audio=has_audio,
         start_seconds=start,
-        duration_seconds=float(settings.video_chunk_seconds),
+        duration_seconds=min(float(settings.video_chunk_seconds), duration - start),
     )
     audit.record_transcode(
         settings,
@@ -645,12 +651,13 @@ async def video_chunk_get(path: str, start: float, fp: str) -> FileResponse:
     caller read anything the store happens to hold.
     """
     p = _resolve_video_path(path)
-    if not _HEX64.fullmatch(fp or ""):
+    if not _SHA256_RE.fullmatch(fp or ""):
         raise HTTPException(status_code=422, detail="fp is not a pipeline fingerprint")
     settings = Settings()
     cache_dir = _cache_dir_or_503(settings)
     digest = await asyncio.to_thread(_source_digest, p, settings)
     chunk = artifact_dir(cache_dir, digest, fp) / chunk_name(start)
+    renew_lease(digest, settings.video_lease_seconds)
     if not chunk.is_file():
         raise HTTPException(
             status_code=404,
@@ -659,7 +666,6 @@ async def video_chunk_get(path: str, start: float, fp: str) -> FileResponse:
                 "evicted; POST to this endpoint to produce it."
             ),
         )
-    renew_lease(digest, settings.video_lease_seconds)
     await asyncio.to_thread(_touch, chunk)
     return FileResponse(
         chunk,
@@ -671,9 +677,7 @@ async def video_chunk_get(path: str, start: float, fp: str) -> FileResponse:
     )
 
 
-# ---------------------------------------------------------------------------
 # The full-video job (spec §4.3, §5, §6.3, §9, §10)
-# ---------------------------------------------------------------------------
 
 
 @router.post("/api/video-full")
@@ -729,7 +733,7 @@ async def video_full_start(
                     "retry_after_seconds": None,
                     "estimate_bytes": verdict.estimate_bytes,
                     "limit_bytes": verdict.limit_bytes,
-                    "overridable": verdict.overridable and bool(settings.examiner_id),
+                    "overridable": _override_offered(verdict, settings),
                 },
             )
         if not settings.examiner_id:
@@ -767,6 +771,7 @@ async def video_full_start(
             verdict.estimate_bytes,
             verdict.limit_bytes,
         )
+    claim_id = secrets.token_urlsafe(32)
     job = jobs.runner.start(
         jobs.JobRequest(
             source=p,
@@ -796,8 +801,9 @@ async def video_full_start(
             started_by=settings.examiner_id,
         ),
         settings,
+        claim_id=claim_id,
     )
-    return JSONResponse(job.view())
+    return JSONResponse({**job.view(), "claim_id": claim_id})
 
 
 @router.get("/api/video-job-status")
@@ -819,7 +825,7 @@ async def video_job_status(path: str) -> JSONResponse:
 
 
 @router.delete("/api/video-full")
-async def video_full_cancel(path: str) -> JSONResponse:
+async def video_full_cancel(path: str, claim_id: str) -> JSONResponse:
     """Drop this client's claim on the job; kill it when the claim was the last.
 
     §10.4: "a cancel by one analyst must never kill a job another is waiting on".
@@ -829,7 +835,7 @@ async def video_full_cancel(path: str) -> JSONResponse:
     p = _resolve_video_path(path)
     settings = Settings()
     digest = await asyncio.to_thread(_source_digest, p, settings)
-    outcome = jobs.runner.cancel(digest)
+    outcome = jobs.runner.cancel(digest, claim_id)
     if outcome == "none":
         raise HTTPException(status_code=404, detail=states.NO_SUCH_JOB.as_detail())
     job = jobs.runner.get(digest)
@@ -853,12 +859,12 @@ async def video_full_get(path: str, fp: str) -> FileResponse:
     through the one resolution flow (§9).
     """
     p = _resolve_video_path(path)
-    if not _HEX64.fullmatch(fp or ""):
+    if not _SHA256_RE.fullmatch(fp or ""):
         raise HTTPException(status_code=422, detail="fp is not a pipeline fingerprint")
     settings = Settings()
     cache_dir = _cache_dir_or_503(settings)
     digest = await asyncio.to_thread(_source_digest, p, settings)
-    full = artifact_dir(cache_dir, digest, fp) / FULL_NAME
+    full = full_path(cache_dir, digest, fp)
     if not full.is_file():
         raise HTTPException(
             status_code=404,

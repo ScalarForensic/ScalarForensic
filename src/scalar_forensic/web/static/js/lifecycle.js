@@ -1,6 +1,6 @@
 // Part of the sfn() Alpine component — merged by app.js. See app.js for load order.
 (window.__sfnParts = window.__sfnParts || []).push({
-    // ── Lifecycle ─────────────────────────────────────────────────────────
+    // Lifecycle
     async init() {
       try {
         const d = await fetch('/api/collections').then(r => r.json());

@@ -1,4 +1,4 @@
-// ── sfn() Alpine component assembler ────────────────────────────────────────
+// sfn() Alpine component assembler
 // The component is defined in topical parts under static/js/, each pushing an
 // object fragment onto window.__sfnParts.  Load order (see index.html):
 //   state.js → computed.js → helpers.js → lifecycle.js → analysis.js

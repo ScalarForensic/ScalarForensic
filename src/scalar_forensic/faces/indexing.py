@@ -9,7 +9,6 @@ keeps the core testable without a server.
 from __future__ import annotations
 
 import importlib.metadata
-import io
 import os
 import threading
 from collections.abc import Callable, Iterator, Sequence
@@ -21,7 +20,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 import onnxruntime as ort
-from PIL import Image, ImageOps
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 
@@ -38,45 +36,7 @@ from scalar_forensic.faces.embed import OnnxFaceEmbedder
 from scalar_forensic.faces.provenance import PipelineConfig
 from scalar_forensic.faces.quality import post_align_gate, pre_align_gate, review_gate
 from scalar_forensic.faces.store import FACE_VECTOR_NAME, FaceStore
-
-
-def decode_shared(data: bytes, cap: int) -> tuple[np.ndarray, Image.Image | None]:
-    """One native-resolution decode serving face detection AND the embed path.
-
-    Returns ``(native_rgb_array, capped_pil_or_None)``.  The array is
-    pixel-identical to :func:`scalar_forensic.faces.decode.load_for_detection`.
-    The second element is the embedding-path input (what
-    ``preprocess_batch`` would have produced from the same bytes) derived by
-    downscaling the native decode — returned only when that derivation is
-    byte-identical to the ``embedder._open_rgb`` + ``_cap_short_side`` path,
-    so a faces-on run embeds exactly the same pixels as a faces-off run:
-
-    - JPEG: ``None``.  ``_open_rgb`` uses libjpeg ``draft()`` shrink-on-load,
-      whose pixels differ slightly from a full decode + Lanczos; the caller
-      must decode the embed input separately (cheap for JPEG).
-    - Non-JPEG with an EXIF Orientation != 1 in a format ``_open_rgb`` does
-      not orient (e.g. PNG eXIf): ``None`` — detection sees the oriented
-      image, the embed path deliberately keeps its unoriented behaviour.
-    - Everything else (HEIC, PNG, WEBP, …): the derived image, identical.
-    """
-    # Deferred: embedder imports torch; keep the faces module importable
-    # without paying that cost until a shared decode is actually requested.
-    from scalar_forensic.embedder import (
-        _EXIF_ORIENTATION_FORMATS,
-        _EXIF_ORIENTATION_TAG,
-        _cap_short_side,
-    )
-
-    pil = Image.open(io.BytesIO(data))
-    fmt = pil.format
-    orientation = pil.getexif().get(_EXIF_ORIENTATION_TAG, 1)
-    pil = ImageOps.exif_transpose(pil)
-    if pil.mode != "RGB":
-        pil = pil.convert("RGB")
-    arr = np.asarray(pil)
-    if fmt == "JPEG" or (fmt not in _EXIF_ORIENTATION_FORMATS and orientation != 1):
-        return arr, None
-    return arr, _cap_short_side(Image.fromarray(arr), cap)
+from scalar_forensic.media_access import decode_shared as decode_shared
 
 
 @dataclass
@@ -89,6 +49,45 @@ class FaceIndexResult:
     n_dropped_noncanonical: int = 0
     points: list[PointStruct] = field(default_factory=list)
     review_only_point_ids: list[str] = field(default_factory=list)
+
+
+def _sfn_version() -> str:
+    try:
+        return importlib.metadata.version("scalar-forensic")
+    except importlib.metadata.PackageNotFoundError:  # pragma: no cover - dev checkout
+        return "unknown"
+
+
+def build_pipeline_config(settings, detector, embedder) -> PipelineConfig:
+    """The provenance record for one pass, index-time or query-time.
+
+    Shared with ``web/pipeline/faces_query.py`` so ``FaceStore.check_compat``
+    compares like with like — a query embedding is only meaningful against the
+    collection if it was produced under the same hard fields.
+    """
+    return PipelineConfig(
+        detector_id=detector.detector_id,
+        detector_model_hash=detector.model_hash,
+        detector_score_threshold=detector._score_threshold,
+        detect_max_size=settings.face_detect_max_size,
+        embedder_model_name=Path(settings.face_embedder_model).name,
+        embedder_model_hash=embedder.model_hash,
+        manifest_hash=embedder.manifest_hash,
+        embedder_dim=embedder.manifest.embedding_dim,
+        alignment_version=ALIGNMENT_VERSION,
+        normalization_id=embedder.normalization_id,
+        min_conf=settings.face_min_conf,
+        min_size=settings.face_min_size,
+        min_sharpness=settings.face_min_sharpness,
+        max_clipped=settings.face_max_clipped,
+        max_pose=settings.face_max_pose,
+        crop_dilation=settings.face_crop_dilation,
+        review_min_conf=settings.face_review_min_conf,
+        review_min_size=settings.face_review_min_size,
+        sfn_version=_sfn_version(),
+        cv2_version=cv2.__version__,
+        ort_version=ort.__version__,
+    )
 
 
 @dataclass
@@ -124,29 +123,7 @@ class FacePipeline:
             raise ValueError(err)
         detector = YuNetDetector(settings.face_detector_model, settings.face_detect_max_size)
         embedder = OnnxFaceEmbedder(settings.face_embedder_model)
-        cfg = PipelineConfig(
-            detector_id=detector.detector_id,
-            detector_model_hash=detector.model_hash,
-            detector_score_threshold=detector._score_threshold,
-            detect_max_size=settings.face_detect_max_size,
-            embedder_model_name=Path(settings.face_embedder_model).name,
-            embedder_model_hash=embedder.model_hash,
-            manifest_hash=embedder.manifest_hash,
-            embedder_dim=embedder.manifest.embedding_dim,
-            alignment_version=ALIGNMENT_VERSION,
-            normalization_id=embedder.normalization_id,
-            min_conf=settings.face_min_conf,
-            min_size=settings.face_min_size,
-            min_sharpness=settings.face_min_sharpness,
-            max_clipped=settings.face_max_clipped,
-            max_pose=settings.face_max_pose,
-            crop_dilation=settings.face_crop_dilation,
-            review_min_conf=settings.face_review_min_conf,
-            review_min_size=settings.face_review_min_size,
-            sfn_version=_sfn_version(),
-            cv2_version=cv2.__version__,
-            ort_version=ort.__version__,
-        )
+        cfg = build_pipeline_config(settings, detector, embedder)
         store = FaceStore(
             QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key),
             settings.face_collection,
@@ -314,12 +291,13 @@ class FacePipeline:
             payload = {
                 "is_face": True,
                 "image_hash": image_hash,
+                "source_unit": self.store.unit_key(image_hash, video_hash, frame_timecode_ms),
                 "image_path": image_path,
                 "video_hash": video_hash,
                 "video_path": video_path,
                 "frame_timecode_ms": frame_timecode_ms,
                 "observation_key": self.store.observation_key(
-                    image_hash, frame_timecode_ms, det.bbox
+                    image_hash, frame_timecode_ms, det.bbox, video_hash=video_hash
                 ),
                 "bbox": [int(round(v)) for v in det.bbox],
                 "landmarks": det.landmarks.tolist(),
@@ -341,7 +319,9 @@ class FacePipeline:
             }
             result.points.append(
                 PointStruct(
-                    id=self.store.face_point_id(image_hash, frame_timecode_ms, det.bbox),
+                    id=self.store.face_point_id(
+                        image_hash, frame_timecode_ms, det.bbox, video_hash=video_hash
+                    ),
                     vector={FACE_VECTOR_NAME: [float(v) for v in embeddings[i]]},
                     payload=payload,
                 )
@@ -357,7 +337,9 @@ class FacePipeline:
                     dilation=self.crop_dilation,
                     thumb_size=self.thumb_size,
                 )
-            point_id = self.store.face_point_id(image_hash, frame_timecode_ms, det.bbox)
+            point_id = self.store.face_point_id(
+                image_hash, frame_timecode_ms, det.bbox, video_hash=video_hash
+            )
             result.review_only_point_ids.append(point_id)
             result.points.append(
                 PointStruct(
@@ -368,12 +350,15 @@ class FacePipeline:
                     payload={
                         "is_face": True,
                         "image_hash": image_hash,
+                        "source_unit": self.store.unit_key(
+                            image_hash, video_hash, frame_timecode_ms
+                        ),
                         "image_path": image_path,
                         "video_hash": video_hash,
                         "video_path": video_path,
                         "frame_timecode_ms": frame_timecode_ms,
                         "observation_key": self.store.observation_key(
-                            image_hash, frame_timecode_ms, det.bbox
+                            image_hash, frame_timecode_ms, det.bbox, video_hash=video_hash
                         ),
                         "bbox": [int(round(v)) for v in det.bbox],
                         "landmarks": det.landmarks.tolist(),
@@ -465,10 +450,3 @@ def process_media_threaded(
         futures = [pool.submit(_work, job) for job in jobs]
         for job, fut in zip(jobs, futures, strict=True):
             yield *job, fut.result()
-
-
-def _sfn_version() -> str:
-    try:
-        return importlib.metadata.version("scalar-forensic")
-    except importlib.metadata.PackageNotFoundError:  # pragma: no cover - dev checkout
-        return "unknown"

@@ -1,7 +1,7 @@
 # Spec: On-demand video transcoding for in-browser playback
 
-Status: **draft v2, post-review** · 2026-08-13 · author `scalarforensic-cfm-g1` (CTO)
-Supersedes the "HEVC remedy" pending decision carried in `docs/CTO_LEDGER.md`.
+Status: **implemented design**, originating 2026-08-13; later rulings are folded into the relevant sections.
+Records the codec-playback remedy and the operator's decisions in §§4, 6 and 16.
 v1 proposed a lazy-HLS segment engine. Two independent adversarial design reviews
 (Codex, Opus) rejected it as unproven and materially underspecified; the operator
 then chose a simpler shape that removes most of the objections by construction
@@ -265,7 +265,12 @@ v1 scheduler complex (§4.1). Explicit cancellation exists only for the
 full-video job (§4.3), where the cost actually justifies it.
 
 Seeking outside the loaded chunk requests a chunk at the new position. This is
-what gives random access before the full file exists.
+what gives random access before the full file exists. The chunk panel exposes
+a source-position input in seconds and a Go button (Enter also submits), bounded
+to `[0, duration)`. The player seeks within the returned window by subtracting
+its source start; seeking again within the cached window updates the loaded
+element directly. A failed seek retries the requested source position, not the
+last successful window.
 
 ### 4.3 Full-video job
 
@@ -346,7 +351,14 @@ What is ruled out is the third option: leaving it both unbounded and invisible.
 - Cancellable explicitly; navigating away prompts. **Cancellation is a refcount
   drop, not a kill** (§10.4): `DELETE /api/video-full` releases one analyst's
   claim and stops the encoder only when it was the last, and the response says
-  which of the two happened. A cancelled job is **not a fourth state** — nothing
+  which of the two happened. Each successful POST returns an opaque `claim_id`,
+  which DELETE requires alongside `path`. Repeating a DELETE with that token
+  returns its previous outcome without releasing another claim. Missing tokens
+  are rejected with 422; unknown tokens or expired jobs with 404 (`no-such-job`).
+  Starting again while the cancelled encoder is still being reaped returns 409
+  (`job-cancelling`, retryable, `Retry-After: 1`).
+  Shared status responses never expose tokens: observing an existing job does
+  not grant cancellation rights. A cancelled job is **not a fourth state** — nothing
   is running, so the video is back to `needs-transcode` with `cancelled: true`
   saying why.
 - On completion: notification, and if the analyst is still watching chunks, the
@@ -550,10 +562,6 @@ the ceiling an invariant — by refusing jobs that would not fit *before* they r
 and breaking a playback in progress to recover bytes from a residue of a smaller
 ceiling is the worse trade.
 
-Legacy top-level `{sha256}.mp4` files from the pre-directory layout are counted
-and evictable as their own entry rather than deleted on sight: they are still
-valid rewraps, and a layout change should not throw away a warm cache.
-
 ### 6.3 When one video exceeds the ceiling
 
 `SFN_VIDEO_CACHE_MAX_BYTES` defaults to 8 GiB (`config.py:91`). A long 4K full copy
@@ -651,7 +659,7 @@ operator has now ruled on it by name, and this paragraph replaces that reading.
 
 The guarantee is unchanged either way — `limit_bytes` is derived from
 `SFN_VIDEO_CACHE_MAX_BYTES` and never depended on the estimate existing — so this
-narrows who may act, not what the system enforces. Recorded in `docs/CTO_LEDGER.md`.
+narrows who may act, not what the system enforces. This section records that ruling.
 
 A corollary of (4), found while implementing it: `limit_bytes` is decided from
 whether a ceiling is *configured*, never from the limit being non-zero. Half of a
@@ -994,12 +1002,12 @@ one-implementation rule it is a security control.
 
 Correction to v1: `/api/video-timeline` does **not** call `_resolve_video_path`.
 It takes a `video_hash` only, validated with `re.fullmatch(r"[0-9a-f]{64}")`,
-and never touches a filesystem path. The four callers are `/api/video-frame` and
-the three playback routes. The move is still a two-module split and still
+and never touches a filesystem path. The callers are the three playback routes
+(`/api/video-frame` has since been deleted — it had no caller). The move is still a two-module split and still
 correct; there is simply no call in the timeline handler to go looking for.
 
-`/api/video-frame` and `/api/video-timeline` stay in `routes/video.py`: they serve
-the indexing side, not playback.
+`/api/video-timeline` stays in `routes/video.py`: it serves the indexing side,
+not playback.
 
 No compatibility re-exports are left behind in `routes/video.py`. The tests read
 private symbols off the module without patching, so a stale alias would turn a
@@ -1050,10 +1058,10 @@ purge — an examiner deleting a rendering on purpose is the act §6.4 keeps
 explicit precisely so that it happens. Nothing here touches a source file or an
 indexed frame JPEG; a purged rendering is regenerated by playing the video again.
 
-The examiner id is printed with the result but **not yet filed to an audit log**:
-`video_playback/audit.py` is phase 8, and stubbing it early would create the
-mostly-empty module §15 says the carve exists to avoid. Phase 8 owns wiring this
-call into it.
+After a successful purge, `video_playback.audit.record_purge()` records the
+examiner id, scope, media digest (for a single-media purge), video/file counts
+and bytes freed. The audit log lives beside the cache directory, so purging
+renderings does not delete the record of their removal.
 
 ---
 
@@ -1189,8 +1197,8 @@ patch `scalar_forensic.web.routes.video.*` by name, and `CLAUDE.md`'s first gotc
 is that patch targets are per-module.
 
 On the carve itself: in the event only `tests/test_video_playback.py` needed
-rewiring — all six of `test_video_endpoints.py`'s string targets belong to
-`/api/video-frame` and `/api/video-timeline`, which stay put.
+rewiring — all six of `test_video_endpoints.py`'s string targets belonged to
+`/api/video-frame` and `/api/video-timeline`, which stayed put.
 
 **Done: phases 1–8 complete, and the carve.** Verified on `main` at `5cfae82`.
 Two rulings taken after the phases were written and folded back into the text

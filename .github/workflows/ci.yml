@@ -39,8 +39,14 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
+      - name: Validate shipped Compose configurations
+        run: |
+          docker compose --env-file .env.example -f docker-compose.yml config --quiet
+          docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.amd.yml config --quiet
+          docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.nvidia.yml config --quiet
+
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --locked --dev
 
       - name: Lint (ruff)
         run: uv run ruff check src tests scripts
@@ -55,19 +61,26 @@ jobs:
       # decorative check is worse than none, because it looks like coverage.
       # As a step it is required by construction and needs no ruleset change.
       #
-      # There is no `npm ci` because there is nothing to install: the harness
-      # runs on Node's built-in test runner and `package.json` declares no
-      # dependencies (see tests/js/harness.mjs for why).
+      # Browser tooling is development-only; runtime images do not copy npm assets.
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
           node-version: "24.14.0"
+
+      - name: Install browser test dependencies
+        run: npm ci
 
       # Before the Python suite: it takes seconds, and it is the only check
       # that can tell a browser script apart from a text file that looks like
       # one. `player.js` once shipped a SyntaxError past 14 green wiring tests.
       - name: Run JS tests (node --test)
         run: npm test
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run real DOM smoke
+        run: npm run test:browser
 
       - name: Run tests
         run: uv run pytest
@@ -80,7 +93,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       qdrant:
-        image: qdrant/qdrant:latest
+        image: qdrant/qdrant:v1.19.0
         ports:
           - 6333:6333
 
@@ -96,7 +109,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --locked --dev
 
       - name: Wait for Qdrant
         run: |
@@ -108,15 +121,15 @@ jobs:
           exit 1
 
       # No ffmpeg install here on purpose: this job runs only
-      # tests/faces/test_store_integration.py, which touches no video path. If
-      # this job's test selection ever widens to the video suite, it needs the
+      # face-store integration, snapshot restore and interrupted-ingest synthetic-frame checks.
+      # Neither decodes/encodes real video. If selection widens to real video, it needs the
       # `Install ffmpeg` step from lint-and-test — the encode tests fail rather
       # than skip when ffmpeg is absent under CI, so it will say so loudly.
       #
       # --no-cov: the global --cov-fail-under=65 in pyproject addopts is a floor
-      # for the *full* suite. This job runs a 5-test subset on purpose, so
-      # coverage lands near 2% and the floor fails a job whose tests all passed.
+      # for the *full* suite. This job runs a targeted integration subset, so
+      # coverage is intentionally partial and must not apply the full-suite floor.
       - name: Run Qdrant-gated integration tests
         env:
           SFN_TEST_QDRANT_URL: http://localhost:6333
-        run: uv run pytest tests/faces/test_store_integration.py -v --no-cov
+        run: uv run pytest tests/test_qdrant_release.py tests/faces/test_store_integration.py tests/test_ingest_characterization.py::test_live_interrupted_ingestion_converges -v --no-cov

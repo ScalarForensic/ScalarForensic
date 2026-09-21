@@ -28,9 +28,7 @@ from tests.test_ingest_characterization import (  # noqa: F401 — shared fixtur
     store,
 )
 
-# ---------------------------------------------------------------------------
 # Settings.report_dir (SFN_REPORT_DIR)
-# ---------------------------------------------------------------------------
 
 
 def test_report_dir_defaults_to_data_reports():
@@ -48,9 +46,7 @@ def test_report_dir_empty_rejected(monkeypatch):
         Settings()
 
 
-# ---------------------------------------------------------------------------
 # manifest module units
-# ---------------------------------------------------------------------------
 
 
 def test_manifest_path_sits_next_to_csv_report():
@@ -138,9 +134,7 @@ def test_write_run_manifest_degrades_unexpected_types_to_str(tmp_path):
     assert json.loads(out.read_text(encoding="utf-8"))["models"]["dino"]["odd"] == "/p"
 
 
-# ---------------------------------------------------------------------------
 # End-to-end: cli.index() writes the manifest at run start
-# ---------------------------------------------------------------------------
 
 
 def test_index_writes_manifest_next_to_report(ingest_env, store):  # noqa: F811

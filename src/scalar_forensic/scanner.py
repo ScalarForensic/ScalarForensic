@@ -39,12 +39,22 @@ def _maybe_register_heif() -> None:
 _maybe_register_heif()
 
 
+def allowed_image_extensions() -> frozenset[str]:
+    """Image extensions this deployment can actually open.
+
+    Read at call time so HEIF appears exactly when pillow-heif registered.
+    Indexing and the file-serving routes both go through here, so the two
+    can never drift apart.
+    """
+    return IMAGE_EXTENSIONS | (_HEIF_EXTENSIONS if _HEIF_AVAILABLE else frozenset())
+
+
 def scan_all_files(root: Path) -> Iterator[tuple[Path, str]]:
     """Recursively yield *(path, file_type)* for every regular file under *root*.
 
     ``file_type`` is one of ``"image"``, ``"video"``, or ``"unsupported"``.
     """
-    image_extensions = IMAGE_EXTENSIONS | (_HEIF_EXTENSIONS if _HEIF_AVAILABLE else frozenset())
+    image_extensions = allowed_image_extensions()
     for path in root.rglob("*"):
         if path.is_file():
             ext = path.suffix.lower()

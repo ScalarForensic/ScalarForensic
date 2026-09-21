@@ -15,7 +15,7 @@ from scalar_forensic.faces.indexing import (
     decode_shared,
     process_media_threaded,
 )
-from scalar_forensic.faces.store import FACE_VECTOR_NAME
+from scalar_forensic.faces.store import FACE_VECTOR_NAME, FaceStore
 from scalar_forensic.faces.types import FaceDetection
 
 FRONTAL = np.array([[130, 130], [170, 130], [150, 155], [135, 175], [165, 175]], np.float32)
@@ -49,8 +49,9 @@ def _pipeline(detections):
     store = MagicMock()
     # bbox enters the id: distinct faces in one image must not collide, or the
     # review-only id list would silently deduplicate.
-    store.face_point_id.side_effect = lambda h, t, b: f"id-{h}-{t}-{int(b[0])}x{int(b[2])}"
-    store.observation_key.side_effect = lambda h, t, b: f"{h}:{t or ''}:obs"
+    store.face_point_id.side_effect = lambda h, t, b, **kw: f"id-{h}-{t}-{int(b[0])}x{int(b[2])}"
+    store.unit_key.side_effect = FaceStore.unit_key
+    store.observation_key.side_effect = lambda h, t, b, **kw: f"{h}:{t or ''}:obs"
     return FacePipeline(
         detector=detector,
         embedder=embedder,
@@ -262,9 +263,7 @@ def test_detector_without_the_counter_is_tolerated():
     assert r.n_dropped_noncanonical == 0
 
 
-# ---------------------------------------------------------------------------
 # Decode reuse (in-loop face detection shares the batch loop's decode)
-# ---------------------------------------------------------------------------
 
 
 def test_process_image_accepts_a_predecoded_image_without_touching_data():
@@ -362,9 +361,7 @@ def test_decode_shared_orientation_edge_case_falls_back_but_detects_oriented():
     np.testing.assert_array_equal(arr, oriented)
 
 
-# ---------------------------------------------------------------------------
 # CLI wiring: detection folded into the batch loop, residual pass for the rest
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -412,7 +409,8 @@ def inloop_env(tmp_path, monkeypatch):
         pipeline.cfg.config_hash = "cfg1"
         pipeline.store.collection_is_new.return_value = False
         pipeline.store.check_compat.return_value = []
-        pipeline.store.processed_hashes.return_value = set()
+        pipeline.store.processed_units.return_value = set()
+        pipeline.store.unit_key.side_effect = FaceStore.unit_key
         pipeline.store.stale_face_points.return_value = []
         pipeline.process_image.return_value = FaceIndexResult()
         return pipeline
@@ -439,7 +437,6 @@ def inloop_env(tmp_path, monkeypatch):
                 report=tmp_path / "report.csv",
                 allow_online=False,
                 reference=False,
-                ignore_config_mismatch=False,
             )
 
     from types import SimpleNamespace
@@ -493,14 +490,14 @@ def test_already_indexed_media_still_get_faces_via_the_residual_pass(inloop_env)
 
 
 def test_face_marker_skip_set_is_honoured_on_both_paths(inloop_env):
-    # processed_hashes is the idempotency source; a marked medium must be
+    # processed_units is the idempotency source; a marked medium must be
     # processed by neither the in-loop nor the residual path.
     from scalar_forensic.embedder import hash_file
 
     pipeline = inloop_env.make_pipeline()
     green_sha = hash_file(inloop_env.images / "green.png")
     red_sha = hash_file(inloop_env.images / "red.png")  # covers red_copy.png too
-    pipeline.store.processed_hashes.return_value = {green_sha, red_sha}
+    pipeline.store.processed_units.return_value = {green_sha, red_sha}
     inloop_env.run(pipeline)
 
     calls = pipeline.process_image.call_args_list
@@ -508,7 +505,7 @@ def test_face_marker_skip_set_is_honoured_on_both_paths(inloop_env):
     assert calls[0].kwargs["image_hash"] not in {green_sha, red_sha}
 
 
-# ── Residual-pass threading (efficiency audit 2026-08-13 §4, fix 1) ──────────
+# Residual-pass threading (efficiency audit 2026-08-13 §4, fix 1)
 # The residual pass fans decode+detect+embed out over a thread pool.  YuNet is
 # not thread-safe, so each worker thread must build its own detector; the
 # embedder session is shared and its embed()+embedding_norms read must be

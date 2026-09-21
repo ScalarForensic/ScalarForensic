@@ -2,11 +2,15 @@
   "name": "scalar-forensic-js-tests",
   "version": "0.0.0",
   "private": true,
-  "description": "Test-only manifest: runs the browser scripts under Node's built-in test runner. See tests/js/harness.mjs for why there are no dependencies.",
+  "description": "Development-only JavaScript and real-browser smoke tests",
   "scripts": {
-    "test": "node --test \"tests/js/**/*.test.mjs\""
+    "test": "node --test \"tests/js/**/*.test.mjs\"",
+    "test:browser": "playwright test -c tests/browser/playwright.config.mjs"
   },
   "engines": {
     "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
   }
 }

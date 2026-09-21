@@ -20,18 +20,14 @@ The result is persisted to ``data/sfn_batch_cache.json`` so subsequent runs
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING
 
-from scalar_forensic.embedder import _SHARED_CAP
-
 if TYPE_CHECKING:
+    from scalar_forensic.config import Settings
     from scalar_forensic.embedder import AnyEmbedder
-
-# ---------------------------------------------------------------------------
-# Tunables
-# ---------------------------------------------------------------------------
 
 _CACHE_FILE = Path("data/sfn_batch_cache.json")
 _EFFICIENCY_TARGET = 0.95  # fraction of T_max to accept as "optimal"
@@ -48,20 +44,44 @@ _PLATEAU_CV = 0.10  #   …with coefficient of variation below this → plateau
 _BAR_WIDTH = 30  # characters for the throughput bar
 
 
-# ---------------------------------------------------------------------------
-# Cache I/O
-# ---------------------------------------------------------------------------
+def cache_identity(settings: Settings, *, vector_names: Iterable[str] | None = None) -> dict | None:
+    """Describe the selected pipeline without loading model weights.
+
+    Unknown/empty selections cannot authorize reuse of a calibrated batch size.
+    """
+    selected = sorted(set(vector_names)) if vector_names is not None else []
+    if not selected:
+        return None
+    from scalar_forensic.embedder import _resolve_device
+
+    return {
+        "vector_names": selected,
+        "device": _resolve_device(settings.device),
+        "normalize_size": settings.normalize_size,
+        "sscd_n_crops": settings.sscd_n_crops,
+        "model_dino": str(settings.model_dino),
+        "model_sscd": str(settings.model_sscd),
+        "embedding_endpoint": settings.embedding_endpoint,
+        "embedding_model": settings.embedding_model,
+    }
 
 
-def load_cached_batch_size(cache_file: Path = _CACHE_FILE) -> int | None:
-    """Return the cached batch size, or *None* if no valid cache exists."""
+def load_cached_batch_size(
+    cache_file: Path = _CACHE_FILE, *, identity: dict | None = None
+) -> int | None:
+    """Return a batch size only when the cache matches the current runtime.
+
+    Legacy caches and calls without a verifiable identity return ``None``.
+    """
     if not cache_file.exists():
         return None
     try:
         data = json.loads(cache_file.read_text(encoding="utf-8"))
+        if identity is None or data.get("identity") != identity:
+            return None
         v = int(data["batch_size"])
         return v if v > 0 else None
-    except (KeyError, ValueError, json.JSONDecodeError, OSError):
+    except (KeyError, ValueError, TypeError, AttributeError, json.JSONDecodeError, OSError):
         return None
 
 
@@ -69,6 +89,7 @@ def save_cached_batch_size(
     batch_size: int,
     *,
     device: str = "",
+    identity: dict | None = None,
     throughput_img_per_s: float = 0.0,
     t_max: float = 0.0,
     k_half: float = 0.0,
@@ -84,6 +105,7 @@ def save_cached_batch_size(
         "batch_size": batch_size,
         "calibrated_at": datetime.now().isoformat(timespec="seconds"),
         "device": device,
+        "identity": identity,
         "throughput_img_per_s": round(throughput_img_per_s, 2),
         "model_t_max": round(t_max, 2),
         "model_k_half": round(k_half, 2),
@@ -101,17 +123,12 @@ def save_cached_batch_size(
         raise
 
 
-# ---------------------------------------------------------------------------
-# Internal probe helper
-# ---------------------------------------------------------------------------
-
-
 def _run_batches(
     embedders: list[AnyEmbedder],
     images: list[bytes],
     batch_size: int,
     *,
-    cap: int = _SHARED_CAP,
+    cap: int,
 ) -> None:
     """Pass *images* through the full combined pipeline in batches of *batch_size*.
 
@@ -122,10 +139,8 @@ def _run_batches(
     would underestimate.
 
     *cap* should match the effective cap used by the real indexing pipeline
-    (``max(_SSCD_SCALE, settings.normalize_size)``).  The default is
-    ``_SHARED_CAP`` (331 px) for backward compatibility, but callers should
-    pass the real cap so that calibration accurately represents production
-    throughput when ``normalize_size > 331``.
+    (``max(_SSCD_SCALE, settings.normalize_size)``) so that calibration
+    accurately represents production throughput when ``normalize_size > 331``.
     """
     from scalar_forensic.embedder import hash_bytes, hash_bytes_md5, preprocess_batch
 
@@ -137,8 +152,7 @@ def _run_batches(
         pils = [r for r in preprocess_batch(chunk, cap=cap) if not isinstance(r, Exception)]
         if pils:
             for embedder in embedders:
-                norm = embedder.normalize_batch_bytes(pils)
-                embedder.embed_images(norm)
+                embedder.embed_images(pils)
 
 
 def _probe(
@@ -147,8 +161,8 @@ def _probe(
     measure_bytes: list[bytes],
     batch_size: int,
     *,
-    repeats: int = 1,
-    cap: int = _SHARED_CAP,
+    repeats: int,
+    cap: int,
 ) -> float:
     """Warm up once then time *measure_bytes* for *repeats* runs; return median img/s.
 
@@ -174,17 +188,13 @@ def _probe(
     return statistics.median(tps)
 
 
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
-
-
 def calibrate(
     embedders: AnyEmbedder | list[AnyEmbedder],
     sample_dir: Path,
     *,
     cache_file: Path | None = _CACHE_FILE,
-    cap: int = _SHARED_CAP,
+    cap: int,
+    identity: dict | None = None,
 ) -> int:
     """Probe batch sizes, fit the saturation model, display results, and return
     the optimal batch size.
@@ -209,10 +219,10 @@ def calibrate(
     cap:
         Short-side pixel cap passed to ``preprocess_batch`` for each probe.
         Should match the effective cap used by the real indexing pipeline:
-        ``max(_SSCD_SCALE, settings.normalize_size)``.  Defaults to
-        ``_SHARED_CAP`` (331 px).  When ``normalize_size > 331``, passing the
-        correct cap ensures calibration measures throughput at production image
-        sizes rather than underestimating it on smaller inputs.
+        ``max(_SSCD_SCALE, settings.normalize_size)``.  When
+        ``normalize_size > 331``, passing the correct cap ensures calibration
+        measures throughput at production image sizes rather than
+        underestimating it on smaller inputs.
     """
     import typer
 
@@ -221,7 +231,7 @@ def calibrate(
     )
     primary = emb_list[0]
 
-    # ── Load sample images into memory (once) ─────────────────────────────
+    # Load sample images into memory (once)
     image_paths: list[Path] = []
     for pat in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
         image_paths.extend(sorted(sample_dir.glob(pat)))
@@ -250,7 +260,7 @@ def calibrate(
 
     _random.Random(0).shuffle(raw_bytes)
 
-    # ── Header ────────────────────────────────────────────────────────────
+    # Header
     sep = "─" * 62
     model_names = "  +  ".join(type(e).__name__ for e in emb_list)
     typer.echo("")
@@ -260,7 +270,7 @@ def calibrate(
     typer.echo(f"  pipeline: {model_names}")
     typer.echo(sep)
 
-    # ── Exponential probe ─────────────────────────────────────────────────
+    # Exponential probe
     measurements: list[tuple[int, float]] = []
     prev_tp: float | None = None
 
@@ -301,7 +311,7 @@ def calibrate(
         else:
             gain_str = ""
 
-        # ── Stopping conditions ───────────────────────────────────────────
+        # Stopping conditions
         # 1. Saturation: small *positive* gain — throughput has plateaued.
         if prev_tp is not None and 0.0 <= (tp - prev_tp) / prev_tp < _MIN_GAIN:
             typer.echo(
@@ -342,7 +352,7 @@ def calibrate(
         prev_tp = tp
         probe_b *= 2
 
-    # ── Fit Michaelis-Menten via Lineweaver-Burk OLS ──────────────────────
+    # Fit Michaelis-Menten via Lineweaver-Burk OLS
     t_max_fit = 0.0
     k_half_fit = 0.0
     b_star = 0.0
@@ -381,7 +391,7 @@ def calibrate(
 
     best_tp = max(tp for _, tp in measurements) if measurements else 0.0
 
-    # ── Summary ────────────────────────────────────────────────────────────
+    # Summary
     typer.echo(sep)
     if t_max_fit > 0 and b_star >= 1.0:
         typer.echo(f"  Fitted:   T_max = {t_max_fit:.1f} img/s  ·  K_½ = {k_half_fit:.1f}")
@@ -398,6 +408,7 @@ def calibrate(
         save_cached_batch_size(
             optimal,
             device=primary.device,
+            identity=identity,
             throughput_img_per_s=best_tp,
             t_max=t_max_fit,
             k_half=k_half_fit,

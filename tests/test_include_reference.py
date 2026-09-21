@@ -17,9 +17,7 @@ from unittest.mock import MagicMock, patch
 
 from scalar_forensic.web.pipeline import Hit, query_session
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 CASE_COLLECTION = "sfn"
 REF_COLLECTION = "sfn_reference"
@@ -86,9 +84,7 @@ def _dispatch_query_vector(
     return ([Hit(path=PATH_CASE, scores={mode: 0.90})], [])
 
 
-# ---------------------------------------------------------------------------
 # _query_vector is called with the reference collection
-# ---------------------------------------------------------------------------
 
 
 def test_reference_collection_queried_when_include_reference_true():
@@ -150,9 +146,7 @@ def test_reference_collection_not_queried_when_not_configured():
     assert REF_COLLECTION not in collections_queried
 
 
-# ---------------------------------------------------------------------------
 # Reference hits carry is_reference=True
-# ---------------------------------------------------------------------------
 
 
 def test_reference_hits_have_is_reference_true():
@@ -197,9 +191,7 @@ def test_case_hits_have_is_reference_false():
     assert all(not h.is_reference for h in case_hits), "case hits must not have is_reference=True"
 
 
-# ---------------------------------------------------------------------------
 # Reference hits are never merged with case hits (unify=True)
-# ---------------------------------------------------------------------------
 
 
 def test_reference_hits_not_merged_with_case_hits_unify_true():
@@ -239,9 +231,7 @@ def test_reference_hits_not_merged_with_case_hits_unify_true():
     assert all(h.is_reference for h in ref_hits)
 
 
-# ---------------------------------------------------------------------------
 # Both modes (altered + semantic) query the reference collection
-# ---------------------------------------------------------------------------
 
 
 def test_both_modes_query_reference_collection():
@@ -292,9 +282,7 @@ def test_both_modes_query_reference_collection():
     assert "semantic" in ref_calls, "semantic mode must query the reference collection"
 
 
-# ---------------------------------------------------------------------------
 # unify=False: reference hits still appear as separate rows from case hits
-# ---------------------------------------------------------------------------
 
 
 def test_reference_hits_separate_from_case_hits_unify_false():
@@ -333,9 +321,7 @@ def test_reference_hits_separate_from_case_hits_unify_false():
     )
 
 
-# ---------------------------------------------------------------------------
 # Reference overlay merges altered+semantic onto one row when unify=True
-# ---------------------------------------------------------------------------
 
 
 def test_reference_modes_merged_on_same_path_unify_true():
@@ -386,9 +372,7 @@ def test_reference_modes_merged_on_same_path_unify_true():
     )
 
 
-# ---------------------------------------------------------------------------
 # Reference overlay propagates query_timecodes from video-query frames
-# ---------------------------------------------------------------------------
 
 
 def test_reference_hits_carry_query_timecodes_for_video_query():
@@ -414,24 +398,25 @@ def test_reference_hits_carry_query_timecodes_for_video_query():
     session = _make_session([entry])
     settings = _mock_settings()
 
-    def _dispatch(
-        client,
-        collection,
-        vector,
-        mode,
-        threshold,
-        limit,
-        vector_name="dino",
-        is_reference_result=False,
-    ):
-        if collection == REF_COLLECTION:
-            return ([Hit(path=PATH_REF, scores={mode: 0.85}, is_reference=True)], [])
-        return ([Hit(path=PATH_CASE, scores={mode: 0.90})], [])
+    def _batch(collection_name, requests):
+        return [
+            MagicMock(
+                points=[
+                    MagicMock(
+                        payload={
+                            "image_path": PATH_REF
+                            if collection_name == REF_COLLECTION
+                            else PATH_CASE
+                        },
+                        score=0.85,
+                    )
+                ]
+            )
+            for _ in requests
+        ]
 
-    with (
-        patch("scalar_forensic.web.pipeline.query.QdrantClient"),
-        patch("scalar_forensic.web.pipeline.query._query_vector", side_effect=_dispatch),
-    ):
+    with patch("scalar_forensic.web.pipeline.query.QdrantClient") as factory:
+        factory.return_value.query_batch_points.side_effect = _batch
         results, _ = query_session(
             session,
             ["semantic"],
@@ -456,9 +441,7 @@ def test_reference_hits_carry_query_timecodes_for_video_query():
     )
 
 
-# ---------------------------------------------------------------------------
 # Path-overlap safety: reference and case hits stay distinct even at same path
-# ---------------------------------------------------------------------------
 
 
 def test_reference_and_case_hits_isolated_on_path_overlap():

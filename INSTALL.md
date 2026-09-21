@@ -4,7 +4,7 @@
 
 - Python 3.12 (required — see [why](#why-python-312-is-required))
 - [uv](https://github.com/astral-sh/uv)
-- Qdrant: `docker run -p 6333:6333 qdrant/qdrant`
+- Qdrant: `docker run -p 6333:6333 qdrant/qdrant:v1.19.0`
 - `ffmpeg` on `PATH` — required only for **transcoded playback** of videos the
   browser cannot decode; see [Transcoded playback](#transcoded-playback).
   Indexing and lossless rewrapping do not need it.
@@ -14,12 +14,13 @@
 ```bash
 git clone https://github.com/ScalarForensic/ScalarForensic
 cd ScalarForensic
-uv sync --group web   # add --group dev to include test/lint tools
+uv sync --locked --no-default-groups --group web   # runtime only
 cp .env.example .env  # edit to match your environment
 # Note: a Qdrant service must be running at SFN_QDRANT_URL before starting the app.
 ```
 
-`uv sync` alone only installs the base CLI dependencies. The `--group web` flag is
+`uv sync` installs the default development group, including web/faces/HEIF and tests.
+Use `uv sync --locked --no-default-groups` for base CLI dependencies only. The `--group web` flag is
 required to get FastAPI, Uvicorn, and python-multipart for `sfn-web`. Use `--group heif`
 to add HEIC/HEIF support (see [below](#heicheif-support)).
 
@@ -508,7 +509,7 @@ bash scripts/download_deps.sh --web --heif # add HEIC/HEIF support
 ```
 
 This runs `uv export --frozen` to capture the locked dependency list, then downloads all
-wheels into `vendor/` using `uv pip download`. The `--web` flag is required if you intend
+wheels into `vendor/` using the build host’s `python3 -m pip download`. The `--web` flag is required if you intend
 to run `sfn-web` on the offline machine (FastAPI, Uvicorn, python-multipart). Without it
 only the CLI indexer (`sfn`) will be available.
 
@@ -520,8 +521,8 @@ only the CLI indexer (`sfn`) will be available.
 **3. Save the Qdrant Docker image:**
 
 ```bash
-docker pull qdrant/qdrant:v1.17.1
-docker save qdrant/qdrant:v1.17.1 | gzip > qdrant.tar.gz
+docker pull qdrant/qdrant:v1.19.0
+docker save qdrant/qdrant:v1.19.0 | gzip > qdrant.tar.gz
 ```
 
 **4. Transfer** the entire project folder to the offline machine, including:
@@ -543,15 +544,16 @@ docker save qdrant/qdrant:v1.17.1 | gzip > qdrant.tar.gz
 
 ```bash
 uv venv
-uv pip install --no-index --find-links vendor/ -r requirements.txt
-uv pip install --no-index --find-links vendor/ --no-deps -e .
+uv pip install --no-index --find-links vendor/ --require-hashes -r requirements.txt
+uv pip install --no-index --find-links vendor/ --require-hashes -r requirements-build.txt
+uv pip install --no-index --find-links vendor/ --no-deps --no-build-isolation .
 ```
 
 **6. Load and start Qdrant:**
 
 ```bash
 docker load < qdrant.tar.gz
-docker run -p 6333:6333 qdrant/qdrant:v1.17.1
+docker run -p 6333:6333 qdrant/qdrant:v1.19.0
 ```
 
 **7. Run:**
@@ -698,12 +700,10 @@ docker compose run --rm \
   sfn-web sfn /images --dino --sscd
 ```
 
-CSV reports are written to `/app/` inside the container by default. To save them
-on the host, redirect the path:
-
-```bash
-docker compose run --rm sfn-web sfn --dino --sscd --report /images/report.csv
-```
+CSV reports and paired manifests persist in `/app/data/reports`, backed by the
+shared `SFN_CASE_DATA_DIR` host directory. An explicit report path must also be
+inside writable state, for example `--report /app/data/reports/review.csv`.
+Never target `/images`: that evidence mount is read-only.
 
 **5. Open the web UI:**
 
@@ -734,3 +734,12 @@ Qdrant's storage is kept in the named Docker volume `qdrant_data`. It survives
 docker volume rm scalarforensic_qdrant_data
 # Note: use the project-prefixed name shown by `docker volume ls`
 ```
+
+### Persisted case state and backups
+
+The shipped Compose stack shares `SFN_CASE_DATA_DIR` (default `./case-data`) at
+`/app/data` between web and disposable indexing containers. Keep it outside the
+read-only evidence directory and writable by the container user. Before updating
+an existing deployment, recover container-local state before recreating containers.
+Follow the [current operations and restore guide](docs/deployment.md#durable-compose-state-and-recovery)
+for inventory, stopped Qdrant/application backups and an isolated restore rehearsal.

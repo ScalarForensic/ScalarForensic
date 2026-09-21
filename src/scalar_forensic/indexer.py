@@ -214,11 +214,33 @@ class Indexer:
                 result.add(r.payload["image_path"])
         return result
 
+    def get_indexed_frame_units(self) -> set[tuple[str, int]]:
+        """Durably stored source/timecode slots for this named vector."""
+        return {
+            (r.payload["video_hash"], r.payload["frame_timecode_ms"])
+            for r in qdrant_scroll_all(
+                self.client,
+                self.collection,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(key="is_video_frame", match=MatchValue(value=True)),
+                        HasVectorCondition(has_vector=self.vector_name),
+                    ]
+                ),
+                limit=10_000,
+                with_payload=["video_hash", "frame_timecode_ms"],
+            )
+            if r.payload
+            and r.payload.get("video_hash")
+            and r.payload.get("frame_timecode_ms") is not None
+        }
+
     def get_all_video_info(self) -> dict[str, dict]:
         """Return one payload record per distinct video_hash stored in the collection.
 
         The returned dict maps ``video_hash → {extraction_fps, max_frames_cap, complete}``
-        where *complete* is True iff ``video_frames_total`` is present in the payload
+        where *complete* is True iff this named vector's ``<vector>_video_frames_total``
+        is present in the payload
         (written by :meth:`mark_video_complete` after a successful full index).
 
         Performs a single paginated scroll so the caller can evaluate video
@@ -237,7 +259,12 @@ class Indexer:
                 ]
             ),
             limit=10_000,
-            with_payload=["video_hash", "extraction_fps", "max_frames_cap", "video_frames_total"],
+            with_payload=[
+                "video_hash",
+                "extraction_fps",
+                "max_frames_cap",
+                f"{self.vector_name}_video_frames_total",
+            ],
         ):
             p = r.payload or {}
             vh = p.get("video_hash")
@@ -245,12 +272,12 @@ class Indexer:
                 seen[vh] = {
                     "extraction_fps": p.get("extraction_fps"),
                     "max_frames_cap": p.get("max_frames_cap"),
-                    "complete": "video_frames_total" in p,
+                    "complete": f"{self.vector_name}_video_frames_total" in p,
                 }
         return seen
 
     def mark_video_complete(self, video_hash: str, frame_count: int) -> None:
-        """Set video_frames_total on every frame of this video as a completion marker.
+        """Set this named vector's completion marker on every frame of the video.
 
         Called after all frames have been successfully upserted.  Its absence
         tells :meth:`get_all_video_info` that a previous run was interrupted and the
@@ -258,7 +285,8 @@ class Indexer:
         """
         self.client.set_payload(
             collection_name=self.collection,
-            payload={"video_frames_total": frame_count},
+            payload={f"{self.vector_name}_video_frames_total": frame_count},
+            wait=True,
             points=Filter(
                 must=[
                     FieldCondition(key="video_hash", match=MatchValue(value=video_hash)),
@@ -297,7 +325,7 @@ class Indexer:
             )
             for v in videos
         ]
-        self.client.upsert(collection_name=self.collection, points=points)
+        self.client.upsert(collection_name=self.collection, points=points, wait=True)
 
     def upsert_batch(
         self,
@@ -317,8 +345,9 @@ class Indexer:
         provenance for both models when indexed by both pipelines.
 
         Points that already exist in the collection (e.g. because the other model was
-        indexed first) are updated in-place: only the new named vector and its provenance
-        are written; the core payload and any other named vectors are left untouched.
+        indexed first) are updated in-place: the supplied core metadata, named vector,
+        and its provenance are refreshed. Other named vectors/provenance and omitted
+        optional payload fields are preserved.
 
         For video frames, pass ``video_metadata`` as a list of per-point dicts
         (or ``None`` entries for non-video points in a mixed batch).  When a
@@ -418,7 +447,7 @@ class Indexer:
 
         new_points: list[PointStruct] = []
         existing_vector_updates: list[PointVectors] = []
-        existing_point_ids: list[str] = []
+        existing_payload_updates: list[tuple[str, dict]] = []
 
         for pid, core, emb in zip(point_ids, core_payloads, vector_list):
             if pid not in existing_ids:
@@ -431,18 +460,22 @@ class Indexer:
                 )
             else:
                 existing_vector_updates.append(PointVectors(id=pid, vector={vn: emb}))
-                existing_point_ids.append(pid)
+                existing_payload_updates.append((pid, core))
 
         if new_points:
-            self.client.upsert(collection_name=self.collection, points=new_points)
+            self.client.upsert(collection_name=self.collection, points=new_points, wait=True)
 
         if existing_vector_updates:
             self.client.update_vectors(
-                collection_name=self.collection, points=existing_vector_updates
+                collection_name=self.collection, points=existing_vector_updates, wait=True
             )
-            # model_provenance is identical for every point in the batch — one call suffices.
-            self.client.set_payload(
-                collection_name=self.collection,
-                payload={**model_provenance, **ref_tag},
-                points=existing_point_ids,
-            )
+            # Paths and extraction metadata vary per point. Merge them with this
+            # model's provenance only after its vector write succeeds; replacing
+            # the payload would erase other models' provenance and optional fields.
+            for pid, core in existing_payload_updates:
+                self.client.set_payload(
+                    collection_name=self.collection,
+                    payload={**core, **model_provenance},
+                    points=[pid],
+                    wait=True,
+                )

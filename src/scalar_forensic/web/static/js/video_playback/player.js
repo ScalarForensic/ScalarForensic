@@ -1,4 +1,4 @@
-// ── Chunk playback: the double-buffered player (spec §4.2, §5, §10.1) ───────
+// Chunk playback: the double-buffered player (spec §4.2, §5, §10.1)
 //
 // One `sfn()` part file, loaded before app.js like every other part and merged
 // with property descriptors — never Object.assign, which would evaluate the
@@ -19,7 +19,7 @@
 // the server.  A client that inferred "probably needs a transcode" from a
 // status code would be the second implementation, and the two would drift.
 (window.__sfnParts = window.__sfnParts || []).push({
-  // ── State ────────────────────────────────────────────────────────────────
+  // State
   // `state` starts at 'idle' and not at 'chunk-failed' or 'chunk-ready':
   // before anything has been asked, the player is not entitled to a verdict.
   // Same reason `videoPlayback.player_state` carries 'unknown' as a value
@@ -34,13 +34,16 @@
     next: null,
     url: '',
     pipeline: null,
-    fellBack: false,
     elapsedS: 0,
     buffer: 0,          // which of the two <video> elements is on screen
     preload: { start: null, url: '' },
     prefetchFailed: false,
+    seekOffset: 0,
+    requestedSeconds: null,
   },
-  // ── The §4.3 contention disclosure ───────────────────────────────────────
+  chunkSeekSeconds: 0,
+  chunkSeekError: '',
+  // The §4.3 contention disclosure
   // THIS IS THE REMEDY, NOT A LABEL.  Yielding was measured at ~9% (median
   // 18.31 s unniced vs 16.83 s niced, n=6, CPU/libx264) and *neither* arm lands
   // inside §4.2's 6–10 s window, so the slowdown an analyst sees while an export
@@ -57,7 +60,7 @@
   _chunkRetryTimer: null,
   _chunkRequestId: 0,
 
-  // ── Computed ─────────────────────────────────────────────────────────────
+  // Computed
   get chunkPlaybackOffered() {
     return this.videoPlayback?.player_state === 'needs-transcode';
   },
@@ -131,7 +134,7 @@
     this.contentionNotice = typeof value === 'string' && value ? value : '';
   },
 
-  // ── Requesting a chunk ───────────────────────────────────────────────────
+  // Requesting a chunk
   async _requestChunk(seconds) {
     const path = this.videoPlayback?.source_path;
     if (!path) return { ok: false, detail: null };
@@ -169,6 +172,7 @@
   async playChunkAt(seconds) {
     if (!this.chunkPlaybackOffered) return;
     const id = ++this._chunkRequestId;
+    this.chunk.requestedSeconds = seconds;
     this.chunk.state = 'chunk-encoding';
     this.chunk.reason = '';
     this.chunk.kind = '';
@@ -188,14 +192,17 @@
     }
     this._stopChunkElapsed();
     const b = result.body;
+    const sameWindow = this.chunk.url === b.chunk_url;
     this.chunk.state = b.player_state ?? 'chunk-ready';
     this.chunk.start = b.chunk_start;
+    this.chunk.seekOffset = Math.max(0, seconds - b.chunk_start);
     this.chunk.next = b.next_chunk_start;
     this.chunk.url = b.chunk_url;
     this.chunk.pipeline = b.pipeline ?? null;
-    this.chunk.fellBack = Boolean(b.fell_back);
     this.chunk.preload = { start: null, url: '' };
     this.chunk.prefetchFailed = false;
+    // A cached window keeps the same src, so it emits no new loadedmetadata.
+    if (sameWindow) this.seekChunkBuffer(this.$refs?.[this.chunk.buffer === 0 ? 'chunkA' : 'chunkB'], this.chunk.buffer);
     this._setContentionNotice(b.contention_notice);
     this._startChunkLease();
     // §4.2: the next chunk is queued the moment this one is ready — not when
@@ -210,10 +217,12 @@
   // handler asks again as a real request, and that one is allowed to fail
   // loudly.
   async _prefetchNextChunk() {
+    const id = this._chunkRequestId;
     const target = this.chunk.next;
     if (target === null || target === undefined) return;
     try {
       const result = await this._requestChunk(target);
+      if (id !== this._chunkRequestId) return;
       if (!result.ok) {
         this.chunk.prefetchFailed = true;
         return;
@@ -222,21 +231,24 @@
       this.chunk.preload = { start: target, url: result.body.chunk_url };
       this.chunk.prefetchFailed = false;
     } catch {
+      if (id !== this._chunkRequestId) return;
       this.chunk.prefetchFailed = true;
     }
   },
 
-  // ── The boundary swap ────────────────────────────────────────────────────
+  // The boundary swap
   // Called from the playing element's @ended.  A prefetch made useless by a
   // seek is left to finish rather than cancelled (§4.2) — it is one small job,
   // it is cached if the analyst comes back, and cancelling speculative work is
   // the ownership problem that made v1's scheduler complex.
   async advanceToNextChunk(playingEl, hiddenEl) {
+    if (!this.chunkIsPlaying) return; // a pending explicit seek owns the next window
     const target = this.chunk.next;
     if (target === null || target === undefined) return; // final chunk: stop
     if (this.chunk.preload.start === target && this.chunk.preload.url) {
       this.chunk.buffer = this.chunk.buffer === 0 ? 1 : 0;
       this.chunk.start = target;
+      this.chunk.seekOffset = 0;
       this.chunk.next = target + this.chunkSeconds < this.videoDurationSeconds
         ? target + this.chunkSeconds
         : null;
@@ -256,21 +268,22 @@
     return (this.videoPlayback?.duration_ms ?? 0) / 1000;
   },
 
-  // ── Seeking ──────────────────────────────────────────────────────────────
-  // Inside the loaded chunk this is an ordinary currentTime move against a
-  // faststart MP4.  Outside it, it is a new chunk at the new position — which
-  // is what gives random access before any full copy exists (§4.2).
-  async seekChunkTo(seconds, el) {
-    if (!Number.isFinite(seconds) || seconds < 0) return;
-    const start = this.chunk.start;
-    if (start !== null && seconds >= start && seconds < start + this.chunkSeconds) {
-      if (el) { try { el.currentTime = seconds - start; } catch { /* not seekable */ } }
+  async seekChunkTo(seconds) {
+    this.chunkSeekError = '';
+    if (!Number.isFinite(seconds) || seconds < 0 || seconds >= this.videoDurationSeconds) {
+      this.chunkSeekError = 'Enter a source time within the video duration.';
       return;
     }
+    this.chunkSeekSeconds = seconds;
     await this.playChunkAt(seconds);
   },
 
-  // ── The playback lease (§6.2) ────────────────────────────────────────────
+  seekChunkBuffer(element, buffer) {
+    if (!element || buffer !== this.chunk.buffer || !this.chunkIsPlaying) return;
+    try { element.currentTime = this.chunk.seekOffset ?? 0; } catch { /* metadata not seekable yet */ }
+  },
+
+  // The playback lease (§6.2)
   // HTTP is stateless and a FileResponse streams after its handler returns, so
   // between two chunk requests nothing tells eviction this video is on screen.
   // The heartbeat is that signal.  A quarter of the ttl means three beats can
@@ -296,7 +309,7 @@
     this._beatChunkLease(true);
   },
 
-  // ── Elapsed-time ticker and the retry countdown ──────────────────────────
+  // Elapsed-time ticker and the retry countdown
   _startChunkElapsed() {
     this.chunk.elapsedS = 0;
     if (this._chunkElapsedTimer) clearInterval(this._chunkElapsedTimer);
@@ -321,10 +334,10 @@
 
   retryChunk() {
     if (!this.chunkRetryOffered) return;
-    this.playChunkAt(this.chunk.start ?? this.videoPlaybackTimecodeMs / 1000 ?? 0);
+    return this.playChunkAt(this.chunk.requestedSeconds ?? this.chunk.start ?? ((this.videoPlaybackTimecodeMs ?? 0) / 1000));
   },
 
-  // ── Teardown ─────────────────────────────────────────────────────────────
+  // Teardown
   closeChunkPlayback() {
     this._chunkRequestId += 1; // orphan any in-flight response
     this._stopChunkElapsed();
@@ -334,10 +347,13 @@
     // a stale sentence would outlive the export that justified it.  Both
     // carriers re-establish it — the next chunk response, or the next job poll.
     this.contentionNotice = '';
+    this.chunkSeekSeconds = 0;
+    this.chunkSeekError = '';
     this.chunk = {
       state: 'idle', reason: '', kind: '', retryable: false, retryAfterS: null,
-      start: null, next: null, url: '', pipeline: null, fellBack: false,
-      elapsedS: 0, buffer: 0, preload: { start: null, url: '' }, prefetchFailed: false,
+      start: null, next: null, url: '', pipeline: null,
+      elapsedS: 0, buffer: 0, preload: { start: null, url: '' }, prefetchFailed: false, seekOffset: 0,
+      requestedSeconds: null,
     };
   },
 });

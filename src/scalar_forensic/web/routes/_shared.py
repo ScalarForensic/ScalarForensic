@@ -42,9 +42,9 @@ def _check_allowed_path(p: Path) -> None:
 def _resolve_video_path(path: str) -> Path:
     """Validate *path* as a servable video file and return it resolved.
 
-    Shared by ``/api/video-frame`` (the indexing side) and the three playback
-    routes, so it lives here beside :func:`_check_allowed_path`: by the same
-    one-implementation rule, a security control gets exactly one definition.
+    Shared by the three playback routes, so it lives here beside
+    :func:`_check_allowed_path`: by the same one-implementation rule, a security
+    control gets exactly one definition.
 
     Same allowed-root check as /api/hit-image (``_check_allowed_path``); the set
     of acceptable extensions is the scanner's own ``VIDEO_EXTENSIONS``, never a
@@ -61,3 +61,11 @@ def _resolve_video_path(path: str) -> Path:
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="Video file not found")
     return p
+
+
+def _entry_for(session, file_id: str):
+    """The session's entry for *file_id*, or ``None``."""
+    for e in session.files:
+        if e.file_id == file_id:
+            return e
+    return None

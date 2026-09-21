@@ -8,21 +8,26 @@ the raw cosine is displayed and labelled as such (spec §10 divergence).
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import io
 import logging
 import math
 import re
+import threading
 import uuid
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 from fastapi import APIRouter, Form, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, Response
+from PIL import Image
 from qdrant_client import QdrantClient
 
 from scalar_forensic.config import Settings
 from scalar_forensic.faces.audit import AuditLog
 from scalar_forensic.faces.chips import chip_paths, write_thumbnail
+from scalar_forensic.faces.provenance import PipelineConfig
 from scalar_forensic.faces.store import _HARD_FIELDS, FACE_VECTOR_NAME, FaceStore
 from scalar_forensic.video import extract_frame_at
 from scalar_forensic.web.pipeline import (
@@ -35,6 +40,7 @@ from scalar_forensic.web.pipeline import (
     query_embedder_block,
     search_query_faces,
 )
+from scalar_forensic.web.routes._shared import _entry_for
 from scalar_forensic.web.session import get_session
 
 _log = logging.getLogger(__name__)
@@ -51,16 +57,24 @@ def _require_hash(value: str) -> str:
     return value
 
 
-def _entry_for(session, file_id: str):
-    for e in session.files:
-        if e.file_id == file_id:
-            return e
-    return None
+def _source_scope(video_hash: str | None, frame_timecode_ms: int | None) -> dict:
+    if video_hash is None and frame_timecode_ms is None:
+        return {}
+    if video_hash is None or frame_timecode_ms is None or frame_timecode_ms < 0:
+        raise HTTPException(
+            400, "Video face lookup requires video_hash and nonnegative frame_timecode_ms"
+        )
+    return {"video_hash": _require_hash(video_hash), "frame_timecode_ms": frame_timecode_ms}
+
+
+def _require_faces_enabled(settings: Settings) -> None:
+    """Gate evidence access without requiring today's inference model files."""
+    if not settings.faces_enabled:
+        raise HTTPException(503, "Face modality is disabled (set SFN_FACES_ENABLED=true).")
 
 
 def _require_faces(settings: Settings) -> None:
-    if not settings.faces_enabled:
-        raise HTTPException(503, "Face modality is disabled (set SFN_FACES_ENABLED=true).")
+    _require_faces_enabled(settings)
     err = settings.face_startup_error()
     if err:
         raise HTTPException(503, err)
@@ -76,7 +90,7 @@ def _store(settings: Settings) -> FaceStore:
 
 
 @router.get("/api/faces/availability")
-async def faces_availability() -> JSONResponse:
+def faces_availability() -> JSONResponse:
     """Capability flag for the UI.
 
     This is deliberately not an entry in get_available_modes: those are
@@ -141,11 +155,17 @@ def _browse_order(face: dict) -> tuple[int, float]:
 
 
 @router.get("/api/faces/by-image/{image_hash}")
-async def faces_by_image(image_hash: str) -> JSONResponse:
+def faces_by_image(
+    image_hash: str,
+    video_hash: str | None = None,
+    frame_timecode_ms: int | None = None,
+) -> JSONResponse:
     _require_hash(image_hash)
+    scope = _source_scope(video_hash, frame_timecode_ms)
     settings = Settings()
+    _require_faces_enabled(settings)
     try:
-        faces = _store(settings).list_faces(image_hash)
+        faces = _store(settings).list_faces(image_hash, **scope)
     except Exception as exc:
         _log.warning("face lookup failed for %s: %s", image_hash, exc)
         raise HTTPException(status_code=503, detail=f"Face collection unreachable: {exc}") from exc
@@ -153,7 +173,7 @@ async def faces_by_image(image_hash: str) -> JSONResponse:
 
 
 @router.get("/api/faces/explain/{point_id}")
-async def face_explain(point_id: str) -> JSONResponse:
+def face_explain(point_id: str) -> JSONResponse:
     """Step-by-step account of how one stored face observation was produced.
 
     Assembled *entirely from persisted data* — no pipeline step is re-run, and
@@ -166,8 +186,10 @@ async def face_explain(point_id: str) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Invalid point id") from None
 
     settings = Settings()
+    _require_faces_enabled(settings)
     try:
-        face = _store(settings).get_face(point_id)
+        store = _store(settings)
+        face = store.get_face(point_id)
     except Exception as exc:
         _log.warning("face explain lookup failed for %s: %s", point_id, exc)
         raise HTTPException(status_code=503, detail=f"Face collection unreachable: {exc}") from exc
@@ -177,7 +199,10 @@ async def face_explain(point_id: str) -> JSONResponse:
     marker = None
     if face.get("image_hash"):
         try:
-            marker = _store(settings).get_marker(face["image_hash"])
+            marker = store.get_marker(
+                face["image_hash"],
+                **_source_scope(face.get("video_hash"), face.get("frame_timecode_ms")),
+            )
         except Exception:  # the totals are contextual, not load-bearing
             marker = None
 
@@ -359,6 +384,7 @@ async def face_explain(point_id: str) -> JSONResponse:
 def _chip_file(chip_hash: str, index: int) -> Path:
     settings = Settings()
     _require_hash(chip_hash)
+    _require_faces_enabled(settings)
     if settings.face_store_dir is None:
         raise HTTPException(status_code=404, detail="Face chip store is disabled")
     return chip_paths(Path(settings.face_store_dir), chip_hash)[index]
@@ -403,11 +429,9 @@ async def face_chip_thumb(chip_hash: str) -> FileResponse:
     return FileResponse(thumb, media_type="image/jpeg")
 
 
-# ---------------------------------------------------------------------------
 # Query-side faces (Phase 1b).  Session-scoped: nothing here reaches Qdrant or
 # SFN_FACE_STORE_DIR, and no vector is ever serialised into a response — the
 # client selects probes by *index* and the vectors stay in this process.
-# ---------------------------------------------------------------------------
 
 
 def _resolve_entry(session_id: str, file_id: str):
@@ -447,7 +471,26 @@ def _query_image_bytes(entry, timecode_ms: int | None) -> bytes:
         raise HTTPException(status_code=404, detail="file not found in session") from exc
 
 
-def _detection_token(faces, cfg) -> str:
+# Protect only state publication/snapshots, never the expensive inference itself.
+_detection_lock = threading.Lock()
+
+
+def _face_snapshot(entry):
+    with _detection_lock:
+        return copy.copy(entry)
+
+
+def _require_detection_token(entry, token: str) -> None:
+    current = _detection_token(
+        entry.query_faces or [], entry.query_faces_cfg, entry.query_faces_timecode_ms
+    )
+    if token != current:
+        raise HTTPException(
+            409, "stale face detection: re-run query-faces before using these faces"
+        )
+
+
+def _detection_token(faces, cfg, timecode_ms=None) -> str:
     """Fingerprint of one detection generation.
 
     Face *indices* are positions in whatever detection is currently cached on
@@ -463,10 +506,13 @@ def _detection_token(faces, cfg) -> str:
     """
     digest = hashlib.sha256()
     digest.update(str(getattr(cfg, "config_hash", "")).encode())
+    digest.update(repr(timecode_ms).encode())
     for face in faces:
         digest.update(
             f"|{face.index}|{tuple(face.bbox)}|{face.det_conf:.6f}|{face.embedding_status}".encode()
         )
+        digest.update(hashlib.sha256(face.review_jpeg or b"").digest())
+        digest.update(repr(face.vector).encode())
     return digest.hexdigest()[:16]
 
 
@@ -511,15 +557,31 @@ def query_faces(
     settings = Settings()
     _require_faces(settings)
 
-    data = _query_image_bytes(entry, timecode_ms)
+    session = get_session(session_id)
+    if session is None:
+        raise HTTPException(404, "Session not found")
     try:
-        result = detect_query_faces(data, settings, max_faces=settings.face_query_max_faces)
-    except (OSError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=f"not an image: {exc}") from exc
-
-    entry.query_faces = result.faces
-    entry.query_faces_cfg = result.cfg
-    token = _detection_token(result.faces, result.cfg)
+        session.begin_work()
+    except RuntimeError as exc:
+        raise HTTPException(409, "Session was cancelled") from exc
+    try:
+        with _detection_lock:
+            generation = entry._query_faces_generation + 1
+            entry._query_faces_generation = generation
+        data = _query_image_bytes(entry, timecode_ms)
+        try:
+            result = detect_query_faces(data, settings, max_faces=settings.face_query_max_faces)
+        except (OSError, ValueError, Image.DecompressionBombError) as exc:
+            raise HTTPException(status_code=400, detail=f"not an image: {exc}") from exc
+        with _detection_lock:
+            if entry._query_faces_generation != generation:
+                raise HTTPException(409, "Face detection was superseded by a newer request")
+            entry.query_faces = result.faces
+            entry.query_faces_cfg = result.cfg
+            entry.query_faces_timecode_ms = timecode_ms
+        token = _detection_token(result.faces, result.cfg, timecode_ms)
+    finally:
+        session.end_work()
     return JSONResponse(
         {
             "faces": [_face_json(f, session_id, file_id, token) for f in result.faces],
@@ -547,9 +609,14 @@ def query_chip(session_id: str, file_id: str, token: str, face_index: int) -> Re
     the current one — serving it would put another face's crop under the
     identity the examiner is looking at, which is the failure that matters here.
     """
-    entry = _resolve_entry(session_id, file_id)
+    _require_faces_enabled(Settings())
+    entry = _face_snapshot(_resolve_entry(session_id, file_id))
     faces = entry.query_faces or []
-    current = _detection_token(faces, getattr(entry, "query_faces_cfg", None))
+    current = _detection_token(
+        faces,
+        getattr(entry, "query_faces_cfg", None),
+        entry.query_faces_timecode_ms,
+    )
     if token != current:
         raise HTTPException(
             status_code=409,
@@ -570,11 +637,9 @@ def query_chip(session_id: str, file_id: str, token: str, face_index: int) -> Re
     )
 
 
-# ---------------------------------------------------------------------------
 # Cross-file face search (Phase 1b).  Uncalibrated by the maintainer's ruling of
 # 2026-08-12: the raw cosine is returned and labelled, the score floor defaults
 # to 0.0, and 0.363 travels only as the model authors' reference figure.
-# ---------------------------------------------------------------------------
 
 
 def _audit_log(settings: Settings) -> AuditLog:
@@ -655,18 +720,43 @@ def _stored_vectors(store: FaceStore, point_ids: list[str]) -> dict[str, list[fl
     return out
 
 
-def _point_probes(store: FaceStore, point_ids: list[str]) -> list[tuple[str, list[float]]]:
+@dataclass(frozen=True)
+class StoredProbe:
+    point_id: str
+    vector: list[float]
+    cfg: PipelineConfig
+
+
+def _stored_probe_config(payload: dict) -> PipelineConfig:
+    try:
+        values = {field.name: payload[field.name] for field in fields(PipelineConfig)}
+    except (KeyError, TypeError) as exc:
+        raise HTTPException(
+            409, "Stored probe provenance is incomplete; rebuild the face index"
+        ) from exc
+    if any(values[name] is None for name in _HARD_FIELDS):
+        raise HTTPException(409, "Stored probe provenance is incomplete; rebuild the face index")
+    return PipelineConfig(**values)
+
+
+def _uploaded_config(entry) -> PipelineConfig:
+    if entry.query_faces is None or entry.query_faces_cfg is None:
+        raise HTTPException(400, "Detect query faces before comparing or searching uploaded probes")
+    return entry.query_faces_cfg
+
+
+def _point_probes(store: FaceStore, point_ids: list[str]) -> list[StoredProbe]:
     """Stored points as probes.  A vectorless point is refused, not skipped:
     quietly dropping it would leave the examiner believing that face was
     searched and found nothing — the same rule as _parse_face_indices."""
     records = store.client.retrieve(
         collection_name=store.collection,
         ids=point_ids,
-        with_payload=False,
+        with_payload=True,
         with_vectors=[FACE_VECTOR_NAME],
     )
     found = {str(rec.id): rec for rec in records}
-    probes: list[tuple[str, list[float]]] = []
+    probes: list[StoredProbe] = []
     for pid in point_ids:
         rec = found.get(pid)
         if rec is None:
@@ -678,7 +768,7 @@ def _point_probes(store: FaceStore, point_ids: list[str]) -> list[tuple[str, lis
                 status_code=400,
                 detail=f"point {pid} is review-only and has no vector; it cannot be searched",
             )
-        probes.append((f"pt:{pid}", list(v)))
+        probes.append(StoredProbe(pid, list(v), _stored_probe_config(rec.payload or {})))
     return probes
 
 
@@ -718,7 +808,7 @@ def face_search(
     limit: int = Form(10, ge=1, le=50),
     threshold: float = Form(0.0, ge=0.0, le=1.0),
     exact: bool = Form(True),
-    collapse: bool = Form(True),
+    detection_token: str = Form(""),
 ) -> JSONResponse:
     """Search the face collection with the examiner's selected probe faces.
 
@@ -734,10 +824,12 @@ def face_search(
     It is never seeded from the model authors' 0.363 — this deployment has no
     calibrated threshold, and putting one in the default would manufacture it.
     """
-    entry = _resolve_entry(session_id, file_id)
+    entry = _face_snapshot(_resolve_entry(session_id, file_id))
     settings = Settings()
     _require_faces(settings)
 
+    if face_indices.strip():
+        _require_detection_token(entry, detection_token)
     faces = entry.query_faces or []
     idxs = _parse_face_indices(face_indices, faces) if face_indices.strip() else []
     pids = _parse_point_ids(point_ids)
@@ -746,19 +838,23 @@ def face_search(
 
     store = _store(settings)
     probes: list[tuple[int | str, list[float]]] = [(i, faces[i].vector) for i in idxs]
-    probes += _point_probes(store, pids)
-
-    cfg = entry.query_faces_cfg
-    compat = _compat_block(store, cfg)
-
     try:
+        stored = _point_probes(store, pids) if pids else []
+        configs = ([_uploaded_config(entry)] if idxs else []) + [probe.cfg for probe in stored]
+        cfg = configs[0]
+        warnings = []
+        for candidate in configs:
+            if any(getattr(candidate, name) != getattr(cfg, name) for name in _HARD_FIELDS):
+                raise HTTPException(409, "Selected probes have incompatible face provenance")
+            warnings.extend(_compat_block(store, candidate)["warnings"])
+        compat = {"ok": True, "warnings": list(dict.fromkeys(warnings))}
+        probes.extend((f"pt:{probe.point_id}", probe.vector) for probe in stored)
         hits = search_query_faces(
             store,
             probes,
             limit=limit,
             threshold=threshold,
             exact=exact,
-            collapse=collapse,
         )
     except HTTPException:
         raise
@@ -804,6 +900,9 @@ def face_compare(
     session_id: str = Form(...),
     file_id: str = Form(...),
     image_hash: str = Form(...),
+    video_hash: str | None = Form(None),
+    frame_timecode_ms: int | None = Form(None),
+    detection_token: str = Form(""),
 ) -> JSONResponse:
     """Pairwise raw cosine: query image's faces × one indexed medium's faces.
 
@@ -815,20 +914,22 @@ def face_compare(
     No threshold is applied here (spec §10): every pair ships with its raw
     cosine, and any floor is an operator-set display control in the UI.
     """
-    entry = _resolve_entry(session_id, file_id)
+    entry = _face_snapshot(_resolve_entry(session_id, file_id))
     settings = Settings()
     _require_faces(settings)
     image_hash = _require_hash(image_hash)
+    scope = _source_scope(video_hash, frame_timecode_ms)
 
+    _require_detection_token(entry, detection_token)
     faces = entry.query_faces or []
     query_probes = [(f.index, f.vector) for f in faces if f.vector is not None]
 
     store = _store(settings)
-    cfg = entry.query_faces_cfg
+    cfg = _uploaded_config(entry)
     compat = _compat_block(store, cfg)
 
     try:
-        rows = store.list_faces(image_hash)
+        rows = store.list_faces(image_hash, **scope)
         vectors = _stored_vectors(store, [str(r["id"]) for r in rows])
     except Exception as exc:
         _log.warning("face compare failed: %s", exc)
@@ -873,15 +974,17 @@ def face_compare(
     )
 
 
-# ---------------------------------------------------------------------------
 # Per-model explainer surfaces: what the face pipeline did to an indexed medium,
 # and what the score distribution behind one probe looks like.  Both are reports
 # — neither re-runs a pipeline step, and neither applies a threshold.
-# ---------------------------------------------------------------------------
 
 
 @router.get("/api/faces/audit")
-def faces_audit(image_hash: str) -> JSONResponse:
+def faces_audit(
+    image_hash: str,
+    video_hash: str | None = None,
+    frame_timecode_ms: int | None = None,
+) -> JSONResponse:
     """How the machine produced the face observations of one indexed medium.
 
     Sync ``def``: the Qdrant reads are blocking client calls.
@@ -892,10 +995,11 @@ def faces_audit(image_hash: str) -> JSONResponse:
     """
     _require_hash(image_hash)
     settings = Settings()
-    _require_faces(settings)
+    _require_faces_enabled(settings)
 
+    scope = _source_scope(video_hash, frame_timecode_ms)
     try:
-        body = face_audit(_store(settings), image_hash)
+        body = face_audit(_store(settings), image_hash, **scope)
     except Exception as exc:
         _log.warning("face audit lookup failed for %s: %s", image_hash, exc)
         raise HTTPException(status_code=503, detail="Face collection unreachable") from exc
@@ -910,6 +1014,7 @@ def faces_dist_stats(
     file_id: str = Form(...),
     face_index: int = Form(...),
     sample_size: int = Form(10000, ge=1, le=50000),
+    detection_token: str = Form(""),
 ) -> JSONResponse:
     """Score distribution one query face draws out of the face collection.
 
@@ -919,10 +1024,11 @@ def faces_dist_stats(
     modalities read alike.  The 0.363 rides along as an annotation only — it is
     the model authors' figure, applied nowhere in this path.
     """
-    entry = _resolve_entry(session_id, file_id)
+    entry = _face_snapshot(_resolve_entry(session_id, file_id))
     settings = Settings()
     _require_faces(settings)
 
+    _require_detection_token(entry, detection_token)
     faces = entry.query_faces or []
     if face_index < 0 or face_index >= len(faces):
         raise HTTPException(status_code=404, detail="unknown face index")
@@ -934,6 +1040,7 @@ def faces_dist_stats(
         )
 
     store = _store(settings)
+    _compat_block(store, _uploaded_config(entry))
     try:
         stats = face_score_stats(store, vector, sample_size=sample_size)
     except Exception as exc:
@@ -946,9 +1053,10 @@ def faces_dist_stats(
             # States the guarantee rather than a filter: review-only observations
             # carry no vector, so they cannot appear in this population at all.
             "population": (
-                f"embedded face observations in {settings.face_collection}; review-only "
-                "observations carry no vector and are structurally absent from this "
-                "distribution"
+                f"up to {sample_size} most-similar embedded face observations in "
+                f"{settings.face_collection}; selected top-N neighbors, not full collection "
+                "distribution; review-only observations carry no vector and are "
+                "structurally absent from this distribution"
             ),
             "model_reference_threshold": MODEL_REFERENCE_THRESHOLD,
             "model_reference_note": MODEL_REFERENCE_NOTE,

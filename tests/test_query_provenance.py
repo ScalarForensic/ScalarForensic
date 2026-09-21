@@ -9,9 +9,7 @@ from fastapi.testclient import TestClient
 
 from scalar_forensic.web.pipeline import QueryProvenance
 
-# ---------------------------------------------------------------------------
 # QueryProvenance dataclass
-# ---------------------------------------------------------------------------
 
 
 def test_query_provenance_fields():
@@ -60,9 +58,7 @@ def test_query_provenance_dict():
     assert isinstance(d["timestamp"], str)
 
 
-# ---------------------------------------------------------------------------
 # /api/query — provenance in response
-# ---------------------------------------------------------------------------
 
 
 def _make_session(file_id: str = "f1") -> MagicMock:

@@ -3,6 +3,7 @@
 # Prerequisites (run on the internet-connected machine before docker build):
 #   uv run python scripts/download_models.py
 #   bash scripts/download_deps.sh --web
+#   python3 scripts/bundle_inventory.py --output bundle-inventory.json
 #
 # Or run the all-in-one helper:
 #   bash scripts/build_airgap_image.sh
@@ -18,7 +19,8 @@
 FROM python:3.12-slim
 
 # libgomp1: OpenMP runtime required by PyTorch CPU and GPU operations.
-# gcc: required by torch.compile / Triton to JIT-compile GPU kernels.
+# gcc + libc6-dev: compiler and standard C headers required by torch.compile /
+#      Triton to JIT-compile GPU kernels. GCC alone cannot find stdlib.h.
 #      Without it, torch.compile raises "Failed to find C compiler" at the first
 #      forward pass and silently falls back (or errors) for every batch.
 # libdrm-amdgpu1 + symlink: suppresses the ROCm runtime warning
@@ -33,7 +35,7 @@ FROM python:3.12-slim
 #      state, it does not work around it.  NVENC is optional: without it the
 #      capability probe selects libx264.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 gcc libdrm-amdgpu1 ffmpeg \
+    && apt-get install -y --no-install-recommends libgomp1 gcc libc6-dev libdrm-amdgpu1 ffmpeg \
     && mkdir -p /opt/amdgpu/share/libdrm \
     && ln -s /usr/share/libdrm/amdgpu.ids /opt/amdgpu/share/libdrm/amdgpu.ids \
     && rm -rf /var/lib/apt/lists/*
@@ -44,9 +46,11 @@ WORKDIR /app
 # Cached until vendor/ or requirements.txt change.
 # Both are produced by scripts/download_deps.sh --web (or build_airgap_image.sh).
 COPY vendor/ /tmp/vendor/
-COPY requirements.txt /tmp/requirements.txt
+COPY requirements.txt requirements-build.txt /tmp/
 RUN pip install --no-cache-dir --no-index --find-links /tmp/vendor/ \
-        -r /tmp/requirements.txt
+        --target /tmp/build-tools --require-hashes -r /tmp/requirements-build.txt
+RUN pip install --no-cache-dir --no-index --find-links /tmp/vendor/ \
+        --require-hashes -r /tmp/requirements.txt
 
 # ── Layer 2: Model weights ────────────────────────────────────────────────────
 # Cached until models/ changes (~2.4 GB total).
@@ -56,10 +60,21 @@ COPY models/ /app/models/
 # ── Layer 3: Application source ───────────────────────────────────────────────
 # Invalidated only on code changes; the pip install step runs quickly.
 COPY src/ /app/src/
-COPY pyproject.toml LICENSE README.md /app/
-RUN pip install --no-cache-dir --no-index --find-links /tmp/vendor/ \
-        --no-deps . \
-    && rm -rf /tmp/vendor/ /tmp/requirements.txt
+COPY pyproject.toml LICENSE README.md THIRD_PARTY_LICENSES.md bundle-inventory.json /app/
+RUN PYTHONPATH=/tmp/build-tools pip install --no-cache-dir --no-index --find-links /tmp/vendor/ \
+        --no-deps --no-build-isolation . \
+    && rm -rf /tmp/build-tools /tmp/vendor/ /tmp/requirements.txt /tmp/requirements-build.txt
+
+# Inventory OS/native artifacts from the actual built filesystem.
+COPY scripts/bundle_inventory.py /tmp/bundle_inventory.py
+RUN python /tmp/bundle_inventory.py --native --output /app/native-inventory.json \
+    && rm /tmp/bundle_inventory.py \
+    && groupadd --gid 10001 sfn \
+    && useradd --uid 10001 --gid 10001 --no-create-home sfn \
+    && mkdir -p /app/data /home/sfn \
+    && chown -R 10001:10001 /app/data /home/sfn
+ENV HOME=/home/sfn
+USER 10001:10001
 
 # Fallback config used when no .env is mounted from the host at runtime.
 # The real .env is always supplied via a volume mount — never baked in.

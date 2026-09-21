@@ -1,6 +1,6 @@
 // Part of the sfn() Alpine component — merged by app.js. See app.js for load order.
 (window.__sfnParts = window.__sfnParts || []).push({
-    // ── Helpers ───────────────────────────────────────────────────────────
+    // Helpers
     hitKey(hit) {
       // Stable key derived from the hit itself — works for both unified and unmerged.
       // Unified hits have multiple score keys (e.g. "exact,altered"); unmerged hits have one.
@@ -81,7 +81,7 @@
           match: eq(dateA, dateB) && eq(timeA, timeB),
           partial: eq(dateA, dateB) && !eq(timeA, timeB) });
       }
-      if (meta.gps_lat !== undefined && meta.gps_lat !== null)
+      if (Number.isFinite(meta.gps_lat) && Number.isFinite(meta.gps_lon))
         items.push({
           label: 'GPS', value: `${meta.gps_lat.toFixed(5)}, ${meta.gps_lon.toFixed(5)}`,
           match:   num(meta.gps_lat, other?.gps_lat, 0.0001) && num(meta.gps_lon, other?.gps_lon, 0.0001),

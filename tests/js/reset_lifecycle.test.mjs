@@ -1,0 +1,51 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { deferred, loadFrontend } from './harness.mjs';
+
+test('reset clears case face state and releases playback resources before losing the path', () => {
+  const { context, component: app } = loadFrontend();
+  const requests = [];
+  const timers = new Set();
+  let next = 1;
+  context.setInterval = context.setTimeout = () => { timers.add(next); return next++; };
+  context.clearInterval = context.clearTimeout = id => timers.delete(id);
+  context.fetch = async (url, options) => { requests.push({ url, options }); return { ok: true }; };
+  app.videoPlayback = { source_path: '/old.mov', lease_seconds: 120 };
+  app.fullJob.state = 'full-job-running';
+  app._startChunkLease();
+  app._startChunkElapsed();
+  app._startFullJobPoll();
+  app._faceQueryTimer = context.setTimeout(() => {}, 300);
+  app.faceBasket = [{ key: 'previous-case', selected: true }];
+  app.queryFaces = [{ index: 0 }];
+  app.facesForHit = [{ id: 'private-face' }];
+  app.faceHits = [{ image_hash: 'old' }];
+  app.faceStats = { count: 1 };
+  app.faceAudit = { private: true };
+  app.faceCompareCounts = { query: 1 };
+  app.faceExplain = { old: true };
+  app.showFaceStats = app.showFaceAudit = app.faceExplainOpen = true;
+  app.videoFramesCache = { old: [{ frame_hash: 'private' }] };
+  app.selectedFrameTimecode = 123;
+  app.triageMatchMetaError = 'old failure';
+  app.resetToUpload();
+  assert.equal(timers.size, 0);
+  assert.ok(requests.some(({ url }) => url.includes('path=%2Fold.mov&release=true')));
+  assert.equal(requests.some(({ options }) => options?.method === 'DELETE'), false);
+  for (const name of ['faceBasket', 'queryFaces', 'facesForHit', 'faceHits']) assert.equal(app[name].length, 0, name);
+  for (const name of ['faceStats', 'faceAudit', 'faceCompareCounts', 'faceExplain', 'videoPlayback', 'selectedFrameTimecode', 'triageMatchMetaError']) assert.equal(app[name], null, name);
+  assert.equal(Object.keys(app.videoFramesCache).length, 0);
+  assert.equal(app.showFaceStats || app.showFaceAudit || app.faceExplainOpen, false);
+});
+
+test('a playback-info response arriving after reset cannot reopen the old case', async () => {
+  const { context, component: app } = loadFrontend();
+  const pending = deferred();
+  context.fetch = async () => ({ ok: true, json: () => pending.promise });
+  const opening = app.openVideoPlayback('/old.mov', 0);
+  app.resetToUpload();
+  pending.resolve({ source_path: '/old.mov', player_state: 'needs-transcode' });
+  await opening;
+  assert.equal(app.videoPlayback, null);
+  assert.equal(app.videoPlaybackLoading, false);
+});

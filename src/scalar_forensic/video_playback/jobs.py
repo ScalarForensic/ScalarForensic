@@ -46,18 +46,22 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+from scalar_forensic.config import Settings
+
+if TYPE_CHECKING:
+    from scalar_forensic.media_worker.video_client import Cancellation
 
 # `_RateTracker` is the project's one progress estimator, and #139's ruling
 # lives in it: an α=½ EWMA labelled as an extrapolation, with the uncalibrated
 # ±1σ band deleted.  Importing it is the whole point — a second smoother here
 # would be a second answer to "how long is left", and the two would disagree in
 # front of an analyst.
-from scalar_forensic.cli import _RateTracker
-from scalar_forensic.config import Settings
+from scalar_forensic.ingestion.reporting import _RateTracker
 from scalar_forensic.video_playback import audit, states
 from scalar_forensic.video_playback.cache import (
     FULL_NAME,
-    artifact_dir,
     evict,
     full_path,
     pin,
@@ -227,7 +231,7 @@ class FullJob:
         self.settings = settings
         self.state = "full-job-running"
         self.cancelled = False
-        self.waiters = 1
+        self.claims: dict[str, str | None] = {}
         self.started_at = time.monotonic()
         self.finished_at: float | None = None
         self.frames = 0
@@ -240,15 +244,18 @@ class FullJob:
         #: before an encoder had produced a frame would be describing a
         #: selection, which is the thing §7.2 exists to stop the label doing.
         self.rendering: audit.Rendering | None = None
-        self.artifact: Path | None = None
         self.task: asyncio.Task | None = None
-        self._proc: subprocess.Popen | None = None
+        self._proc: subprocess.Popen | Cancellation | None = None
         self._tracker = _RateTracker()
         self._last_tick = self.started_at
         self._last_out = 0.0
 
-    # -- lifecycle -------------------------------------------------------
-    def attach(self, proc: subprocess.Popen) -> None:
+    # lifecycle
+    @property
+    def waiters(self) -> int:
+        return sum(outcome is None for outcome in self.claims.values())
+
+    def attach(self, proc: subprocess.Popen | Cancellation) -> None:
         """Hold the encoder so a cancel can stop it — including one that raced.
 
         A DELETE that arrives between ``Popen`` and this callback would otherwise
@@ -257,6 +264,15 @@ class FullJob:
         """
         self._proc = proc
         if self.cancelled:
+            self._stop_encoder(proc)
+
+    @staticmethod
+    def _stop_encoder(proc):
+        from scalar_forensic.media_worker.video_client import Cancellation
+
+        if isinstance(proc, Cancellation):
+            proc.cancel()
+        else:
             _kill_group(proc)
 
     def observe(self, progress: Progress) -> None:
@@ -275,9 +291,9 @@ class FullJob:
         """Stop the encoder now (§4.3: "cancellable explicitly")."""
         self.cancelled = True
         if self._proc is not None:
-            _kill_group(self._proc)
+            self._stop_encoder(self._proc)
 
-    # -- what it will admit to -------------------------------------------
+    # what it will admit to
     @property
     def elapsed_seconds(self) -> float:
         end = self.finished_at if self.finished_at is not None else time.monotonic()
@@ -380,29 +396,67 @@ class JobRunner:
     def __init__(self) -> None:
         self._jobs: dict[str, FullJob] = {}
 
+    def reap_completed(self) -> None:
+        """Expire status records after an hour and retain at most 256 by default.
+
+        Artifacts and audit records have separate retention. Running jobs are
+        never removed, and polling does not extend completed status retention.
+        """
+        now = time.monotonic()
+        completed = []
+        for digest, job in list(self._jobs.items()):
+            if job.finished_at is None:
+                continue
+            ttl = job.settings.video_completed_job_ttl_seconds
+            if now - job.finished_at >= ttl:
+                del self._jobs[digest]
+            else:
+                completed.append((digest, job))
+        completed.sort(key=lambda item: item[1].finished_at)
+        maximum = min(
+            (job.settings.video_completed_job_max for _, job in completed),
+            default=256,
+        )
+        for digest, _ in completed[: max(0, len(completed) - maximum)]:
+            del self._jobs[digest]
+
     def get(self, digest: str) -> FullJob | None:
+        self.reap_completed()
         return self._jobs.get(digest)
 
-    def start(self, request: JobRequest, settings: Settings) -> FullJob:
+    def start(self, request: JobRequest, settings: Settings, *, claim_id: str) -> FullJob:
         """Start a job, or join the one already running for this video."""
+        self.reap_completed()
         existing = self._jobs.get(request.digest)
         if existing is not None and existing.state == "full-job-running":
-            existing.waiters += 1
+            if existing.cancelled:
+                # Keep the old job reachable by shutdown until its worker has
+                # reaped the encoder and released the admission slot and pin.
+                raise states.JOB_CANCELLING.as_http()
+            existing.claims.setdefault(claim_id, None)
             return existing
         job = FullJob(request, settings)
+        job.claims[claim_id] = None
         self._jobs[request.digest] = job
         job.task = asyncio.create_task(self._run(job))
+        job.task.add_done_callback(lambda _: self.reap_completed())
         return job
 
-    def cancel(self, digest: str) -> str:
-        """Drop one claim.  ``cancelled`` when that was the last, else ``released``."""
+    def cancel(self, digest: str, claim_id: str) -> str:
+        """Release this claim once; repeats cannot consume another analyst's claim."""
         job = self._jobs.get(digest)
-        if job is None or job.state != "full-job-running":
+        if job is None or claim_id not in job.claims:
             return "none"
-        job.waiters -= 1
+        previous = job.claims[claim_id]
+        if previous is not None:
+            return previous
+        if job.state != "full-job-running":
+            return "none"
+        job.claims[claim_id] = "released"
         if job.waiters > 0:
             return "released"
         job.cancel()
+        job.claims[claim_id] = "cancelled"
         return "cancelled"
 
     def reset(self) -> None:
@@ -410,6 +464,19 @@ class JobRunner:
         for job in list(self._jobs.values()):
             if job.state == "full-job-running":
                 job.cancel()
+        self._jobs.clear()
+
+    async def shutdown(self) -> None:
+        """Cancel outstanding encodes and await worker cleanup before shutdown."""
+        tasks = []
+        for job in list(self._jobs.values()):
+            if job.finished_at is None:
+                job.cancel()
+                if job.task is not None:
+                    job.task.cancel()
+                    tasks.append(job.task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._jobs.clear()
 
     async def _run(self, job: FullJob) -> None:
@@ -424,18 +491,33 @@ class JobRunner:
                 # is writing (§6.2): the lease covers readers, the pin writers.
                 renew_lease(request.digest, settings.video_lease_seconds)
                 with pin(request.digest):
-                    result = await asyncio.to_thread(
-                        encode_full,
-                        settings,
-                        request.capability,
-                        request.source,
-                        dst,
-                        hdr=request.hdr,
-                        has_audio=request.has_audio,
-                        limit_bytes=request.limit_bytes,
-                        on_progress=job.observe,
-                        on_start=job.attach,
+                    worker = asyncio.create_task(
+                        asyncio.to_thread(
+                            encode_full,
+                            settings,
+                            request.capability,
+                            request.source,
+                            dst,
+                            hdr=request.hdr,
+                            has_audio=request.has_audio,
+                            limit_bytes=request.limit_bytes,
+                            on_progress=job.observe,
+                            on_start=job.attach,
+                        )
                     )
+                    try:
+                        result = await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        job.cancel()
+                        # Keep admission and cache pin until the real encoder
+                        # thread has killed/reaped its process and removed .part.
+                        try:
+                            await asyncio.shield(worker)
+                        except Exception:
+                            pass
+                        raise Cancelled("job task cancelled") from None
+                    if job.cancelled:
+                        raise Cancelled("cancelled while encoder finished")
                     published = await asyncio.to_thread(
                         relocate_to_pipeline_key,
                         result.path,
@@ -496,7 +578,6 @@ class JobRunner:
             threads=job_threads(settings),
             duration_seconds=request.duration_seconds,
         )
-        job.artifact = published
         job.state = "full-job-done"
         audit.record_transcode(
             settings,
@@ -529,8 +610,3 @@ class JobRunner:
 
 
 runner = JobRunner()
-
-
-def artifact_for(cache_dir: Path, digest: str, fingerprint: str) -> Path:
-    """Where a finished full copy lies, for the route that serves its bytes."""
-    return artifact_dir(cache_dir, digest, fingerprint) / FULL_NAME

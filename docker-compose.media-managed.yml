@@ -1,0 +1,22 @@
+# Explicit override for an independently supervised host worker.
+# Run the host supervisor with --client-root /sfn-worker.
+services:
+  sfn-web:
+    user: "${SFN_MEDIA_WORKER_UID:?Set the nonroot supervisor UID}:${SFN_MEDIA_WORKER_GID:?Set the supervisor GID}"
+    environment:
+      - SFN_MEDIA_WORKER_STATE=/sfn-worker/current.json
+      - SFN_MEDIA_WORKER_CASE=${SFN_MEDIA_WORKER_CASE:?Specify the supervised case}
+      - SFN_MEDIA_WORKER_RECEIPTS=/app/data/media-worker-receipts.jsonl
+    volumes:
+      - type: bind
+        source: ${SFN_MEDIA_WORKER_STATE_DIR:?Specify the private host supervisor state directory}
+        target: /sfn-worker
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SFN_MEDIA_WORKER_STATE_DIR:?Specify the private host supervisor state directory}/failures
+        target: /sfn-worker/failures
+        read_only: false
+        bind:
+          create_host_path: false
