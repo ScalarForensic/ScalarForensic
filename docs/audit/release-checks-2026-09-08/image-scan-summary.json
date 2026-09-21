@@ -1,0 +1,75 @@
+{
+  "app": {
+    "created_at": "2026-09-08T16:54:34.087348987Z",
+    "counts": {
+      "LOW": 741,
+      "HIGH": 273,
+      "MEDIUM": 686,
+      "CRITICAL": 8,
+      "UNKNOWN": 24
+    },
+    "scopes": [
+      {
+        "target": "/reports/app-final.tar (debian 13.6)",
+        "class": "os-pkgs",
+        "type": "debian",
+        "counts": {
+          "LOW": 739,
+          "HIGH": 273,
+          "MEDIUM": 680,
+          "CRITICAL": 8,
+          "UNKNOWN": 24
+        }
+      },
+      {
+        "target": "Python",
+        "class": "lang-pkgs",
+        "type": "python-pkg",
+        "counts": {
+          "MEDIUM": 6,
+          "LOW": 2
+        }
+      }
+    ]
+  },
+  "qdrant": {
+    "created_at": "2026-09-08T16:40:49.412592409Z",
+    "counts": {
+      "LOW": 86,
+      "HIGH": 87,
+      "MEDIUM": 93,
+      "UNKNOWN": 5,
+      "CRITICAL": 3
+    },
+    "scopes": [
+      {
+        "target": "/reports/qdrant.tar (debian 13.6)",
+        "class": "os-pkgs",
+        "type": "debian",
+        "counts": {
+          "LOW": 83,
+          "HIGH": 80,
+          "MEDIUM": 93,
+          "UNKNOWN": 5,
+          "CRITICAL": 3
+        }
+      },
+      {
+        "target": "Node.js",
+        "class": "lang-pkgs",
+        "type": "node-pkg",
+        "counts": {
+          "HIGH": 7
+        }
+      },
+      {
+        "target": "qdrant/qdrant.spdx.json",
+        "class": "lang-pkgs",
+        "type": "cargo",
+        "counts": {
+          "LOW": 3
+        }
+      }
+    ]
+  }
+}

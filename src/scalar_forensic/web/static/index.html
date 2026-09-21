@@ -11,10 +11,10 @@
 <body>
 <div id="app" x-data="sfn()" x-init="init()" x-cloak @keydown.window="handleKeydown($event)">
 
-  <!-- ── Error banner ── -->
+  <!-- Error banner -->
   <div class="error-banner" x-show="serverError" x-text="serverError"></div>
 
-  <!-- ── Lightbox ── -->
+  <!-- Lightbox -->
   <div class="lightbox" x-show="lightboxSrc" @click.self="closeLightbox()" @keydown.escape.window="closeLightbox()">
     <div class="lightbox-controls">
       <button class="lightbox-btn" @click="lightboxZoom = Math.min(5, lightboxZoom + 0.25)" title="Zoom in">+</button>
@@ -27,7 +27,7 @@
     </div>
   </div>
 
-  <!-- ── Semantic stats modal ── -->
+  <!-- Semantic stats modal -->
   <div class="stats-modal-backdrop" x-show="showSemanticStats" @click.self="showSemanticStats = false" @keydown.escape.window="showSemanticStats = false">
     <div class="stats-modal">
       <div class="stats-modal-header">
@@ -35,15 +35,12 @@
         <button class="stats-modal-close" @click="showSemanticStats = false">✕</button>
       </div>
 
-      <!-- loading -->
       <div x-show="semanticStatsLoading" class="stats-modal-body stats-modal-loading">Computing…</div>
 
-      <!-- error -->
       <template x-if="!semanticStatsLoading && semanticStatsError">
         <div class="stats-modal-body stats-modal-error" x-text="semanticStatsError"></div>
       </template>
 
-      <!-- result -->
       <template x-if="!semanticStatsLoading && semanticStats">
         <div class="stats-modal-body">
           <div class="stats-modal-subtitle">
@@ -95,7 +92,7 @@
     </div>
   </div>
 
-  <!-- ── Face score-distribution modal ──
+  <!-- Face score-distribution modal
        Structurally the DINOv2 modal above, with two additions the face
        modality requires: the population statement (review-only observations
        carry no vector and are structurally absent) and the 0.363 marker,
@@ -121,6 +118,9 @@
             &nbsp;·&nbsp;
             <span x-text="faceStats.count.toLocaleString()"></span> face observations
           </div>
+
+          <p class="stats-population">Summary values use raw cosine scores (−1 to 1).
+            The histogram uses normalized cosine, (score + 1) / 2, from 0 to 1.</p>
 
           <div class="stats-modal-grid">
             <div class="stats-cell"><span class="stats-k">Min</span><span class="stats-v" x-text="faceStats.min_score.toFixed(4)"></span></div>
@@ -171,7 +171,7 @@
     </div>
   </div>
 
-  <!-- ── Face forensic-audit modal ──
+  <!-- Face forensic-audit modal
        Every value is read off the observation's persisted provenance, so this
        reports the gates in force at index time, not today's environment. -->
   <div class="face-audit-modal-backdrop" x-show="showFaceAudit"
@@ -289,7 +289,7 @@
             <div class="audit-section-hdr">Compatibility</div>
             <div class="audit-row" :class="faceAudit.compat.ok ? 'audit-row-ok' : 'audit-row-warn'">
               <span class="audit-k">comparable</span>
-              <span class="audit-v" x-text="faceAudit.compat.ok ? 'yes' : 'no'"></span>
+              <span class="audit-v" x-text="faceAudit.compat.ok == null ? 'unknown' : (faceAudit.compat.ok ? 'yes' : 'no')"></span>
             </div>
             <template x-for="(w, i) in faceAudit.compat.warnings" :key="`fw-${i}`">
               <div class="audit-row audit-row-warn">
@@ -305,7 +305,7 @@
     </div>
   </div>
 
-  <!-- ── Forensic Audit modal ── -->
+  <!-- Forensic Audit modal -->
   <div class="audit-modal-backdrop" x-show="showAudit"
        @click.self="showAudit=false"
        @keydown.escape.window="showAudit=false">
@@ -336,7 +336,7 @@
       <template x-if="!auditLoading && !auditError">
         <div class="audit-body">
 
-          <!-- ── Section: Model Input Preview ── -->
+          <!-- Section: Model Input Preview -->
           <template x-if="embeddingModels.altered || embeddingModels.semantic">
             <div class="audit-section audit-preproc-section">
               <div class="audit-section-hdr">Model Input Preview</div>
@@ -345,7 +345,6 @@
                 ImageNet channel normalisation not shown.
               </p>
               <div class="audit-preproc-grid">
-                <!-- header row -->
                 <div class="audit-preproc-cell audit-preproc-hdr"></div>
                 <div class="audit-preproc-cell audit-preproc-hdr">Analysis Image</div>
                 <div class="audit-preproc-cell audit-preproc-hdr">Result Image</div>
@@ -443,7 +442,7 @@
             </template>
           </div>
 
-          <!-- ── Section: Analysis Image ── -->
+          <!-- Section: Analysis Image -->
           <div class="audit-section">
             <div class="audit-section-hdr">Analysis Image</div>
 
@@ -537,7 +536,7 @@
             </template>
           </div>
 
-          <!-- ── Section: Result Image ── -->
+          <!-- Section: Result Image -->
           <div class="audit-section">
             <div class="audit-section-hdr">Result Image</div>
 
@@ -650,7 +649,7 @@
             </template>
           </div>
 
-          <!-- ── Section: Search Parameters ── -->
+          <!-- Section: Search Parameters -->
           <div class="audit-section">
             <div class="audit-section-hdr">Search Parameters</div>
             <div class="audit-row">
@@ -687,7 +686,7 @@
     </div><!-- /audit-modal -->
   </div><!-- /audit-modal-backdrop -->
 
-  <!-- ── Header ── -->
+  <!-- Header -->
   <header>
     <img class="header-logo" src="/static/logo.svg" alt="ScalarForensic" height="30">
 
@@ -729,14 +728,14 @@
     </div>
   </header>
 
-  <!-- ── Upload ── -->
+  <!-- Upload -->
   <div class="upload-section" x-show="phase === 'upload' || phase === 'analyzing'">
     <div class="drop-zone" :class="{'drag-over': dragOver, 'analyzing': phase === 'analyzing'}"
          @dragover.prevent="dragOver = true"
          @dragleave.prevent="dragOver = false"
          @drop.prevent="onDrop($event)">
 
-      <!-- ── Progress overlay (replaces drop-zone content while analyzing) ── -->
+      <!-- Progress overlay (replaces drop-zone content while analyzing) -->
       <div class="drop-zone-progress" x-show="phase === 'analyzing'">
         <div class="drop-zone-progress-label" x-text="`Analyzing… ${progress.current} / ${progress.total}`"></div>
         <div class="progress-track" style="width:100%">
@@ -776,7 +775,7 @@
     </div>
   </div>
 
-  <!-- ── Stats bar ── -->
+  <!-- Stats bar -->
   <div class="stats-bar" x-show="phase === 'results'">
     <!-- Search stats (only in search mode) -->
     <template x-if="appMode === 'search'">
@@ -809,10 +808,10 @@
     <button class="btn-secondary" @click="resetToUpload()">← New search</button>
   </div>
 
-  <!-- ── Query error toast ── -->
+  <!-- Query error toast -->
   <div class="query-error-toast" x-show="queryError" x-text="queryError"></div>
 
-  <!-- ── 4-panel results layout (search mode) ── -->
+  <!-- 4-panel results layout (search mode) -->
   <div class="results-layout" x-show="phase === 'results' && appMode === 'search'">
 
     <!-- Panel 1: Controls + file lists -->
@@ -915,7 +914,7 @@
       <div class="file-list matched-list">
         <template x-for="(r, idx) in matchedFiles.slice(0, LIST_CAP)" :key="r.file_id">
           <div>
-            <!-- ── Video file: collapsible parent + frame children ── -->
+            <!-- Video file: collapsible parent + frame children -->
             <template x-if="isVideoFile(r.filename)">
               <div>
                 <!-- Parent row -->
@@ -964,7 +963,7 @@
                 </div>
               </div>
             </template>
-            <!-- ── Regular image file ── -->
+            <!-- Regular image file -->
             <template x-if="!isVideoFile(r.filename)">
               <div class="file-item" :class="{selected: selectedFileId===r.file_id}"
                    :style="`animation-delay:${idx*15}ms`"
@@ -1127,6 +1126,14 @@
               Detection was capped; not every face in this image is shown.
             </p>
             <p class="faces-caveat" x-show="queryFacesError" x-text="queryFacesError"></p>
+            <details x-show="queryFaceEmbedder" class="vc-rendering">
+              <summary>Query face model provenance</summary>
+              <dl class="vc-rendering-rows">
+                <template x-for="[key, value] in Object.entries(queryFaceEmbedder || {})" :key="key">
+                  <div><dt x-text="key.replaceAll('_', ' ')"></dt><dd x-text="value ?? 'Not recorded'"></dd></div>
+                </template>
+              </dl>
+            </details>
           </div>
           <!-- Frame navigation (video uploads only) -->
           <template x-if="isVideoUpload && queryFrames && queryFrames.length > 0">
@@ -1292,6 +1299,23 @@
                 <span class="faces-error-detail" x-text="faceCompareError"></span>
                 <span class="faces-error-note">No cross-highlight below — not a finding of "no match".</span>
               </div>
+              <div class="faces-caveat" x-show="faceCompareCounts">
+                Query: <span x-text="faceCompareCounts?.queryComparable ?? 0"></span> comparable,
+                <span x-text="faceCompareCounts?.queryReviewOnly ?? 0"></span> review only.
+                Match: <span x-text="faceCompareCounts?.matchComparable ?? 0"></span> comparable,
+                <span x-text="faceCompareCounts?.matchReviewOnly ?? 0"></span> review only.
+              </div>
+              <template x-for="warning in (faceCompareCompat?.warnings || [])" :key="warning">
+                <p class="faces-caveat" role="status" x-text="warning"></p>
+              </template>
+              <details x-show="faceCompareEmbedder" class="vc-rendering">
+                <summary>Face comparison model provenance</summary>
+                <dl class="vc-rendering-rows">
+                  <template x-for="[key, value] in Object.entries(faceCompareEmbedder || {})" :key="key">
+                    <div><dt x-text="key.replaceAll('_', ' ')"></dt><dd x-text="value ?? 'Not recorded'"></dd></div>
+                  </template>
+                </dl>
+              </details>
               <div class="faces-grid" x-show="facesForHit.length">
                 <template x-for="face in facesForHit" :key="face.id">
                   <!-- Plain click keeps the review-crop link; ctrl+click puts the
@@ -1569,6 +1593,16 @@
                           <div class="vc-notice" x-show="contentionNotice"
                                x-text="contentionNotice"></div>
 
+                          <div class="vc-label-body" x-show="videoDurationSeconds > 0">
+                            <label>Source position (seconds)
+                              <input type="number" min="0" :max="Math.max(0, videoDurationSeconds - 0.001)"
+                                     step="0.001" x-model.number="chunkSeekSeconds"
+                                     @keydown.enter.prevent="seekChunkTo(chunkSeekSeconds)">
+                            </label>
+                            <button class="vc-open-btn" @click="seekChunkTo(chunkSeekSeconds)">Go to source position</button>
+                            <span x-show="chunkSeekError" x-text="chunkSeekError" role="alert"></span>
+                          </div>
+
                           <!-- states `chunk-ready` (visible buffer) and the hidden
                                buffer holding the prefetched next chunk. Both elements
                                always exist; which one is on screen is chunk.buffer. -->
@@ -1576,11 +1610,13 @@
                                  x-ref="chunkA"
                                  x-show="chunkIsPlaying && chunk.buffer === 0"
                                  :src="chunk.buffer === 0 ? chunk.url : chunk.preload.url"
+                                 @loadedmetadata="seekChunkBuffer($event.target, 0)"
                                  @ended="advanceToNextChunk($refs.chunkA, $refs.chunkB)"></video>
                           <video class="vc-player" controls preload="auto"
                                  x-ref="chunkB"
                                  x-show="chunkIsPlaying && chunk.buffer === 1"
                                  :src="chunk.buffer === 1 ? chunk.url : chunk.preload.url"
+                                 @loadedmetadata="seekChunkBuffer($event.target, 1)"
                                  @ended="advanceToNextChunk($refs.chunkB, $refs.chunkA)"></video>
 
                           <div class="vc-label-body" x-show="chunkIsPlaying">
@@ -1640,7 +1676,7 @@
                             </button>
                           </div>
 
-                          <!-- ── The full-video job (spec §4.3, §6.3, §5) ──────────
+                          <!-- The full-video job (spec §4.3, §6.3, §5)
                                Every state below came off the wire. The panel decides
                                nothing and writes no sentence: the refusal reason, the
                                ETA label and the §4.3 disclosure are all the server's
@@ -1669,9 +1705,13 @@
                               <span x-show="fullJobRateLabel"> · <span x-text="fullJobRateLabel"></span></span>
                               <span x-show="fullJob.waiters > 1"> · <span x-text="fullJob.waiters"></span> viewers waiting</span>
                             </div>
-                            <button class="vc-open-btn" @click="cancelFullJob()">
+                            <button class="vc-open-btn" x-show="fullJobCancelOffered" @click="cancelFullJob()">
                               <span>✕</span><span>Cancel the export</span>
                             </button>
+                            <p class="vc-notice" x-show="!fullJobCancelOffered && !fullJobCancelError">
+                              This tab is observing the export. Cancellation is available to a tab that requested it.
+                            </p>
+                            <p class="vc-notice" x-show="fullJobCancelError" x-text="fullJobCancelError" role="alert"></p>
                           </div>
 
                           <!-- state `full-job-done`. The completion notice is not an
@@ -1902,6 +1942,17 @@
         <span x-text="faceCalibration?.banner"></span>
         <span class="faces-uncal-note" x-text="faceCalibration?.model_reference_note"></span>
       </div>
+      <template x-for="warning in (faceSearchCompat?.warnings || [])" :key="warning">
+        <p class="faces-caveat" role="status" x-text="warning"></p>
+      </template>
+      <details x-show="faceSearchEmbedder" class="vc-rendering">
+        <summary>Face search model provenance</summary>
+        <dl class="vc-rendering-rows">
+          <template x-for="[key, value] in Object.entries(faceSearchEmbedder || {})" :key="key">
+            <div><dt x-text="key.replaceAll('_', ' ')"></dt><dd x-text="value ?? 'Not recorded'"></dd></div>
+          </template>
+        </dl>
+      </details>
 
       <!-- A failed face search must never be silent.  Without this the hits
            list simply keeps the previous result and the examiner reads a stale
@@ -2022,6 +2073,8 @@
               <div class="hit-dirpath" x-text="hit.is_video_frame && hit.video_path ? hit.video_path.split('/').slice(0,-1).join('/') : hit.path.split('/').slice(0,-1).join('/')"></div>
               <div class="hit-meta-row">
                 <span x-show="hit.exif_geo_data" class="meta-tag">GPS</span>
+                <span x-show="hit.face_observation_count != null" class="meta-tag"
+                      x-text="`${hit.face_observation_count} face matches represented`"></span>
                 <span x-show="hit.exif && !hit.exif_geo_data" class="meta-tag exif-tag">EXIF</span>
                 <!-- Query-frame provenance: which frame of the query video produced this comparison -->
                 <template x-if="hit.query_timecodes && hit.query_timecodes.length > 0">
@@ -2121,7 +2174,7 @@
 
   </div><!-- /results-layout -->
 
-  <!-- ── Concept Triage layout ── -->
+  <!-- Concept Triage layout -->
   <div class="triage-layout" x-show="phase === 'results' && appMode === 'triage'">
 
     <!-- Panel 1: Tag browser + run controls -->
@@ -2523,6 +2576,10 @@
           </div>
 
           <!-- EXIF / File info box -->
+          <div class="meta-box" x-show="triageMatchMetaError" role="alert">
+            <div class="meta-box-hdr">Metadata unavailable</div>
+            <span x-text="triageMatchMetaError"></span>
+          </div>
           <div class="meta-box" x-show="triageMatchMeta && _metaItems(triageMatchMeta, null).length > 0">
             <div class="meta-box-hdr">EXIF / File Info</div>
             <div class="meta-grid">

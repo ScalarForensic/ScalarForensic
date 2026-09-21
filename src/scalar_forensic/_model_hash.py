@@ -3,10 +3,6 @@
 Imported by safeguards.py and embedder.py.  This module is intentionally
 stdlib-only (no torch, no qdrant, no huggingface_hub) so it can be imported
 in any context without heavyweight side-effects.
-
-scripts/download_models.py mirrors _hash_dino_snapshot without importing the
-package (to keep that script's dependency footprint minimal).  When changing
-DINO_CONTENT_EXTENSIONS or _hash_dino_snapshot, update that script too.
 """
 
 import hashlib
@@ -20,8 +16,6 @@ from pathlib import Path
 # the hash would make it impossible to reproduce the same value across
 # deployment environments even when the actual model weights are byte-for-byte
 # identical — which is exactly the property forensic integrity requires.
-#
-# scripts/download_models.py mirrors this value; keep both in sync.
 DINO_CONTENT_EXTENSIONS: frozenset[str] = frozenset({".safetensors", ".bin", ".json"})
 
 

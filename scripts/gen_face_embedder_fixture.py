@@ -5,12 +5,9 @@ Run with the export-only deps supplied ad hoc (they are NOT project deps):
 """
 
 import json
-import sys
 from pathlib import Path
 
 import torch
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 OUT = Path("tests/fixtures/faces")
 

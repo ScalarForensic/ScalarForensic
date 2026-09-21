@@ -1,6 +1,6 @@
 // Part of the sfn() Alpine component — merged by app.js. See app.js for load order.
 (window.__sfnParts = window.__sfnParts || []).push({
-    // ── Concept Triage ────────────────────────────────────────────────────
+    // Concept Triage
     async switchToTriage() {
       this.appMode = 'triage';
       if (!this.concepts.length && !this.conceptsLoading) await this.loadConcepts();
@@ -106,7 +106,6 @@
           this._putTriageHitCache(sid, null);  // trigger reactivity
         }
       }
-      // Fetch any unknown IDs
       const toFetch = allIds.filter(id => !this.triageHitCache[String(id)]);
       await Promise.all(toFetch.map(async id => {
         try {
@@ -125,6 +124,7 @@
 
     async runTriage() {
       if (!this.selectedConceptId) return;
+      const current = this._beginViewRequest('triageResults', ['selectedConceptId', 'triageTarget']);
       if (this.triageTarget === 'uploaded' && !this.sessionId) {
         this.triageError = 'No query session active. Upload a query image first.';
         return;
@@ -154,10 +154,12 @@
         }
         if (!resp.ok) {
           const d = await resp.json().catch(() => ({}));
+          if (!current()) return;
           this.triageError = d.detail ?? `HTTP ${resp.status}`;
           return;
         }
         const d = await resp.json();
+        if (!current()) return;
         this.triageResults = d.hits ?? [];
         if (d.tag) {
           const idx = this.concepts.findIndex(c => c.tag_id === d.tag.tag_id);
@@ -173,14 +175,15 @@
         }
         if (this.triageResults.length > 0) await this.selectTriageHit(this.triageResults[0]);
       } catch (e) {
-        this.triageError = e?.message || 'Triage failed — check Qdrant connection';
+        if (current()) this.triageError = e?.message || 'Triage failed — check Qdrant connection';
       } finally {
-        this.triageRunning = false;
+        if (current()) this.triageRunning = false;
       }
     },
 
     async runExplore() {
       if (!this.selectedConceptId) return;
+      const current = this._beginViewRequest('triageResults', ['selectedConceptId', 'triageTarget']);
       this.triageRunning = true;
       this.triageError = null;
       this.triageResults = [];
@@ -195,10 +198,12 @@
         const resp = await fetch('/api/explore', { method: 'POST', body: fd });
         if (!resp.ok) {
           const d = await resp.json().catch(() => ({}));
+          if (!current()) return;
           this.triageError = d.detail ?? `HTTP ${resp.status}`;
           return;
         }
         const d = await resp.json();
+        if (!current()) return;
         this.exploreStrategy = d.strategy ?? null;
         this.triageResults = d.hits ?? [];
         if (d.tag) {
@@ -212,14 +217,15 @@
         }
         if (this.triageResults.length > 0) await this.selectTriageHit(this.triageResults[0]);
       } catch (e) {
-        this.triageError = e?.message || 'Explore failed — check Qdrant connection';
+        if (current()) this.triageError = e?.message || 'Explore failed — check Qdrant connection';
       } finally {
-        this.triageRunning = false;
+        if (current()) this.triageRunning = false;
       }
     },
 
     async selectTriageHit(hit) {
       this.selectedTriageHitId = String(hit.point_id ?? hit.file_id);
+      const current = this._beginViewRequest('triageMeta', ['selectedTriageHitId', 'selectedConceptId', 'triageTarget']);
       this.triageMatchZoom = 1.0;
       this.triageMatchMeta = null;
       this.triageMatchMetaError = null;
@@ -230,9 +236,11 @@
         this.triageMatchSrc = `/api/hit-image?path=${encodeURIComponent(hit.path)}`;
         try {
           const r = await fetch(`/api/metadata?path=${encodeURIComponent(metaPath)}`);
-          if (r.ok) this.triageMatchMeta = await r.json();
-          else this.triageMatchMetaError = `HTTP ${r.status}`;
-        } catch (e) { this.triageMatchMetaError = e?.message; }
+          if (r.ok) {
+            const data = await r.json();
+            if (current()) this.triageMatchMeta = data;
+          } else if (current()) this.triageMatchMetaError = `HTTP ${r.status}`;
+        } catch (e) { if (current()) this.triageMatchMetaError = e?.message; }
       } else if (hit.file_id && this.sessionId) {
         this.triageMatchSrc = `/api/query-image/${this.sessionId}/${hit.file_id}`;
       }
@@ -325,22 +333,6 @@
             const tid = String(updated.target_id);
             if (!this.triageHitCache[tid]) await this.loadConceptExamples(updated);
           }
-        }
-      } catch { /* ignore */ }
-      finally { this.settingAnchor = false; }
-    },
-
-    async clearAnchor() {
-      if (!this.selectedConceptId) return;
-      const fd = new FormData();
-      fd.append('target_id', '');
-      this.settingAnchor = true;
-      try {
-        const resp = await fetch(`/api/tag/${this.selectedConceptId}/set-target`, { method: 'POST', body: fd });
-        if (resp.ok) {
-          const updated = await resp.json();
-          const idx = this.concepts.findIndex(c => c.tag_id === updated.tag_id);
-          if (idx >= 0) this.concepts[idx] = updated;
         }
       } catch { /* ignore */ }
       finally { this.settingAnchor = false; }
@@ -531,8 +523,10 @@
 
     // Load tag classifications for current search results + query image
     async loadHitTags() {
+      const current = this._beginViewRequest('hitTags', ['selectedFileId', 'results', 'triageCosineThreshold']);
       if (!this.concepts.length) {
         if (this._conceptsPromise) await this._conceptsPromise;
+        if (!current()) return;
         if (!this.concepts.length) return;
       }
       const hashes = this.results.flatMap(r => r.hits.map(h => h.image_hash).filter(Boolean));
@@ -563,6 +557,7 @@
       if (!fetches.length) return;
       try {
         const results = await Promise.all(fetches);
+        if (!current()) return;
         const merged = Object.assign({}, ...results);
         this.hitTags = { ...this.hitTags, ...merged };
       } catch { /* non-fatal */ }

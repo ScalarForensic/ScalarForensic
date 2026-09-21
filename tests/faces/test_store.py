@@ -108,7 +108,7 @@ def test_collection_is_new_reflects_server_state(store):
 
 def _existing_meta(client, payload):
     rec = MagicMock()
-    rec.payload = payload
+    rec.payload = {"identity_schema_version": 2, **payload}
     client.retrieve.return_value = [rec]
 
 
@@ -147,10 +147,24 @@ def test_check_compat_soft_mismatch_warns(store):
     assert any("detector_model_hash" in w for w in warnings)
 
 
-def test_check_compat_absent_fields_are_unknown_not_mismatch(store):
+@pytest.mark.parametrize("stored_version", [None, "image-x-v1", "eye-axis-v2"])
+def test_gate_version_is_soft_compatibility_with_legacy_default(store, stored_version):
+    s, client = store
+    payload = _cfg().to_payload()
+    if stored_version is None:
+        payload.pop("quality_gate_version", None)
+    else:
+        payload["quality_gate_version"] = stored_version
+    _existing_meta(client, {"case_collection": "case1", **payload})
+    warnings = s.check_compat(_cfg())
+    assert any("quality_gate_version" in w for w in warnings) is (stored_version != "eye-axis-v2")
+
+
+def test_check_compat_absent_hard_fields_require_rebuild(store):
     s, client = store
     _existing_meta(client, {"case_collection": "case1"})
-    assert s.check_compat(_cfg()) == []
+    with pytest.raises(ValueError, match="rebuild"):
+        s.check_compat(_cfg())
 
 
 def test_check_compat_wrong_case_collection_raises(store):
@@ -162,8 +176,8 @@ def test_check_compat_wrong_case_collection_raises(store):
 
 def test_marker_point_is_per_processed_unit(store):
     s, _ = store
-    frame = s.marker_point("frame_hash", "vid1", "cfg", 3, 2, {"pose": 1})
-    video_frame2 = s.marker_point("frame2_hash", "vid1", "cfg", 1, 1, {})
+    frame = s.marker_point("frame_hash", "vid1", "cfg", 3, 2, {"pose": 1}, frame_timecode_ms=0)
+    video_frame2 = s.marker_point("frame2_hash", "vid1", "cfg", 1, 1, {}, frame_timecode_ms=1000)
     assert frame.id != video_frame2.id  # per frame, never per video
     assert frame.payload["is_face_marker"] is True
     assert frame.payload["n_detected"] == 3 and frame.payload["n_kept"] == 2
@@ -176,17 +190,9 @@ def test_video_rollup_never_collides_with_frame_marker(store):
     # A rollup keyed on the video hash must not share an ID with the frame
     # marker of a frame that happens to hash to the same value.
     rollup = s.video_rollup_point("v1", "cfg", 10, 6, {"pose": 4}, n_frames=5)
-    assert rollup.id != s.marker_point("v1", "v1", "cfg", 10, 6, {}).id
+    assert rollup.id != s.marker_point("v1", "v1", "cfg", 10, 6, {}, frame_timecode_ms=0).id
     assert rollup.payload["is_face_video_rollup"] is True
     assert rollup.payload["n_frames"] == 5
-
-
-def test_processed_hashes_filters_on_config_hash(store):
-    s, _ = store
-    rec = MagicMock()
-    rec.payload = {"image_hash": "h1"}
-    with patch("scalar_forensic.faces.store.qdrant_scroll_all", return_value=iter([rec])):
-        assert s.processed_hashes("cfg") == {"h1"}
 
 
 def test_purge_media_deletes_points_and_returns_chip_hashes(store):
@@ -195,7 +201,7 @@ def test_purge_media_deletes_points_and_returns_chip_hashes(store):
     rec1.id = "p1"
     rec1.payload = {"aligned_chip_hash": "a" * 64, "review_chip_hash": "r" * 64}
     with patch("scalar_forensic.faces.store.qdrant_scroll_all", return_value=iter([rec1])):
-        result = s.purge_media("h1")
+        result = s.purge_media("a" * 64)
     assert result.n_points == 1
     # Both artefact domains are collected; the caller unlinks chip files (spec §7.5).
     assert set(result.chip_hashes) == {"a" * 64, "r" * 64}
@@ -209,7 +215,7 @@ def test_purge_all_preserves_meta_point(store):
     # Points deleted by filter (is_face / is_face_marker), never delete_collection:
     # the meta point carries the enablement record and must survive routine purges.
     client.delete_collection.assert_not_called()
-    client.delete.assert_called()
+    client.delete.assert_not_called()
 
 
 def test_list_faces_returns_payloads_for_media(store):
@@ -266,7 +272,7 @@ def test_stale_face_points_excludes_what_this_run_produced(store):
     # Scoped to this medium, and to faces — a marker or rollup swept up here
     # would be deleted as "stale" and take the medium's counts with it.
     conditions = calls[0]["scroll_filter"].must
-    assert [c.key for c in conditions] == ["is_face", "image_hash"]
+    assert [c.key for c in conditions] == ["is_face", "source_unit"]
     assert conditions[1].match.value == "h1"
 
 

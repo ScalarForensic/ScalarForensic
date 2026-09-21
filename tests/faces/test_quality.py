@@ -44,6 +44,29 @@ def test_pose_ratio_zero_for_symmetric_face():
     assert pose_ratio(FRONTAL) == pytest.approx(0.0, abs=0.05)
 
 
+@pytest.mark.parametrize("roll", [-120, -45, 0, 45, 90, 180])
+@pytest.mark.parametrize("nose_x, expected_pose, passes", [(50, 0.0, True), (70, 0.5, False)])
+def test_pose_gate_distinguishes_yaw_from_roll(roll, nose_x, expected_pose, passes):
+    landmarks = FRONTAL.copy()
+    landmarks[2, 0] = nose_x
+    angle = np.deg2rad(roll)
+    rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+    rotated = (landmarks - [50, 50]) @ rotation.T + [50, 50]
+    result = pre_align_gate(_det(lm=rotated), min_conf=0.8, min_size=40, max_pose=0.35)
+    assert result.subscores["pose"] == pytest.approx(expected_pose, abs=1e-6)
+    assert result.passed is passes
+    assert result.reason == (None if passes else "pose")
+
+
+@pytest.mark.parametrize("eyes", [[[30, 30], [30, 30]], [[30, 30], [30, 30.5]]])
+def test_pose_gate_rejects_degenerate_eye_span(eyes):
+    landmarks = FRONTAL.copy()
+    landmarks[:2] = eyes
+    assert pre_align_gate(_det(lm=landmarks), min_conf=0.8, min_size=40, max_pose=0.35).reason == (
+        "pose"
+    )
+
+
 def test_post_gate_rejects_flat_crop_as_blurry():
     flat = np.full((80, 80), 128, dtype=np.uint8)
     r = post_align_gate(flat, min_sharpness=25.0, max_clipped_frac=0.6)

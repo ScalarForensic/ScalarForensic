@@ -181,3 +181,24 @@ def test_unreferenced_chip_hashes_reads_the_real_payload_projection(live_collect
     )
     unreferenced = store.unreferenced_chip_hashes(["a" * 64, "r" * 64, "z" * 64])
     assert unreferenced == ["z" * 64]
+
+
+def test_source_identity_and_video_purge_preserve_shared_observations(live_collection):
+    from tests.faces.test_store_identity import seed
+
+    client, name = live_collection
+    store = FaceStore(client, name, "case1", 4)
+    first = seed(store, "a" * 64, 0)
+    second = seed(store, "a" * 64, 1000)
+    other = seed(store, "b" * 64, 0)
+    assert len({first, second, other}) == 3
+    assert (
+        store.stale_face_points("f" * 64, {first}, video_hash="a" * 64, frame_timecode_ms=0) == []
+    )
+    store.refresh_video_rollup("a" * 64, "cfg")
+    result = store.purge_media("a" * 64)
+    assert result.n_points == 5
+    assert store.unreferenced_chip_hashes(result.chip_hashes) == []
+    assert store.get_face(other)
+    assert len(store.processed_units("cfg")) == 1
+    assert store.purge_media("a" * 64).n_points == 0

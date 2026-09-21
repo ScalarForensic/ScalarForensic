@@ -9,14 +9,17 @@ from dataclasses import dataclass
 from qdrant_client import QdrantClient
 
 from scalar_forensic.config import Settings
+from scalar_forensic.safeguards import require_collection_compatible
+from scalar_forensic.web.pipeline._embedders import (
+    _embedder_cache,
+    validate_cached_embedder_settings,
+)
 from scalar_forensic.web.session import Session
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Semantic score distribution stats (on-demand, per uploaded file)
-# ---------------------------------------------------------------------------
 
 _STATS_SAMPLE = 10_000
 _HIST_BUCKETS = 20  # 0.05-wide buckets covering normalised [0.0, 1.0] (cosine [-1,1] → [0,1])
@@ -59,18 +62,30 @@ def query_semantic_stats(
     if not entry.dino_embedding:
         return None, "no semantic embedding — was semantic mode selected during analysis?"
 
+    validate_cached_embedder_settings(settings, {"dino"})
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
     try:
-        result = client.query_points(
-            collection_name=settings.collection,
-            query=entry.dino_embedding,
-            using="dino",
-            limit=sample_size,
-            with_payload=False,
+        hashes = {"dino": _embedder_cache["dino"].model_hash} if "dino" in _embedder_cache else None
+        require_collection_compatible(
+            client,
+            settings.collection,
+            settings,
+            needed_vectors={"dino"},
+            expected_hashes=hashes,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Semantic stats query failed: %s", exc)
-        return None, f"Qdrant query failed: {type(exc).__name__}"
+        try:
+            result = client.query_points(
+                collection_name=settings.collection,
+                query=entry.dino_embedding,
+                using="dino",
+                limit=sample_size,
+                with_payload=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Semantic stats query failed: %s", exc)
+            return None, f"Qdrant query failed: {type(exc).__name__}"
+    finally:
+        client.close()
 
     scores = [r.score for r in result.points]
     if not scores:

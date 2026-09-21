@@ -12,7 +12,9 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    IsEmptyCondition,
     MatchValue,
+    PayloadField,
     PayloadSchemaType,
     PointIdsList,
     PointStruct,
@@ -24,9 +26,10 @@ from qdrant_client.models import (
 )
 
 from scalar_forensic.faces.align import ALIGNMENT_VERSION
-from scalar_forensic.faces.provenance import PipelineConfig
+from scalar_forensic.faces.provenance import LEGACY_QUALITY_GATE_VERSION, PipelineConfig
 from scalar_forensic.indexer import qdrant_scroll_all
 
+IDENTITY_SCHEMA_VERSION = 2
 FACE_VECTOR_NAME = "face"
 _META_POINT_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, "sfn:face-collection-meta"))
 _SCROLL_LIMIT = 256
@@ -42,6 +45,7 @@ _HARD_FIELDS = (
 )
 # Soft fields change *which* faces get in, not what the vectors mean.
 _SOFT_FIELDS = (
+    "quality_gate_version",
     "detector_id",
     "detector_model_hash",
     "detect_max_size",
@@ -72,22 +76,37 @@ class FaceStore:
         self.case_collection = case_collection
         self.embedder_dim = embedder_dim
 
-    # --- identity -------------------------------------------------------
+    # identity
 
-    def observation_key(self, image_hash: str, frame_timecode_ms: int | None, bbox) -> str:
+    @staticmethod
+    def unit_key(
+        image_hash: str, video_hash: str | None = None, frame_timecode_ms: int | None = None
+    ) -> str:
+        if video_hash is not None:
+            if frame_timecode_ms is None:
+                raise ValueError("Video face identity requires a frame timecode")
+            return f"video:{video_hash}:{frame_timecode_ms}"
+        return image_hash
+
+    def observation_key(
+        self, image_hash: str, frame_timecode_ms: int | None, bbox, *, video_hash: str | None = None
+    ) -> str:
         # Model-independent: no alignment version — labels reference this and
         # must survive re-alignment/re-detection under new versions.
         x, y, w, h = (round(v) for v in bbox)
         ts = "" if frame_timecode_ms is None else str(frame_timecode_ms)
-        return f"{image_hash}:{ts}:{x}:{y}:{w}:{h}"
+        source = self.unit_key(image_hash, video_hash, frame_timecode_ms)
+        return f"{source}:{ts}:{x}:{y}:{w}:{h}"
 
-    def face_point_id(self, image_hash: str, frame_timecode_ms: int | None, bbox) -> str:
+    def face_point_id(
+        self, image_hash: str, frame_timecode_ms: int | None, bbox, *, video_hash: str | None = None
+    ) -> str:
         # ALIGNMENT_VERSION is part of the ID so a future arcface-112-v2
         # re-index coexists with v1 points instead of overwriting them.
-        key = self.observation_key(image_hash, frame_timecode_ms, bbox)
+        key = self.observation_key(image_hash, frame_timecode_ms, bbox, video_hash=video_hash)
         return str(uuid.uuid5(uuid.NAMESPACE_URL, f"face:{key}:{ALIGNMENT_VERSION}"))
 
-    # --- collection lifecycle -------------------------------------------
+    # collection lifecycle
 
     def collection_is_new(self) -> bool:
         existing = {c.name for c in self.client.get_collections().collections}
@@ -111,6 +130,7 @@ class FaceStore:
         )
         for field, schema in (
             ("image_hash", PayloadSchemaType.KEYWORD),
+            ("source_unit", PayloadSchemaType.KEYWORD),
             ("image_path", PayloadSchemaType.KEYWORD),
             ("video_hash", PayloadSchemaType.KEYWORD),
             ("video_path", PayloadSchemaType.KEYWORD),
@@ -124,6 +144,7 @@ class FaceStore:
             )
         meta_payload = {
             "is_face_meta": True,
+            "identity_schema_version": IDENTITY_SCHEMA_VERSION,
             "case_collection": self.case_collection,
             "enablement": {
                 "examiner_id": examiner_id,
@@ -151,12 +172,15 @@ class FaceStore:
     def check_compat(self, cfg: PipelineConfig) -> list[str]:
         """Raise on hard mismatches, return warning strings for soft ones.
 
-        Fields absent from the stored meta are "unknown", not a mismatch —
-        the same stance safeguards.py takes for older collections.
+        Legacy identities and missing hard model provenance require a rebuild.
         """
         meta = self._meta_payload()
-        if not meta:
-            return []
+        meta.setdefault("quality_gate_version", LEGACY_QUALITY_GATE_VERSION)
+        if meta.get("identity_schema_version") != IDENTITY_SCHEMA_VERSION:
+            raise ValueError(
+                "Face identity schema is legacy or unknown; rebuild the face collection "
+                "and its adjudications before indexing or similarity search."
+            )
         stored_case = meta.get("case_collection")
         if stored_case is not None and stored_case != self.case_collection:
             raise ValueError(
@@ -164,6 +188,12 @@ class FaceStore:
                 f"{stored_case!r}, but this run targets {self.case_collection!r}.\n"
                 "  Face observations are case-scoped: refusing to mix biometric data\n"
                 "  across cases.  Set SFN_FACE_COLLECTION explicitly if this is intended."
+            )
+        missing = [field for field in _HARD_FIELDS if meta.get(field) is None]
+        if missing:
+            raise ValueError(
+                "Face model provenance is unknown; rebuild the face collection: "
+                + ", ".join(missing)
             )
         hard_mismatches = [
             f"{f}: collection has {meta[f]!r}, this run has {getattr(cfg, f)!r}"
@@ -181,12 +211,12 @@ class FaceStore:
             if f in meta and meta[f] != getattr(cfg, f)
         ]
 
-    # --- writes ---------------------------------------------------------
+    # writes
 
     def upsert_faces(self, points: list[PointStruct]) -> None:
         if not points:
             return
-        self.client.upsert(collection_name=self.collection, points=points)
+        self.client.upsert(collection_name=self.collection, points=points, wait=True)
 
     def marker_point(
         self,
@@ -199,17 +229,25 @@ class FaceStore:
         n_review_only: int = 0,
         review_only_reasons: dict[str, int] | None = None,
         n_dropped_noncanonical: int = 0,
+        frame_timecode_ms: int | None = None,
     ) -> PointStruct:
         """One marker per *processed unit* — per image, per video frame.
 
-        Keying on the frame's own hash rather than the video's is what keeps
-        processed_hashes() from skipping every frame after the first.
+        Video source and timecode identify observations; frame content hashes
+        remain available for chip/content deduplication.
         """
         return PointStruct(
-            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"face-marker:{image_hash}")),
+            id=str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"face-marker:{self.unit_key(image_hash, video_hash, frame_timecode_ms)}",
+                )
+            ),
             vector={},
             payload={
                 "is_face_marker": True,
+                "source_unit": self.unit_key(image_hash, video_hash, frame_timecode_ms),
+                "frame_timecode_ms": frame_timecode_ms,
                 "image_hash": image_hash,
                 "video_hash": video_hash,
                 "faces_processed_at": datetime.now(UTC).isoformat(),
@@ -243,7 +281,7 @@ class FaceStore:
         """Aggregate marker for a whole video, written once after its frames.
 
         Distinct ID namespace from the per-frame markers so it can never
-        overwrite one — processed_hashes() keys on the frame markers.
+        overwrite one — processed_units() keys on the frame markers.
         """
         return PointStruct(
             id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"face-marker-video:{video_hash}")),
@@ -263,25 +301,70 @@ class FaceStore:
             },
         )
 
-    # --- reads ----------------------------------------------------------
-
-    def processed_hashes(self, cfg_hash: str) -> set[str]:
-        flt = Filter(
-            must=[
-                FieldCondition(key="is_face_marker", match=MatchValue(value=True)),
-                FieldCondition(key="faces_pipeline_config_hash", match=MatchValue(value=cfg_hash)),
+    def refresh_video_rollup(self, video_hash: str, cfg_hash: str) -> None:
+        """Recompute from acknowledged frame markers, including resumed frames."""
+        totals = {k: 0 for k in ("n_detected", "n_kept", "n_review_only", "n_dropped_noncanonical")}
+        rejected: dict[str, int] = {}
+        reasons: dict[str, int] = {}
+        n_frames = 0
+        for rec in qdrant_scroll_all(
+            self.client,
+            self.collection,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key="is_face_marker", match=MatchValue(value=True)),
+                    FieldCondition(key="video_hash", match=MatchValue(value=video_hash)),
+                    FieldCondition(
+                        key="faces_pipeline_config_hash", match=MatchValue(value=cfg_hash)
+                    ),
+                ]
+            ),
+            limit=_SCROLL_LIMIT,
+            with_payload=True,
+        ):
+            payload = rec.payload or {}
+            n_frames += 1
+            for key in totals:
+                totals[key] += payload.get(key, 0)
+            for field, bucket in (("n_rejected", rejected), ("review_only_reasons", reasons)):
+                for reason, count in payload.get(field, {}).items():
+                    bucket[reason] = bucket.get(reason, 0) + count
+        self.upsert_faces(
+            [
+                self.video_rollup_point(
+                    video_hash,
+                    cfg_hash,
+                    totals["n_detected"],
+                    totals["n_kept"],
+                    rejected,
+                    n_frames,
+                    n_review_only=totals["n_review_only"],
+                    review_only_reasons=reasons,
+                    n_dropped_noncanonical=totals["n_dropped_noncanonical"],
+                )
             ]
         )
+
+    # reads
+
+    def processed_units(self, cfg_hash: str) -> set[str]:
         return {
-            rec.payload["image_hash"]
+            rec.payload["source_unit"]
             for rec in qdrant_scroll_all(
                 self.client,
                 self.collection,
-                scroll_filter=flt,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(key="is_face_marker", match=MatchValue(value=True)),
+                        FieldCondition(
+                            key="faces_pipeline_config_hash", match=MatchValue(value=cfg_hash)
+                        ),
+                    ]
+                ),
                 limit=_SCROLL_LIMIT,
-                with_payload=["image_hash"],
+                with_payload=["source_unit"],
             )
-            if rec.payload and rec.payload.get("image_hash")
+            if rec.payload and rec.payload.get("source_unit")
         }
 
     def get_face(self, point_id: str) -> dict | None:
@@ -293,9 +376,20 @@ class FaceStore:
             return None
         return {"id": records[0].id, **(records[0].payload or {})}
 
-    def get_marker(self, image_hash: str) -> dict | None:
+    def get_marker(
+        self,
+        image_hash: str,
+        *,
+        video_hash: str | None = None,
+        frame_timecode_ms: int | None = None,
+    ) -> dict | None:
         """Return the processed marker for one medium, or None if absent."""
-        marker_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"face-marker:{image_hash}"))
+        marker_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"face-marker:{self.unit_key(image_hash, video_hash, frame_timecode_ms)}",
+            )
+        )
         records = self.client.retrieve(
             collection_name=self.collection, ids=[marker_id], with_payload=True
         )
@@ -303,11 +397,22 @@ class FaceStore:
             return None
         return records[0].payload or {}
 
-    def list_faces(self, image_hash: str) -> list[dict]:
+    def list_faces(
+        self,
+        image_hash: str,
+        *,
+        video_hash: str | None = None,
+        frame_timecode_ms: int | None = None,
+    ) -> list[dict]:
         flt = Filter(
             must=[
                 FieldCondition(key="is_face", match=MatchValue(value=True)),
-                FieldCondition(key="image_hash", match=MatchValue(value=image_hash)),
+                FieldCondition(
+                    key="source_unit",
+                    match=MatchValue(
+                        value=self.unit_key(image_hash, video_hash, frame_timecode_ms)
+                    ),
+                ),
             ]
         )
         return [
@@ -322,7 +427,7 @@ class FaceStore:
         ]
 
     def search_faces(
-        self, vector: list[float], *, limit: int, threshold: float, exact: bool
+        self, vector: list[float], *, limit: int, threshold: float | None, exact: bool
     ) -> list[dict]:
         """kNN over the named ``face`` vector.
 
@@ -347,7 +452,7 @@ class FaceStore:
             for p in res.points
         ]
 
-    # --- purge ----------------------------------------------------------
+    # purge
 
     def clear_face_vector(self, point_ids: list[str]) -> None:
         """Remove the named face vector from points, keeping their payloads.
@@ -373,6 +478,7 @@ class FaceStore:
             collection_name=self.collection,
             vectors=[FACE_VECTOR_NAME],
             points=list(point_ids),
+            wait=True,
         )
 
     def unreferenced_chip_hashes(self, hashes: list[str]) -> list[str]:
@@ -417,7 +523,14 @@ class FaceStore:
         "review_chip_hash",
     ]
 
-    def stale_face_points(self, image_hash: str, produced_ids: set[str]) -> list[dict]:
+    def stale_face_points(
+        self,
+        image_hash: str,
+        produced_ids: set[str],
+        *,
+        video_hash: str | None = None,
+        frame_timecode_ms: int | None = None,
+    ) -> list[dict]:
         """Face points for one medium that the current run did not produce.
 
         Point IDs derive from image_hash + timecode + rounded bbox + alignment
@@ -435,7 +548,12 @@ class FaceStore:
         flt = Filter(
             must=[
                 FieldCondition(key="is_face", match=MatchValue(value=True)),
-                FieldCondition(key="image_hash", match=MatchValue(value=image_hash)),
+                FieldCondition(
+                    key="source_unit",
+                    match=MatchValue(
+                        value=self.unit_key(image_hash, video_hash, frame_timecode_ms)
+                    ),
+                ),
             ]
         )
         return [
@@ -469,7 +587,9 @@ class FaceStore:
                 if chash:
                     chip_hashes.append(chash)
         self.client.delete(
-            collection_name=self.collection, points_selector=PointIdsList(points=list(point_ids))
+            collection_name=self.collection,
+            points_selector=PointIdsList(points=list(point_ids)),
+            wait=True,
         )
         return PurgeResult(n_points=len(point_ids), chip_hashes=list(dict.fromkeys(chip_hashes)))
 
@@ -485,17 +605,43 @@ class FaceStore:
                 chash = payload.get(key)
                 if chash:
                     chip_hashes.append(chash)
-        self.client.delete(
-            collection_name=self.collection, points_selector=PointIdsList(points=ids)
+        for start in range(0, len(ids), _SCROLL_LIMIT):
+            self.client.delete(
+                collection_name=self.collection,
+                points_selector=PointIdsList(points=ids[start : start + _SCROLL_LIMIT]),
+                wait=True,
+            )
+        residual = next(
+            iter(
+                qdrant_scroll_all(
+                    self.client, self.collection, scroll_filter=flt, limit=1, with_payload=False
+                )
+            ),
+            None,
         )
-        # Deduplicated: one review JPEG is shared by every observation whose
-        # source crop is byte-identical, so the raw list repeats hashes and the
-        # caller's unlinked-file count goes into the audit record.
+        if residual is not None:
+            raise RuntimeError("Face purge verification failed: target points remain")
         return PurgeResult(n_points=len(ids), chip_hashes=list(dict.fromkeys(chip_hashes)))
 
     def purge_media(self, image_hash: str) -> PurgeResult:
-        """Delete every face point for one medium; caller unlinks the chips."""
-        flt = Filter(must=[FieldCondition(key="image_hash", match=MatchValue(value=image_hash))])
+        """Purge an original image or source video digest, including all markers."""
+        import re
+
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", image_hash):
+            raise ValueError("Media digest must be a 64-character SHA-256 hex string")
+        digest = image_hash.lower()
+        flt = Filter(
+            should=[
+                Filter(
+                    must=[
+                        FieldCondition(key="image_hash", match=MatchValue(value=digest)),
+                        IsEmptyCondition(is_empty=PayloadField(key="video_hash")),
+                        IsEmptyCondition(is_empty=PayloadField(key="frame_timecode_ms")),
+                    ]
+                ),
+                FieldCondition(key="video_hash", match=MatchValue(value=digest)),
+            ]
+        )
         return self._purge_by_filter(flt)
 
     def purge_all(self) -> PurgeResult:

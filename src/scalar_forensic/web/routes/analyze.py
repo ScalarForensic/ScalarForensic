@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import tempfile
 import time
 import uuid
 from datetime import UTC, datetime
@@ -16,6 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import get_library_versions
+from scalar_forensic.safeguards import CompatibilityError, QdrantUnavailable
 from scalar_forensic.web.pipeline import (
     ProgressEvent,
     QueryProvenance,
@@ -30,14 +30,11 @@ from scalar_forensic.web.session import (
     create_session,
     delete_session,
     get_session,
+    prepare_upload_permissions,
+    session_temp_dir,
 )
 
 router = APIRouter()
-
-
-# ---------------------------------------------------------------------------
-# Collections availability
-# ---------------------------------------------------------------------------
 
 
 @router.get("/api/collections")
@@ -50,9 +47,7 @@ async def collections() -> JSONResponse:
     return JSONResponse(payload)
 
 
-# ---------------------------------------------------------------------------
 # Phase 1: Analyze (SSE stream)
-# ---------------------------------------------------------------------------
 
 
 @router.post("/api/analyze")
@@ -67,11 +62,10 @@ async def analyze(
         session = await create_session(max_active=settings.max_active_sessions)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    tmp_dir = Path(tempfile.mkdtemp(prefix="sfn_"))
-    session.temp_dir = tmp_dir
-
     total_bytes = 0
     try:
+        tmp_dir = session_temp_dir()
+        session.temp_dir = tmp_dir
         for upload in files:
             file_id = str(uuid.uuid4())
             filename = upload.filename or "unknown"
@@ -95,10 +89,14 @@ async def analyze(
                             ),
                         )
                     fout.write(chunk)
+            prepare_upload_permissions(dest)
             session.files.append(FileEntry(file_id=file_id, filename=filename, temp_path=dest))
-    except Exception:
+    except BaseException:
         await delete_session(session.session_id)
         raise
+    finally:
+        for upload in files:
+            await upload.close()
 
     # Touch last_access so the reaper cannot evict an in-flight session that
     # has not yet received a get_session() call (e.g. long-running analysis).
@@ -113,14 +111,27 @@ async def analyze(
         loop = asyncio.get_running_loop()
 
         def _run_analysis() -> None:
+            events = None
             try:
-                for event in analyze_session(session, mode_list, settings):
+                events = iter(analyze_session(session, mode_list, settings))
+                while not session.cancelled.is_set():
+                    try:
+                        event = next(events)
+                    except StopIteration:
+                        break
                     session.last_access = time.monotonic()
                     loop.call_soon_threadsafe(queue.put_nowait, event)
             finally:
-                loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+                try:
+                    if events is not None and hasattr(events, "close"):
+                        events.close()
+                finally:
+                    session.end_work()
+                    loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
 
+        session.begin_work()
         task = asyncio.create_task(asyncio.to_thread(_run_analysis))
+        completed = False
 
         try:
             while True:
@@ -129,13 +140,19 @@ async def analyze(
                     break
                 yield f"data: {json.dumps(event.__dict__)}\n\n"
 
-            await task  # re-raise any unexpected exception from the thread
+            await asyncio.shield(task)  # preserve worker ownership on disconnect
+            completed = True
         finally:
-            # Cancel the task if the client disconnects so the asyncio Future
-            # is not orphaned.  The underlying thread pool thread cannot be
-            # forcibly interrupted, but it will be ignored once the task is
-            # cancelled and its result will be discarded.
-            task.cancel()
+            if not completed:
+                await delete_session(session.session_id)
+
+                # Do not cancel to_thread: cleanup belongs to the real worker,
+                # which checks the signal before each next generator step.
+                def consume_result(done: asyncio.Task) -> None:
+                    if not done.cancelled():
+                        done.exception()
+
+                task.add_done_callback(consume_result)
 
     return StreamingResponse(
         event_stream(),
@@ -144,9 +161,7 @@ async def analyze(
     )
 
 
-# ---------------------------------------------------------------------------
 # Phase 2: Query (instant, re-callable on slider change)
-# ---------------------------------------------------------------------------
 
 
 @router.post("/api/query")
@@ -167,17 +182,22 @@ async def query(
     mode_list = [m.strip() for m in modes.split(",") if m.strip()]
     # Sync Qdrant I/O (potentially one query per video frame) — run in a
     # thread so a slider drag never stalls other examiners' requests.
-    results, embedding_models = await asyncio.to_thread(
-        query_session,
-        session,
-        mode_list,
-        threshold_altered,
-        threshold_semantic,
-        limit,
-        settings,
-        unify=unify,
-        include_reference=include_reference,
-    )
+    try:
+        results, embedding_models = await asyncio.to_thread(
+            query_session,
+            session,
+            mode_list,
+            threshold_altered,
+            threshold_semantic,
+            limit,
+            settings,
+            unify=unify,
+            include_reference=include_reference,
+        )
+    except CompatibilityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except QdrantUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     provenance = QueryProvenance(
         modes=mode_list,
         threshold_altered=threshold_altered,
@@ -231,9 +251,7 @@ async def query(
     )
 
 
-# ---------------------------------------------------------------------------
 # Semantic score distribution stats (on-demand, per file)
-# ---------------------------------------------------------------------------
 
 
 @router.get("/api/semantic-stats/{session_id}/{file_id}")
@@ -247,15 +265,18 @@ async def semantic_stats(session_id: str, file_id: str) -> JSONResponse:
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     settings = Settings()
-    stats, error = query_semantic_stats(session, file_id, settings)
+    try:
+        stats, error = await asyncio.to_thread(query_semantic_stats, session, file_id, settings)
+    except CompatibilityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except QdrantUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if error:
         raise HTTPException(status_code=400, detail=error)
     return JSONResponse(stats.__dict__)
 
 
-# ---------------------------------------------------------------------------
 # Forensic audit endpoints (on-demand, for the Audit modal)
-# ---------------------------------------------------------------------------
 
 
 @router.get("/api/library-versions")
@@ -270,4 +291,4 @@ async def hit_provenance(image_hash: str) -> JSONResponse:
     if not re.fullmatch(r"[0-9a-f]{64}", image_hash):
         raise HTTPException(status_code=400, detail="Invalid hash")
     settings = Settings()
-    return JSONResponse(get_hit_qdrant_provenance(image_hash, settings))
+    return JSONResponse(await asyncio.to_thread(get_hit_qdrant_provenance, image_hash, settings))

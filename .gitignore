@@ -211,6 +211,8 @@ __marimo__/
 # committed sample image set.
 data/*
 !data/sample_images/
+# Keep new local photos private; the curated images already tracked stay tracked.
+data/sample_images/*
 research/
 models/
 qdrant
@@ -219,3 +221,21 @@ test/searchfiles/
 sfn_ingestion_*.csv
 .claude/worktrees/
 .playwright-mcp/
+
+# Local planning, handoffs and cleanup reports are not project documentation.
+/.cleanup-notes/
+
+# Durable case state and generated release artifacts
+case-data/
+scalarforensic-*.advisories.json
+scalarforensic-*.qdrant-advisories.json
+scalarforensic-*.images.json
+scalarforensic-*.scanner.txt
+bundle-inventory.json
+vendor/
+release-artifacts/
+requirements.txt
+requirements-build.txt
+node_modules/
+test-results/
+playwright-report/

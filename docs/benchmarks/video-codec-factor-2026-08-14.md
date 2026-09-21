@@ -1,6 +1,6 @@
 # Video codec output-size factor, and the §4.3 yield residual — 2026-08-14
 
-Benchmarker: `scalarforensic-csm-b2`. Repo `main` at `f2b07a7`, clean tree in a
+Historical benchmark of `main` at `f2b07a7`, clean tree in a
 dedicated worktree (`PYTHONPATH=$PWD/src`). Raw per-run JSON, the driver
 scripts, the full 509-file corpus probe and the task-B logs are committed
 alongside this report — `docs/benchmarks/video-codec-factor-2026-08-14-scripts/`
@@ -160,8 +160,7 @@ GPU row:
   under 1, several substantially so (HEVC 10-bit CPU: as low as 0.125 — the
   estimate can overshoot the real output by 8×).
 
-**Named implication for §6.3, stated as a finding, not a fix (this is a
-measurement dispatch, code is out of scope):** the uncalibrated estimate is
+**Implication for §6.3 (a measurement finding, not an implementation change):** the uncalibrated estimate is
 not uniformly a low-side risk. On this sample it is frequently a *high-side*
 over-estimate for the CPU pipeline, which is the pipeline `select()` picks
 whenever the host has no working GPU encoder — i.e., the estimate can refuse
@@ -210,21 +209,20 @@ this alone — see §5.
 
 ## 4. Task B — the §4.3 yield residual
 
-**Settings, from `scalarforensic-com-c17` directly (phase 7 implementer):**
+**Recorded implementation settings:**
 `SFN_VIDEO_JOB_NICE=10` (applied with `setpriority(PRIO_PGRP)` on a
 `start_new_session` child, so every ffmpeg thread carries it) and
 `SFN_VIDEO_JOB_THREADS=0` → ffmpeg `-threads max(1, os.cpu_count()//2)` = 12
-on this 24-thread host. c17: "the knobs bite on CPU/libx264 only — chunk
-encodes take neither knob. Measure both pipelines: NVENC residual is
-unmeasured and I claim nothing about it." This report accordingly measures
-the CPU pipeline only.
+on this 24-thread host. These knobs apply to the full-copy CPU/libx264 path;
+chunk encodes take neither knob. This report measures the CPU pipeline only,
+not an NVENC residual.
 
 **Method.** The real §4.3 competitor holds a worker for ~51 min;
 this corpus has no source that long, and synthesizing a genuinely
 tens-of-minutes source is expensive on this host's tight `/tmp` (tmpfs,
 shared with other sessions — 6.3 GiB free at the time this was designed).
-`scalarforensic-com-m6` flagged (correctly) that a short-lived competitor
-that exits mid-measurement doesn't test the steady state §4.3 describes.
+A short-lived competitor that exits mid-measurement does not test the steady
+state §4.3 describes.
 Resolution: `task_b.py`'s `Sustainer` relaunches the full-copy job the
 instant one run exits, for the whole span of the chunk-encode reps, so a
 competitor is running at every timed rep's start — a **synthesized sustained
@@ -238,19 +236,16 @@ In practice, at CPU/libx264 with a live chunk-encode competing for the same
 core budget, one full-job run took the whole span of both 6-rep measurements
 (0 restarts recorded in either run — `Sustainer.restarts` stayed 0
 throughout), so both runs in fact tested against the *same continuous* run
-of the 11.4-minute source, not a mid-run handoff. The relaunch design is
+of the 11.4-minute source, without a mid-run restart. The relaunch design is
 still the correct one to have built (a shorter or faster-finishing full job
 would have needed it), and is kept in the report because it is what made
 `competitor_running_at_start=True` a checked invariant rather than an
 assumption.
 
-**Box state during the measured runs.** Window coordinated by
-`scalarforensic-com-m6`: `c17` at its retire nudge, running nothing;
-`c18` idle, its work merged (#173); `m6` held its own pending pytest run
-until this reported back. `/tmp` (tmpfs) at 12 GiB free after `m6` reclaimed
-~21 GiB from retired agents' worktree venvs — noted because a full tmpfs
-mid-run would look exactly like a slow encode, and this run did not hit
-that. Non-fleet load present throughout, as it is on this host at all
+**Box state during the measured runs.** Other implementation/test work was
+paused during the measurement. `/tmp` (tmpfs) had 12 GiB free after reclaiming
+~21 GiB of temporary environments; a full tmpfs could mimic a slow encode,
+but this run did not fill it. Background load remained, as on this host at all
 times (§3.5): `bitcoind` ~4.5% steady, Xorg, an NX session. `uptime` load
 average during the runs: 16.56/16.03/8.41 at start, 28.71/23.36/13.30 by the
 end of the niced run — both figures reflect this measurement's own two
@@ -262,14 +257,10 @@ suite and no other session's encode, not load 0.
 unniced rep was run and **discarded**, for reasons recorded rather than
 silently dropped:
 
-1. `scalarforensic-com-m6` measured the box directly during that window and
-   found `pytest -q` running at 101% CPU (started 08:42:31, gone by
-   08:42:45 — short bursts, not continuous) with both `c17` and `c18`
-   mid-implementation and expected to keep running the suite repeatedly.
-   Load average 1.40/2.78/1.76 — "this box has not been quiet recently."
-   Per the dispatch, a coder's session not showing `busy` is not sufficient
-   evidence of a clean box, and this confirms why: the contamination here
-   was a burst that would not necessarily show as sustained "busy" state.
+1. Direct observation found `pytest -q` running at 101% CPU (08:42:31 to
+   08:42:45, short bursts rather than continuous). Load average was
+   1.40/2.78/1.76. The measured process activity, not an idle-status claim,
+   established that the run was contaminated.
 2. Independent of contention, the first script draft had a bug: chunk start
    offsets (`10, 50, 90, 130, 170` s) ran past the 68.4 s chunk source's own
    duration for 3 of 5 reps, so those reps hit EOF early and returned
@@ -361,8 +352,8 @@ detectable (re-run `docs/benchmarks/video-codec-factor-2026-08-14-scripts/run_be
 
 **What the numbers support.** With n=3–8 per class, this report should not be
 read as delivering a single "the codec factor is X" constant — it explicitly
-does not, per §2's last paragraph, and the dispatch asked for n and spread
-to be stated rather than a false-precision point estimate. What it does
+does not, per §2's last paragraph; sample counts and spread are reported
+rather than a false-precision point estimate. What it does
 support, with reasonable confidence given the sample: the CPU pipeline
 (the one selected on any host without a working GPU encoder, which per §8 is
 the fallback path, not a rare one) undershoots the §6.3 estimate on both HEVC
@@ -404,5 +395,5 @@ but false number if not caught: task A's estimator call was correct from the
 start, but task B's first script both ran through a coder-contaminated
 window undetected by "not busy" alone, and had a chunk-start arithmetic bug
 producing near-zero wall times that read as suspiciously good in isolation.
-Both are recorded in §4 rather than silently fixed, per the dispatch's own
-instruction that a named gap is worth more than a number covering it.
+Both defects and the discarded measurements are recorded in §4 so the
+limitations of the evidence remain explicit.

@@ -37,6 +37,10 @@ import sys
 import urllib.request
 from pathlib import Path
 
+# Runs without an editable install; the hash module is stdlib-only.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from scalar_forensic._model_hash import hash_dino_snapshot
+
 SSCD_URL = "https://dl.fbaipublicfiles.com/sscd-copy-detection/sscd_disc_mixup.torchscript.pt"
 SSCD_DEST = Path("models/sscd_disc_mixup.torchscript.pt")
 
@@ -60,8 +64,9 @@ DINO_DEST = Path("models/dinov2-large")
 # When --hash resolves to an entry here, the matching revision is fetched automatically
 # so the downloaded snapshot is guaranteed to produce the expected content hash.
 #
-# Content hashes are computed by _compute_dino_hash: SHA-256 over (name, content) of
-# every file whose extension is in _DINO_CONTENT_EXTENSIONS, in lexicographic order.
+# Content hashes are computed by scalar_forensic._model_hash.hash_dino_snapshot:
+# SHA-256 over (name, content) of every file whose extension is in
+# DINO_CONTENT_EXTENSIONS, in lexicographic order.
 # README.md, .gitattributes, *.metadata, CACHEDIR.TAG and other library-generated
 # files are excluded so the hash is stable across huggingface_hub versions.
 #
@@ -79,28 +84,8 @@ KNOWN_DINO_REVISIONS: dict[str, str] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Hash helpers (mirror safeguards.compute_dino_model_hash /
-#               safeguards.compute_sscd_model_hash without importing the package)
-# ---------------------------------------------------------------------------
-
-# Mirror of scalar_forensic._model_hash.DINO_CONTENT_EXTENSIONS.
-# This script intentionally avoids importing the package so it can run with
-# only huggingface_hub installed (no torch / transformers needed for downloads).
-# Keep this value in sync with _model_hash.py; see that module for the rationale.
-_DINO_CONTENT_EXTENSIONS: frozenset[str] = frozenset({".safetensors", ".bin", ".json"})
-
-
-def _compute_dino_hash(local_dir: Path) -> str:
-    h = hashlib.sha256()
-    for file in sorted(local_dir.rglob("*")):
-        if not file.is_file() or file.suffix not in _DINO_CONTENT_EXTENSIONS:
-            continue
-        h.update(file.name.encode())
-        with file.open("rb") as f:
-            for chunk in iter(lambda: f.read(65536), b""):
-                h.update(chunk)
-    return h.hexdigest()
+# Hash helpers (SSCD mirrors safeguards.compute_sscd_model_hash; DINO comes
+# from scalar_forensic._model_hash, which is stdlib-only)
 
 
 def _compute_sscd_hash(path: Path) -> str:
@@ -109,11 +94,6 @@ def _compute_sscd_hash(path: Path) -> str:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
-
-
-# ---------------------------------------------------------------------------
-# Download functions
-# ---------------------------------------------------------------------------
 
 
 def _progress(block_num: int, block_size: int, total_size: int) -> None:
@@ -216,7 +196,7 @@ def download_dino(
     if _dino_is_complete() and not force:
         print(f"DINOv2: already present at {DINO_DEST}")
         if expected_hash:
-            actual = _compute_dino_hash(DINO_DEST)
+            actual = hash_dino_snapshot(DINO_DEST)
             print(f"  content hash: {actual}")
             if actual != expected_hash:
                 print(f"  [ERROR] hash mismatch — expected: {expected_hash}")
@@ -248,7 +228,7 @@ def download_dino(
         resume_download=True,
     )
     print(f"DINOv2: saved to {DINO_DEST}")
-    actual = _compute_dino_hash(DINO_DEST)
+    actual = hash_dino_snapshot(DINO_DEST)
     print(f"  content hash: {actual}")
     if expected_hash and actual != expected_hash:
         print(f"  [ERROR] hash mismatch — expected: {expected_hash}")
@@ -261,11 +241,6 @@ def download_dino(
         sys.exit(1)
     elif expected_hash:
         print("  hash verified ✓")
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 
 def main() -> None:
@@ -336,10 +311,10 @@ def main() -> None:
     # Faces are opt-in: never fetched by a bare invocation or --all.
     do_yunet = args.yunet
 
-    if args.hash and do_sscd and do_dino:
+    if args.hash and sum((do_sscd, do_dino, do_yunet)) != 1:
         print(
-            "[ERROR] --hash requires exactly one of --sscd or --dino "
-            "(the two models have different hashes).",
+            "[ERROR] --hash requires exactly one of --sscd, --dino or --yunet "
+            "(each model has a different hash).",
             file=sys.stderr,
         )
         sys.exit(1)

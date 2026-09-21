@@ -1,0 +1,154 @@
+[
+    {
+        "Id": "sha256:e447fb5a1f85c5cc08d72710640af1041fbb4469a49f80f57a351c97e8bc5701",
+        "RepoTags": [
+            "scalarforensic:release-check-20260908"
+        ],
+        "RepoDigests": [
+            "scalarforensic@sha256:e447fb5a1f85c5cc08d72710640af1041fbb4469a49f80f57a351c97e8bc5701"
+        ],
+        "Comment": "buildkit.dockerfile.v0",
+        "Created": "2026-09-08T18:50:18.586985348+02:00",
+        "Config": {
+            "User": "10001:10001",
+            "Env": [
+                "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LANG=C.UTF-8",
+                "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+                "PYTHON_VERSION=3.12.14",
+                "PYTHON_SHA256=5c8462af5790baf43a321a1559dbe0db06d1be4300fb85fb53c40060668e548a",
+                "HOME=/home/sfn"
+            ],
+            "Cmd": [
+                "sfn-web"
+            ],
+            "WorkingDir": "/app",
+            "ArgsEscaped": true
+        },
+        "Architecture": "amd64",
+        "Os": "linux",
+        "Size": 11051644602,
+        "RootFS": {
+            "Type": "layers",
+            "Layers": [
+                "sha256:411a86676185cb54d695a805b238194a64e9b77e0c723f3802fbb87d333ea0b3",
+                "sha256:3070bb8623db07ca38569112f9b296043371a00bfb3ee4d9f8f63ddfd2f2efca",
+                "sha256:3d664d274420a79749a26f9e5115b2120d46037264011773ca4c52e22780b2ca",
+                "sha256:24257af4ce5bde01d3c7ebd6d366ec4a298ed27c794bbd6832ef5ce934a66170",
+                "sha256:db0b27af7880c5e9d32e5582e358df4a85a6b7ffb28f163889cbc558d5eef5eb",
+                "sha256:fbe4688c739751e40414a7eeba99eab99b04971f6a264b406da3678eab863e8f",
+                "sha256:14c73ed91d0f8be9f618b4e0c5b7465cc1f06ff3ce37c052d025a16f9e70f32e",
+                "sha256:b63d6e70456b5327b9e61cefa61e29470a53953f5853ac9961980c22ba614d0e",
+                "sha256:c47532dda15f1358023f3393f4f5333cb7de449e7f784d0ff764ccc4c5d95eb7",
+                "sha256:25de84221cbee26675490ef0b14e3ac639be87332844f0803bd468c762a8a585",
+                "sha256:bbbf6dc4f4578076e4191a03810e608d85642029597eef6f3fc415342e471415",
+                "sha256:89cd2ff12a7da177438933ae5141901bbab85c8e4a367bf076db1c9e30714be7",
+                "sha256:50d755af78af4681250c5c8da574320dc65d007180490ca6c660503f1ee219a5",
+                "sha256:962c1d68555aad62b79feed79946c782ddce2b413813b866d9c302bffc7f5dab",
+                "sha256:9dfdb7e9905f63d0943ca944667514afc8949fc9692aaa73db89c18f8babf1fa",
+                "sha256:34d3b9950105aca360b49558d9e6d37daa90a6bb31c28ec4cca0b3e91371768e",
+                "sha256:5820a9d4a76a6cb3e46e0ca6d58e58346166aca568f690434eec3cd37bd33698"
+            ]
+        },
+        "Metadata": {
+            "LastTagTime": "2026-09-08T16:55:04.540129778Z"
+        },
+        "Descriptor": {
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "digest": "sha256:e447fb5a1f85c5cc08d72710640af1041fbb4469a49f80f57a351c97e8bc5701",
+            "size": 856,
+            "annotations": {
+                "io.containerd.image.name": "docker.io/library/scalarforensic:release-check-20260908",
+                "org.opencontainers.image.ref.name": "release-check-20260908"
+            }
+        },
+        "Identity": {
+            "Build": [
+                {
+                    "Ref": "irurrbno60wopkekz4unzs0mv",
+                    "CreatedAt": "2026-09-08T18:52:47.324010357+02:00"
+                }
+            ]
+        }
+    },
+    {
+        "Id": "sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc",
+        "RepoTags": [
+            "qdrant/qdrant:v1.19.0"
+        ],
+        "RepoDigests": [
+            "qdrant/qdrant@sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc"
+        ],
+        "Comment": "buildkit.dockerfile.v0",
+        "Created": "2026-08-04T12:30:43.398149307Z",
+        "Config": {
+            "User": "0:0",
+            "ExposedPorts": {
+                "6333/tcp": {},
+                "6334/tcp": {}
+            },
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "DIR=",
+                "TZ=Etc/UTC",
+                "RUN_MODE=production"
+            ],
+            "Cmd": [
+                "./entrypoint.sh"
+            ],
+            "WorkingDir": "/qdrant",
+            "Labels": {
+                "org.opencontainers.image.description": "Official Qdrant image",
+                "org.opencontainers.image.documentation": "https://qdrant.com/docs",
+                "org.opencontainers.image.source": "https://github.com/qdrant/qdrant",
+                "org.opencontainers.image.title": "Qdrant",
+                "org.opencontainers.image.url": "https://qdrant.com/",
+                "org.opencontainers.image.vendor": "Qdrant",
+                "org.opencontainers.image.version": "v1.19.0"
+            },
+            "ArgsEscaped": true
+        },
+        "Architecture": "amd64",
+        "Os": "linux",
+        "Size": 70716036,
+        "RootFS": {
+            "Type": "layers",
+            "Layers": [
+                "sha256:f2ec4de84f559f5c7be4233b589cdbdbb5507807e05621b77320edd55a1f2a0f",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:cca395e10decb44e44f0bc111d50c2a943eca378f524d7219cb961860c0ba3a3",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:8a7aa544dd2ad0666a346f07ad535a30d93e163c28f12d98879afc315d4d9519",
+                "sha256:f678b1c1c69e6f4ac229cf51d650e7bd50fc6d4aa61bade6b485e7ce8bdad5bb",
+                "sha256:5ccf3a706733b7ce459097c96d5433f494d768eaf75369fa44051092a68dbd34",
+                "sha256:dd5686d42c869e755a7a9564010686ad1be6086d37288a733456038900228a5b",
+                "sha256:09b3c0fbb55553b4259279142fd68c204df06c03bff65034c344201d1318e686",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
+            ]
+        },
+        "Metadata": {
+            "LastTagTime": "2026-09-08T16:55:05.357159623Z"
+        },
+        "Descriptor": {
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "digest": "sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc",
+            "size": 1609,
+            "annotations": {
+                "containerd.io/distribution.source.docker.io": "qdrant/qdrant",
+                "io.containerd.image.name": "docker.io/qdrant/qdrant:v1.19.0",
+                "org.opencontainers.image.ref.name": "v1.19.0"
+            }
+        },
+        "Identity": {
+            "Pull": [
+                {
+                    "Repository": "docker.io/qdrant/qdrant"
+                }
+            ]
+        }
+    }
+]

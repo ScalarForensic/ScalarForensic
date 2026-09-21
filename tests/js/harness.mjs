@@ -1,4 +1,4 @@
-// ── The JS harness: execute the frontend, do not read it ─────────────────────
+// The JS harness: execute the frontend, do not read it
 //
 // WHY THIS EXISTS.  `player.js` once shipped a `?? … ||` precedence
 // SyntaxError — the file did not parse at all — and all fourteen text-level
@@ -16,11 +16,8 @@
 // parts under test touch no DOM.  `package.json` therefore has no
 // `dependencies` at all: see it, and this paragraph, as one statement.
 //
-// WHAT IT DOES NOT COVER.  There is no DOM.  Markup — the `.vc-block`
-// template, Alpine directives, CSS — is still wiring-pinned only, and
-// rendering it needs a full analysis session with Qdrant and an indexed
-// corpus.  This harness pins the *script* half: that it parses, and that its
-// methods and getters compute what they claim to.
+// There is no DOM here. Tests in tests/browser/smoke.spec.mjs exercise markup
+// and Alpine behavior in Chromium with synthetic API responses.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -112,4 +109,12 @@ export function loadFrontend() {
 
 export function loadComponent() {
   return loadFrontend().component;
+}
+
+// A promise whose settlement a test controls, for pinning what happens while a
+// request is still in flight.
+export function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 }

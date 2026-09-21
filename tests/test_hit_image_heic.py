@@ -104,9 +104,8 @@ class TestMetadataHeic:
 class TestWhitelistDerivation:
     def test_route_whitelist_matches_scanner(self):
         from scalar_forensic import scanner
-        from scalar_forensic.web.routes import files
 
         expected = scanner.IMAGE_EXTENSIONS | (
             scanner._HEIF_EXTENSIONS if scanner._HEIF_AVAILABLE else frozenset()
         )
-        assert files._allowed_image_extensions() == expected
+        assert scanner.allowed_image_extensions() == expected

@@ -7,7 +7,6 @@ reordered into the canonical order, RGB in / BGR handled internally.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
 
 import cv2
 import numpy as np
@@ -29,16 +28,6 @@ _YUNET_TO_CANONICAL = [0, 1, 2, 3, 4]
 def _create_yunet(model_path: str, score_threshold: float):
     """Seam for tests — cv2's extension types cannot be mock-patched directly."""
     return cv2.FaceDetectorYN.create(model_path, "", (0, 0), score_threshold=score_threshold)
-
-
-class FaceDetector(Protocol):
-    def detect(self, img_rgb: np.ndarray) -> list[FaceDetection]: ...
-
-    @property
-    def detector_id(self) -> str: ...
-
-    @property
-    def model_hash(self) -> str: ...
 
 
 def _scaled_size(w: int, h: int, max_size: int) -> tuple[int, int, float]:
@@ -83,8 +72,8 @@ class YuNetDetector:
             native = row[4:14].reshape(5, 2) / scale
             lm = native[_YUNET_TO_CANONICAL].astype(np.float32)
             # Runtime guard against a wrong _YUNET_TO_CANONICAL map: drop
-            # non-canonical output rather than raise — one legitimately rotated
-            # face must not crash a whole indexing run.  A wholesale-wrong map
+            # non-canonical output rather than raise — a malformed detection
+            # must not crash a whole indexing run.  A wholesale-wrong map
             # shows up as a large n_dropped_noncanonical on the marker and in
             # the index_run audit record — note it is NOT in the CLI summary,
             # so it has to be looked for rather than noticed.

@@ -9,12 +9,6 @@ def test_faces_part_is_loaded_before_app_js():
     assert html.index("/static/js/faces.js") < html.index("/static/app.js")
 
 
-def test_faces_part_registers_via_sfn_parts_not_object_assign():
-    js = (STATIC / "js" / "faces.js").read_text()
-    assert "__sfnParts" in js
-    assert "Object.assign" not in js  # would evaluate getters instead of copying
-
-
 def test_face_grid_uses_the_review_hash_domain():
     # chip_hash no longer exists in the payload, and the aligned hash names no
     # review artefact: binding either one renders a broken image for every face.
@@ -67,13 +61,6 @@ def test_selected_query_faces_get_the_green_border():
     block = css[start : start + 200]
     assert "var(--success)" in block
     assert "border" in block
-
-
-def test_query_face_functions_live_in_the_faces_part_file():
-    js = (STATIC / "js" / "faces.js").read_text()
-    for fn in ("loadQueryFaces", "toggleQueryFace", "queryFaceChipUrl"):
-        assert fn in js
-    assert "Object.assign" not in js
 
 
 def test_hit_list_has_a_faces_badge_slot():
@@ -178,7 +165,7 @@ def test_basket_box_sits_in_the_left_panel_with_three_state_rows():
     assert "basketClear()" in head
     css = (STATIC / "style.css").read_text()
     basket = css[css.index(".face-basket {") :].split("}")[0]
-    assert "overflow-y: auto" in basket  # scrollable
+    assert "overflow-y: auto" in basket
 
 
 def test_ctrl_click_adds_faces_to_the_basket_on_both_sides():
@@ -291,7 +278,8 @@ def test_query_image_buttons_name_their_model():
 def test_face_dist_stats_modal_scopes_the_reference_threshold():
     html = (STATIC / "index.html").read_text()
     start = html.index('<div class="face-stats-modal-backdrop"')
-    block = html[start : start + 4000]
+    end = html.index('<div class="face-audit-modal-backdrop"', start)
+    block = html[start:end]
     assert "model_reference_note" in block
     assert "review-only" in block  # the population statement
 

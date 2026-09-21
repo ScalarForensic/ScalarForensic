@@ -1,6 +1,6 @@
 // Part of the sfn() Alpine component — merged by app.js. See app.js for load order.
 (window.__sfnParts = window.__sfnParts || []).push({
-    // ── Computed ──────────────────────────────────────────────────────────
+    // Computed
     get progressPct() {
       // Total may be null on error events — treat as no-progress rather than dividing by zero.
       return !this.progress.total
@@ -42,7 +42,7 @@
       }
       return hits[0] ?? null;
     },
-    // ── Source-video playback ─────────────────────────────────────────────
+    // Source-video playback
     // Timecode the player should open at: the matched frame the examiner has
     // selected, otherwise the frame that produced the hit itself.
     get activeHitTimecodeMs() {
@@ -115,7 +115,7 @@
       return `Not carried into the viewing copy: ${dropped.join(', ')} `
         + '(no MP4 mapping, and nothing here is re-encoded). Present in the original.';
     },
-    // ── Face basket derivations (change-set 2026-08-13) ───────────────────
+    // Face basket derivations (change-set 2026-08-13)
     // The basket is the single selection model; the wire formats fall out of
     // it here rather than living as parallel state that could drift.
     get selectedQueryFaceIndices() {
@@ -153,7 +153,8 @@
         const fh = byHash.get(h.image_hash);
         if (!fh) return h;
         byHash.delete(h.image_hash);
-        return { ...h, scores: { ...h.scores, faces: fh.score }, face_match: fh.face };
+        return { ...h, scores: { ...h.scores, faces: fh.score }, face_match: fh.face,
+          face_observation_count: fh.n_collapsed };
       });
       // Media found only by face, appended score-desc.  `path` is set from
       // whichever locator the record has: hitKey() keys on it, so a null path
@@ -164,6 +165,7 @@
           path: fh.image_path ?? fh.video_path ?? fh.image_hash,
           image_hash: fh.image_hash,
           scores: { faces: fh.score }, face_match: fh.face,
+          face_observation_count: fh.n_collapsed,
           is_video_frame: fh.is_video_frame, video_hash: fh.video_hash,
           video_path: fh.video_path, frame_timecode_ms: fh.frame_timecode_ms,
           exif: null, exif_geo_data: null, model_provenance: null,
@@ -175,14 +177,12 @@
     get filteredHits() {
       if (!this.selectedFile) return [];
       let hits = this.mergedHits.filter(h => {
-        // Keep if any active-mode score is present
         if ('exact' in h.scores) return true;
         if ('altered' in h.scores && this.hitsFilterAltered) return true;
         if ('semantic' in h.scores && this.hitsFilterSemantic) return true;
         if ('faces' in h.scores && this.hitsFilterFaces) return true;
         return false;
       });
-      // When a specific query frame child is selected, show only that frame's hits
       if (this.selectedFrameTimecode !== null) {
         hits = hits.filter(h => h.query_timecodes?.includes(this.selectedFrameTimecode));
       }

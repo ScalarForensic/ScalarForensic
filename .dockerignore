@@ -31,3 +31,15 @@ report.csv
 .idea/
 *.bak
 .DS_Store
+
+# Durable case state and generated release artifacts
+case-data/
+scalarforensic-*.advisories.json
+scalarforensic-*.qdrant-advisories.json
+scalarforensic-*.images.json
+scalarforensic-*.scanner.txt
+node_modules/
+test-results/
+playwright-report/
+
+release-artifacts/

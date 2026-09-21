@@ -60,15 +60,6 @@ class ExtractedFrame:
     frame_index: int  # ordinal among yielded unique frames (0-based)
     frame_hash: str  # SHA-256 of width/height-prefixed raw RGB pixel bytes
 
-    # Needed so the frozen dataclass can hold a non-hashable Image.Image
-    def __hash__(self) -> int:  # type: ignore[override]
-        return hash(self.frame_hash)
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, ExtractedFrame):
-            return NotImplemented
-        return self.frame_hash == other.frame_hash
-
 
 def _frame_pixel_hash(image: Image.Image) -> str:
     """SHA-256 of width || height || raw RGB pixel bytes.
@@ -121,6 +112,12 @@ def extract_frames(
         raise ValueError(f"fps must be > 0, got {fps!r}")
     if max_frames < 0:
         raise ValueError(f"max_frames must be >= 0, got {max_frames!r}")
+
+    from scalar_forensic import video_access
+
+    if video_access.configured():
+        yield from video_access.frames(video_path, fps, max_frames)
+        return
 
     import av  # local import: PyAV is optional at the module level
 
@@ -297,6 +294,11 @@ def extract_frame_at(video_path: Path, timecode_ms: int) -> Image.Image | None:
     Returns ``None`` if the video cannot be opened, the timecode is out of range,
     or no frame is found near the requested position.
     """
+    from scalar_forensic import video_access
+
+    if video_access.configured():
+        return video_access.frame_at(video_path, timecode_ms)
+
     import av  # local import
 
     target_s = timecode_ms / 1000.0
@@ -346,8 +348,14 @@ def get_video_info(video_path: Path) -> dict:
     """Return metadata about a video file (duration, codec, resolution, fps).
 
     Used for timeline rendering in the web UI and for forensic metadata display.
-    Returns a dict with best-effort fields; never raises.
+    Decode errors return best-effort fields. Isolated transport/configuration
+    failures raise instead of silently reporting missing metadata.
     """
+    from scalar_forensic import video_access
+
+    if video_access.configured():
+        return video_access.client().call("info", video_path)
+
     import av  # local import
 
     try:

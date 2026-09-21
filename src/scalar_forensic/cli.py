@@ -1,12 +1,10 @@
 """CLI entry point for ScalarForensic."""
 
-import csv
 import hashlib
 import io
 import os
-from collections import Counter, deque
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
 from datetime import datetime
 from itertools import batched
 from pathlib import Path
@@ -16,6 +14,7 @@ import typer
 from PIL import Image
 from qdrant_client.models import Distance, VectorParams
 
+from scalar_forensic import scanner
 from scalar_forensic.config import ENV_ALLOW_ONLINE, Settings
 from scalar_forensic.embedder import (
     AnyEmbedder,
@@ -33,308 +32,49 @@ from scalar_forensic.embedder import (
     write_thumbnail,
 )
 from scalar_forensic.indexer import Indexer
+from scalar_forensic.ingestion.commit import BatchWrite
+from scalar_forensic.ingestion.faces import (
+    FaceRunState,
+    commit_faces,
+    remove_stale_faces,
+    unlink_unreferenced_chips,
+)
+from scalar_forensic.ingestion.models import (
+    _S_FAIL_EMB,
+    _S_FAIL_PRE,
+    _S_FAIL_READ,
+    _S_INDEXED,
+    _S_SKIP_DUP,
+    _S_SKIP_IDX,
+    _S_UNSUPPORTED,
+    _BatchCtx,
+    _FileRecord,
+)
+from scalar_forensic.ingestion.planning import discover_files, plan_images
+from scalar_forensic.ingestion.reporting import (
+    _fmt_duration,
+    _fmt_mbps,
+    _fmt_rate,
+    _print_summary,
+    _progress_bar,
+    _RateTracker,
+    _stale_path_listing,
+    _write_csv,
+)
+from scalar_forensic.ingestion.video import (
+    _video_status,
+    completion_plan,
+    plan_frames,
+    plan_videos,
+)
 from scalar_forensic.manifest import input_file_entry, write_run_manifest
-from scalar_forensic.scanner import _HEIF_AVAILABLE, scan_all_files
+from scalar_forensic.scanner import scan_all_files
 from scalar_forensic.video import (
     extract_frames,
     frame_disk_path,
     get_pyav_version,
     get_video_info,
 )
-
-# ── file-level status codes ──────────────────────────────────────────────────
-_S_INDEXED = "indexed"
-_S_SKIP_DUP = "skipped_dup_batch"
-_S_SKIP_IDX = "skipped_indexed"
-# Video source file whose every extracted frame was a byte-identical duplicate
-# of a frame from other media in the same run — nothing new to index, but not a
-# failure either.  Distinct from _S_SKIP_DUP: the video file itself is not a
-# duplicate, its frames are.
-_S_SKIP_FRAME_DUP = "skipped_frames_dup_run"
-_S_FAIL_READ = "failed_read"
-_S_FAIL_PRE = "failed_preprocessing"
-_S_FAIL_EMB = "failed_embedding"
-_S_UNSUPPORTED = "unsupported"
-
-
-@dataclass
-class _FileRecord:
-    path: Path
-    status: str = "pending"
-    reason: str = ""
-    md5: str = ""
-    sha256: str = ""
-    is_frame: bool = False  # True for frame JPEGs written during slicing
-
-
-@dataclass
-class _BatchCtx:
-    """Carries Phase-A results (read/hash/dedup) across one loop iteration.
-
-    The preprocessing Future is submitted at the end of Phase A and resolved
-    at the start of the next iteration's finish step — so CPU preprocessing
-    of batch N+1 overlaps with GPU embedding of batch N.
-    """
-
-    batch_num: int
-    batch_bytes: int
-    read_s: float
-    hash_s: float
-    imgs_at_batch: int  # items_processed_so_far snapshot — used for the progress line
-    path_hash_pairs: list[tuple[Path, str]]
-    md5_by_sha256: dict[str, str]
-    unique_pairs: list[tuple[Path, str]]
-    to_embed_per_spec: list[list[tuple[Path, str]]]
-    exif_data: "dict[Path, ExifInfo] | None"
-    paths_to_pre: list[Path]
-    # tuple[list[Image.Image | Exception], list[face results], float] — see
-    # _timed_preprocess; face results are (path, sha256, vmeta,
-    # FaceIndexResult | Exception) for this batch's in-loop face detection.
-    pre_future: "Future[tuple[list, list, float]] | None"
-
-
-def _fmt_rate(count: int, seconds: float, unit: str) -> str:
-    if seconds <= 0:
-        return "—"
-    return f"{count / seconds:.1f} {unit}/s"
-
-
-def _fmt_mbps(bytes_total: int, seconds: float) -> str:
-    if seconds <= 0:
-        return "—"
-    return f"{bytes_total / 1e6 / seconds:.1f} MB/s"
-
-
-def _fmt_duration(seconds: float) -> str:
-    s = int(seconds)
-    if s < 60:
-        return f"{s}s"
-    m, s = divmod(s, 60)
-    if m < 60:
-        return f"{m}m {s:02d}s"
-    h, m = divmod(m, 60)
-    return f"{h}h {m:02d}m {s:02d}s"
-
-
-def _progress_bar(pct: float, width: int = 28) -> str:
-    """Unicode block-element progress bar."""
-    filled = round(width * min(max(pct, 0.0), 100.0) / 100)
-    return "█" * filled + "░" * (width - filled)
-
-
-class _RateTracker:
-    """Smoothed throughput estimate driving the run-progress line. Θ(1) per update.
-
-        x̂ₜ = x̂ₜ₋₁ + α(zₜ − x̂ₜ₋₁),  α = ½,  x̂₁ = z₁
-
-    where zₜ = items / elapsed_s for one batch (or one block of frames).
-
-    The previous version of this class was a scalar Kalman filter that also
-    published a ±1σ band around the ETA. That band was not a calibrated
-    uncertainty: Q and R were hand-picked constants, so at steady state the
-    filter is exactly this α = ½ EWMA and √P is a function of those constants,
-    not of the run. Reporting it as a confidence interval collides with the
-    project rule against displaying uncalibrated numbers (precedent: the raw
-    face cosine, `docs/specs/face-pipeline.md` §10), so the band is gone and
-    the ETA is labelled for what it is — an extrapolation at the current rate.
-    """
-
-    _ALPHA: float = 0.5  # smoothing factor: half old estimate, half new observation
-
-    def __init__(self) -> None:
-        self._x: float | None = None  # x̂: current rate estimate (items/s)
-        self._n: int = 0  # number of updates applied
-
-    def update(self, n_items: int, elapsed_s: float) -> None:
-        """Incorporate one batch/block observation."""
-        if elapsed_s <= 0 or n_items <= 0:
-            return
-        z = n_items / elapsed_s
-        self._n += 1
-        self._x = z if self._x is None else self._x + self._ALPHA * (z - self._x)
-
-    @property
-    def rate(self) -> float | None:
-        """x̂ₜ — current smoothed rate (items/s), or None before the first update."""
-        return self._x
-
-    def eta(self, remaining: int) -> float | None:
-        """Seconds to finish `remaining` items at the current rate.
-
-        None until two observations exist — a single batch is not a rate the
-        display should extrapolate from. No error bound is returned: this is a
-        straight-line extrapolation, not a prediction with a known spread.
-        """
-        if self._x is None or self._x <= 0 or self._n < 2:
-            return None
-        return remaining / self._x
-
-
-def _write_csv(records: dict[Path, "_FileRecord"], csv_path: Path) -> None:
-    try:
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        with csv_path.open("w", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh)
-            writer.writerow(["path", "processed", "reason", "md5", "sha256", "is_video_frame"])
-            for rec in sorted(records.values(), key=lambda r: str(r.path)):
-                processed = "yes" if rec.status == _S_INDEXED else "no"
-                writer.writerow(
-                    [str(rec.path), processed, rec.reason, rec.md5, rec.sha256, rec.is_frame]
-                )
-    except OSError as exc:
-        typer.echo(f"[ERROR] Could not write CSV report to {csv_path}: {exc}", err=True)
-
-
-def _dedup_by_hash(
-    paths: "list[Path]",
-    hash_lookup: "dict[Path, str]",
-    records: "dict[Path, _FileRecord]",
-    dedup_hashes: "list[set[str]]",
-    dedup_paths: "list[set[str]]",
-    n_specs: int,
-    skipped_counts: "list[int]",
-) -> "tuple[list[set[Path]], set[Path], int, int]":
-    """Elect one winner per unique SHA-256, mark duplicates and already-indexed files.
-
-    Returns ``(needs_per_spec, any_needs, n_run_dups, n_all_indexed)``.
-    Mutates *records* (sets status/reason) and *skipped_counts* in place.
-    """
-    unique_by_hash: dict[str, Path] = {}
-    for p in paths:
-        unique_by_hash.setdefault(hash_lookup[p], p)
-    winners: set[Path] = set(unique_by_hash.values())
-
-    for p in paths:
-        if p not in winners:
-            records[p].status = _S_SKIP_DUP
-            records[p].reason = "duplicate in run (same SHA-256)"
-
-    needs_per_spec: list[set[Path]] = [set() for _ in range(n_specs)]
-    for si in range(n_specs):
-        needs_per_spec[si] = {
-            p
-            for p in winners
-            if hash_lookup[p] not in dedup_hashes[si] and str(p.resolve()) not in dedup_paths[si]
-        }
-    any_needs = set().union(*needs_per_spec) if n_specs > 0 else set()
-
-    n_run_dups = len(paths) - len(winners)
-    n_all_indexed = len(winners) - len(any_needs)
-    for si in range(n_specs):
-        skipped_counts[si] += n_run_dups + n_all_indexed
-
-    for p in winners:
-        if p not in any_needs:
-            records[p].status = _S_SKIP_IDX
-            records[p].reason = "already indexed in Qdrant"
-
-    return needs_per_spec, any_needs, n_run_dups, n_all_indexed
-
-
-def _stale_path_listing(stale_points: "list[dict]", limit: int = 20) -> "list[str]":
-    """Indented lines naming the files a stale-observation set belongs to.
-
-    One line per distinct source file, most-affected first, so the operator
-    deciding whether to delete sees *which* evidence is involved rather than a
-    bare total.  Long listings are capped at *limit* files and the remainder is
-    reported as a count.
-    """
-    counts: dict[str, int] = {}
-    for sp in stale_points:
-        src = sp.get("source_path") or "(source file unknown)"
-        counts[src] = counts.get(src, 0) + 1
-    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-    lines = [f"    {n:>4} × {src}" for src, n in ordered[:limit]]
-    if len(ordered) > limit:
-        lines.append(f"    … and {len(ordered) - limit:,} more file(s)")
-    return lines
-
-
-def _video_status(
-    n_total: int, n_indexed: int, n_already: int, n_run_dup: int
-) -> "tuple[str, str]":
-    """Classify a video source file from the outcomes of its extracted frames.
-
-    ``n_total`` frames were extracted; of those ``n_indexed`` produced new
-    vectors, ``n_already`` were already in Qdrant, and ``n_run_dup`` were
-    byte-identical to a frame of other media processed in the same run.
-    Returns ``(status, reason)`` — both are court-facing, so each branch states
-    the fact that holds, never a failure standing in for a duplicate.
-    """
-    if n_indexed > 0:
-        return _S_INDEXED, f"{n_total} frames extracted"
-    if n_already >= n_total:
-        return _S_SKIP_IDX, f"all {n_total} extracted frames already indexed"
-    if n_already + n_run_dup >= n_total:
-        detail = (
-            f"{n_run_dup} in-run duplicate(s), {n_already} already indexed"
-            if n_already
-            else "in-run duplicates"
-        )
-        return (
-            _S_SKIP_FRAME_DUP,
-            f"all {n_total} extracted frames were duplicates of frames from "
-            f"other media in this run ({detail})",
-        )
-    return _S_FAIL_EMB, f"{n_total} frames extracted but no new vectors were indexed"
-
-
-def _print_summary(
-    records: dict[Path, "_FileRecord"],
-    resolved_input: Path,
-    csv_path: Path,
-    specs: list,
-    indexed_counts: list[int],
-    skipped_counts: list[int],
-    failed_counts: list[int],
-    n_images: int = 0,
-    n_videos: int = 0,
-    n_video_frames_indexed: int = 0,
-    n_video_frames_skipped: int = 0,
-) -> None:
-    counts = Counter(r.status for r in records.values())
-    total = len(records)
-    n_image = n_images
-
-    # Per-model breakdown
-    typer.echo("\nDone.")
-    for spec_idx, (embedder, _, _) in enumerate(specs):
-        typer.echo(
-            f"  [{type(embedder).__name__}]  indexed={indexed_counts[spec_idx]}"
-            f"  skipped={skipped_counts[spec_idx]}  embed_failed={failed_counts[spec_idx]}"
-        )
-
-    # Overall file summary table
-    sep = "─" * 52
-    typer.echo(f"\nIngestion summary  ({resolved_input})")
-    typer.echo(sep)
-    rows: list[tuple[str, int | None]] = [
-        ("Total files found", total),
-        ("  image files", n_image),
-        ("  video files", n_videos),
-        ("  non-image files (unsupported)", counts[_S_UNSUPPORTED]),
-        ("", None),
-        ("Indexed (new)", counts[_S_INDEXED]),
-        ("Skipped — already indexed", counts[_S_SKIP_IDX]),
-        ("Skipped — duplicate in batch", counts[_S_SKIP_DUP]),
-        ("Skipped — all frames dup in run", counts[_S_SKIP_FRAME_DUP]),
-        ("Failed  — read error", counts[_S_FAIL_READ]),
-        ("Failed  — preprocessing", counts[_S_FAIL_PRE]),
-        ("Failed  — embedding", counts[_S_FAIL_EMB]),
-    ]
-    if n_videos > 0:
-        rows += [
-            ("", None),
-            ("Video frames indexed (new)", n_video_frames_indexed),
-            ("Video frames skipped (dup)", n_video_frames_skipped),
-        ]
-    for label, value in rows:
-        if value is None:
-            typer.echo("")
-        else:
-            typer.echo(f"  {label:<36} {value:>6,}")
-    typer.echo(sep)
-    typer.echo(f"  CSV report → {csv_path}")
 
 
 def _check_collection_compat_cli(
@@ -369,6 +109,7 @@ def _check_collection_compat_cli(
             settings,
             expected_dino_hash=expected_dino_hash,
             expected_sscd_hash=expected_sscd_hash,
+            needed_vectors={indexer.vector_name for _, indexer, _ in specs},
         )
     except QdrantUnavailable as exc:
         # During `sfn index` Qdrant is *required* — surface the failure rather
@@ -415,15 +156,6 @@ def index(
             "Points are tagged with is_reference=true in their payload."
         ),
     ),
-    ignore_config_mismatch: bool = typer.Option(
-        False,
-        "--ignore-config-mismatch",
-        help=(
-            "Skip embedding-configuration compatibility checks against existing"
-            " collection points. Mixing incompatible embeddings in one collection"
-            " will corrupt similarity results."
-        ),
-    ),
 ) -> None:
     """Embed all images under INPUT_DIR and store vectors in Qdrant."""
     # Write back to os.environ so Settings() reads the correct value,
@@ -437,7 +169,9 @@ def index(
     settings.apply_network_policy()
 
     env_source = str(settings._env_file) if settings._env_file else "(no .env, using defaults)"
-    heif_status = "enabled (pillow-heif)" if _HEIF_AVAILABLE else "disabled (install pillow-heif)"
+    heif_status = (
+        "enabled (pillow-heif)" if scanner._HEIF_AVAILABLE else "disabled (install pillow-heif)"
+    )
     typer.echo(f"Config: {env_source}")
     typer.echo(f"HEIF/HEIC support: {heif_status}")
     typer.echo(
@@ -460,7 +194,7 @@ def index(
         typer.echo("[ERROR] Specify at least one of --dino, --sscd or --faces.", err=True)
         raise typer.Exit(1)
 
-    # ── Face modality startup check (spec §13: fail at startup, not mid-run) ──
+    # Face modality startup check (spec §13: fail at startup, not mid-run)
     face_pipeline = None
     _faces_done: set[str] = set()
     if faces:
@@ -478,29 +212,11 @@ def index(
         from scalar_forensic.faces.indexing import FacePipeline  # deferred: optional deps
 
         face_pipeline = FacePipeline.from_settings(settings)
-        if face_pipeline.store.collection_is_new():
-            _auth_ref = typer.prompt(
-                "First face-collection activation. Authorization reference (free text,"
-                " recorded in the enablement record; empty allowed)",
-                default="",
-            )
-            if not _auth_ref:
-                typer.echo(
-                    "[WARN] No authorization reference recorded for this activation.", err=True
-                )
-            face_pipeline.store.ensure_collection(
-                face_pipeline.cfg, settings.examiner_id, _auth_ref or None
-            )
-            face_pipeline.audit.append(
-                "enablement",
-                examiner_id=settings.examiner_id,
-                authorization_ref=_auth_ref or None,
-                face_collection=settings.face_collection,
-                case_collection=settings.collection,
-            )
-        for _warn in face_pipeline.store.check_compat(face_pipeline.cfg):
-            typer.echo(f"[WARN] face collection config differs — {_warn}", err=True)
-        _faces_done = face_pipeline.store.processed_hashes(face_pipeline.cfg.config_hash)
+        _face_collection_new = face_pipeline.store.collection_is_new()
+        if not _face_collection_new:
+            for _warn in face_pipeline.store.check_compat(face_pipeline.cfg):
+                typer.echo(f"[WARN] face collection config differs — {_warn}", err=True)
+            _faces_done = face_pipeline.store.processed_units(face_pipeline.cfg.config_hash)
 
     if reference:
         if not settings.reference_collection:
@@ -536,7 +252,7 @@ def index(
     if dino:
         models_to_run.append((False, settings.model_dino, "dino"))
 
-    # ── Pass 1: load all embedders upfront so we know every vector's dimension ──
+    # Pass 1: load all embedders upfront so we know every vector's dimension
     # When the collection does not yet exist, passing all selected vector types in
     # a single create_collection call is more efficient than adding them one by one.
     _loaded: list[tuple[AnyEmbedder, str]] = []  # (embedder, vector_name)
@@ -587,7 +303,7 @@ def index(
         vn: VectorParams(size=emb.embedding_dim, distance=Distance.COSINE) for emb, vn in _loaded
     }
 
-    # ── Pass 2: create Indexer instances with the full vectors config ──────────
+    # Pass 2: create Indexer instances with the full vectors config
     specs: list[tuple[AnyEmbedder, Indexer, str]] = []
     for embedder, vector_name in _loaded:
         typer.echo(
@@ -616,57 +332,57 @@ def index(
     mismatches = _check_collection_compat_cli(specs, settings)
     if mismatches:
         detail = "\n  ".join(mismatches)
-        if ignore_config_mismatch:
-            typer.echo(
-                "[WARN] Embedding configuration mismatch"
-                f" (--ignore-config-mismatch set):\n  {detail}",
-                err=True,
-            )
-        else:
-            typer.echo("[ERROR] Embedding configuration mismatch — indexing aborted.", err=True)
-            typer.echo(f"  {detail}", err=True)
-            typer.echo("", err=True)
-            typer.echo(
-                "Mixing incompatible embeddings in the same collection"
-                " corrupts similarity results.",
-                err=True,
-            )
-            typer.echo("Options:", err=True)
-            typer.echo("  • Restore the original settings in .env, OR", err=True)
-            typer.echo("  • Re-create the collection from scratch and re-index, OR", err=True)
-            typer.echo(
-                "  • Download the exact model version recorded in this collection"
-                " (local DINOv2/SSCD only):",
-                err=True,
-            )
-            typer.echo(
-                "      uv run python scripts/download_models.py --dino --hash <stored_hash>",
-                err=True,
-            )
-            typer.echo(
-                "      uv run python scripts/download_models.py --sscd --hash <stored_hash>",
-                err=True,
-            )
-            typer.echo("    (use the stored= value from the mismatch detail above), OR", err=True)
-            typer.echo(
-                "  • Pass --ignore-config-mismatch to proceed anyway (not recommended)", err=True
-            )
-            raise typer.Exit(1)
+        typer.echo("[ERROR] Embedding configuration mismatch — indexing aborted.", err=True)
+        typer.echo(f"  {detail}", err=True)
+        typer.echo(
+            "Restore the recorded settings/model or rebuild the collection. "
+            "sfn-web's --ignore-config-mismatch permits metadata/original inspection "
+            "only; it never permits incompatible ingestion.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Persistent face activation follows all selected collection compatibility gates.
+    if face_pipeline is not None and _face_collection_new:
+        _auth_ref = typer.prompt(
+            "First face-collection activation. Authorization reference (free text,"
+            " recorded in the enablement record; empty allowed)",
+            default="",
+        )
+        if not _auth_ref:
+            typer.echo("[WARN] No authorization reference recorded for this activation.", err=True)
+        face_pipeline.store.ensure_collection(
+            face_pipeline.cfg, settings.examiner_id, _auth_ref or None
+        )
+        face_pipeline.audit.append(
+            "enablement",
+            examiner_id=settings.examiner_id,
+            authorization_ref=_auth_ref or None,
+            face_collection=settings.face_collection,
+            case_collection=settings.collection,
+        )
+        _faces_done = face_pipeline.store.processed_units(face_pipeline.cfg.config_hash)
 
     # Effective short-side cap for preprocessing: must satisfy both SSCD (≥331 px)
     # and DINOv2 (≥normalize_size px).  Computed here so it is available to
     # calibrate() before the batch loops.
     _effective_cap = effective_preprocessing_cap(settings.normalize_size)
 
-    # ── Batch size: explicit config > calibration cache > auto-calibrate ─────
-    if settings.batch_size is None:
+    # Batch size: explicit config > calibration cache > auto-calibrate
+    if settings.batch_size is None and not specs:
+        settings.batch_size = 32
+    elif settings.batch_size is None:
         from scalar_forensic.calibration import (
+            cache_identity,
             calibrate,
             load_cached_batch_size,
         )
 
         _sample_dir = Path("data/sample_images")
-        cached = load_cached_batch_size()
+        _batch_identity = cache_identity(
+            settings, vector_names=[idx.vector_name for _, idx, _ in specs]
+        )
+        cached = load_cached_batch_size(identity=_batch_identity)
         if cached is not None:
             settings.batch_size = cached
             typer.echo(f"Batch size: {cached}  (calibration cache)")
@@ -691,7 +407,9 @@ def index(
                 # mirroring what the indexer does.  This captures true combined
                 # VRAM pressure rather than underestimating it by probing models
                 # in isolation.
-                settings.batch_size = calibrate(local_embedders, _sample_dir, cap=_effective_cap)
+                settings.batch_size = calibrate(
+                    local_embedders, _sample_dir, cap=_effective_cap, identity=_batch_identity
+                )
         else:
             settings.batch_size = 32
             typer.echo(
@@ -702,24 +420,10 @@ def index(
     else:
         typer.echo(f"Batch size: {settings.batch_size}  (SFN_BATCH_SIZE)")
 
-    # ── Pre-scan: collect all files and classify image / video / unsupported ──
+    # Pre-scan: collect all files and classify image / video / unsupported
     typer.echo(f"Scanning {resolved_input} ...")
-    records: dict[Path, _FileRecord] = {}
-    image_paths: list[Path] = []
-    video_paths: list[Path] = []
-    for path, file_type in scan_all_files(resolved_input):
-        rec = _FileRecord(path=path)
-        records[path] = rec
-        if file_type == "image":
-            image_paths.append(path)
-        elif file_type == "video":
-            video_paths.append(path)
-            rec.status = _S_UNSUPPORTED  # placeholder — overwritten after video processing
-            rec.reason = "video (pending)"
-        else:
-            ext = path.suffix.lower() or "(no extension)"
-            rec.status = _S_UNSUPPORTED
-            rec.reason = f"unsupported extension: {ext}"
+    discovery = discover_files(scan_all_files(resolved_input))
+    records, image_paths, video_paths = discovery.records, discovery.images, discovery.videos
 
     n_unsupported = len(records) - len(image_paths) - len(video_paths)
     typer.echo(
@@ -730,7 +434,7 @@ def index(
     # Library versions don't change during a run — compute once and reuse.
     _library_versions = get_library_versions()
 
-    # ── Per-model counters ────────────────────────────────────────────────────
+    # Per-model counters
     indexed_counts = [0] * len(specs)
     skipped_counts = [0] * len(specs)
     failed_counts = [0] * len(specs)
@@ -741,7 +445,7 @@ def index(
     imgs_processed_so_far = 0
     tracker = _RateTracker()
 
-    # ── Mutable containers shared between slicing pass and _finish_batch ─────
+    # Mutable containers shared between slicing pass and _finish_batch
     # Pre-declared so the closure captures them by reference; filled later.
     vmeta_by_path: dict[Path, dict] = {}  # frame disk path → video metadata
     _frame_source: dict[Path, Path] = {}  # frame disk path → source video path
@@ -752,7 +456,7 @@ def index(
     _needs_per_spec: list[set[Path]] = [set() for _ in specs]
     _frame_needs_per_spec: list[set[Path]] = [set() for _ in specs]
 
-    # ── Pipelined batch loop ──────────────────────────────────────────────────
+    # Pipelined batch loop
     # Pipeline depth = 2: Phase A (read / hash / dedup) runs up to two batches
     # ahead of the GPU.  Each Phase A immediately submits a preprocessing Future
     # so CPU pre-processing starts as early as possible.  _finish_batch() (the
@@ -766,7 +470,7 @@ def index(
         """Resolve the preprocessing Future and run embed + upsert for *ctx*."""
         t_finish = perf_counter()
 
-        # ── Wait for preprocessing (usually already done while GPU ran) ───────
+        # Wait for preprocessing (usually already done while GPU ran)
         # pre_s is the actual CPU preprocessing time recorded inside the worker;
         # the future itself resolves instantly when GPU is the bottleneck.
         pre_results: list[Image.Image | Exception]
@@ -784,7 +488,7 @@ def index(
             else:
                 pre_by_path[p] = result
 
-        # ── Commit this batch's in-loop face results (main thread only) ───────
+        # Commit this batch's in-loop face results (main thread only)
         # Before the unique_pairs early-return below: face results are
         # independent of whether any image survived embed preprocessing.
         for _fp, _fsha, _fvmeta, _fres in face_results:
@@ -792,9 +496,9 @@ def index(
                 _face_stats["failed"] += 1
                 typer.echo(f"[WARN] Face processing failed for {_fp.name}: {_fres}", err=True)
             else:
-                _commit_face_result(_fp, _fsha, _fvmeta, _fres)
+                _face_state.record(commit_faces(face_pipeline, _fp, _fsha, _fvmeta, _fres))
 
-        # ── Thumbnail generation ───────────────────────────────────────────────
+        # Thumbnail generation
         if settings.thumbnail_dir is not None:
             hash_by_path = {p: h for p, h in ctx.unique_pairs}
             for p, img in pre_by_path.items():
@@ -807,7 +511,7 @@ def index(
                         except Exception as exc:  # noqa: BLE001
                             typer.echo(f"[WARN] Thumbnail failed for {p.name}: {exc}", err=True)
 
-        # ── Propagate preprocessing failures ──────────────────────────────────
+        # Propagate preprocessing failures
         pre_failures: set[Path] = {p for p in ctx.paths_to_pre if p not in pre_by_path}
         failed_pre_hashes = {h for p, h in ctx.unique_pairs if p in pre_failures}
         if failed_pre_hashes:
@@ -826,11 +530,11 @@ def index(
             1 for p, _ in ctx.path_hash_pairs if records[p].status == _S_SKIP_DUP
         )
 
-        # ── Per-model loop: normalize + embed, collect upsert jobs ────────────
+        # Per-model loop: normalize + embed, collect upsert jobs
         n_frames_in_batch = sum(1 for p, _ in ctx.path_hash_pairs if p in vmeta_by_path)
         n_plain_in_batch = len(ctx.path_hash_pairs) - n_frames_in_batch
         model_segments: list[str] = []
-        upsert_jobs: list = []
+        upsert_jobs: list[BatchWrite] = []
 
         for spec_idx, (embedder, indexer, model_hash) in enumerate(specs):
             to_embed = [(p, h) for p, h in ctx.to_embed_per_spec[spec_idx] if p not in pre_failures]
@@ -853,26 +557,9 @@ def index(
             n = len(paths)
             model_pil = [pre_by_path[p] for p in paths]
 
-            # ── Normalize ────────────────────────────────────────────────────
             t0 = perf_counter()
             try:
-                norm_images = embedder.normalize_batch_bytes(model_pil)
-            except Exception as exc:  # noqa: BLE001
-                typer.echo(
-                    f"[ERROR] Normalization failed for batch of {n} [{backend}]: {exc}", err=True
-                )
-                failed_counts[spec_idx] += n
-                for p in paths:
-                    if records[p].status != _S_INDEXED:
-                        records[p].status = _S_FAIL_EMB
-                        records[p].reason = f"normalization error: {exc}"
-                continue
-            norm_s = perf_counter() - t0
-
-            # ── Embed ─────────────────────────────────────────────────────────
-            t0 = perf_counter()
-            try:
-                embeddings = embedder.embed_images(norm_images)
+                embeddings = embedder.embed_images(model_pil)
             except Exception as exc:  # noqa: BLE001
                 typer.echo(
                     f"[ERROR] Embedding failed for batch of {n} [{backend}]: {exc}", err=True
@@ -885,19 +572,8 @@ def index(
                 continue
             embed_s = perf_counter() - t0
 
-            indexed_counts[spec_idx] += n
-            for p in paths:
-                records[p].status = _S_INDEXED
-                records[p].reason = ""
-                if p in vmeta_by_path:
-                    sv = _frame_source[p]
-                    vf_indexed_by_spec.setdefault(spec_idx, {})
-                    vf_indexed_by_spec[spec_idx][sv] = vf_indexed_by_spec[spec_idx].get(sv, 0) + 1
-
             model_segments.append(
-                f"{backend} norm {norm_s:.2f}s"
-                f"  embed {embed_s:.2f}s ({_fmt_rate(n, embed_s, 'img')})"
-                f"  +{n}"
+                f"{backend} embed {embed_s:.2f}s ({_fmt_rate(n, embed_s, 'img')})  +{n}"
             )
 
             # Collect upsert work — executed in parallel after all models embed.
@@ -920,14 +596,9 @@ def index(
             video_metadata_for_batch = [vmeta_by_path.get(p) for p in list(paths)]
             has_vmeta = any(v is not None for v in video_metadata_for_batch)
 
-            def _make_upsert(idx, ps, hs, hs_md5, embs, meta, exif, vmetas):
-                def _job():
-                    idx.upsert_batch(ps, hs, embs, meta, exif, hs_md5, vmetas)
-
-                return _job
-
             upsert_jobs.append(
-                _make_upsert(
+                BatchWrite(
+                    spec_idx,
                     indexer,
                     list(paths),
                     list(hashes),
@@ -939,7 +610,7 @@ def index(
                 )
             )
 
-        # ── Serialized upserts ────────────────────────────────────────────────
+        # Serialized upserts
         # Must be sequential: both models target the same unified collection and
         # share point IDs.  Concurrent upserts race on the retrieve→upsert TOCTOU
         # window — the second thread may see a point as "new" and overwrite the
@@ -948,8 +619,15 @@ def index(
         upsert_wall_s = 0.0
         if upsert_jobs:
             t0 = perf_counter()
-            for j in upsert_jobs:
-                j()
+            for job in upsert_jobs:
+                committed = job.commit()
+                indexed_counts[committed.spec_index] += len(committed.paths)
+                for path in committed.paths:
+                    records[path].status, records[path].reason = _S_INDEXED, ""
+                    if path in vmeta_by_path:
+                        source = _frame_source[path]
+                        counts = vf_indexed_by_spec.setdefault(committed.spec_index, {})
+                        counts[source] = counts.get(source, 0) + 1
             upsert_wall_s = perf_counter() - t0
 
         if model_segments:
@@ -1057,12 +735,12 @@ def index(
             face_results.append((p, sha, vmeta, fres))
         return [by_path[p] for p in paths], face_results, perf_counter() - t0
 
-    # ── Persistent hash cache (shared across image and video passes) ─────────
+    # Persistent hash cache (shared across image and video passes)
     _hash_cache: HashCache | None = (
         HashCache(settings.hash_cache_path) if settings.hash_cache_path is not None else None
     )
 
-    # ── Pre-load Qdrant dedup indices ─────────────────────────────────────────
+    # Pre-load Qdrant dedup indices
     _dedup_hashes: list[set[str]] = []
     _dedup_paths: list[set[str]] = []
     _video_info: list[dict[str, dict]] = []
@@ -1096,7 +774,7 @@ def index(
             )
         )
 
-    # ── Upfront hash pass (images + videos) ──────────────────────────────────
+    # Upfront hash pass (images + videos)
     # Hash every file before any embedding so the full dedup picture is known
     # upfront.  The HashCache skips the disk read for unchanged files on
     # subsequent runs.  Images are hashed in parallel; videos sequentially
@@ -1158,51 +836,42 @@ def index(
 
     _hash_elapsed = perf_counter() - _t_hash0
 
-    # ── Image dedup ───────────────────────────────────────────────────────────
+    # Image dedup
     _paths_to_batch: list[Path] = []
     _any_needs: set[Path] = set()
     _n_run_dups = 0
     _n_all_indexed = 0
 
     if image_paths:
-        _needs_per_spec, _any_needs, _n_run_dups, _n_all_indexed = _dedup_by_hash(
-            paths=list(_file_hashes.keys()),
-            hash_lookup=_file_hashes,
-            records=records,
-            dedup_hashes=_dedup_hashes,
-            dedup_paths=_dedup_paths,
-            n_specs=len(specs),
-            skipped_counts=skipped_counts,
+        image_plan = plan_images(
+            list(_file_hashes),
+            _file_hashes,
+            _dedup_hashes,
+            _dedup_paths,
+            len(specs),
         )
+        image_plan.record(records, skipped_counts)
+        _needs_per_spec, _any_needs = image_plan.needs_per_spec, image_plan.any_needs
+        _n_run_dups, _n_all_indexed = len(image_plan.duplicates), len(image_plan.already_indexed)
         # Build the ordered list of image paths that actually need processing.
         _paths_to_batch = [p for p in image_paths if p in _any_needs]
 
-    # ── Video dedup ───────────────────────────────────────────────────────────
-    _skip_by_spec: dict[Path, set[int]] = {}
-    _videos_to_process: list[Path] = []
+    # Source-video planning is separate from frame-content deduplication.
+    video_plan = plan_videos(
+        video_paths,
+        _pre_hashes,
+        _video_info,
+        fps=settings.video_fps,
+        max_frames=settings.video_max_frames,
+        faces=face_pipeline is not None,
+    )
+    _skip_by_spec, _videos_to_process = video_plan.already_done, video_plan.to_process
+    for path in video_plan.complete:
+        records[path].status, records[path].reason = _S_SKIP_IDX, "video already indexed"
+    for path in video_plan.duplicates:
+        records[path].status, records[path].reason = _S_SKIP_DUP, "duplicate in run (same SHA-256)"
 
-    for _vp, _vh in _pre_hashes.items():
-        _already_in = {
-            _si
-            for _si, _vi in enumerate(_video_info)
-            if (_vinfo := _vi.get(_vh)) is not None
-            and _vinfo["extraction_fps"] == settings.video_fps
-            and _vinfo["max_frames_cap"] == settings.video_max_frames
-            and _vinfo["complete"]
-        }
-        if _already_in:
-            _skip_by_spec[_vp] = _already_in
-        if len(_already_in) == len(specs):
-            records[_vp].status = _S_SKIP_IDX
-            records[_vp].reason = "video already indexed"
-
-    _videos_to_process = [
-        vp
-        for vp in video_paths
-        if vp in _pre_hashes and records[vp].status not in (_S_FAIL_READ, _S_SKIP_IDX)
-    ]
-
-    # ── Hash pass summary ─────────────────────────────────────────────────────
+    # Hash pass summary
     if _hash_label_parts:
         _cache_hits_str = (
             f"  │  {_n_cache_hits:,} cache hits"
@@ -1227,7 +896,7 @@ def index(
                 f"  │  {len(video_paths) - len(_pre_hashes):,} read errors"
             )
 
-    # ── Per-run manifest ──────────────────────────────────────────────────────
+    # Per-run manifest
     # Config snapshot + model hashes + discovered input list, written before any
     # embedding or upsert.  Placed after the hash pass so every readable input
     # already carries its sha256; unreadable/unsupported files appear as
@@ -1254,7 +923,7 @@ def index(
     )
     typer.echo(f"Run manifest → {_manifest_path}")
 
-    # ── Video slicing pass ────────────────────────────────────────────────────
+    # Video slicing pass
     # Extract frames from each video that needs processing, save each as a JPEG
     # on disk at the canonical path, and register them in the unified ingestion
     # queue so they go through exactly the same pipeline as regular images.
@@ -1301,6 +970,7 @@ def index(
             _vh = _pre_hashes[_vp]
             _vp_abs = str(_vp.resolve())
             _n_frames_this_video = 0
+            _frame_io_failed = False
             _exp_this = _expected_per_video.get(_vp, 0)
             _exp_suffix = f"  (est. {_exp_this:,} frames)" if _exp_this > 0 else ""
 
@@ -1326,6 +996,7 @@ def index(
                             typer.echo(
                                 f"[WARN] Cannot read existing frame {_fp.name}: {_exc}", err=True
                             )
+                            _frame_io_failed = True
                             continue
                     else:
                         _buf = io.BytesIO()
@@ -1341,6 +1012,7 @@ def index(
                             _fp.write_bytes(_jpeg_bytes)
                         except OSError as _exc:
                             typer.echo(f"[WARN] Cannot write frame {_fp}: {_exc}", err=True)
+                            _frame_io_failed = True
                             continue
 
                     _frame_sha256 = hashlib.sha256(_jpeg_bytes).hexdigest()
@@ -1377,7 +1049,6 @@ def index(
                         _block_count += 1
                         _t_block_start = perf_counter()
 
-                        # Per-block progress line
                         _tc_s = _frame.timecode_ms / 1000
                         _tc_str = (
                             f"{int(_tc_s // 3600)}:"
@@ -1432,7 +1103,7 @@ def index(
                 f"  {_fmt_rate(_n_frames_this_video, _video_s, 'fps')}"
             )
 
-            vf_total[_vp] = _n_frames_this_video
+            vf_total[_vp] = 0 if _frame_io_failed else _n_frames_this_video
 
             if _n_frames_this_video > 0:
                 _video_records_to_upsert.append(
@@ -1453,28 +1124,31 @@ def index(
         if _video_records_to_upsert and specs:
             specs[0][1].upsert_video_records(_video_records_to_upsert)
 
-    # ── Frame dedup (hash-based, same pipeline as images) ────────────────────
+    # Frame identity is source video + timecode, never frame content hash.
     _frame_any_needs: set[Path] = set()
     if _frame_paths:
-        _frame_needs_per_spec, _frame_any_needs, _n_frame_run_dups, _n_frame_all_indexed = (
-            _dedup_by_hash(
-                paths=_frame_paths,
-                hash_lookup=_file_hashes,
-                records=records,
-                dedup_hashes=_dedup_hashes,
-                dedup_paths=_dedup_paths,
-                n_specs=len(specs),
-                skipped_counts=skipped_counts,
-            )
+        frame_plan = plan_frames(
+            _frame_paths,
+            vmeta_by_path,
+            _frame_source,
+            [indexer.get_indexed_frame_units() for _, indexer, _ in specs],
         )
+        _frame_needs_per_spec = frame_plan.needs_per_spec
+        _frame_any_needs = frame_plan.any_needs
+        vf_indexed_by_spec.update(frame_plan.confirmed_by_spec)
+        for si, skipped in enumerate(frame_plan.skipped_per_spec):
+            skipped_counts[si] += skipped
+        for fp in _frame_paths:
+            if fp not in _frame_any_needs:
+                records[fp].status = _S_SKIP_IDX
         _paths_to_batch.extend(fp for fp in _frame_paths if fp in _frame_any_needs)
 
-    # ── Combined per-spec needs ───────────────────────────────────────────────
+    # Combined per-spec needs
     _combined_needs_per_spec: list[set[Path]] = [
         _needs_per_spec[si] | _frame_needs_per_spec[si] for si in range(len(specs))
     ]
 
-    # ── Face work: in-loop detection + residual pass ──────────────────────────
+    # Face work: in-loop detection + residual pass
     # Media the batch loop visits get their face detection folded into its
     # background preprocess worker, reusing one native-resolution decode for
     # detection and (where byte-identical) the embed input.  Media the loop
@@ -1484,115 +1158,32 @@ def index(
     # write (points → vector clear → marker) happens on the main thread with
     # the ordering guarantees unchanged.
     _face_pending: dict[Path, tuple[str, dict | None]] = {}
-    _face_stats = {"detected": 0, "kept": 0, "review_only": 0, "dropped_noncanon": 0, "failed": 0}
-    _face_rejected: dict[str, int] = {}
-    _face_review_reasons: dict[str, int] = {}
+    _face_state = FaceRunState()
+    _face_stats = _face_state.counts
+    _face_rejected = _face_state.rejected
+    _face_review_reasons = _face_state.review_reasons
     # Collected across the run, acted on once at the end: prompting per
     # medium would ask the same question hundreds of times, and deleting
     # biometric observations without showing what they are first is not a
     # decision the tool gets to make on the operator's behalf.
-    _stale_points: list[dict] = []
-    _video_rollup: dict[str, dict] = {}
+    _stale_points = _face_state.stale_points
     _n_face_media = 0
     if face_pipeline is not None:
         from scalar_forensic.faces.indexing import decode_shared as _face_decode_shared
 
         for _p, _sha in _file_hashes.items():
-            if _sha not in _faces_done:
+            _vm = vmeta_by_path.get(_p) or {}
+            if (
+                face_pipeline.store.unit_key(
+                    _sha, _vm.get("video_hash"), _vm.get("frame_timecode_ms")
+                )
+                not in _faces_done
+            ):
                 _face_pending[_p] = (_sha, vmeta_by_path.get(_p))
         _n_face_media = len(_face_pending)
         typer.echo(
             f"\nFaces: processing {_n_face_media:,} media item(s)  →  {settings.face_collection}"
         )
-
-    def _commit_face_result(_p: Path, _sha: str, _vmeta: "dict | None", _fres) -> None:
-        """Store one medium's face results and its marker; update run counters."""
-        _marker = face_pipeline.store.marker_point(
-            _sha,
-            (_vmeta or {}).get("video_hash"),
-            face_pipeline.cfg.config_hash,
-            _fres.n_detected,
-            _fres.n_kept,
-            _fres.rejected,
-            n_review_only=_fres.n_review_only,
-            review_only_reasons=_fres.review_only_reasons,
-            n_dropped_noncanonical=_fres.n_dropped_noncanonical,
-        )
-        # Points first, marker last, with the vector clear between them.
-        # The marker is this medium's idempotency record: once it is
-        # committed for this config hash, the medium is never reprocessed.
-        # Committing it in the same call as the points would make a failed
-        # clear permanent and invisible — a point whose payload says
-        # review-only while its vector is still live in the index, which is
-        # the one state this design exists to prevent.  clear_face_vector
-        # can raise (delete_vectors 404s on an unknown id, see
-        # tests/faces/test_store_integration.py), so the ordering is
-        # load-bearing, not stylistic.
-        #
-        # Checked before the upsert, while the collection still holds only
-        # what previous runs wrote: point ids come from the bbox, not from
-        # any threshold, so a threshold change rewrites a point in place
-        # and leaves nothing stale.  What does survive is a face that has
-        # dropped below the review gate (no point produced at all) or an
-        # observation whose bbox moved because the detector changed — in
-        # both cases the old point is still there, still carrying its old
-        # provenance, and if it was embedded it is still searchable.
-        # Tag each stale point with the file it came from while that is still
-        # known here — the stored payload fields fetched for a stale point do
-        # not include a path, and the end-of-run prompt has to name the files
-        # whose observations would be deleted, not just count them.  For a
-        # video frame the operator's file is the video, not the frame JPEG.
-        _stale_here = face_pipeline.store.stale_face_points(
-            _sha, {str(pt.id) for pt in _fres.points}
-        )
-        _stale_src = (_vmeta or {}).get("video_path") or str(_p)
-        for _sp in _stale_here:
-            _sp["source_path"] = _stale_src
-        _stale_points.extend(_stale_here)
-        face_pipeline.store.upsert_faces(_fres.points)
-        # Every review-only point, not only genuinely demoted ones:
-        # delete_vectors is idempotent and ignores absent vectors, so
-        # first-time review-only observations cost nothing.  An upsert with
-        # vector={} must not be trusted to clear a vector a previous run
-        # stored at the same point id -- a review-only point that kept its
-        # vector would still be returned by similarity search.  Only ever
-        # pass review-only ids: clearing an embedded point's vector
-        # destroys data recoverable only by a full re-index.
-        face_pipeline.store.clear_face_vector(_fres.review_only_point_ids)
-        face_pipeline.store.upsert_faces([_marker])
-        _face_stats["detected"] += _fres.n_detected
-        _face_stats["kept"] += _fres.n_kept
-        _face_stats["review_only"] += _fres.n_review_only
-        _face_stats["dropped_noncanon"] += _fres.n_dropped_noncanonical
-        for _reason, _n in _fres.rejected.items():
-            _face_rejected[_reason] = _face_rejected.get(_reason, 0) + _n
-        for _reason, _n in _fres.review_only_reasons.items():
-            _face_review_reasons[_reason] = _face_review_reasons.get(_reason, 0) + _n
-        _vh_roll = (_vmeta or {}).get("video_hash")
-        if _vh_roll:
-            _agg = _video_rollup.setdefault(
-                _vh_roll,
-                {
-                    "n_frames": 0,
-                    "n_detected": 0,
-                    "n_kept": 0,
-                    "rejected": {},
-                    "n_review_only": 0,
-                    "review_only_reasons": {},
-                    "n_dropped_noncanonical": 0,
-                },
-            )
-            _agg["n_frames"] += 1
-            _agg["n_detected"] += _fres.n_detected
-            _agg["n_kept"] += _fres.n_kept
-            _agg["n_review_only"] += _fres.n_review_only
-            _agg["n_dropped_noncanonical"] += _fres.n_dropped_noncanonical
-            for _reason, _n in _fres.rejected.items():
-                _agg["rejected"][_reason] = _agg["rejected"].get(_reason, 0) + _n
-            for _reason, _n in _fres.review_only_reasons.items():
-                _agg["review_only_reasons"][_reason] = (
-                    _agg["review_only_reasons"].get(_reason, 0) + _n
-                )
 
     total_image_count = len(_paths_to_batch)
     if total_image_count > 0:
@@ -1612,7 +1203,7 @@ def index(
         for batch_paths in batched(iter(_paths_to_batch), settings.batch_size):
             batch_num += 1
 
-            # ── Read (shared) ─────────────────────────────────────────────────
+            # Read (shared)
             t0 = perf_counter()
             raw: list[tuple[Path, bytes]] = []
             batch_bytes = 0
@@ -1644,7 +1235,7 @@ def index(
             for p, _, md5 in path_hash_pairs_full:
                 records[p].md5 = md5
 
-            # ── EXIF (shared, once per batch if enabled, images only) ─────────
+            # EXIF (shared, once per batch if enabled, images only)
             exif_data: dict[Path, ExifInfo] | None = None
             if settings.extract_exif:
                 data_by_path_for_exif = {p: data for p, data in raw if p not in vmeta_by_path}
@@ -1661,7 +1252,7 @@ def index(
 
             data_by_path = {p: data for p, data in raw}
 
-            # ── Per-spec: use pre-computed combined needs sets ─────────────────
+            # Per-spec: use pre-computed combined needs sets
             to_embed_per_spec: list[list[tuple[Path, str]]] = []
             needs_embed: set[Path] = set()
             for spec_i, _ in enumerate(specs):
@@ -1694,7 +1285,7 @@ def index(
                 else None
             )
 
-            # ── Drain oldest batch when pipeline is full ─────────────────────
+            # Drain oldest batch when pipeline is full
             # Phase A for this batch (and the one before it) has already run,
             # so embed(oldest) overlaps with both of those Phase A passes.
             if len(_pipeline) >= _PIPELINE_DEPTH:
@@ -1716,49 +1307,19 @@ def index(
                 )
             )
 
-        # ── Drain remaining batches ───────────────────────────────────────────
+        # Drain remaining batches
         while _pipeline:
             _finish_batch(_pipeline.popleft())
 
-    # ── Mark videos as fully indexed (per spec) ──────────────────────────────
-    # Called only when all frames of a video were successfully embedded for a
-    # given spec.  Writes the video_frames_total marker onto the stored frame
-    # payloads so future runs can distinguish a finished index from an
-    # interrupted partial one via get_all_video_info().
-    if _videos_to_process:
-        # Count dup-skipped frames per source video; these are already present
-        # in Qdrant (via a hash-identical frame that was embedded) so they count
-        # toward the "fully indexed" threshold even though they weren't embedded
-        # in this run.  Only count within-video dups: if the dedup winner came
-        # from a different video its Qdrant point carries that video's metadata,
-        # not this one's, so this video's timecode slot was never written.
-        _winner_by_hash: dict[str, Path] = {}
-        for _fp in _frame_source:
-            if records[_fp].status != _S_SKIP_DUP:
-                _winner_by_hash.setdefault(_file_hashes[_fp], _fp)
+    # Named-vector completion includes acknowledged writes and stored resume slots.
+    for completion in completion_plan(
+        _videos_to_process, vf_total, _pre_hashes, _skip_by_spec, vf_indexed_by_spec, len(specs)
+    ):
+        specs[completion.spec_index][1].mark_video_complete(
+            completion.video_hash, completion.frame_count
+        )
 
-        _vf_dup_count: dict[Path, int] = {}
-        for _fp, _sv in _frame_source.items():
-            if records[_fp].status == _S_SKIP_DUP:
-                _winner = _winner_by_hash.get(_file_hashes[_fp])
-                if _winner is not None and _frame_source.get(_winner) == _sv:
-                    _vf_dup_count[_sv] = _vf_dup_count.get(_sv, 0) + 1
-
-        for _vp in _videos_to_process:
-            _total = vf_total.get(_vp, 0)
-            if _total == 0:
-                continue
-            _vh = _pre_hashes[_vp]
-            _already_done = _skip_by_spec.get(_vp, set())
-            for _spec_idx, (_, _indexer, _) in enumerate(specs):
-                if _spec_idx in _already_done:
-                    continue  # was complete before this run
-                _indexed = vf_indexed_by_spec.get(_spec_idx, {}).get(_vp, 0)
-                _dups = _vf_dup_count.get(_vp, 0)
-                if _indexed + _dups >= _total:
-                    _indexer.mark_video_complete(_vh, _total)
-
-    # ── Finalise per-video source file records ────────────────────────────────
+    # Finalise per-video source file records
     if video_paths:
         # Build per-video aggregate counts from frame record statuses.
         _vf_indexed_total: dict[Path, int] = {}
@@ -1790,7 +1351,7 @@ def index(
                 _vf_rundup_total.get(_vp, 0),
             )
 
-    # ── Reclassify run-duplicates whose winner failed preprocessing ───────────
+    # Reclassify run-duplicates whose winner failed preprocessing
     # Non-winners are marked _S_SKIP_DUP upfront and never enter any batch, so
     # _finish_batch cannot reclassify them.  Do a single post-batch pass here.
     if image_paths and _file_hashes:
@@ -1809,7 +1370,7 @@ def index(
                     records[_p].status = _S_FAIL_PRE
                     records[_p].reason = "duplicate of image that failed preprocessing"
 
-    # ── Face residual pass ───────────────────────────────────────────────────
+    # Face residual pass
     # The batch loop only iterates *not-yet-embedded* media, so it cannot be
     # the only place faces happen — that would silently yield zero faces on an
     # already-indexed case.  Whatever the loop did not consume from
@@ -1827,26 +1388,12 @@ def index(
                 _face_stats["failed"] += 1
                 typer.echo(f"[WARN] Face processing failed for {_p.name}: {_fres}", err=True)
                 continue
-            _commit_face_result(_p, _sha, _vmeta, _fres)
+            _face_state.record(commit_faces(face_pipeline, _p, _sha, _vmeta, _fres))
 
-        # Per-video rollup markers, written once each after their frames.
-        for _vh_roll, _agg in _video_rollup.items():
-            face_pipeline.store.upsert_faces(
-                [
-                    face_pipeline.store.video_rollup_point(
-                        _vh_roll,
-                        face_pipeline.cfg.config_hash,
-                        _agg["n_detected"],
-                        _agg["n_kept"],
-                        _agg["rejected"],
-                        _agg["n_frames"],
-                        n_review_only=_agg["n_review_only"],
-                        review_only_reasons=_agg["review_only_reasons"],
-                        n_dropped_noncanonical=_agg["n_dropped_noncanonical"],
-                    )
-                ]
-            )
-        # ── Stale observations: show, ask, then delete ───────────────────────
+        # Aggregate persisted markers so resumed runs retain earlier frame counts.
+        for _vh_roll in {_pre_hashes[vp] for vp in _videos_to_process}:
+            face_pipeline.store.refresh_video_rollup(_vh_roll, face_pipeline.cfg.config_hash)
+        # Stale observations: show, ask, then delete
         _n_stale_removed = 0
         _n_stale_chip_files = 0
         if _stale_points:
@@ -1903,27 +1450,12 @@ def index(
                     fg=typer.colors.YELLOW,
                 )
             if _do_delete:
-                _ids = [str(_sp["id"]) for _sp in _stale_points]
-                _stale_result = face_pipeline.store.delete_face_points(_ids)
-                _n_stale_removed = _stale_result.n_points
-                if settings.face_store_dir is not None:
-                    from scalar_forensic.faces.chips import chip_paths as _chip_paths
-                    from scalar_forensic.faces.chips import (
-                        review_chip_paths as _review_chip_paths,
-                    )
-
-                    for _chash in face_pipeline.store.unreferenced_chip_hashes(
-                        _stale_result.chip_hashes
-                    ):
-                        for _path in dict.fromkeys(
-                            (
-                                *_chip_paths(Path(settings.face_store_dir), _chash),
-                                *_review_chip_paths(Path(settings.face_store_dir), _chash),
-                            )
-                        ):
-                            if _path.exists():
-                                _path.unlink()
-                                _n_stale_chip_files += 1
+                removal = remove_stale_faces(
+                    face_pipeline.store,
+                    _stale_points,
+                    Path(settings.face_store_dir) if settings.face_store_dir is not None else None,
+                )
+                _n_stale_removed, _n_stale_chip_files = removal.n_points, removal.n_chip_files
             else:
                 typer.secho(
                     f"  Left in place: {len(_stale_points):,} stale observation(s) remain in "
@@ -1974,18 +1506,18 @@ def index(
             pipeline_config_hash=face_pipeline.cfg.config_hash,
         )
 
-    # ── Close hash cache (close() performs the final flush) ──────────────────
+    # Close hash cache (close() performs the final flush)
     if _hash_cache is not None:
         _hash_cache.close()
 
-    # ── Video frames summary counters ─────────────────────────────────────────
+    # Video frames summary counters
     n_video_frames_indexed = sum(_vf_indexed_total.values()) if video_paths else 0
     n_video_frames_skipped = sum(_vf_skipped_total.values()) if video_paths else 0
 
-    # ── Write CSV report ──────────────────────────────────────────────────────
+    # Write CSV report
     _write_csv(records, csv_path)
 
-    # ── Print summary table (user-supplied files only, no frame records) ──────
+    # Print summary table (user-supplied files only, no frame records)
     _user_records = {p: r for p, r in records.items() if not r.is_frame}
     _print_summary(
         _user_records,
@@ -2006,7 +1538,7 @@ def main() -> None:
     typer.run(index)
 
 
-# ── Face-modality maintenance (separate console script) ──────────────────────
+# Face-modality maintenance (separate console script)
 # `sfn` itself stays a single-command `typer.run(index)` app, so adding a named
 # command here would break every documented `sfn <dir>` invocation.  Purge ships
 # as its own entry point instead, mirroring the sfn / sfn-web split.
@@ -2025,7 +1557,7 @@ def _faces_callback() -> None:
 
 @faces_app.command()
 def purge(
-    media: str = typer.Option(None, "--media", help="Purge faces for one media sha256"),
+    media: str | None = typer.Option(None, "--media", help="Purge faces for one media sha256"),
     all_: bool = typer.Option(False, "--all", help="Purge ALL face observations"),
 ) -> None:
     """Delete stored face observations and their chip files."""
@@ -2048,7 +1580,6 @@ def purge(
     from qdrant_client import QdrantClient
 
     from scalar_forensic.faces.audit import AuditLog
-    from scalar_forensic.faces.chips import chip_paths, review_chip_paths
     from scalar_forensic.faces.store import FaceStore
 
     if all_ and not typer.confirm(
@@ -2064,38 +1595,32 @@ def purge(
         settings.collection,
         0,  # dim unused on the purge path — no collection is created here
     )
-    result = store.purge_all() if all_ else store.purge_media(media)
-
-    # Chips are content-addressed, so a hash freed by this purge may still be
-    # referenced by a surviving observation (an exact-duplicate medium, or an
-    # embedded face whose source crop matched a review-only one).  Filter through
-    # the store before unlinking.  Three limits are deployment properties, not
-    # code defects, and are documented rather than engineered away:
-    #   1. The check is collection-scoped but the chip store is not — purging
-    #      case A can unlink a chip case B references unless SFN_FACE_STORE_DIR
-    #      is set per case (INSTALL.md; the rule check_compat enforces for vectors).
-    #   2. Check-then-unlink: a concurrent index run can write a referencing
-    #      point between the two, leaving a dangling reference.  Single writer.
-    #   3. Both are mitigated, not cured, by chips being re-derivable from media.
-    n_chip_files = 0
-    if settings.face_store_dir is not None:
-        for chash in store.unreferenced_chip_hashes(result.chip_hashes):
-            # Both builders, deliberately: a hash may be an aligned hash (PNG)
-            # or a review hash (JPEG + thumb), and the caller cannot tell which.
-            # The two overlap on the review pair; exists() keeps the count honest.
-            for path in dict.fromkeys(
-                (
-                    *chip_paths(Path(settings.face_store_dir), chash),
-                    *review_chip_paths(Path(settings.face_store_dir), chash),
-                )
-            ):
-                if path.exists():
-                    path.unlink()
-                    n_chip_files += 1
-
     store_dir = Path(settings.face_store_dir) if settings.face_store_dir else Path("data")
     audit_dir = store_dir.parent if settings.face_store_dir else store_dir
-    AuditLog(audit_dir / "face_audit.log").append(
+    audit = AuditLog(audit_dir / "face_audit.log")
+    scope = {
+        "examiner_id": settings.examiner_id,
+        "scope": "all" if all_ else "media",
+        "source_digest": None if all_ else media,
+    }
+    audit.append("purge_requested", **scope)
+    try:
+        result = store.purge_all() if all_ else store.purge_media(media)
+    except Exception as exc:
+        audit.append("purge_failed", **scope, error=str(exc))
+        raise
+
+    try:
+        n_chip_files = unlink_unreferenced_chips(
+            store,
+            Path(settings.face_store_dir) if settings.face_store_dir is not None else None,
+            result.chip_hashes,
+        )
+    except Exception as exc:
+        audit.append("purge_failed", **scope, n_points=result.n_points, error=str(exc))
+        raise
+
+    audit.append(
         "purge",
         examiner_id=settings.examiner_id,
         scope="all" if all_ else "media",
@@ -2110,7 +1635,7 @@ def faces_main() -> None:
     faces_app()
 
 
-# ── Viewing-copy retention (separate console script) ─────────────────────────
+# Viewing-copy retention (separate console script)
 # Same shape and same reason as sfn-faces above: `sfn` stays a single-command
 # app, so retention gets its own entry point rather than a subcommand.
 video_app = typer.Typer(help="Viewing-copy (video playback) maintenance commands.")
@@ -2123,7 +1648,9 @@ def _video_callback() -> None:
 
 @video_app.command("purge")
 def video_purge(
-    media: str = typer.Option(None, "--media", help="Purge viewing copies for one media sha256"),
+    media: str | None = typer.Option(
+        None, "--media", help="Purge viewing copies for one media sha256"
+    ),
     all_: bool = typer.Option(False, "--all", help="Purge ALL viewing copies"),
 ) -> None:
     """Delete derived viewing copies from the video cache (spec §13).

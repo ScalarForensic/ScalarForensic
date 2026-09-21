@@ -1,0 +1,10 @@
+# Reuse an operator-selected LOCAL application image with its locked native,
+# Pillow and NumPy dependencies. This is not a minimal-dependency image.
+# Build offline with --pull=false --build-arg BASE_IMAGE=<local image>.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY src/scalar_forensic/__init__.py src/scalar_forensic/media_decode.py /worker-src/scalar_forensic/
+COPY src/scalar_forensic/media_worker/__init__.py src/scalar_forensic/media_worker/protocol.py src/scalar_forensic/media_worker/client.py src/scalar_forensic/media_worker/server.py /worker-src/scalar_forensic/media_worker/
+ENV PYTHONPATH=/worker-src PYTHONDONTWRITEBYTECODE=1 NVIDIA_VISIBLE_DEVICES=void
+USER 10001:10001
+ENTRYPOINT ["python", "-m", "scalar_forensic.media_worker.server"]

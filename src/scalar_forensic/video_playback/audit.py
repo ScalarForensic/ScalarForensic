@@ -93,6 +93,7 @@ class Rendering:
     duration_seconds: float | None = None
     fell_back: bool = False
     fallback_reason: str | None = None
+    runtime: dict | None = None
 
     @classmethod
     def from_result(
@@ -123,6 +124,7 @@ class Rendering:
             duration_seconds=duration_seconds,
             fell_back=result.fell_back,
             fallback_reason=result.fallback_reason,
+            runtime=result.runtime,
         )
 
     @property
@@ -137,7 +139,7 @@ class Rendering:
         the argv on spaces, which produces a line that does not survive being
         copied — the filter chain carries ``'min(ih,1080)'``, and a shell hands
         ffmpeg something it rejects with ``No such filter: '1080)'`` (measured
-        2026-08-14, `data/reports/c24-task2-label-vs-render.md`).  Quoting is
+        2026-08-14, `data/reports/c24-task2-label-vs-render.md`).
         This is the one definition of that quoting for every record that carries
         it, so the label and ``sfn-video render`` cannot print one argv two ways.
         Two call sites of ``shlex.join`` remain and both are stated rather than
@@ -157,6 +159,7 @@ class Rendering:
             "fallback_reason": self.fallback_reason,
             "command": None if self.command is None else list(self.command),
             "command_line": None if self.command is None else shlex.join(self.command),
+            **({"runtime": self.runtime} if self.runtime is not None else {}),
         }
 
 

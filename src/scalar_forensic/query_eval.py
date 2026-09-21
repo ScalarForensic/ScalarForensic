@@ -11,15 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from scalar_forensic.discovery import MAX_CONTEXT_PAIRS, pair_indices
-
-__all__ = [
-    "MAX_CONTEXT_PAIRS",
-    "QueryEvalHit",
-    "pair_indices",
-    "score_query_entries",
-    "score_query_vector",
-]
+from scalar_forensic.discovery import pair_indices
 
 
 @dataclass

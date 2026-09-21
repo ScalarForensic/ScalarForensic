@@ -26,9 +26,7 @@ from scalar_forensic.web.pipeline import (
     _video_frame_batch,
 )
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 VIDEO_PATH = "/evidence/clip.mp4"
 
@@ -56,9 +54,7 @@ def _frame_hit(
     )
 
 
-# ---------------------------------------------------------------------------
 # Non-video hits pass through unchanged
-# ---------------------------------------------------------------------------
 
 
 def test_non_video_hits_pass_through():
@@ -72,9 +68,7 @@ def test_empty_list_returns_empty():
     assert _group_video_hits([]) == []
 
 
-# ---------------------------------------------------------------------------
 # Single video frame produces a single grouped hit
-# ---------------------------------------------------------------------------
 
 
 def test_single_frame_grouped_hit_scores_preserved():
@@ -98,9 +92,7 @@ def test_single_frame_matched_frames_list():
     assert mf.scores == {"altered": 0.7}
 
 
-# ---------------------------------------------------------------------------
 # Representative = highest-scoring frame
-# ---------------------------------------------------------------------------
 
 
 def test_representative_is_highest_scoring_frame():
@@ -115,9 +107,7 @@ def test_representative_is_highest_scoring_frame():
     assert hit.frame_timecode_ms == 3000
 
 
-# ---------------------------------------------------------------------------
 # matched_frames sorted by timecode regardless of input order
-# ---------------------------------------------------------------------------
 
 
 def test_matched_frames_sorted_by_timecode():
@@ -131,9 +121,7 @@ def test_matched_frames_sorted_by_timecode():
     assert timecodes == [1000, 2000, 3000]
 
 
-# ---------------------------------------------------------------------------
 # Mode union: grouped hit must surface all modes present in any dataset frame
-# ---------------------------------------------------------------------------
 
 
 def test_grouped_hit_includes_alter_mode_from_non_representative_frame():
@@ -196,9 +184,21 @@ def test_grouped_hit_model_provenance_follows_best_score_per_mode():
     assert prov.get("hash") == "new", "provenance must come from the best-scoring ALTER frame"
 
 
-# ---------------------------------------------------------------------------
 # query_timecodes preserved
-# ---------------------------------------------------------------------------
+
+
+def test_grouping_preserves_best_query_frame_not_first_timecode():
+    hit = Hit(
+        path="/frames/best.jpg",
+        scores={"semantic": 0.9},
+        is_video_frame=True,
+        video_path="/video/source.mp4",
+        query_timecodes=[1000, 5000],
+        best_query_timecode_ms=5000,
+    )
+    grouped = _group_video_hits([hit])
+    assert grouped[0].best_query_timecode_ms == 5000
+    assert grouped[0].query_timecodes == [1000, 5000]
 
 
 def test_query_timecodes_preserved_from_representative():
@@ -209,9 +209,7 @@ def test_query_timecodes_preserved_from_representative():
     assert result[0].query_timecodes == [500]
 
 
-# ---------------------------------------------------------------------------
 # Multiple different dataset videos stay separate
-# ---------------------------------------------------------------------------
 
 
 def test_two_different_videos_produce_two_grouped_hits():
@@ -224,9 +222,7 @@ def test_two_different_videos_produce_two_grouped_hits():
     assert video_paths == {"/clips/a.mp4", "/clips/b.mp4"}
 
 
-# ---------------------------------------------------------------------------
 # Mixed video + image hits
-# ---------------------------------------------------------------------------
 
 
 def test_mixed_hits_video_and_image():
@@ -249,9 +245,7 @@ def test_mixed_hits_video_and_image():
     assert len(grouped.matched_frames) == 2
 
 
-# ---------------------------------------------------------------------------
 # _video_frame_batch resolution order
-# ---------------------------------------------------------------------------
 
 
 def test_video_frame_batch_explicit_setting():
@@ -263,7 +257,7 @@ def test_video_frame_batch_explicit_setting():
 
 def test_video_frame_batch_cache_hit():
     """Returns cached value when settings.batch_size is None and cache exists."""
-    settings = Settings.__new__(Settings)
+    settings = Settings()
     settings.batch_size = None
 
     with patch("scalar_forensic.calibration.load_cached_batch_size", return_value=16) as mock_load:
@@ -275,7 +269,7 @@ def test_video_frame_batch_cache_hit():
 
 def test_video_frame_batch_cache_miss_returns_default():
     """Falls back to 32 when settings.batch_size is None and no cache exists."""
-    settings = Settings.__new__(Settings)
+    settings = Settings()
     settings.batch_size = None
 
     with patch("scalar_forensic.calibration.load_cached_batch_size", return_value=None):
@@ -284,9 +278,7 @@ def test_video_frame_batch_cache_miss_returns_default():
     assert result == 32
 
 
-# ---------------------------------------------------------------------------
 # _query_exact_video: malformed frame_timecode_ms handling
-# ---------------------------------------------------------------------------
 
 
 def _make_query_settings(collection: str = "sfn_test") -> Settings:
@@ -377,9 +369,7 @@ def test_query_exact_video_multiple_frames_sorted_by_timecode():
     assert timecodes == [1000, 2000, 3000]
 
 
-# ---------------------------------------------------------------------------
 # is_reference propagation through grouping
-# ---------------------------------------------------------------------------
 
 
 def test_grouping_propagates_is_reference_true():
@@ -419,9 +409,7 @@ def test_grouping_marks_reference_when_any_frame_in_group_is_reference():
     assert result[0].is_reference is True
 
 
-# ---------------------------------------------------------------------------
 # MatchedVideoFrame.path — each frame's own servable file
-# ---------------------------------------------------------------------------
 
 
 def test_matched_frame_carries_its_own_stored_path():

@@ -23,23 +23,22 @@ gates the same way whether it arrives by index or by upload.
 
 from __future__ import annotations
 
-import importlib.metadata
 import io
+import threading
 from dataclasses import dataclass
-from pathlib import Path
 
 import cv2
 import numpy as np
-import onnxruntime as ort
 from PIL import Image
 
 from scalar_forensic.config import Settings
-from scalar_forensic.faces.align import ALIGNMENT_VERSION, align_face
+from scalar_forensic.faces.align import align_face
 from scalar_forensic.faces.chips import dilated_clamped_bbox
 from scalar_forensic.faces.decode import load_for_detection
 from scalar_forensic.faces.detect import YuNetDetector
 from scalar_forensic.faces.embed import OnnxFaceEmbedder
-from scalar_forensic.faces.provenance import PipelineConfig
+from scalar_forensic.faces.indexing import build_pipeline_config
+from scalar_forensic.faces.provenance import EMBEDDER_IDENTITY_FIELDS, PipelineConfig
 from scalar_forensic.faces.quality import post_align_gate, pre_align_gate, review_gate
 from scalar_forensic.web.session import QueryFace
 
@@ -48,66 +47,31 @@ from scalar_forensic.web.session import QueryFace
 _REVIEW_QUALITY = 95
 
 # Process-lifetime model caches.  The web process loads YuNet and the ONNX
-# embedder lazily on the first query-face call; both are stateless across calls
-# apart from OnnxFaceEmbedder.embedding_norms, which this module does not read.
+# embedder lazily on the first query-face call. YuNet mutates its input size
+# and network state per call; the embedder also records mutable norm samples.
 _detector_cache: dict[str, YuNetDetector] = {}
 _embedder_cache: dict[str, OnnxFaceEmbedder] = {}
-
-
-def _sfn_version() -> str:
-    try:
-        return importlib.metadata.version("scalar-forensic")
-    except importlib.metadata.PackageNotFoundError:  # pragma: no cover - dev checkout
-        return "unknown"
+_model_lock = threading.RLock()
+_detector_lock = threading.Lock()
+_inference_lock = threading.Lock()
 
 
 def _detector(settings: Settings) -> YuNetDetector:
-    key = f"{settings.face_detector_model}:{settings.face_detect_max_size}"
-    if key not in _detector_cache:
-        _detector_cache[key] = YuNetDetector(
-            settings.face_detector_model, settings.face_detect_max_size
-        )
-    return _detector_cache[key]
+    key = f"opencv-cpu:{settings.face_detector_model}:{settings.face_detect_max_size}"
+    with _model_lock:
+        if key not in _detector_cache:
+            _detector_cache[key] = YuNetDetector(
+                settings.face_detector_model, settings.face_detect_max_size
+            )
+        return _detector_cache[key]
 
 
 def _embedder(settings: Settings) -> OnnxFaceEmbedder:
-    key = str(settings.face_embedder_model)
-    if key not in _embedder_cache:
-        _embedder_cache[key] = OnnxFaceEmbedder(settings.face_embedder_model)
-    return _embedder_cache[key]
-
-
-def pipeline_config(settings: Settings, detector, embedder) -> PipelineConfig:
-    """The provenance record for a query-time pass.
-
-    Built the same way as ``FacePipeline.from_settings`` (faces/indexing.py) so
-    ``FaceStore.check_compat`` compares like with like — the query embedding is
-    only meaningful against the collection if it was produced under the same
-    hard fields.
-    """
-    return PipelineConfig(
-        detector_id=detector.detector_id,
-        detector_model_hash=detector.model_hash,
-        detector_score_threshold=detector._score_threshold,
-        detect_max_size=settings.face_detect_max_size,
-        embedder_model_name=Path(settings.face_embedder_model).name,
-        embedder_model_hash=embedder.model_hash,
-        manifest_hash=embedder.manifest_hash,
-        embedder_dim=embedder.manifest.embedding_dim,
-        alignment_version=ALIGNMENT_VERSION,
-        normalization_id=embedder.normalization_id,
-        min_conf=settings.face_min_conf,
-        min_size=settings.face_min_size,
-        min_sharpness=settings.face_min_sharpness,
-        max_clipped=settings.face_max_clipped,
-        max_pose=settings.face_max_pose,
-        crop_dilation=settings.face_crop_dilation,
-        review_min_conf=settings.face_review_min_conf,
-        review_min_size=settings.face_review_min_size,
-        sfn_version=_sfn_version(),
-        cv2_version=cv2.__version__,
-        ort_version=ort.__version__,
-    )
+    key = f"CPUExecutionProvider:{settings.face_embedder_model}"
+    with _model_lock:
+        if key not in _embedder_cache:
+            _embedder_cache[key] = OnnxFaceEmbedder(settings.face_embedder_model)
+        return _embedder_cache[key]
 
 
 @dataclass
@@ -129,15 +93,7 @@ def query_embedder_block(cfg: PipelineConfig) -> dict[str, object]:
     manifest is authoritative.
     """
     payload = cfg.to_payload()
-    keys = (
-        "embedder_model_name",
-        "embedder_model_hash",
-        "manifest_hash",
-        "embedder_dim",
-        "normalization_id",
-        "alignment_version",
-    )
-    return {k: payload.get(k) for k in keys}
+    return {k: payload.get(k) for k in EMBEDDER_IDENTITY_FIELDS}
 
 
 def detect_query_faces(data: bytes, settings: Settings, *, max_faces: int) -> QueryFaceResult:
@@ -150,9 +106,10 @@ def detect_query_faces(data: bytes, settings: Settings, *, max_faces: int) -> Qu
     img = load_for_detection(data)
     detector = _detector(settings)
     embedder = _embedder(settings)
-    cfg = pipeline_config(settings, detector, embedder)
+    cfg = build_pipeline_config(settings, detector, embedder)
 
-    dets = detector.detect(img)
+    with _detector_lock:
+        dets = detector.detect(img)
     n_detected = len(dets)
 
     faces: list[QueryFace] = []
@@ -255,7 +212,8 @@ def detect_query_faces(data: bytes, settings: Settings, *, max_faces: int) -> Qu
         to_embed.append((face.index, aligned))
 
     if to_embed:
-        vecs = embedder.embed([a for _, a in to_embed])
+        with _inference_lock:
+            vecs = embedder.embed([a for _, a in to_embed])
         for (idx, _), vec in zip(to_embed, vecs, strict=True):
             faces[idx].vector = [float(v) for v in vec]
             faces[idx].embedding_status = "embedded"

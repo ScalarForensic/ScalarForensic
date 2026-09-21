@@ -1,10 +1,54 @@
 // Part of the sfn() Alpine component — merged by app.js. See app.js for load order.
 (window.__sfnParts = window.__sfnParts || []).push({
-    // ── Reset ─────────────────────────────────────────────────────────────
+    // Reset
     resetToUpload() {
+      this._viewGeneration += 1;
+      this._invalidateQuery();
+      this.closeVideoPlayback();
       clearTimeout(this._queryTimer);
       clearTimeout(this._matchImgTimer);
       clearTimeout(this._queryImgTimer);
+      clearTimeout(this._faceQueryTimer);
+      this._faceQueryTimer = null;
+      this._queryFacesSeq += 1;
+      this._faceBrowseRequest = (this._faceBrowseRequest || 0) + 1;
+      this._faceSearchRequest = (this._faceSearchRequest || 0) + 1;
+      this._faceCompareRequest = (this._faceCompareRequest || 0) + 1;
+      this._faceExplainRequest += 1;
+      this._faceStatsRequest += 1;
+      this._faceAuditRequest += 1;
+      this.faceBasket = [];
+      this.queryFaces = [];
+      this.queryFacesToken = null;
+      this.queryFaceEmbedder = null;
+      this.queryFacesStale = {};
+      this.queryFacesError = '';
+      this.queryFacesTruncated = false;
+      this.facesForHit = [];
+      this.facesLoading = false;
+      this.faceHits = [];
+      this.faceSearchLoading = false;
+      this.faceSearchError = '';
+      this.faceSearchEmbedder = null;
+      this.faceSearchCompat = null;
+      this.faceComparePairs = [];
+      this.faceCompareCounts = null;
+      this.faceCompareError = '';
+      this.faceCompareEmbedder = null;
+      this.faceCompareCompat = null;
+      this.faceMatchScores = {};
+      this.faceCalibration = null;
+      this.faceExplain = null;
+      this.faceExplainOpen = false;
+      this.faceExplainError = '';
+      this.faceStats = null;
+      this.faceStatsLoading = false;
+      this.faceStatsError = '';
+      this.showFaceStats = false;
+      this.faceAudit = null;
+      this.faceAuditLoading = false;
+      this.faceAuditError = '';
+      this.showFaceAudit = false;
       this.phase = 'upload';
       this.pendingFiles = [];
       this.results = [];
@@ -18,6 +62,12 @@
       this.queryError = '';
       this.queryFrames = null;
       this.queryFrameIdx = 0;
+      this.videoFramesCache = {};
+      this.videoExpanded = {};
+      this.selectedFrameTimecode = null;
+      this.selectedMatchedFrameKey = null;
+      this.videoTimeline = null;
+      this.embeddingModels = {};
       this.expandedHits = {};
       this.provenance = null;
       this.showProvenance = false;
@@ -51,6 +101,8 @@
       this.selectedTriageHitId = null;
       this.triageMatchSrc = null;
       this.triageMatchMeta = null;
+      this.triageMatchMetaError = null;
+      this.triageHitCache = {};
       this.triageMatchZoom = 1.0;
       this.triageRunning = false;
       this.triageError = null;

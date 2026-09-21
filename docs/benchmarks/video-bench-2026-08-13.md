@@ -1,12 +1,10 @@
 # Video playback §14 benchmarks — 2026-08-13
 
-Benchmarker: `scalarforensic-csm-b1`. Repo `main` at `43a7222`, clean. Raw
-`/usr/bin/time -v` logs and the concurrency driver script are in the bench
-scratch dir (not under `data/`, not committed):
-`/tmp/claude-1000/-home-user01-Schreibtisch-gitea-ScalarForensic/098f80ee-3b25-494d-bd9b-31bc15a8b965/scratchpad/video-bench/`.
+Historical benchmark of `main` at `43a7222`, clean. Raw
+`/usr/bin/time -v` logs and the concurrency driver were kept in temporary
+scratch space, not committed; continued availability is not established.
 Large intermediate `.mov`/`.mp4` files were deleted after measurement to
-reclaim ~14 GB; the `.log`/`.txt` files (one per run) are kept as the
-methodology trail.
+reclaim ~14 GB. The measurements and limitations below are the retained record.
 
 ## Hardware — stated minimum floor
 
@@ -26,30 +24,29 @@ This is the same host and ffmpeg build §3 used. No other hardware was tested;
 there is no separate "floor" figure to derive — this machine's numbers below
 **are** the floor.
 
-**Box was not perfectly idle.** Two other Claude sessions (`llm-browser-com-c3/4/5`)
-run headless Chrome and a Node test process on this host continuously; a
+**Box was not perfectly idle.** Headless Chrome and a Node test process
+ran on this host continuously; a
 long-running `bitcoind` process holds a steady ~5% CPU. `uptime` 1-minute load
 was checked before each phase (0.3–0.5 before starting; it climbs to the
 job's own contribution during a run and decays back after). No other
 CPU/GPU-heavy job was observed active during any timed run — the ambient load
 is background daemons in the low single-digit percent, not a competing
-benchmark. This is disclosed per the dispatch rule rather than omitted; it
+benchmark. This disclosed background load
 does not invalidate the concurrency numbers but means "idle" here is
 "ordinary desktop background," not a bare-metal box with nothing else
 installed.
 
 ## Sources — synthesised, not real 4K/multi-hour footage
 
-No real 4K or multi-hour source exists in the corpus (§3 saw max 318 s). Per
-the dispatch:
+No real 4K or multi-hour source existed in the corpus (§3 saw max 318 s).
+The benchmark used:
 
 - **4K source**: `IMG_3274.MOV` (the §3 dev-corpus HDR sample, found under
   `/media/user01/.../Gitea_Backup/input_scalar/IMG_3274.MOV` — read-only,
   not under this repo's `data/`) upscaled 1920×1080 → 3840×2160 with
   `libx265 -crf 18 -preset fast`, HLG/bt2020 tags preserved, 133.869 s,
   matches §3's sample exactly (verified against ffprobe before use). This is
-  a real HDR *frame content* source at 4K resolution — not synthetic colour —
-  per the dispatch's instruction to prefer this over invented HDR.
+  a real HDR *frame content* source at 4K resolution — not synthetic colour.
 - **Long source**: 100× concatenation of the same `IMG_3274.MOV` via
   `ffmpeg -f concat -c copy` (stream copy, no re-encode) → 13387.043 s
   (3 h 43 m). **This is a best-case index**: concat-copy produces a single
@@ -168,8 +165,7 @@ decided pipeline — the analyst would sit on a spinner well past chunk
 boundary if the source is played at full 4K resolution.
 
 Note: §16 already caps output resolution at 1080p by operator decision
-(pending ledger item 3, "1080p is ok, full quality can be archived by
-download"), so this 4K number is a **stress test of the assumption**, not a
+(full quality remains available by original-file download), so this 4K number is a **stress test of the assumption**, not a
 number the shipped path is expected to hit under that ruling — but it
 confirms §17 Q2's concern was correctly raised, and forecloses ever raising
 the resolution cap without also revisiting chunk length.

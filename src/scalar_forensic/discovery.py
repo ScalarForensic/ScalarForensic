@@ -156,22 +156,6 @@ def _exclude_filter(point_ids: list[str | int]) -> Filter | None:
     return Filter(must_not=[HasIdCondition(has_id=point_ids)])
 
 
-def _merge_filter(user_filter: Filter | None, exclude: Filter | None) -> Filter | None:
-    """Conjoin a caller-supplied filter with the must_not-exclude filter."""
-    if exclude is None:
-        return user_filter
-    if user_filter is None:
-        return exclude
-    # Qdrant Filter is dataclass-like; build a fresh one combining both.
-    combined_must_not = list(user_filter.must_not or []) + list(exclude.must_not or [])
-    return Filter(
-        must=user_filter.must,
-        should=user_filter.should,
-        min_should=user_filter.min_should,
-        must_not=combined_must_not,
-    )
-
-
 def _resolve_polarity(tag: Tag, reverse: bool) -> tuple[list[str | int], list[str | int]]:
     """Apply reverse-polarity by swapping positive and negative lists.
 
@@ -200,7 +184,6 @@ def run_discovery(
     *,
     vector_name: str,
     limit: int = 50,
-    filter_: Filter | None = None,
     reverse: bool = False,
     reference_collection: str | None = None,
     exclude_references: bool = True,
@@ -254,7 +237,7 @@ def run_discovery(
         ref_ids.extend(negatives)
         if target is not None and target not in ref_ids:
             ref_ids.append(target)
-    query_filter = _merge_filter(filter_, _exclude_filter(ref_ids))
+    query_filter = _exclude_filter(ref_ids)
 
     lookup_from = (
         LookupLocation(collection=reference_collection, vector=vector_name)
@@ -334,7 +317,6 @@ def run_explore(
     *,
     vector_name: str = "dino",
     limit: int = 50,
-    filter_: Filter | None = None,
 ) -> tuple[list[DiscoveryHit], str]:
     """Surface candidates for tag bootstrapping and iterative diversity injection.
 
@@ -355,7 +337,7 @@ def run_explore(
     ``"random"``.
     """
     exclude_ids: list[str | int] = list(positive_ids) + list(negative_ids)
-    query_filter = _merge_filter(filter_, _exclude_filter(exclude_ids))
+    query_filter = _exclude_filter(exclude_ids)
 
     use_context = bool(positive_ids) and bool(negative_ids)
 
@@ -390,30 +372,3 @@ def run_explore(
             )
         )
     return hits, strategy
-
-
-def run_triage(
-    client: QdrantClient,
-    collection: str,
-    tag: Tag,
-    *,
-    limit: int = 50,
-    filter_: Filter | None = None,
-    reverse: bool = False,
-    reference_collection: str | None = None,
-    exclude_references: bool = True,
-    cosine_threshold: float | None = None,
-) -> list[DiscoveryHit]:
-    """Run a tag triage query using DINOv2 semantic embeddings only."""
-    return run_discovery(
-        client,
-        collection,
-        tag,
-        vector_name="dino",
-        limit=limit,
-        filter_=filter_,
-        reverse=reverse,
-        reference_collection=reference_collection,
-        exclude_references=exclude_references,
-        cosine_threshold=cosine_threshold,
-    )

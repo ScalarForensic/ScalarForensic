@@ -23,10 +23,26 @@ def test_face_detection_holds_canonical_shapes():
     assert det.confidence == pytest.approx(0.93)
 
 
-def test_assert_canonical_rejects_swapped_eyes():
-    # Right eye left of left eye => mirrored order => must raise.
-    lm = np.array([[30, 20], [10, 20], [20, 30], [12, 40], [28, 40]], dtype=np.float32)
+@pytest.mark.parametrize("order", [[1, 0, 2, 3, 4], [0, 1, 2, 4, 3], [1, 0, 2, 4, 3]])
+def test_assert_canonical_rejects_swapped_pairs(order):
+    lm = np.array([[10, 20], [30, 20], [20, 30], [12, 40], [28, 40]], dtype=np.float32)
     with pytest.raises(ValueError, match="landmark order"):
+        assert_canonical_landmarks(lm[order])
+
+
+@pytest.mark.parametrize("roll", [-90, 90, 180])
+def test_assert_canonical_accepts_rotated_face(roll):
+    lm = np.array([[10, 20], [30, 20], [20, 30], [12, 40], [28, 40]], dtype=np.float32)
+    angle = np.deg2rad(roll)
+    rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+    assert_canonical_landmarks(lm @ rotation.T)
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf])
+def test_assert_canonical_rejects_nonfinite_landmarks(value):
+    lm = np.array([[10, 20], [30, 20], [20, 30], [12, 40], [28, 40]], dtype=np.float32)
+    lm[2, 1] = value
+    with pytest.raises(ValueError):
         assert_canonical_landmarks(lm)
 
 

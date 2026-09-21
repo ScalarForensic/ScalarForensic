@@ -54,6 +54,11 @@ def _remux_to_mp4(src: Path, dst: Path) -> dict:
     Writes to a sibling ``.part`` file and renames on success, so a reader can
     never observe a half-written viewing copy.
     """
+    from scalar_forensic import video_access
+
+    if video_access.configured():
+        return video_access.client().call("rewrap", src, destination=dst)
+
     skipped: list[str] = []
     repaired = 0
     part = part_path(dst)

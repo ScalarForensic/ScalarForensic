@@ -12,9 +12,7 @@ from scalar_forensic.config import Settings
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Full indexing provenance for a single image (on-demand, for Audit modal)
-# ---------------------------------------------------------------------------
 
 _PROVENANCE_FIELD_NAMES = [
     "model_name",

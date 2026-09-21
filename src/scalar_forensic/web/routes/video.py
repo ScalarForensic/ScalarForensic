@@ -1,4 +1,4 @@
-"""Video routes: on-demand frame extraction and indexed-frame timelines.
+"""Video routes: indexed-frame timelines.
 
 The indexing side of video.  In-browser playback is a subsystem of its own —
 ``scalar_forensic.video_playback`` (spec §11).
@@ -6,50 +6,20 @@ The indexing side of video.  In-browser playback is a subsystem of its own —
 
 from __future__ import annotations
 
-import asyncio
-import io
 import logging
 import re
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from scalar_forensic.config import Settings
 from scalar_forensic.indexer import qdrant_scroll_all
-from scalar_forensic.video import extract_frame_at
-from scalar_forensic.web.routes._shared import _resolve_video_path
 
 _log = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-# ---------------------------------------------------------------------------
-# Video frame serving
-# ---------------------------------------------------------------------------
-
-
-@router.get("/api/video-frame")
-async def video_frame(path: str, timecode_ms: int) -> StreamingResponse:
-    """Re-extract and serve a single video frame as JPEG.
-
-    ``path`` must be an absolute filesystem path to a video file.
-    ``timecode_ms`` is the target timecode in milliseconds.
-    """
-    if timecode_ms < 0:
-        raise HTTPException(status_code=400, detail="timecode_ms must be >= 0")
-    p = _resolve_video_path(path)
-
-    img = await asyncio.to_thread(extract_frame_at, p, timecode_ms)
-    if img is None:
-        raise HTTPException(status_code=404, detail="Frame not found at given timecode")
-
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=90)
-    buf.seek(0)
-    return StreamingResponse(buf, media_type="image/jpeg")
 
 
 @router.get("/api/video-timeline")

@@ -201,7 +201,7 @@ test('no payload, no rows', () => {
   assert.equal(c._renderingRows('not an object').length, 0);
 });
 
-// ── The two panels that use it ───────────────────────────────────────────────
+// The two panels that use it
 
 test('the chunk label renders the record from the chunk response payload', () => {
   const c = loadComponent();

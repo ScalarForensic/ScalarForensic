@@ -32,9 +32,7 @@ from scalar_forensic.config import Settings
 
 _log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 # Filter chains
-# ---------------------------------------------------------------------------
 
 # The tone-map chain measured in §3.1, unchanged.  It is what makes the output
 # carry bt709/bt709 instead of an 8-bit picture still labelled bt2020/HLG —
@@ -71,9 +69,7 @@ def _video_filter(output_height: int, *, hdr: bool) -> str:
     return f"{_scale_filter(output_height)},{TONEMAP_CHAIN if hdr else SDR_CHAIN}"
 
 
-# ---------------------------------------------------------------------------
 # The pipeline and its fingerprint
-# ---------------------------------------------------------------------------
 
 # Rate control per encoder.  Recorded as data rather than inlined at the call
 # site because it is a fingerprint member: changing a CRF changes the pixels.
@@ -157,9 +153,7 @@ class Pipeline:
         return described
 
 
-# ---------------------------------------------------------------------------
 # The probe
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -172,11 +166,6 @@ class Capability:
     hwaccel: str
     tonemap_ok: bool
     notes: tuple[str, ...]
-
-    @property
-    def available(self) -> bool:
-        """True when an SDR source can be encoded at all."""
-        return self.encoder is not None
 
     def unavailable_reason(self, *, hdr: bool) -> str | None:
         """Why an encode cannot run, phrased for an analyst, or None."""
@@ -350,6 +339,11 @@ def capability(settings: Settings, *, refresh: bool = False) -> Capability:
     ``ffmpeg_version`` is a fingerprint member and the cache key moves with it.
     """
     global _cached
+    from scalar_forensic import video_access
+
+    if video_access.configured():
+        return video_access.capability(settings, refresh=refresh)
+
     with _cache_lock:
         if _cached is None or refresh:
             _cached = probe(settings)
@@ -359,13 +353,14 @@ def capability(settings: Settings, *, refresh: bool = False) -> Capability:
 def reset_cache() -> None:
     """Drop the cached probe result (tests, and a future explicit re-probe)."""
     global _cached
+    from scalar_forensic import video_access
+
+    video_access.reset_capability_cache()
     with _cache_lock:
         _cached = None
 
 
-# ---------------------------------------------------------------------------
 # Selection
-# ---------------------------------------------------------------------------
 
 
 def is_hdr(info: dict) -> bool:

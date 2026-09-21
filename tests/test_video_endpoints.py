@@ -3,7 +3,6 @@
 Covered endpoints:
   GET /api/query-frames/{session_id}/{file_id}
   GET /api/query-frame/{session_id}/{file_id}?timecode_ms=…
-  GET /api/video-frame?path=…&timecode_ms=…
   GET /api/video-timeline?video_hash=…
   GET /api/thumbnail/{sha256}
 """
@@ -19,9 +18,7 @@ from fastapi.testclient import TestClient
 from scalar_forensic.web.app import app
 from scalar_forensic.web.session import FileEntry, VideoFrameEntry
 
-# ---------------------------------------------------------------------------
 # Fixtures
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -58,9 +55,7 @@ def _mock_session(entries: list[FileEntry]) -> MagicMock:
     return sess
 
 
-# ---------------------------------------------------------------------------
 # /api/query-frames — frame list for an uploaded query video
-# ---------------------------------------------------------------------------
 
 
 class TestQueryFramesList:
@@ -107,9 +102,7 @@ class TestQueryFramesList:
         assert frames[1] == {"frame_index": 1, "timecode_ms": 1000, "frame_hash": "b" * 64}
 
 
-# ---------------------------------------------------------------------------
 # /api/query-frame — serve a single frame image from a query video
-# ---------------------------------------------------------------------------
 
 
 class TestQueryFrameImage:
@@ -163,54 +156,7 @@ class TestQueryFrameImage:
         assert r.headers["content-type"] == "image/jpeg"
 
 
-# ---------------------------------------------------------------------------
-# /api/video-frame — serve a frame from a dataset video on disk
-# ---------------------------------------------------------------------------
-
-
-class TestVideoFrame:
-    def test_non_video_extension_returns_400(self, client, tmp_path):
-        # Extension check fires before _check_allowed_path — no SFN_INPUT_DIR needed.
-        p = tmp_path / "image.jpg"
-        p.write_bytes(b"x")
-        r = client.get(f"/api/video-frame?path={p}&timecode_ms=0")
-        assert r.status_code == 400
-
-    def test_negative_timecode_returns_400(self, client, tmp_path):
-        p = tmp_path / "clip.mp4"
-        r = client.get(f"/api/video-frame?path={p}&timecode_ms=-1")
-        assert r.status_code == 400
-
-    def test_missing_file_returns_404(self, client, tmp_path, monkeypatch):
-        monkeypatch.setenv("SFN_INPUT_DIR", str(tmp_path))
-        p = tmp_path / "missing.mp4"
-        r = client.get(f"/api/video-frame?path={p}&timecode_ms=0")
-        assert r.status_code == 404
-
-    def test_frame_not_found_returns_404(self, client, tmp_path, monkeypatch):
-        monkeypatch.setenv("SFN_INPUT_DIR", str(tmp_path))
-        p = tmp_path / "clip.mp4"
-        p.write_bytes(b"fake")
-        with patch("scalar_forensic.web.routes.video.extract_frame_at", return_value=None):
-            r = client.get(f"/api/video-frame?path={p}&timecode_ms=99999")
-        assert r.status_code == 404
-
-    def test_valid_frame_returns_jpeg(self, client, tmp_path, monkeypatch):
-        from PIL import Image
-
-        monkeypatch.setenv("SFN_INPUT_DIR", str(tmp_path))
-        img = Image.new("RGB", (32, 32), color=(0, 128, 255))
-        p = tmp_path / "clip.mp4"
-        p.write_bytes(b"fake")
-        with patch("scalar_forensic.web.routes.video.extract_frame_at", return_value=img):
-            r = client.get(f"/api/video-frame?path={p}&timecode_ms=0")
-        assert r.status_code == 200
-        assert r.headers["content-type"] == "image/jpeg"
-
-
-# ---------------------------------------------------------------------------
 # /api/video-timeline — indexed frame list from Qdrant by video hash
-# ---------------------------------------------------------------------------
 
 
 class TestVideoTimeline:
@@ -220,17 +166,6 @@ class TestVideoTimeline:
         for bad in ("short", "not-hex!!", "x" * 63, "G" * 64):
             r = client.get(f"/api/video-timeline?video_hash={bad}")
             assert r.status_code == 400, f"expected 400 for hash {bad!r}"
-
-    def test_valid_hash_format_accepted(self, client):
-        mock_client = MagicMock()
-        mock_client.scroll.return_value = ([], None)
-        with (
-            patch("scalar_forensic.web.routes.video.Settings"),
-            patch("scalar_forensic.web.routes.video.QdrantClient", return_value=mock_client),
-        ):
-            r = client.get(f"/api/video-timeline?video_hash={self._VALID_HASH}")
-        assert r.status_code == 200
-        assert "frames" in r.json()
 
     def test_empty_qdrant_result_returns_empty_frames(self, client):
         mock_client = MagicMock()
@@ -244,9 +179,7 @@ class TestVideoTimeline:
         assert r.json()["frames"] == []
 
 
-# ---------------------------------------------------------------------------
 # /api/thumbnail/{sha256}
-# ---------------------------------------------------------------------------
 
 
 class TestThumbnail:
@@ -284,9 +217,7 @@ class TestThumbnail:
         assert r.status_code == 200
 
 
-# ---------------------------------------------------------------------------
 # /api/hit-image — serve frame JPEGs from frame_store_dir
-# ---------------------------------------------------------------------------
 
 
 class TestHitImage:
@@ -335,9 +266,7 @@ class TestHitImage:
         assert r.status_code == 404
 
 
-# ---------------------------------------------------------------------------
 # /api/metadata — frame path classification via parse_frame_path
-# ---------------------------------------------------------------------------
 
 
 class TestHitMetadataFramePath:

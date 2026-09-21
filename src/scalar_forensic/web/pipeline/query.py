@@ -6,20 +6,19 @@ import logging
 from dataclasses import dataclass, field
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue
+from qdrant_client.models import FieldCondition, Filter, MatchValue, QueryRequest
 
 from scalar_forensic.config import Settings
 from scalar_forensic.indexer import qdrant_scroll_all
-from scalar_forensic.web.pipeline._embedders import _embedder_cache
+from scalar_forensic.safeguards import require_collection_compatible
+from scalar_forensic.web.pipeline._embedders import (
+    _embedder_cache,
+    validate_cached_embedder_settings,
+)
 from scalar_forensic.web.pipeline.provenance import _payload_model_provenance
 from scalar_forensic.web.session import Session
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Phase 2: Query
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -242,11 +241,11 @@ def _group_video_hits(hits: list[Hit]) -> list[Hit]:
                 frame_timecode_ms=representative.frame_timecode_ms,
                 matched_frames=matched,
                 query_timecodes=qtc,
+                best_query_timecode_ms=representative.best_query_timecode_ms,
                 is_reference=is_reference,
             )
         )
 
-    # Re-sort combined list
     return sorted(non_video + grouped_video, key=_hit_sort_key)
 
 
@@ -273,6 +272,44 @@ def query_session(
     mode → {name, hash} for each embedder currently loaded in the web process.
     """
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+    try:
+        return _query_session_with_client(
+            client,
+            session,
+            modes,
+            threshold_altered,
+            threshold_semantic,
+            limit,
+            settings,
+            unify,
+            include_reference,
+        )
+    finally:
+        client.close()
+
+
+def _query_session_with_client(
+    client: QdrantClient,
+    session: Session,
+    modes: list[str],
+    threshold_altered: float,
+    threshold_semantic: float,
+    limit: int,
+    settings: Settings,
+    unify: bool,
+    include_reference: bool,
+) -> tuple[list[FileResult], dict[str, dict]]:
+    needed = {vn for mode, vn in (("semantic", "dino"), ("altered", "sscd")) if mode in modes}
+    if needed:
+        validate_cached_embedder_settings(settings, needed)
+        hashes = {vn: _embedder_cache[vn].model_hash for vn in needed if vn in _embedder_cache}
+        collections = [settings.collection]
+        if include_reference and settings.reference_collection:
+            collections.append(settings.reference_collection)
+        for collection in dict.fromkeys(collections):
+            require_collection_compatible(
+                client, collection, settings, needed_vectors=needed, expected_hashes=hashes
+            )
     results: list[FileResult] = []
 
     for entry in session.files:
@@ -336,143 +373,38 @@ def query_session(
                 all_qtcs.append(tc)
                 seen_qtcs.add(tc)
 
-        # Query each timecode (frame or image) in complete isolation.
-        # Within one query entity, altered and semantic hits for the same
-        # dataset path are combined onto one hit card (unify=True) so both
-        # measurements are visible side by side — both scores originate from
-        # the exact same query→dataset pair, just via different models.
-        # After the per-qtc loop, the final unify pass may merge hits for the
-        # same dataset path across different query frames (video queries); when
-        # that happens the reported score is the max across those comparisons
-        # and query_timecodes accumulates all contributing query timecodes.
-        # NOTE: the per-mode structure below (altered / semantic branches, unify
-        # merge/append, _group_video_hits) is mirrored by the reference overlay
-        # loop that follows it.  If you add or change a mode branch here, apply
-        # the same change to the reference overlay loop and vice versa.
-        for qtc in all_qtcs:
-            frame_merged: dict[str, Hit] = {}  # used when unify=True
-            frame_unmerged: list[Hit] = []  # used when unify=False
-
-            if "altered" in modes:
-                for vec in sscd_by_qtc.get(qtc, []):
-                    hits, errs = _query_vector(
-                        client,
-                        collection=settings.collection,
-                        vector=vec,
-                        mode="altered",
-                        threshold=threshold_altered,
-                        limit=limit,
-                        vector_name="sscd",
-                    )
-                    for h in hits:
-                        if qtc is not None:
-                            h.query_timecodes = [qtc]
-                        if unify:
-                            _merge_hit(h, frame_merged)
-                        else:
-                            frame_unmerged.append(h)
-                    file_result.errors.extend(errs)
-
-            if "semantic" in modes:
-                for vec in dino_by_qtc.get(qtc, []):
-                    hits, errs = _query_vector(
-                        client,
-                        collection=settings.collection,
-                        vector=vec,
-                        mode="semantic",
-                        threshold=threshold_semantic,
-                        limit=limit,
-                        vector_name="dino",
-                    )
-                    for h in hits:
-                        if qtc is not None:
-                            h.query_timecodes = [qtc]
-                        if unify:
-                            _merge_hit(h, frame_merged)
-                        else:
-                            frame_unmerged.append(h)
-                    file_result.errors.extend(errs)
-
-            # Group dataset-video frames found by this query entity, then
-            # append to the shared results list.  Because grouping is done
-            # per query entity, a dataset video appears as a separate Hit for
-            # each query frame that matched it — scores are never combined.
-            if unify:
-                all_flat_hits.extend(_group_video_hits(list(frame_merged.values())))
-            else:
-                # unify=False: keep modes separate — group video frames per mode
-                # independently so a database video can appear once per mode,
-                # consistent with unify=False semantics for image hits.
-                # Calling _group_video_hits on the mixed list would silently
-                # re-unify altered and semantic scores despite unify=False.
-                for mode_hits in (
-                    [h for h in frame_unmerged if "altered" in h.scores],
-                    [h for h in frame_unmerged if "semantic" in h.scores],
-                ):
-                    if mode_hits:
-                        all_flat_hits.extend(_group_video_hits(mode_hits))
-
-        # Reference collection overlay: query the reference collection with the
-        # same per-mode embeddings used for the main case search and append hits
-        # as is_reference=True.  Mirrors the per-qtc + merge/group structure of
-        # the case-collection loop above so reference hits honour unify=True
-        # (mode-merge per path), unify=False (per-mode rows), and propagate
-        # query_timecodes from video-query frames.
-        # NOTE: keep in sync with the case-collection loop above.
+        # Each collection/frame is grouped independently before the final merge.
+        # Video RPCs contain at most 64 vectors; only 32 frames' intermediate
+        # results are retained at a time. The final forensic result remains complete.
+        collections = [(settings.collection, False)]
         if include_reference and settings.reference_collection:
-            for qtc in all_qtcs:
-                ref_frame_merged: dict[str, Hit] = {}  # used when unify=True
-                ref_frame_unmerged: list[Hit] = []  # used when unify=False
-
-                if "altered" in modes:
-                    for vec in sscd_by_qtc.get(qtc, []):
-                        ref_hits, ref_errs = _query_vector(
-                            client,
-                            collection=settings.reference_collection,
-                            vector=vec,
-                            mode="altered",
-                            threshold=threshold_altered,
-                            limit=limit,
-                            vector_name="sscd",
-                            is_reference_result=True,
-                        )
-                        for h in ref_hits:
-                            if qtc is not None:
-                                h.query_timecodes = [qtc]
-                            if unify:
-                                _merge_hit(h, ref_frame_merged)
-                            else:
-                                ref_frame_unmerged.append(h)
-                        file_result.errors.extend(ref_errs)
-
-                if "semantic" in modes:
-                    for vec in dino_by_qtc.get(qtc, []):
-                        ref_hits, ref_errs = _query_vector(
-                            client,
-                            collection=settings.reference_collection,
-                            vector=vec,
-                            mode="semantic",
-                            threshold=threshold_semantic,
-                            limit=limit,
-                            vector_name="dino",
-                            is_reference_result=True,
-                        )
-                        for h in ref_hits:
-                            if qtc is not None:
-                                h.query_timecodes = [qtc]
-                            if unify:
-                                _merge_hit(h, ref_frame_merged)
-                            else:
-                                ref_frame_unmerged.append(h)
-                        file_result.errors.extend(ref_errs)
-
+            collections.append((settings.reference_collection, True))
+        for collection, is_reference in collections:
+            for qtc, frame_hits, errors in _query_frames(
+                client,
+                collection,
+                all_qtcs,
+                sscd_by_qtc,
+                dino_by_qtc,
+                modes,
+                threshold_altered,
+                threshold_semantic,
+                limit,
+                batched=entry.is_video,
+                is_reference=is_reference,
+            ):
+                file_result.errors.extend(errors)
+                frame_merged: dict[str, Hit] = {}
+                for hit in frame_hits:
+                    if qtc is not None:
+                        hit.query_timecodes = [qtc]
+                    if unify:
+                        _merge_hit(hit, frame_merged)
                 if unify:
-                    all_flat_hits.extend(_group_video_hits(list(ref_frame_merged.values())))
+                    all_flat_hits.extend(_group_video_hits(list(frame_merged.values())))
                 else:
-                    for mode_hits in (
-                        [h for h in ref_frame_unmerged if "altered" in h.scores],
-                        [h for h in ref_frame_unmerged if "semantic" in h.scores],
-                    ):
+                    for mode in ("altered", "semantic"):
+                        mode_hits = [h for h in frame_hits if mode in h.scores]
                         if mode_hits:
                             all_flat_hits.extend(_group_video_hits(mode_hits))
 
@@ -757,29 +689,114 @@ def _query_vector(
                 "is_reference",
             ],
         )
-        hits = []
-        for r in result.points:
-            mp = _payload_model_provenance(r.payload)
-            # Source of truth for is_reference is the point's payload.  Fall back
-            # to the caller-supplied flag when the payload does not carry the
-            # field (case-collection points indexed before --reference existed).
-            payload_is_ref = bool(r.payload.get("is_reference"))
-            hits.append(
-                Hit(
-                    path=r.payload.get("image_path", ""),
-                    scores={mode: r.score},
-                    exif=r.payload.get("exif"),
-                    exif_geo_data=r.payload.get("exif_geo_data"),
-                    image_hash=r.payload.get("image_hash"),
-                    model_provenance=mp,
-                    is_video_frame=bool(r.payload.get("is_video_frame")),
-                    video_path=r.payload.get("video_path"),
-                    video_hash=r.payload.get("video_hash"),
-                    frame_timecode_ms=r.payload.get("frame_timecode_ms"),
-                    is_reference=payload_is_ref or is_reference_result,
-                )
-            )
-        return hits, []
+        return _vector_hits(result.points, mode, is_reference_result), []
     except Exception as exc:  # noqa: BLE001
         logger.warning("Vector query failed on %s (%s): %s", collection, mode, exc)
         return [], [f"{mode} query failed: {type(exc).__name__}"]
+
+
+def _vector_hits(points, mode: str, is_reference_result: bool) -> list[Hit]:
+    hits: list[Hit] = []
+    for r in points:
+        mp = _payload_model_provenance(r.payload)
+        # Source of truth for is_reference is the point's payload.  Fall back
+        # to the caller-supplied flag when the payload does not carry the
+        # field (case-collection points indexed before --reference existed).
+        payload_is_ref = bool(r.payload.get("is_reference"))
+        hits.append(
+            Hit(
+                path=r.payload.get("image_path", ""),
+                scores={mode: r.score},
+                exif=r.payload.get("exif"),
+                exif_geo_data=r.payload.get("exif_geo_data"),
+                image_hash=r.payload.get("image_hash"),
+                model_provenance=mp,
+                is_video_frame=bool(r.payload.get("is_video_frame")),
+                video_path=r.payload.get("video_path"),
+                video_hash=r.payload.get("video_hash"),
+                frame_timecode_ms=r.payload.get("frame_timecode_ms"),
+                is_reference=payload_is_ref or is_reference_result,
+            )
+        )
+    return hits
+
+
+def _query_frames(
+    client,
+    collection,
+    timecodes,
+    sscd_by_qtc,
+    dino_by_qtc,
+    modes,
+    threshold_altered,
+    threshold_semantic,
+    limit,
+    *,
+    batched,
+    is_reference,
+):
+    """Yield ordered frame results, with bounded video requests/intermediates."""
+    mode_specs = [
+        ("altered", "sscd", sscd_by_qtc, threshold_altered),
+        ("semantic", "dino", dino_by_qtc, threshold_semantic),
+    ]
+    for offset in range(0, len(timecodes), 32):
+        chunk = timecodes[offset : offset + 32]
+        grouped = {tc: ([], []) for tc in chunk}
+        pending = []
+        for tc in chunk:
+            for mode, vector_name, vectors, threshold in mode_specs:
+                if mode not in modes:
+                    continue
+                for vector in vectors.get(tc, []):
+                    if not batched:
+                        kwargs = dict(
+                            collection=collection,
+                            vector=vector,
+                            mode=mode,
+                            threshold=threshold,
+                            limit=limit,
+                            vector_name=vector_name,
+                        )
+                        if is_reference:
+                            kwargs["is_reference_result"] = True
+                        hits, errors = _query_vector(client, **kwargs)
+                        grouped[tc][0].extend(hits)
+                        grouped[tc][1].extend(errors)
+                        continue
+                    pending.append(
+                        (
+                            tc,
+                            mode,
+                            QueryRequest(
+                                query=vector,
+                                using=vector_name,
+                                score_threshold=threshold,
+                                limit=limit,
+                                with_payload=True,
+                                with_vector=False,
+                            ),
+                        )
+                    )
+                    if len(pending) == 64:
+                        _flush_frame_queries(client, collection, pending, grouped, is_reference)
+                        pending.clear()
+        if pending:
+            _flush_frame_queries(client, collection, pending, grouped, is_reference)
+        for tc in chunk:
+            yield tc, *grouped[tc]
+
+
+def _flush_frame_queries(client, collection, pending, grouped, is_reference):
+    try:
+        responses = client.query_batch_points(
+            collection_name=collection, requests=[request for _, _, request in pending]
+        )
+        if len(responses) != len(pending):
+            raise ValueError("Qdrant returned an incomplete query batch")
+        for (tc, mode, _), response in zip(pending, responses, strict=True):
+            grouped[tc][0].extend(_vector_hits(response.points, mode, is_reference))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Video query batch failed on %s: %s", collection, exc)
+        for tc, mode, _ in pending:
+            grouped[tc][1].append(f"{mode} query failed: {type(exc).__name__}")

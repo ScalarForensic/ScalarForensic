@@ -25,6 +25,7 @@ import statistics as _statistics
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+from scalar_forensic.faces.provenance import EMBEDDER_IDENTITY_FIELDS, LEGACY_QUALITY_GATE_VERSION
 from scalar_forensic.faces.store import _HARD_FIELDS, _SOFT_FIELDS
 
 _HIST_BUCKETS = 20  # 0.05-wide buckets covering normalised [0.0, 1.0] (cosine [-1,1] → [0,1])
@@ -32,7 +33,7 @@ _HIST_BUCKETS = 20  # 0.05-wide buckets covering normalised [0.0, 1.0] (cosine [
 
 @dataclass
 class FaceScoreStats:
-    """Deliberately the same field set as ``stats.py`` ``SemanticStats``."""
+    """The same statistics as ``SemanticStats``, with explicit scale metadata."""
 
     sample_size: int  # how many points were requested
     count: int  # how many were actually returned
@@ -47,17 +48,20 @@ class FaceScoreStats:
     stdev: float
     # _HIST_BUCKETS counts on normalised [0,1] scale; bucket i covers [i*0.05, (i+1)*0.05)
     histogram: list[int]
+    score_scale: str = "raw_cosine"
+    # Histogram positions use (clamp(score, -1, 1) + 1) / 2, not raw cosine.
+    histogram_scale: str = "normalized_cosine"
 
 
 def face_score_stats(store, vector: list[float], *, sample_size: int) -> FaceScoreStats:
     """Score distribution of one probe vector against the face collection.
 
-    Exact search with no score floor: a distribution drawn through an ANN index
-    or above a threshold would describe the search, not the population.  The
-    population is the *embedded* observations — review-only observations carry
+    Exact top-N neighbors with no score floor. This is a selected nearest-neighbor
+    sample, not an estimate of the full collection distribution. The eligible
+    observations are *embedded* — review-only observations carry
     no vector and are structurally absent from it (spec §6.2).
     """
-    rows = store.search_faces(vector, limit=sample_size, threshold=0.0, exact=True)
+    rows = store.search_faces(vector, limit=sample_size, threshold=None, exact=True)
     scores = [float(r["score"]) for r in rows]
 
     n = len(scores)
@@ -119,6 +123,7 @@ def face_score_stats(store, vector: list[float], *, sample_size: int) -> FaceSco
 
 
 _GATE_FIELDS = (
+    "quality_gate_version",
     "min_conf",
     "min_size",
     "max_pose",
@@ -136,15 +141,6 @@ _DETECTOR_FIELDS = (
     "detect_max_size",
 )
 
-_EMBEDDER_FIELDS = (
-    "embedder_model_name",
-    "embedder_model_hash",
-    "manifest_hash",
-    "embedder_dim",
-    "normalization_id",
-    "alignment_version",
-)
-
 _AUDIT_CAVEAT = (
     "This describes how the machine produced these face observations. It is an "
     "investigative lead, not an identification."
@@ -157,8 +153,8 @@ def _stored_config(row: dict) -> SimpleNamespace:
     ``check_compat`` reads the hard and soft fields off an attribute bag; feeding
     it the *persisted* values rather than a config built from today's env is what
     keeps this report a statement about index time.  A field the payload never
-    carried comes through as ``None``, which ``check_compat`` treats the same way
-    it treats an absent collection field: unknown, not a mismatch.
+    carried comes through as ``None``; absent hard provenance cannot establish
+    comparability with a collection carrying that identity.
     """
     return SimpleNamespace(**{f: row.get(f) for f in (*_HARD_FIELDS, *_SOFT_FIELDS)})
 
@@ -179,38 +175,59 @@ def _enablement(store) -> dict | None:
     return enablement if isinstance(enablement, dict) else None
 
 
-def face_audit(store, image_hash: str, cfg=None) -> dict | None:
+def face_audit(
+    store,
+    image_hash: str,
+    *,
+    video_hash: str | None = None,
+    frame_timecode_ms: int | None = None,
+) -> dict | None:
     """Endpoint-4 body for one indexed medium, or ``None`` when it has no faces.
 
-    *cfg* is the configuration the collection is checked against; it defaults to
-    the observation's own persisted provenance so that nothing in this report
-    depends on the environment the web process happens to be running under.
+    The collection is checked against the observation's own persisted provenance,
+    so that nothing in this report depends on the environment the web process
+    happens to be running under. Marker-only records report compatibility as
+    unknown because they carry no observation provenance to compare.
     """
-    marker = store.get_marker(image_hash)
-    faces = store.list_faces(image_hash)
+    scope = (
+        {}
+        if video_hash is None
+        else {
+            "video_hash": video_hash,
+            "frame_timecode_ms": frame_timecode_ms,
+        }
+    )
+    marker = store.get_marker(image_hash, **scope)
+    faces = store.list_faces(image_hash, **scope)
     if marker is None and not faces:
         return None
 
     # Every observation of one medium was produced by one pass, so the provenance
     # fields are identical across its rows — the first row carries them all.
-    row = faces[0] if faces else {}
+    row = {"quality_gate_version": LEGACY_QUALITY_GATE_VERSION, **faces[0]} if faces else {}
 
-    try:
-        warnings = list(store.check_compat(cfg if cfg is not None else _stored_config(row)))
-        ok = True
-    except ValueError as exc:
-        # A report, not a search: an incomparable observation is still described,
-        # with the incomparability stated rather than raised.  Refusing to answer
-        # would hide the very record the examiner needs in order to see why.
-        warnings = [str(exc)]
-        ok = False
+    if not faces:
+        # Markers record totals, not the provenance needed for a comparison.
+        # An absent observation cannot demonstrate an embedding mismatch.
+        ok = None
+        warnings = [
+            "Compatibility is unknown: no surviving face observations carry index-time provenance."
+        ]
+    else:
+        try:
+            warnings = list(store.check_compat(_stored_config(row)))
+            ok = True
+        except ValueError as exc:
+            # Preserve incomparable observations so the examiner can see why.
+            warnings = [str(exc)]
+            ok = False
 
     marker = marker or {}
     return {
         "image_hash": image_hash,
         "n_observations": len(faces),
         "detector": {f: row.get(f) for f in _DETECTOR_FIELDS},
-        "embedder": {f: row.get(f) for f in _EMBEDDER_FIELDS},
+        "embedder": {f: row.get(f) for f in EMBEDDER_IDENTITY_FIELDS},
         "gates_in_force_at_index_time": {f: row.get(f) for f in _GATE_FIELDS},
         "pipeline_config_hash": row.get("pipeline_config_hash"),
         "library_versions": {
@@ -224,7 +241,7 @@ def face_audit(store, image_hash: str, cfg=None) -> dict | None:
             "n_review_only": marker.get("n_review_only"),
             "review_only_reasons": marker.get("review_only_reasons") or {},
             "n_rejected": marker.get("n_rejected"),
-            "rejected": marker.get("rejected") or {},
+            "rejected": marker.get("n_rejected") or {},
         },
         "enablement": _enablement(store),
         "compat": {"ok": ok, "warnings": warnings},

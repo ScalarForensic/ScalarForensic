@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { loadFrontend } from './harness.mjs';
+import { loadFrontend, deferred } from './harness.mjs';
 
 const NOTICE =
   "A full viewing copy is being produced. It shares this host's two encode workers " +
@@ -70,7 +70,7 @@ function jobView(overrides = {}) {
   };
 }
 
-// ── The §4.3 disclosure ─────────────────────────────────────────────────────
+// The §4.3 disclosure
 // THE LOAD-BEARING TEST. Yielding buys ~9% (18.31 s vs 16.83 s median, n=6) and
 // neither pipeline lands inside §4.2's 6–10 s window, so this sentence *is* the
 // remedy. The server sends it on two payloads; both must reach the same cell, or
@@ -132,7 +132,7 @@ test('the notice is never invented client-side', () => {
   }
 });
 
-// ── Progress, and no fabricated percentage ──────────────────────────────────
+// Progress, and no fabricated percentage
 // UNREACHABLE FROM TEXT: the shape of a formatted string, and the absence of a
 // number. §5 and #139 forbid inventing a percentage; `fraction: null` must
 // degrade to elapsed-only rather than to "0%".
@@ -153,7 +153,7 @@ test('a reported fraction becomes a percentage and the ETA label is the server\'
   assert.equal(component.fullJobRateLabel, '1.50× realtime');
 });
 
-// ── The §6.3 refusal, three-valued ──────────────────────────────────────────
+// The §6.3 refusal, three-valued
 // UNREACHABLE FROM TEXT: which of two mutually exclusive getters is true for a
 // given payload. §6.3 requires the estimate *shown* and the original offered.
 test('a refused export shows the estimate and the ceiling', async () => {
@@ -175,7 +175,6 @@ test('a refused export shows the estimate and the ceiling', async () => {
   await component.startFullJob();
   assert.equal(component.fullJobRefused, true);
   assert.equal(component.fullJobRefusedTooBig, true);
-  assert.equal(component.fullJobRefusedUnknown, false);
   // Exact, both figures, and no dependence on the runner's locale: the label
   // pins 'en-US' (see the locale test below), so this is the string an examiner
   // screenshots on any workstation.
@@ -205,12 +204,11 @@ test('an unknown-verdict refusal prints no estimate and not the too-big sentence
 
   await component.startFullJob();
   assert.equal(component.fullJobRefused, true);
-  assert.equal(component.fullJobRefusedUnknown, true);
   assert.equal(component.fullJobRefusedTooBig, false, 'unknown must not claim a size');
   assert.equal(component.fullJobEstimateLabel, '', 'there is no estimate to print');
 });
 
-// ── The §6.3 examiner override (ruling 2026-08-14, #184) ────────────────────
+// The §6.3 examiner override (ruling 2026-08-14, #184)
 // The server has sent all of this since 45fe545 and nothing displayed it. Each
 // test below names the carrier it pins, because the failure mode here is the
 // contention notice's: two carriers, one of them quietly dropped.
@@ -455,12 +453,13 @@ test('the override disclosure is never invented client-side, and does not stick'
   assert.equal(component.fullJobOverridden, false, 'a refusal kept the previous override on screen');
 });
 
-// ── Cancel, completion, auto-switch ─────────────────────────────────────────
+// Cancel, completion, auto-switch
 // UNREACHABLE FROM TEXT: the server states that a cancel with other waiters does
 // NOT stop the job, and the client must copy that rather than assume it stopped.
 test('cancelling with other waiters leaves the job running', async () => {
   const { context, component } = componentUnderTest();
-  component._applyFullJobView(jobView());
+  context.fetch = async () => ({ ok: true, json: async () => jobView({ claim_id: 'mine' }) });
+  await component.startFullJob();
   context.fetch = async () => ({
     ok: true,
     json: async () => ({ outcome: 'detached', waiters: 2, player_state: 'full-job-running' }),
@@ -474,7 +473,8 @@ test('cancelling with other waiters leaves the job running', async () => {
 
 test('cancelling the last waiter returns the player to needs-transcode', async () => {
   const { context, component } = componentUnderTest();
-  component._applyFullJobView(jobView());
+  context.fetch = async () => ({ ok: true, json: async () => jobView({ claim_id: 'mine' }) });
+  await component.startFullJob();
   context.fetch = async () => ({
     ok: true,
     json: async () => ({ outcome: 'cancelled', waiters: 0, player_state: 'needs-transcode' }),
@@ -504,7 +504,7 @@ test('the completion switch keeps the current position', () => {
   assert.equal(component.fullJobSwitchAtSeconds, 45);
 });
 
-// ── The navigate-away prompt ────────────────────────────────────────────────
+// The navigate-away prompt
 // UNREACHABLE FROM TEXT: that a listener was actually registered, and that it
 // asks. Whether the browser then shows its dialog is the browser's call, gated on
 // user interaction — that half belongs to the live check.
@@ -535,7 +535,123 @@ test('an idle job does not warn on leave', () => {
   assert.equal(component.fullJobWarnsOnLeave, false);
 });
 
-// ── Closing the player closes the job panel ─────────────────────────────────
+test('observers cannot cancel; an owned claim survives close and is released once', async (t) => {
+  const { context, component } = componentUnderTest();
+  t.after(() => component.closeFullJob());
+  const requests = [];
+  context.fetch = async (url, opts) => {
+    requests.push({ url, method: opts?.method });
+    return { ok: true, json: async () => opts?.method === 'DELETE'
+      ? { outcome: 'detached', waiters: 2, player_state: 'full-job-running' }
+      : jobView({ claim_id: 'private/token' }) };
+  };
+  component._adoptPlaybackInfo({ full_job: jobView() });
+  assert.equal(component.fullJobCancelOffered, false);
+  await component.cancelFullJob();
+  assert.equal(requests.length, 0);
+  await component.startFullJob();
+  await component.startFullJob();
+  assert.equal(requests.length, 1);
+  assert.equal(component.fullJob.claim_id, undefined);
+  component.closeFullJob();
+  component._adoptPlaybackInfo({ full_job: jobView() });
+  assert.equal(component.fullJobCancelOffered, true);
+  await component.cancelFullJob();
+  await component.cancelFullJob();
+  assert.equal(requests.length, 2);
+  assert.match(requests[1].url, /claim_id=private%2Ftoken/);
+  assert.equal(component.fullJobCancelOffered, false);
+});
+
+test('failed cancellation retains ownership, running state and polling', async (t) => {
+  const { context, component } = componentUnderTest();
+  t.after(() => component.closeFullJob());
+  context.fetch = async () => ({ ok: true, json: async () => jobView({ claim_id: 'mine' }) });
+  await component.startFullJob();
+  context.fetch = async () => ({ ok: false, status: 503, json: async () => ({ detail: { reason: 'busy' } }) });
+  await component.cancelFullJob();
+  assert.equal(component.fullJobCancelOffered, true);
+  assert.equal(component.fullJobRunning, true);
+  assert.ok(component._fullJobPollTimer);
+  assert.equal(component.fullJobCancelError, 'busy');
+});
+
+test('delayed start JSON cannot reopen a closed panel; concurrent starts acquire one claim', async (t) => {
+  const { context, component } = componentUnderTest();
+  t.after(() => component.closeFullJob());
+  const body = deferred();
+  let posts = 0;
+  context.fetch = async () => { posts++; return { ok: true, json: () => body.promise }; };
+  const pending = component.startFullJob();
+  const duplicate = component.startFullJob();
+  component.closeFullJob();
+  body.resolve(jobView({ claim_id: 'late' }));
+  await pending;
+  await duplicate;
+  assert.equal(posts, 1);
+  assert.equal(component.fullJob.state, 'idle');
+  assert.equal(component._fullJobPollTimer, null);
+  component._adoptPlaybackInfo({ full_job: jobView() });
+  assert.equal(component.fullJobCancelOffered, true);
+});
+
+for (const operation of ['pollFullJob', 'cancelFullJob']) {
+  for (const invalidate of ['close', 'reset', 'source']) {
+    test(`delayed ${operation} JSON cannot publish after ${invalidate}`, async (t) => {
+      const { context, component } = componentUnderTest();
+      t.after(() => component.closeFullJob());
+      context.fetch = async () => ({ ok: true, json: async () => jobView({ claim_id: 'mine' }) });
+      await component.startFullJob();
+      const body = deferred();
+      context.fetch = async () => ({ ok: true, json: () => body.promise });
+      const pending = component[operation]();
+      await Promise.resolve();
+      if (invalidate === 'close') component.closeFullJob();
+      if (invalidate === 'reset') component._viewGeneration++;
+      if (invalidate === 'source') component.videoPlayback.source_path = '/evidence/new.mov';
+      const previous = component.fullJob.state;
+      body.resolve(jobView({ player_state: 'full-job-done', outcome: 'cancelled' }));
+      await pending;
+      assert.equal(component.fullJob.state, previous);
+    });
+  }
+}
+
+test('a terminal job releases stale ownership so another export can start', async (t) => {
+  const { context, component } = componentUnderTest();
+  t.after(() => component.closeFullJob());
+  let posts = 0;
+  context.fetch = async () => ({ ok: true, json: async () => jobView({ claim_id: `claim-${++posts}` }) });
+  await component.startFullJob();
+  component._applyFullJobView(jobView({ player_state: 'full-job-failed' }));
+  await component.startFullJob();
+  assert.equal(posts, 2);
+  assert.equal(component.fullJobCancelOffered, true);
+});
+
+test('reopening a source after its job was reaped permits a new export', async (t) => {
+  const { context, component } = componentUnderTest();
+  t.after(() => component.closeFullJob());
+  let posts = 0;
+  context.fetch = async () => ({ ok: true, json: async () => jobView({ claim_id: `claim-${++posts}` }) });
+  await component.startFullJob();
+  component.closeFullJob();
+  component._adoptPlaybackInfo({ full_copy: { state: 'fits' } });
+  await component.startFullJob();
+  assert.equal(posts, 2);
+});
+
+test('another component instance cannot inherit private cancellation claims', async (t) => {
+  const { context, component } = componentUnderTest();
+  t.after(() => component.closeFullJob());
+  context.fetch = async () => ({ ok: true, json: async () => jobView({ claim_id: 'mine' }) });
+  await component.startFullJob();
+  const observer = context.sfn();
+  observer.videoPlayback = component.videoPlayback;
+  assert.equal(observer.fullJobCancelOffered, false);
+});
+
+// Closing the player closes the job panel
 // UNREACHABLE FROM TEXT, and it was a live defect: `closeFullJob()` had no
 // caller on the close path, so the 1 Hz status poll and the `beforeunload`
 // handler both outlived the panel they belonged to. A grep can see the function

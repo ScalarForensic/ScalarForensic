@@ -1,8 +1,9 @@
 """Shared detection types and the canonical landmark contract.
 
 Canonical landmark order (spec §6.1): left eye, right eye, nose tip,
-left mouth corner, right mouth corner — "left" meaning image-left
-(the subject's right side).  Every detector adapter MUST reorder its
+left mouth corner, right mouth corner — "left" meaning image-left on an
+upright face (the subject's right side), retained as the face rotates.
+Every detector adapter MUST reorder its
 native output into this order; a swapped eye pair produces a mirrored
 alignment that silently degrades matching.
 """
@@ -35,14 +36,16 @@ class FaceDetection:
 
 
 def assert_canonical_landmarks(lm: np.ndarray) -> None:
-    """Sanity-check the canonical ordering invariants that survive pose.
-
-    Checks are deliberately loose (faces rotate) but catch the two silent
-    killers: swapped eye pair and swapped mouth pair.
-    """
+    """Reject mirrored/degenerate ordering without rejecting in-plane rotation."""
     if lm.shape != (5, 2):
         raise ValueError(f"landmarks must be 5x2, got {lm.shape}")
-    if lm[0, 0] >= lm[1, 0]:
-        raise ValueError("bad landmark order: left eye is not left of right eye")
-    if lm[3, 0] >= lm[4, 0]:
-        raise ValueError("bad landmark order: left mouth is not left of right mouth")
+    if not np.isfinite(lm).all():
+        raise ValueError("landmarks must be finite")
+    eye_to_mouth = (lm[3] + lm[4] - lm[0] - lm[1]) / 2.0
+    # In image coordinates, each left-to-right pair and the eye-to-mouth
+    # direction have positive winding. Rotation preserves it; swapping a
+    # pair reverses it. Do not sort by x: landmark identities must survive roll.
+    for name, axis in (("eyes", lm[1] - lm[0]), ("mouth", lm[4] - lm[3])):
+        winding = axis[0] * eye_to_mouth[1] - axis[1] * eye_to_mouth[0]
+        if winding <= 0:
+            raise ValueError(f"bad landmark order: {name} are mirrored or degenerate")

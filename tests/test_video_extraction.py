@@ -12,9 +12,7 @@ from scalar_forensic.video import extract_frame_at, extract_frames
 _NONEXISTENT = Path("/nonexistent/video.mp4")
 
 
-# ---------------------------------------------------------------------------
 # fps validation
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("bad_fps", [0, -1, -0.001, -100.0])
@@ -24,9 +22,7 @@ def test_extract_frames_invalid_fps_raises_value_error(bad_fps):
         list(extract_frames(_NONEXISTENT, fps=bad_fps))
 
 
-# ---------------------------------------------------------------------------
 # max_frames validation
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("bad_max", [-1, -100])
@@ -58,9 +54,7 @@ def test_extract_frames_positive_fps_reaches_file_open():
     assert not isinstance(exc_info.value, ValueError)
 
 
-# ---------------------------------------------------------------------------
 # extract_frame_at: overshoot-seeking behaviour
-# ---------------------------------------------------------------------------
 
 
 def _make_av_frame(pts: int) -> MagicMock:

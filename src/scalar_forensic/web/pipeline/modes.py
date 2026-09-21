@@ -12,11 +12,6 @@ from scalar_forensic.config import Settings
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Collection availability
-# ---------------------------------------------------------------------------
-
-
 async def get_available_modes(settings: Settings) -> tuple[list[str], bool, str | None]:
     """Return which query modes are usable based on existing Qdrant collections.
 
@@ -31,11 +26,14 @@ async def get_available_modes(settings: Settings) -> tuple[list[str], bool, str 
     for attempt in range(4):
         if attempt > 0:
             await asyncio.sleep(_delays[attempt - 1])
+        client = None
         try:
             client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
             existing = {c.name for c in client.get_collections().collections}
             break
         except Exception as exc:  # noqa: BLE001
+            if client is not None:
+                client.close()
             last_exc = exc
             logger.warning(
                 "Qdrant connection attempt %d/4 failed at %s: %s",
@@ -47,6 +45,7 @@ async def get_available_modes(settings: Settings) -> tuple[list[str], bool, str 
         return [], False, str(last_exc)
 
     if settings.collection not in existing:
+        client.close()
         return [], False, None
 
     has_reference = (
@@ -66,4 +65,6 @@ async def get_available_modes(settings: Settings) -> tuple[list[str], bool, str 
         err = f"Could not inspect vector config for {settings.collection}: {exc}"
         logger.warning(err)
         return modes, has_reference, err
+    finally:
+        client.close()
     return modes, has_reference, None

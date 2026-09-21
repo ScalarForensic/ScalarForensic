@@ -48,7 +48,6 @@ def search_query_faces(
     limit: int,
     threshold: float,
     exact: bool,
-    collapse: bool,
 ) -> list[dict]:
     """One kNN per probe, merged.  No aggregation across observations (spec §8).
 
@@ -61,18 +60,22 @@ def search_query_faces(
             raw.append(_hit(row, face_index))
 
     raw.sort(key=lambda h: -h["score"])
-    if not collapse:
-        return raw
 
     # Collapse to one hit per medium, keeping the *best-scoring* observation —
-    # raw is already score-descending, so the first sighting of a hash is it.
+    # A video frame is scoped to source + timecode, independent of content hash.
+    # Raw is already score-descending, so the first sighting of a unit is best.
     # n_collapsed counts how many observations that hit stands for, so a
     # collapsed row never silently hides that a file matched more than once.
-    best: dict[str, dict] = {}
+    best: dict[tuple, dict] = {}
     for hit in raw:
-        seen = best.get(hit["image_hash"])
+        key = (
+            ("video", hit["video_hash"], hit["frame_timecode_ms"])
+            if hit.get("video_hash") is not None
+            else ("image", hit["image_hash"])
+        )
+        seen = best.get(key)
         if seen is None:
-            best[hit["image_hash"]] = hit
+            best[key] = hit
         else:
             seen["n_collapsed"] += 1
     return sorted(best.values(), key=lambda h: -h["score"])

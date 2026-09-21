@@ -19,9 +19,7 @@ from scalar_forensic.web.pipeline import (
     query_session,
 )
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 PATH_A = "/evidence/photo.jpg"
 PATH_B = "/evidence/other.jpg"
@@ -76,9 +74,7 @@ def _altered_hit(path: str, score: float = 0.90) -> Hit:
     return Hit(path=path, scores={"altered": score})
 
 
-# ---------------------------------------------------------------------------
 # Signature guard — exclude_hash must not exist on _query_vector
-# ---------------------------------------------------------------------------
 
 
 def test_query_vector_has_no_exclude_hash_parameter():
@@ -88,9 +84,7 @@ def test_query_vector_has_no_exclude_hash_parameter():
     )
 
 
-# ---------------------------------------------------------------------------
 # Same path from multiple modes is merged into one unified row
-# ---------------------------------------------------------------------------
 
 
 def test_same_image_both_modes_yields_one_merged_row():
@@ -124,9 +118,7 @@ def test_same_image_both_modes_yields_one_merged_row():
     assert hit.scores["semantic"] == 1.0
 
 
-# ---------------------------------------------------------------------------
 # Deselecting Exact does not remove image from Semantic results
-# ---------------------------------------------------------------------------
 
 
 def test_semantic_only_includes_self_match():
@@ -167,9 +159,7 @@ def test_exact_deselected_does_not_drop_semantic_hit():
     assert all("exact" not in h.scores for h in hits)
 
 
-# ---------------------------------------------------------------------------
 # Per-mode limit: each mode caps at `limit` independently
-# ---------------------------------------------------------------------------
 
 
 def test_per_mode_limit_respected():
@@ -210,9 +200,7 @@ def test_per_mode_limit_respected():
     assert len(hits) <= 3 * limit
 
 
-# ---------------------------------------------------------------------------
 # Altered + Semantic for same path merges into one row with both scores
-# ---------------------------------------------------------------------------
 
 
 def test_altered_and_semantic_same_path_yields_one_merged_row():
@@ -239,9 +227,7 @@ def test_altered_and_semantic_same_path_yields_one_merged_row():
     assert hit.scores["semantic"] == 0.92
 
 
-# ---------------------------------------------------------------------------
 # Per-mode dedup keeps highest-scoring hit, not first occurrence
-# ---------------------------------------------------------------------------
 
 
 def test_per_mode_dedup_keeps_highest_score():
@@ -268,9 +254,7 @@ def test_per_mode_dedup_keeps_highest_score():
     assert path_a_hits[0].scores["semantic"] == 0.95, "must keep highest-scoring hit, not first"
 
 
-# ---------------------------------------------------------------------------
 # Combined sort: Exact hits (score 1.0) rank above vector hits
-# ---------------------------------------------------------------------------
 
 
 def test_exact_hits_rank_first_in_combined_sort():
@@ -294,9 +278,7 @@ def test_exact_hits_rank_first_in_combined_sort():
     assert hits[0].scores == {"exact": 1.0}, "exact hit must sort first"
 
 
-# ---------------------------------------------------------------------------
 # unify=False: per-mode independent rows
-# ---------------------------------------------------------------------------
 
 
 def test_unify_false_same_path_yields_separate_rows():

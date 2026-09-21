@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import copy
 import logging
 import os
 import sys
@@ -12,18 +13,21 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from qdrant_client import QdrantClient
 
 from scalar_forensic.config import ENV_ALLOW_ONLINE, Settings
+from scalar_forensic.media_worker.client import WorkerUnavailable
 from scalar_forensic.video_playback import router as video_playback_router
+from scalar_forensic.video_playback.jobs import runner
+from scalar_forensic.web.ingress import UploadLimitMiddleware
 from scalar_forensic.web.routes import analyze as analyze_routes
 from scalar_forensic.web.routes import faces as faces_routes
 from scalar_forensic.web.routes import files as files_routes
 from scalar_forensic.web.routes import tags as tags_routes
 from scalar_forensic.web.routes import video as video_routes
-from scalar_forensic.web.session import reap_idle_sessions
+from scalar_forensic.web.session import initialize_temp_root, reap_idle_sessions, shutdown_sessions
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -31,20 +35,26 @@ _STATIC_DIR = Path(__file__).parent / "static"
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI):
     settings = Settings()
+    settings.apply_network_policy()
+    inspection = bool(getattr(_app.state, "inspection_mode", False))
+    await asyncio.to_thread(_check_collection_compat, settings, ignore_mismatch=inspection)
+    if settings.reference_collection:
+        reference_settings = copy.copy(settings)
+        reference_settings.collection = settings.reference_collection
+        await asyncio.to_thread(
+            _check_collection_compat, reference_settings, ignore_mismatch=inspection
+        )
+    await asyncio.to_thread(initialize_temp_root, settings.session_temp_root)
 
     # Log effective batch size so operators know which value is in use.
     if settings.batch_size is not None:
         logging.getLogger(__name__).info("Batch size: %d (SFN_BATCH_SIZE)", settings.batch_size)
     else:
-        from scalar_forensic.calibration import load_cached_batch_size
-
-        cached = load_cached_batch_size()
-        if cached is not None:
-            logging.getLogger(__name__).info("Batch size: %d (calibration cache)", cached)
-        else:
-            logging.getLogger(__name__).info(
-                "Batch size: 32 (default — run `sfn` once to auto-calibrate)"
-            )
+        # Request modes determine the combined model memory footprint. There is
+        # no selected pipeline at startup, so its cache cannot be resolved yet.
+        logging.getLogger(__name__).info(
+            "Batch size: resolved per request from matching model calibration cache; default 32"
+        )
 
     # Face modality: warn once at startup rather than per request.  The
     # /api/faces/availability endpoint carries the same reason to the UI.
@@ -59,6 +69,7 @@ async def lifespan(_app: FastAPI):
         while True:
             await asyncio.sleep(60)
             await reap_idle_sessions(settings.session_ttl_seconds)
+            runner.reap_completed()
 
     reaper_task = asyncio.create_task(_reaper())
     try:
@@ -67,9 +78,26 @@ async def lifespan(_app: FastAPI):
         reaper_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await reaper_task
+        await shutdown_sessions()
+        await runner.shutdown()
+
+
+def _configured_upload_limits(app):
+    settings = Settings()
+    return UploadLimitMiddleware(
+        app, max_bytes=settings.max_upload_bytes, max_concurrent=settings.max_concurrent_uploads
+    )
 
 
 app = FastAPI(title="ScalarForensic", docs_url=None, redoc_url=None, lifespan=lifespan)
+
+
+@app.exception_handler(WorkerUnavailable)
+async def media_worker_unavailable(_request, _exc) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": "Media worker unavailable"})
+
+
+app.add_middleware(_configured_upload_limits)
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 app.include_router(analyze_routes.router)
@@ -80,19 +108,9 @@ app.include_router(tags_routes.router)
 app.include_router(faces_routes.router)
 
 
-# ---------------------------------------------------------------------------
-# Root
-# ---------------------------------------------------------------------------
-
-
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(_STATIC_DIR / "index.html")
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 
 def _check_collection_compat(settings: Settings, *, ignore_mismatch: bool = False) -> None:
@@ -107,8 +125,7 @@ def _check_collection_compat(settings: Settings, *, ignore_mismatch: bool = Fals
     (results still rank, calibrated thresholds are no longer calibrated).
 
     Skips silently when the collection does not exist or has no points (fresh
-    install).  Payload fields absent in older indexes are skipped so as not to
-    break existing deployments retroactively.
+    install).  Populated indexes with missing model/preprocessing provenance require a rebuild.
 
     Qdrant connectivity errors are reported as warnings — request handling will
     fail naturally if the database stays down — but never silently treated as
@@ -119,11 +136,6 @@ def _check_collection_compat(settings: Settings, *, ignore_mismatch: bool = Fals
     hatch for read-only inspection of a known-incompatible collection; it
     must be opted into per invocation, never via the environment.
     """
-    from scalar_forensic.safeguards import (
-        QdrantUnavailable,
-        check_collection_compat,
-        expected_model_hashes_from_settings,
-    )
 
     try:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
@@ -134,6 +146,19 @@ def _check_collection_compat(settings: Settings, *, ignore_mismatch: bool = Fals
             file=sys.stderr,
         )
         return
+
+    try:
+        _check_collection_compat_with_client(client, settings, ignore_mismatch=ignore_mismatch)
+    finally:
+        client.close()
+
+
+def _check_collection_compat_with_client(client, settings, *, ignore_mismatch=False):
+    from scalar_forensic.safeguards import (
+        QdrantUnavailable,
+        check_collection_compat,
+        expected_model_hashes_from_settings,
+    )
 
     # Only hash the model files that correspond to vectors actually present
     # in the collection — avoids loading a DINOv2 snapshot when the collection
@@ -203,8 +228,9 @@ def _check_collection_compat(settings: Settings, *, ignore_mismatch: bool = Fals
             f"\n  {detail}\n"
             f"\nQuery-time embeddings are produced with the current settings and\n"
             f"compared against vectors stored under the previous values.  Similarity\n"
-            f"scores will be silently meaningless against this collection.  Use only\n"
-            f"for read-only inspection of a known-incompatible index.\n",
+            f"scores would be silently meaningless against this collection.\n"
+            f"Similarity is blocked.\n"
+            f"Only metadata and original evidence may be inspected.\n",
             file=sys.stderr,
         )
         return
@@ -223,8 +249,8 @@ def _check_collection_compat(settings: Settings, *, ignore_mismatch: bool = Fals
         f"      uv run python scripts/download_models.py --dino --hash <stored_hash>\n"
         f"      uv run python scripts/download_models.py --sscd --hash <stored_hash>\n"
         f"    (use the stored= value from the mismatch detail above), OR\n"
-        f"  • Pass --ignore-config-mismatch to start anyway (read-only; results will be\n"
-        f"    silently wrong — never use for forensic conclusions)\n",
+        f"  • Pass --ignore-config-mismatch for metadata/original viewing only;\n"
+        f"    incompatible similarity queries remain blocked.\n",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -251,9 +277,8 @@ def start() -> None:
         help=(
             "Start the server even when the current SFN_MODEL_*, SFN_NORMALIZE_SIZE "
             "or SFN_SSCD_N_CROPS differ from the values used to populate the indexed "
-            "collection.  Cosine similarity scores will be silently meaningless under "
-            "drift; use only for read-only inspection of a known-incompatible index, "
-            "never for forensic conclusions."
+            "collection, for metadata and original-evidence viewing only. "
+            "Incompatible similarity queries remain blocked."
         ),
     )
     args = parser.parse_args()
@@ -272,13 +297,13 @@ def start() -> None:
 
     # Pre-flight: always check DINOv2 — available modes aren't known until Qdrant
     # is queried, so we conservatively validate all potentially-used model configs.
-    err = settings.offline_model_error(need_dino=True)
+    err = settings.offline_model_error(need_dino=not args.ignore_config_mismatch)
     if err:
         print(f"[ERROR] {err}", file=sys.stderr)
         sys.exit(1)
 
-    # Pre-flight: reject mismatched embedding config before accepting any requests.
-    _check_collection_compat(settings, ignore_mismatch=args.ignore_config_mismatch)
+    # ASGI lifespan runs the same pre-flight for both console and direct ASGI launches.
+    app.state.inspection_mode = args.ignore_config_mismatch
 
     uvicorn.run(
         "scalar_forensic.web.app:app",

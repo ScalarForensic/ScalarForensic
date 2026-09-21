@@ -5,8 +5,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
-from scalar_forensic.cli import _stale_path_listing, faces_app, index
+from scalar_forensic.cli import faces_app, index
 from scalar_forensic.faces.store import PurgeResult
+from scalar_forensic.ingestion.reporting import _stale_path_listing
 
 runner = CliRunner()
 
@@ -93,7 +94,7 @@ def run_faces_cli(tmp_path, monkeypatch):
         pipeline.cfg.config_hash = "cfg1"
         pipeline.store.collection_is_new.return_value = False
         pipeline.store.check_compat.return_value = []
-        pipeline.store.processed_hashes.return_value = set()
+        pipeline.store.processed_units.return_value = set()
         pipeline.store.stale_face_points.return_value = list(stale or [])
         pipeline.store.delete_face_points.return_value = PurgeResult(
             n_points=len(stale or []),

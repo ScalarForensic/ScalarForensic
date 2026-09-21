@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,10 +20,6 @@ from scalar_forensic.embedder import (
 from scalar_forensic.video import VIDEO_EXTENSIONS, extract_frames
 from scalar_forensic.web.pipeline._embedders import _get_embedder
 from scalar_forensic.web.session import FileEntry, Session, VideoFrameEntry
-
-# ---------------------------------------------------------------------------
-# Phase 1: Analysis
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -108,24 +104,25 @@ def _analyze_file(entry: FileEntry, embedders: dict[str, AnyEmbedder]) -> None:
         raise result.with_traceback(result.__traceback__)
     pre_images = [result]
     for key, embedder in embedders.items():
-        norm_images = embedder.normalize_batch_bytes(pre_images)
-        emb = embedder.embed_images(norm_images)[0]
+        emb = embedder.embed_images(pre_images)[0]
         if key == "sscd":
             entry.sscd_embedding = emb
         else:
             entry.dino_embedding = emb
 
 
-def _video_frame_batch(settings: Settings) -> int:
+def _video_frame_batch(settings: Settings, vector_names: Iterable[str] | None = None) -> int:
     """Return the effective video-frame batch size.
 
     Resolution order: explicit ``SFN_BATCH_SIZE`` > calibration cache > 32.
     """
     if settings.batch_size is not None:
         return settings.batch_size
-    from scalar_forensic.calibration import load_cached_batch_size
+    from scalar_forensic.calibration import cache_identity, load_cached_batch_size
 
-    return load_cached_batch_size() or 32
+    return (
+        load_cached_batch_size(identity=cache_identity(settings, vector_names=vector_names)) or 32
+    )
 
 
 def _analyze_video_file(
@@ -148,7 +145,7 @@ def _analyze_video_file(
     entry.file_hash, entry.file_hash_md5 = hash_file_both(entry.temp_path)
     entry.is_video = True
     frame_entries: list[VideoFrameEntry] = []
-    _batch_sz = _video_frame_batch(settings)
+    _batch_sz = _video_frame_batch(settings, embedders)
 
     try:
         gen = extract_frames(
@@ -176,8 +173,7 @@ def _analyze_video_file(
                 )
 
             for key, embedder in embedders.items():
-                norm_images = embedder.normalize_batch_bytes(pil_images)
-                embeddings = embedder.embed_images(norm_images)
+                embeddings = embedder.embed_images(pil_images)
                 for j, emb in enumerate(embeddings):
                     fe = frame_entries[batch_start + j]
                     if key == "sscd":

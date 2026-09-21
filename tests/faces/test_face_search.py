@@ -24,6 +24,13 @@ from scalar_forensic.web.pipeline.faces_search import (
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def detection_fingerprint():
+    # Geometry is mocked in these search tests; identity is tested separately.
+    with patch("scalar_forensic.web.routes.faces._detection_token", return_value="detection"):
+        yield
+
+
 def _payload(image_hash, score, review="rev1", **over):
     d = {
         "point_id": f"pid-{image_hash}",
@@ -51,25 +58,10 @@ def test_collapse_keeps_one_hit_per_image_hash_with_the_best_score():
         _payload("aaa", 0.44),
         _payload("bbb", 0.60),
     ]
-    hits = search_query_faces(
-        store, [(0, [1.0, 0.0])], limit=10, threshold=0.0, exact=True, collapse=True
-    )
+    hits = search_query_faces(store, [(0, [1.0, 0.0])], limit=10, threshold=0.0, exact=True)
     assert [h["image_hash"] for h in hits] == ["aaa", "bbb"]
     assert hits[0]["score"] == pytest.approx(0.91)
     assert hits[0]["n_collapsed"] == 2
-
-
-def test_uncollapsed_search_returns_every_observation():
-    store = MagicMock()
-    store.search_faces.return_value = [
-        _payload("aaa", 0.91),
-        _payload("aaa", 0.44),
-        _payload("bbb", 0.60),
-    ]
-    hits = search_query_faces(
-        store, [(0, [1.0, 0.0])], limit=10, threshold=0.0, exact=True, collapse=False
-    )
-    assert [h["score"] for h in hits] == [0.91, 0.60, 0.44]
 
 
 def test_hits_carry_the_query_face_index_that_produced_them():
@@ -81,7 +73,6 @@ def test_hits_carry_the_query_face_index_that_produced_them():
         limit=10,
         threshold=0.0,
         exact=True,
-        collapse=True,
     )
     by_hash = {h["image_hash"]: h for h in hits}
     assert by_hash["aaa"]["query_face_index"] == 0
@@ -91,7 +82,7 @@ def test_hits_carry_the_query_face_index_that_produced_them():
 def test_search_is_exact_by_default_and_records_the_mode():
     store = MagicMock()
     store.search_faces.return_value = []
-    search_query_faces(store, [(0, [1.0])], limit=5, threshold=0.2, exact=True, collapse=True)
+    search_query_faces(store, [(0, [1.0])], limit=5, threshold=0.2, exact=True)
     kwargs = store.search_faces.call_args.kwargs
     assert kwargs["exact"] is True
     assert kwargs["threshold"] == 0.2
@@ -103,9 +94,7 @@ def test_video_frame_hits_are_flagged_from_the_timecode():
     store.search_faces.return_value = [
         _payload("aaa", 0.5, frame_timecode_ms=1200, video_hash="vh", video_path="/v.mp4")
     ]
-    hits = search_query_faces(
-        store, [(0, [1.0])], limit=5, threshold=0.0, exact=True, collapse=True
-    )
+    hits = search_query_faces(store, [(0, [1.0])], limit=5, threshold=0.0, exact=True)
     assert hits[0]["is_video_frame"] is True
     assert hits[0]["frame_timecode_ms"] == 1200
     assert hits[0]["face"]["review_url"] == "/api/faces/chip/rev1/review"
@@ -144,7 +133,12 @@ def test_review_only_probe_is_refused_with_400():
     ):
         resp = client.post(
             "/api/faces/search",
-            data={"session_id": "s", "file_id": "f", "face_indices": "0"},
+            data={
+                "session_id": "s",
+                "detection_token": "detection",
+                "file_id": "f",
+                "face_indices": "0",
+            },
         )
     assert resp.status_code == 400
     assert "review-only" in resp.json()["detail"]
@@ -160,11 +154,21 @@ def test_unknown_and_empty_face_indices_are_refused_with_400():
     ):
         unknown = client.post(
             "/api/faces/search",
-            data={"session_id": "s", "file_id": "f", "face_indices": "9"},
+            data={
+                "session_id": "s",
+                "detection_token": "detection",
+                "file_id": "f",
+                "face_indices": "9",
+            },
         )
         empty = client.post(
             "/api/faces/search",
-            data={"session_id": "s", "file_id": "f", "face_indices": " "},
+            data={
+                "session_id": "s",
+                "detection_token": "detection",
+                "file_id": "f",
+                "face_indices": " ",
+            },
         )
     assert unknown.status_code == 400
     assert "unknown face index 9" in unknown.json()["detail"]
@@ -186,7 +190,12 @@ def test_hard_compat_mismatch_refuses_the_search():
     ):
         resp = client.post(
             "/api/faces/search",
-            data={"session_id": "s", "file_id": "f", "face_indices": "0"},
+            data={
+                "session_id": "s",
+                "detection_token": "detection",
+                "file_id": "f",
+                "face_indices": "0",
+            },
         )
     assert resp.status_code == 409
 
@@ -206,7 +215,12 @@ def test_check_compat_raising_also_refuses_with_409():
     ):
         resp = client.post(
             "/api/faces/search",
-            data={"session_id": "s", "file_id": "f", "face_indices": "0"},
+            data={
+                "session_id": "s",
+                "detection_token": "detection",
+                "file_id": "f",
+                "face_indices": "0",
+            },
         )
     assert resp.status_code == 409
     assert "not comparable" in resp.json()["detail"]
@@ -229,7 +243,12 @@ def test_soft_compat_mismatch_is_a_warning_not_a_refusal():
     ):
         resp = client.post(
             "/api/faces/search",
-            data={"session_id": "s", "file_id": "f", "face_indices": "0"},
+            data={
+                "session_id": "s",
+                "detection_token": "detection",
+                "file_id": "f",
+                "face_indices": "0",
+            },
         )
     assert resp.status_code == 200
     assert resp.json()["compat"] == {
@@ -256,7 +275,12 @@ def test_response_labels_the_score_as_uncalibrated_and_scopes_0363():
     ):
         body = client.post(
             "/api/faces/search",
-            data={"session_id": "s", "file_id": "f", "face_indices": "0"},
+            data={
+                "session_id": "s",
+                "detection_token": "detection",
+                "file_id": "f",
+                "face_indices": "0",
+            },
         ).json()
 
     cal = body["calibration"]
@@ -288,7 +312,12 @@ def test_the_default_score_floor_is_zero_not_the_reference_figure():
     ):
         client.post(
             "/api/faces/search",
-            data={"session_id": "s", "file_id": "f", "face_indices": "0"},
+            data={
+                "session_id": "s",
+                "detection_token": "detection",
+                "file_id": "f",
+                "face_indices": "0",
+            },
         )
     assert store.search_faces.call_args.kwargs["threshold"] == 0.0
 
@@ -314,7 +343,12 @@ def test_every_search_is_written_to_the_face_audit_log():
     ):
         client.post(
             "/api/faces/search",
-            data={"session_id": "s", "file_id": "f", "face_indices": "0"},
+            data={
+                "session_id": "s",
+                "detection_token": "detection",
+                "file_id": "f",
+                "face_indices": "0",
+            },
         )
     log.append.assert_called_once()
     assert log.append.call_args.args[0] == "query"
@@ -344,6 +378,7 @@ def test_ann_mode_is_recorded_when_exact_is_opted_out():
             "/api/faces/search",
             data={
                 "session_id": "s",
+                "detection_token": "detection",
                 "file_id": "f",
                 "face_indices": "0",
                 "exact": "false",
@@ -361,3 +396,21 @@ def test_search_404s_on_unknown_session():
             data={"session_id": "nope", "file_id": "f", "face_indices": "0"},
         )
     assert resp.status_code == 404
+
+
+def test_collapse_preserves_source_video_and_timecode_identity():
+    store = MagicMock()
+    store.search_faces.return_value = [
+        _payload("same-frame", 0.95, video_hash="a", frame_timecode_ms=0),
+        _payload("same-frame", 0.90, video_hash="a", frame_timecode_ms=0),
+        _payload("same-frame", 0.85, video_hash="a", frame_timecode_ms=1000),
+        _payload("same-frame", 0.80, video_hash="b", frame_timecode_ms=0),
+        _payload("same-frame", 0.75),
+    ]
+    hits = search_query_faces(store, [(0, [1.0])], limit=10, threshold=0, exact=True)
+    assert [(h["video_hash"], h["frame_timecode_ms"], h["n_collapsed"]) for h in hits] == [
+        ("a", 0, 2),
+        ("a", 1000, 1),
+        ("b", 0, 1),
+        (None, None, 1),
+    ]

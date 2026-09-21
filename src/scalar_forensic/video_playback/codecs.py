@@ -100,6 +100,11 @@ def _stream_report(p: Path) -> dict:
     cannot be re-encoded here, so the viewing copy of one is silent.  The label
     says so rather than letting the operator infer a silent original.
     """
+    from scalar_forensic import video_access
+
+    if video_access.configured():
+        return video_access.client().call("stream_report", p)
+
     info: dict = {
         "container_brand": _ftyp_brand(p),
         "video_codec": None,
@@ -151,9 +156,7 @@ def _stream_report(p: Path) -> dict:
     return info
 
 
-# ---------------------------------------------------------------------------
 # Codec allowlist (spec §5, §15.3, ruling §16)
-# ---------------------------------------------------------------------------
 #
 # What the browser can decode is decided HERE, from the stream, and never from
 # what the browser advertises: the operator's Chrome reports HEVC support and
@@ -161,9 +164,8 @@ def _stream_report(p: Path) -> dict:
 # therefore deliberately narrow — a codec is playable only in the pixel formats
 # every target browser actually decodes.
 #
-# Phase 3 detects and reports.  It never encodes: a stream outside the allowlist
-# is named as needing a transcode, and the analyst is pointed at Download
-# original until the encode path lands (phase 4).
+# This module detects and reports; encoding lives in encode.py.  A stream
+# outside the allowlist is named as needing a transcode.
 
 # codec name → maximum bit depth the browsers decode.  4:2:0 chroma is required
 # for all of them; 4:2:2 and 4:4:4 have no browser decoder at any depth.
@@ -217,13 +219,20 @@ def _pixel_profile(pix_fmt: str | None, profile: str | None) -> tuple[int | None
             fmt = av.VideoFormat(pix_fmt)
             bits = max(c.bits for c in fmt.components if c.bits)
         except (ValueError, AttributeError):  # pragma: no cover - unknown format name
-            bits = None
+            return None, None
         for chroma in ("444", "422", "420", "411", "410"):
             if chroma in pix_fmt:
                 return bits, chroma
-        # Formats with no subsampling digits (gray, rgb…) are not 4:2:0 and no
-        # browser decodes them in these codecs.
-        return bits, None
+        # A known layout without digits is not an unknown format: gray has no
+        # chroma, RGB is unsubsampled, and semiplanar NV12 is still 4:2:0.
+        if len(fmt.components) < 3:
+            return bits, "400"
+        if fmt.is_rgb:
+            return bits, "444"
+        chroma = {(2, 2): "420", (2, 4): "422", (4, 4): "444"}.get(
+            (fmt.chroma_width(4), fmt.chroma_height(4))
+        )
+        return bits, chroma
     if profile:
         low = profile.lower()
         bits = 12 if "12" in low else 10 if "10" in low else None

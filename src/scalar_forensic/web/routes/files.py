@@ -17,22 +17,27 @@ from PIL import Image, ImageDraw, UnidentifiedImageError
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
-from scalar_forensic import scanner
+from scalar_forensic import media_access, scanner
 from scalar_forensic.config import Settings
 from scalar_forensic.embedder import (
     _SSCD_INPUT_SIZE,
+    _SSCD_SCALE,
+    _cap_short_side,
     _open_rgb,
     _sscd_resize,
+    effective_preprocessing_cap,
     extract_exif_detailed,
     write_thumbnail,
 )
+from scalar_forensic.media_worker.client import WorkerUnavailable
+from scalar_forensic.media_worker.protocol import DecodeError
 from scalar_forensic.video import (
     extract_frame_at,
     frame_disk_path,
     get_video_info,
     parse_frame_path,
 )
-from scalar_forensic.web.routes._shared import _check_allowed_path
+from scalar_forensic.web.routes._shared import _check_allowed_path, _entry_for
 from scalar_forensic.web.session import get_session
 
 _log = logging.getLogger(__name__)
@@ -40,26 +45,12 @@ _log = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _allowed_image_extensions() -> frozenset[str]:
-    """Extensions the file-serving routes accept — derived from the scanner's
-    sets so the two can never drift apart (HEIF only when pillow-heif is up,
-    exactly like indexing)."""
-    return scanner.IMAGE_EXTENSIONS | (
-        scanner._HEIF_EXTENSIONS if scanner._HEIF_AVAILABLE else frozenset()
-    )
-
-
-# ---------------------------------------------------------------------------
-# Image serving
-# ---------------------------------------------------------------------------
-
-
 @router.get("/api/query-image/{session_id}/{file_id}")
 async def query_image(session_id: str, file_id: str) -> FileResponse:
     session = get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    entry = next((e for e in session.files if e.file_id == file_id), None)
+    entry = _entry_for(session, file_id)
     if entry is None or not entry.temp_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(entry.temp_path, filename=Path(entry.filename).name)
@@ -75,7 +66,7 @@ async def query_video_frames(session_id: str, file_id: str) -> JSONResponse:
     session = get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    entry = next((e for e in session.files if e.file_id == file_id), None)
+    entry = _entry_for(session, file_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="File not found")
     if not entry.is_video or not entry.video_frames:
@@ -104,7 +95,7 @@ async def query_video_frame(session_id: str, file_id: str, timecode_ms: int) -> 
     session = get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    entry = next((e for e in session.files if e.file_id == file_id), None)
+    entry = _entry_for(session, file_id)
     if entry is None or not entry.temp_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
     if not entry.is_video:
@@ -124,7 +115,7 @@ async def query_video_frame(session_id: str, file_id: str, timecode_ms: int) -> 
 async def thumbnail(sha256: str) -> FileResponse:
     """Serve a pre-generated thumbnail by SHA-256 hash.
 
-    Thumbnails are written during `sfn index` when SFN_THUMBNAIL_DIR is configured.
+    Thumbnails are written during ingestion when SFN_THUMBNAIL_DIR is configured.
     If the thumbnail file is missing but the raw file path is known in Qdrant,
     attempts to regenerate and cache it before serving.
     Returns 404 when the thumbnail dir is not configured or regeneration fails.
@@ -145,13 +136,12 @@ async def thumbnail(sha256: str) -> FileResponse:
 async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings) -> None:
     """Look up *sha256* in Qdrant and regenerate the missing thumbnail from the raw file.
 
-    Resolution order:
-      1. data/frames/{sha256}.jpg  — frame store written during indexing
-      2. Re-extract from the source video / reopen the source image (path from Qdrant)
+    Reopens source images (including existing frame JPEGs) identified by Qdrant
+    payload paths. Missing video frames are not re-extracted here.
 
     Silently returns when regeneration is not possible (missing record, missing
-    file, extraction failure).  On success the JPEG is written to *dest* exactly
-    like thumbnails produced during ``sfn index``.
+    file, decoding failure). On success the JPEG is written to *dest* exactly
+    like thumbnails produced during ingestion.
     """
 
     def _write(img: Image.Image, source_label: str) -> None:
@@ -159,7 +149,7 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
         _log.info("thumbnail regen: saved %s from %s", sha256[:12], source_label)
 
     try:
-        # ── Look up source path in Qdrant, then load the file directly ────────
+        # Look up source path in Qdrant, then load the file directly
         def _scroll_qdrant() -> list[dict]:
             client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
             payloads: list[dict] = []
@@ -216,9 +206,11 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
                 _log.warning("thumbnail regen: file not found: %s", raw)
                 return None
             try:
-                with Image.open(raw) as img:
-                    img.load()
-                    return img.copy()
+                return media_access.thumbnail_input(
+                    media_access.read_source(raw), settings.thumbnail_size
+                )
+            except WorkerUnavailable:
+                raise
             except Exception as exc:  # noqa: BLE001
                 _log.warning("thumbnail regen: could not open %r: %s", raw, exc)
                 return None
@@ -234,18 +226,28 @@ async def _try_regenerate_thumbnail(sha256: str, dest: Path, settings: Settings)
                 return
         _log.debug("thumbnail regen: no usable source found for hash %s", sha256[:12])
 
+    except WorkerUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001
         _log.warning("thumbnail regen: unexpected error for %s: %s", sha256[:12], exc)
 
 
-@functools.lru_cache(maxsize=32)
 def _transcode_heif_to_jpeg(path: str, mtime_ns: int) -> bytes:
-    """Decode a HEIF file and re-encode as JPEG bytes (browsers cannot render
-    image/heic).  Cached on (path, mtime) so repeated views of the same hit
-    don't re-decode."""
-    with Image.open(path) as img:
+    """Render HEIF as JPEG; isolated reads must validate the current worker."""
+    if media_access.configured_worker() is None:
+        return _cached_heif_to_jpeg(path, mtime_ns)
+    return _render_heif_to_jpeg(path)
+
+
+@functools.lru_cache(maxsize=32)
+def _cached_heif_to_jpeg(path: str, mtime_ns: int) -> bytes:
+    return _render_heif_to_jpeg(path)
+
+
+def _render_heif_to_jpeg(path: str) -> bytes:
+    with media_access.display_rgb(media_access.read_source(Path(path))) as img:
         buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=90)
+        img.save(buf, format="JPEG", quality=90)
         return buf.getvalue()
 
 
@@ -260,22 +262,20 @@ async def hit_image(path: str) -> Response:
         raise HTTPException(status_code=400, detail="Invalid path")
     p = raw.resolve()
     _check_allowed_path(p)
-    if p.suffix.lower() not in _allowed_image_extensions():
+    if p.suffix.lower() not in scanner.allowed_image_extensions():
         raise HTTPException(status_code=400, detail="Not an image file")
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     if p.suffix.lower() in scanner._HEIF_EXTENSIONS:
         try:
             data = await asyncio.to_thread(_transcode_heif_to_jpeg, str(p), p.stat().st_mtime_ns)
-        except (UnidentifiedImageError, OSError) as exc:
+        except (UnidentifiedImageError, OSError, DecodeError) as exc:
             raise HTTPException(status_code=422, detail="Cannot decode HEIF file") from exc
         return Response(content=data, media_type="image/jpeg")
     return FileResponse(p, filename=p.name)
 
 
-# ---------------------------------------------------------------------------
 # Preprocessing preview helpers (audit modal)
-# ---------------------------------------------------------------------------
 
 
 def _sscd_annotated(img: Image.Image, n_crops: int) -> Image.Image:
@@ -330,7 +330,7 @@ def _build_preproc_payload(
     if sscd_n_crops in (1, 5):
         result["sscd"] = {
             "annotated_url": _to_data_url(_sscd_annotated(img, sscd_n_crops)),
-            "resize_size": 331,
+            "resize_size": _SSCD_SCALE,
             "crop_size": _SSCD_INPUT_SIZE,
             "n_crops": sscd_n_crops,
         }
@@ -350,7 +350,7 @@ async def query_preprocessed(
     session = get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    entry = next((e for e in session.files if e.file_id == file_id), None)
+    entry = _entry_for(session, file_id)
     if entry is None or not entry.temp_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -365,7 +365,11 @@ async def query_preprocessed(
             if pil is None:
                 raise ValueError("Frame not found at given timecode")
         else:
-            pil = _open_rgb(entry.temp_path.read_bytes())
+            pil = _open_rgb(
+                entry.temp_path.read_bytes(),
+                cap=effective_preprocessing_cap(settings.normalize_size),
+            )
+        pil = _cap_short_side(pil, effective_preprocessing_cap(settings.normalize_size))
         return _build_preproc_payload(pil, settings.sscd_n_crops, settings.normalize_size)
 
     try:
@@ -400,7 +404,12 @@ async def hit_preprocessed(
     def _compute() -> dict:
         try:
             return _build_preproc_payload(
-                _open_rgb(p.read_bytes()), sscd_n_crops, dino_normalize_size
+                _cap_short_side(
+                    _open_rgb(p.read_bytes(), cap=effective_preprocessing_cap(dino_normalize_size)),
+                    effective_preprocessing_cap(dino_normalize_size),
+                ),
+                sscd_n_crops,
+                dino_normalize_size,
             )
         except (UnidentifiedImageError, OSError) as exc:
             raise ValueError(f"Cannot decode image: {exc}") from exc
@@ -411,9 +420,7 @@ async def hit_preprocessed(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-# ---------------------------------------------------------------------------
 # Metadata (on-demand, for the detail panels)
-# ---------------------------------------------------------------------------
 
 
 @router.get("/api/query-metadata/{session_id}/{file_id}")
@@ -422,7 +429,7 @@ async def query_metadata(session_id: str, file_id: str) -> JSONResponse:
     session = get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    entry = next((e for e in session.files if e.file_id == file_id), None)
+    entry = _entry_for(session, file_id)
     if entry is None or not entry.temp_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -520,7 +527,7 @@ async def hit_metadata(path: str) -> JSONResponse:
         return JSONResponse(meta)
 
     # Regular image path
-    if p.suffix.lower() not in _allowed_image_extensions():
+    if p.suffix.lower() not in scanner.allowed_image_extensions():
         raise HTTPException(status_code=400, detail="Invalid path")
 
     def _read_and_hash() -> dict:

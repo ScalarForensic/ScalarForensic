@@ -1,27 +1,21 @@
 # Image-box parity — independent verification
 
 Tree: `763665f0d26835216a36f57f699d51248ee450fc` (`fix(web): keep the query and
-match image boxes the same size`), already committed by the time this pass
-started (brief said "working tree, not committed" — stale by the time the
-browser was free; confirmed via `git rev-parse HEAD` and `git status --short`
-showing clean before this pass began).
+match image boxes the same size`), verified clean before this historical check.
 
 This is an **independent** re-check of `docs/qa/2026-08-12-image-box-parity/`
-(com-c1's own self-check, committed in the same commit). Different session,
-different browser profile, fresh CSS load.
+(the original self-check, committed in the same commit), using a different
+browser profile and fresh CSS.
 
 ## Setup
 
 - App: `http://127.0.0.1:8099` (env `webenv.sh`, collection `danny_validation`,
   faces enabled). Server was already running; not started by this pass.
-- Browser: Playwright MCP (chrome-devtools MCP's profile was locked by a
-  stale/foreign session at pid 332268 — not any tracked fleet session; filed
-  as friction, see `cx f` entry referenced in the DONE report, not worked
-  around by touching that lock).
+- Browser: Playwright, with an independent browser profile.
 - Cache: navigated with `/?cachebust=<epoch>`; **separately** re-pointed the
   `<link rel="stylesheet">` href to `/static/style.css?v=<Date.now()>` after
   load, since the query-string cachebust on `/` does not bust `style.css`
-  (confirmed stale-CSS trap, same one com-c1's brief called out).
+  (confirmed stale-CSS trap).
 - Idle drop-zone: real `mousemove`/click flows kept losing the race against
   the 5 s screensaver fade mid-multi-step-tool-call, so file selection was
   driven by opening the native chooser via `$refs.fileInput.click()` in-page
@@ -68,7 +62,7 @@ under the same DOM/CSS the real 0/12 cases would use — it is not a claim that
 | 1920×1080 | 0 chips (synthetic) | 703.78 × 693.33 | 703.78 × 693.33 | **YES** |
 | 1920×1080 | 12 chips (synthetic) | 703.78 × 693.33 | 703.78 × 693.33 | **YES** |
 
-## Second/third viewport sweep (requested by com-m2: fixed-% CSS should hold at any size)
+## Second/third viewport sweep (fixed-% CSS should hold at any size)
 
 Re-ran all 5 states (0/1/3/12 chips synthetic + panel absent) at two more
 viewports on the same selected hit (danny2.jpeg), using the fetch-mock method
@@ -121,8 +115,11 @@ navigation for the whole pass). All real network requests (`/api/analyze`,
   numeric-only above — screenshots are a paid resource, and the getBoundingClientRect
   numbers are the actual assertion).
 
-## Replayable spec
+## Reproduction assertion
 
-See `replay.md` in this directory — no e2e runner exists in this repo yet
-(`DECIDE:`d to the manager); steps are ordered selector/action/expected lines
-for a human or a future runner to replay by hand.
+For each of the five states at 1920×1080, 1280×800 and 1440×720, compare
+`getBoundingClientRect()` width and height of the query and match
+`.image-box` elements. Neither chip count nor panel removal should change
+their parity. Refresh CSS and scripts independently of the HTML.
+The repository now has a Playwright suite under `tests/browser/`; these
+historical 15 measurements are not a claim that every viewport case is automated.

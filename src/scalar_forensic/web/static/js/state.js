@@ -1,9 +1,9 @@
 // Part of the sfn() Alpine component — merged by app.js. See app.js for load order.
 (window.__sfnParts = window.__sfnParts || []).push({
-    // ── Constants ──────────────────────────────────────────────────────────
+    // Constants
     LIST_CAP: 200,
 
-    // ── State ─────────────────────────────────────────────────────────────
+    // State
     phase: 'upload',
     pendingFiles: [],
     dragOver: false,
@@ -13,13 +13,13 @@
     serverError: '',
     progress: { current: 0, total: 0, filename: '' },
     sessionId: null,
+    _viewGeneration: 0,
+    _videoPlaybackGeneration: 0,
     results: [],
     selectedFileId: null,
 
-    // ── Face modality (optional; browse only) ──────────────────────────────
+    // Face modality (optional; browse only)
     facesAvailable: false,
-    facesReason: '',
-    facesNote: '',
     facesForHit: [],
     facesLoading: false,
     faceExplain: null,
@@ -34,9 +34,17 @@
     _queryFacesSeq: 0,
     // {face_index: true} for chips the server refused as stale (409) or gone.
     queryFacesStale: {},
-    queryFacesLoading: false,
     queryFacesError: '',
     queryFacesTruncated: false,
+    queryFacesToken: null,
+    queryFaceEmbedder: null,
+    faceSearchEmbedder: null,
+    faceSearchCompat: null,
+    faceCompareEmbedder: null,
+    faceCompareCompat: null,
+    _faceExplainRequest: 0,
+    _faceStatsRequest: 0,
+    _faceAuditRequest: 0,
 
     // Face selection basket (change-set 2026-08-13).  One row per face the
     // examiner picked, from either side; a row is selected or unselected, and
@@ -53,7 +61,6 @@
     // manufacture one (spec §10).
     faceComparePairs: [],
     faceCompareCounts: null,
-    faceCompareLoading: false,
     faceCompareError: '',
     faceCrossThreshold: 0.0,
 
@@ -165,7 +172,7 @@
     includeReference: false,
     hasReferenceCollection: false,
 
-    // ── Tag Triage ────────────────────────────────────────────────────────
+    // Tag Triage
     appMode: 'search',   // 'search' | 'triage'
 
     // Tag store (shared between modes)

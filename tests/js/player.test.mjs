@@ -7,7 +7,95 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { loadFrontend } from './harness.mjs';
+import { deferred, loadFrontend } from './harness.mjs';
+
+test('source seeking requests the containing window and positions within its video', async () => {
+  const { context, component } = playerUnderTest();
+  const requests = [];
+  context.fetch = async url => {
+    requests.push(url);
+    return { ok: true, json: async () => ({ player_state: 'chunk-ready', chunk_start: 60,
+      next_chunk_start: null, chunk_url: '/window60' }) };
+  };
+  try {
+    await component.seekChunkTo(65.5);
+    assert.ok(requests[0].includes('t=65.5'));
+    assert.equal(component.chunk.start, 60);
+    const element = { currentTime: 0 };
+    component.seekChunkBuffer(element, component.chunk.buffer);
+    assert.equal(element.currentTime, 5.5);
+    const count = requests.length;
+    await component.seekChunkTo(-1);
+    await component.seekChunkTo(NaN);
+    assert.equal(requests.length, count);
+  } finally { component.closeChunkPlayback(); }
+});
+
+test('prefetch from a closed player cannot populate the same next timestamp in a new one', async () => {
+  const { context, component } = playerUnderTest();
+  const old = deferred();
+  context.fetch = async url => ({ ok: true, json: () => url.includes('video-chunk') ? old.promise : {} });
+  component.chunk.next = 30;
+  const pending = component._prefetchNextChunk();
+  component.closeChunkPlayback();
+  component.chunk.next = 30;
+  old.resolve({ chunk_url: '/old-case' });
+  await pending;
+  assert.equal(component.chunk.preload.url, '');
+});
+
+test('seeking twice within one cached window moves the already-loaded element', async () => {
+  const { context, component } = playerUnderTest();
+  component.$refs = { chunkA: { currentTime: 2 } };
+  Object.assign(component.chunk, { state: 'chunk-ready', start: 60, url: '/window60', buffer: 0 });
+  context.fetch = async () => ({ ok: true, json: async () => ({ chunk_start: 60,
+    next_chunk_start: null, chunk_url: '/window60', player_state: 'chunk-ready' }) });
+  try {
+    await component.seekChunkTo(68);
+    assert.equal(component.$refs.chunkA.currentTime, 8);
+    await component.seekChunkTo(72);
+    assert.equal(component.$refs.chunkA.currentTime, 12);
+  } finally { component.closeChunkPlayback(); }
+});
+
+test('retry after a failed seek requests the failed position, not the last successful window', async () => {
+  const { context, component } = playerUnderTest();
+  component.chunk.start = 0;
+  const positions = [];
+  context.fetch = async url => {
+    if (url.includes('video-chunk')) positions.push(new URL(url, 'http://test').searchParams.get('t'));
+    return { ok: false, json: async () => ({ detail: { player_state: 'chunk-failed',
+      retryable: true, retry_after_seconds: 0, reason: 'temporarily unavailable' } }) };
+  };
+  await component.seekChunkTo(95);
+  await component.retryChunk();
+  assert.deepEqual(positions, ['95', '95']);
+  component.closeChunkPlayback();
+});
+
+test('an old window ending cannot overtake an explicit seek in flight', async () => {
+  const { context, component } = playerUnderTest();
+  const seekResponse = deferred();
+  const positions = [];
+  Object.assign(component.chunk, { state: 'chunk-ready', start: 0, next: 30, url: '/window0' });
+  context.fetch = async url => {
+    if (!url.includes('video-chunk')) return { ok: true, json: async () => ({}) };
+    const seconds = Number(new URL(url, 'http://test').searchParams.get('t'));
+    positions.push(seconds);
+    return { ok: true, json: () => seconds === 95 ? seekResponse.promise :
+      { player_state: 'chunk-ready', chunk_start: 30, next_chunk_start: null, chunk_url: '/window30' } };
+  };
+  const pending = component.seekChunkTo(95);
+  try {
+    await component.advanceToNextChunk(null, null);
+    seekResponse.resolve({ player_state: 'chunk-ready', chunk_start: 90,
+      next_chunk_start: null, chunk_url: '/window90' });
+    await pending;
+    assert.deepEqual(positions, [95]);
+    assert.equal(component.chunk.start, 90);
+    assert.equal(component.chunk.seekOffset, 5);
+  } finally { component.closeChunkPlayback(); }
+});
 
 function playerUnderTest(playbackInfo = {}) {
   const { context, component } = loadFrontend();

@@ -7,6 +7,19 @@ import json
 from dataclasses import asdict, dataclass
 
 _VERSION_INFO_FIELDS = {"sfn_version", "cv2_version", "ort_version"}
+LEGACY_QUALITY_GATE_VERSION = "image-x-v1"
+
+# The embedder identity every face endpoint reports: the query-side block and the
+# audit report's "embedder" section are one statement about one model, so they
+# read the same fields in the same order.
+EMBEDDER_IDENTITY_FIELDS = (
+    "embedder_model_name",
+    "embedder_model_hash",
+    "manifest_hash",
+    "embedder_dim",
+    "normalization_id",
+    "alignment_version",
+)
 
 
 @dataclass(frozen=True)
@@ -32,6 +45,7 @@ class PipelineConfig:
     sfn_version: str
     cv2_version: str
     ort_version: str
+    quality_gate_version: str = "eye-axis-v2"
 
     @property
     def config_hash(self) -> str:
@@ -39,6 +53,10 @@ class PipelineConfig:
         # a library upgrade alone must not orphan a collection.  Hard
         # comparability is enforced field-by-field in safeguards.
         hashed = {k: v for k, v in asdict(self).items() if k not in _VERSION_INFO_FIELDS}
+        # Old stored probes predate this field; reproduce their original hash.
+        # New gate algorithms participate in identity so old markers cannot skip them.
+        if self.quality_gate_version == LEGACY_QUALITY_GATE_VERSION:
+            hashed.pop("quality_gate_version")
         canon = json.dumps(hashed, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canon.encode()).hexdigest()
 

@@ -34,6 +34,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import threading
 import time
 from collections.abc import Iterator
@@ -49,9 +50,7 @@ _log = logging.getLogger(__name__)
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
-# ---------------------------------------------------------------------------
 # Keys
-# ---------------------------------------------------------------------------
 
 
 def cache_key(source_digest: str, fingerprint: str) -> str:
@@ -139,9 +138,7 @@ def relocate_to_pipeline_key(
     return correct
 
 
-# ---------------------------------------------------------------------------
 # Locks that do not accumulate (§10.4)
-# ---------------------------------------------------------------------------
 
 
 class KeyedLocks:
@@ -192,9 +189,7 @@ class KeyedLocks:
 artifact_locks = KeyedLocks()
 
 
-# ---------------------------------------------------------------------------
 # Playback leases (§6.2)
-# ---------------------------------------------------------------------------
 
 # HTTP is stateless: between two chunk requests of one video the server has no
 # way to know the video is still on screen.  A lease is that knowledge made
@@ -293,9 +288,7 @@ def reset_leases() -> None:
         _pins.clear()
 
 
-# ---------------------------------------------------------------------------
 # Accounting and eviction (§6.2)
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -306,7 +299,6 @@ class VideoEntry:
     path: Path
     size_bytes: int
     last_used: float
-    legacy: bool = False
 
 
 @dataclass(frozen=True)
@@ -315,7 +307,6 @@ class EvictionReport:
     bytes_freed: int = 0
     bytes_before: int = 0
     bytes_after: int = 0
-    ceiling_bytes: int = 0
     protected: tuple[str, ...] = field(default_factory=tuple)
     over_ceiling: bool = False
 
@@ -324,14 +315,15 @@ def _tree_size_and_mtime(root: Path) -> tuple[int, float]:
     """Bytes and newest mtime under *root*, ``.part`` files included (§6.3)."""
     total = 0
     newest = 0.0
-    for dirpath, _dirnames, filenames in os.walk(root):
-        for name in filenames:
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames + filenames:
             try:
-                st = os.stat(os.path.join(dirpath, name))
+                st = os.lstat(os.path.join(dirpath, name))
             except OSError:  # pragma: no cover - racing eviction or purge
                 continue
-            total += st.st_size
-            newest = max(newest, st.st_mtime)
+            if stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
+                total += st.st_size
+                newest = max(newest, st.st_mtime)
     return total, newest
 
 
@@ -341,11 +333,6 @@ def scan(cache_dir: Path) -> list[VideoEntry]:
     Recency is the newest mtime anywhere under the video, so serving one chunk
     makes the whole video recent — which is what "least-recently-*played*" means
     when a play touches one file out of forty.
-
-    Top-level ``{sha256}.mp4`` files are the layout this store used before the
-    per-video directories.  They are counted and evictable as their own entry
-    rather than deleted on sight: they are still valid rewraps, and letting LRU
-    retire them keeps a version change from throwing away a warm cache.
     """
     entries: list[VideoEntry] = []
     try:
@@ -354,26 +341,17 @@ def scan(cache_dir: Path) -> list[VideoEntry]:
         return entries
     for child in children:
         name = child.name
-        if child.is_dir():
+        if not child.is_symlink() and child.is_dir():
             if not _SHA256_RE.fullmatch(name):
                 continue
             size, mtime = _tree_size_and_mtime(child)
             entries.append(VideoEntry(name, child, size, mtime))
-        elif child.is_file() and name.endswith(".mp4") and _SHA256_RE.fullmatch(child.stem):
-            try:
-                st = child.stat()
-            except OSError:  # pragma: no cover - racing eviction
-                continue
-            entries.append(VideoEntry(child.stem, child, st.st_size, st.st_mtime, legacy=True))
     entries.sort(key=lambda e: e.last_used, reverse=True)
     return entries
 
 
 def _remove(entry: VideoEntry) -> None:
-    if entry.legacy:
-        entry.path.unlink(missing_ok=True)
-    else:
-        shutil.rmtree(entry.path, ignore_errors=True)
+    shutil.rmtree(entry.path, ignore_errors=True)
 
 
 def evict(cache_dir: Path, max_bytes: int, *, protect: set[str] | None = None) -> EvictionReport:
@@ -398,15 +376,16 @@ def evict(cache_dir: Path, max_bytes: int, *, protect: set[str] | None = None) -
     broken playback.
     """
     entries = scan(cache_dir)
-    total = sum(e.size_bytes for e in entries)
+    # Unknown layout/files still occupy this store, but are not ours to delete.
+    # Account their bytes without following symlinks into somebody else's data.
+    total, _ = _tree_size_and_mtime(cache_dir)
     if max_bytes <= 0:
-        return EvictionReport(bytes_before=total, bytes_after=total, ceiling_bytes=max_bytes)
+        return EvictionReport(bytes_before=total, bytes_after=total)
     keep = protected_videos() if protect is None else set(protect)
     if total <= max_bytes:
         return EvictionReport(
             bytes_before=total,
             bytes_after=total,
-            ceiling_bytes=max_bytes,
             protected=tuple(sorted(keep)),
         )
     removed = 0
@@ -414,9 +393,19 @@ def evict(cache_dir: Path, max_bytes: int, *, protect: set[str] | None = None) -
     for entry in reversed(entries):  # oldest first
         if total <= max_bytes:
             break
-        if entry.video in keep:
-            continue
-        _remove(entry)
+        # The initial snapshot can predate a reader or writer acquiring its
+        # protection. Check live state and remove under the same lock used by
+        # renew_lease/pin, so registration cannot slip between check and delete.
+        # Explicit protection adds exclusions; it cannot revoke a live lease.
+        with _lease_lock:
+            if (
+                entry.video in keep
+                or _pins.get(entry.video, 0) > 0
+                or _leases.get(entry.video, 0) > time.monotonic()
+            ):
+                keep.add(entry.video)
+                continue
+            _remove(entry)
         total -= entry.size_bytes
         freed += entry.size_bytes
         removed += 1
@@ -440,15 +429,12 @@ def evict(cache_dir: Path, max_bytes: int, *, protect: set[str] | None = None) -
         bytes_freed=freed,
         bytes_before=total + freed,
         bytes_after=total,
-        ceiling_bytes=max_bytes,
         protected=tuple(sorted(keep)),
         over_ceiling=over,
     )
 
 
-# ---------------------------------------------------------------------------
 # The ceiling refusal (§6.3)
-# ---------------------------------------------------------------------------
 
 # Operator ruling (§16): a full-video job whose estimated output exceeds half the
 # ceiling is refused before it starts.  Half, not all, because the store has to
@@ -546,11 +532,11 @@ def check_ceiling(settings: Settings, info: dict) -> CeilingVerdict:
     analyst is given.
     """
     ceiling = settings.video_cache_max_bytes
+    estimate = estimate_full_output_bytes(info, settings.video_output_height)
     if ceiling <= 0:
         # No ceiling configured means no invariant to protect.
-        return CeilingVerdict("fits", estimate_full_output_bytes(info, 1080), 0, None)
+        return CeilingVerdict("fits", estimate, 0, None)
     limit = int(ceiling * CEILING_FRACTION)
-    estimate = estimate_full_output_bytes(info, settings.video_output_height)
     if estimate is None:
         return CeilingVerdict(
             "unknown",
@@ -581,9 +567,7 @@ def check_ceiling(settings: Settings, info: dict) -> CeilingVerdict:
     return CeilingVerdict("fits", estimate, limit, None)
 
 
-# ---------------------------------------------------------------------------
 # Purge (§13)
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -614,10 +598,7 @@ def purge(cache_dir: Path, *, media: str | None = None, all_: bool = False) -> P
     files = 0
     freed = 0
     for entry in targets:
-        if entry.legacy:
-            files += 1
-        else:
-            files += sum(len(f) for _d, _sub, f in os.walk(entry.path))
+        files += sum(len(f) for _d, _sub, f in os.walk(entry.path))
         freed += entry.size_bytes
         _remove(entry)
         _log.info("viewing-copy cache: purged video %s (%d bytes)", entry.video, entry.size_bytes)
@@ -629,9 +610,7 @@ def purge(cache_dir: Path, *, media: str | None = None, all_: bool = False) -> P
     )
 
 
-# ---------------------------------------------------------------------------
 # Publication (§10.2)
-# ---------------------------------------------------------------------------
 
 
 def part_path(dst: Path) -> Path:
@@ -737,11 +716,6 @@ def _reset_sweep() -> None:
     global _swept
     with _sweep_lock:
         _swept = False
-
-
-# ---------------------------------------------------------------------------
-# Misc
-# ---------------------------------------------------------------------------
 
 
 def _touch(p: Path) -> None:

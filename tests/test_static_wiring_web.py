@@ -134,9 +134,7 @@ def test_every_x_for_template_has_exactly_one_root_element():
     assert _xfor_multi_roots(html) == []
 
 
-# ---------------------------------------------------------------------------
 # Source-video playback (viewing copy)
-# ---------------------------------------------------------------------------
 
 
 def test_the_player_is_labelled_as_a_viewing_copy():

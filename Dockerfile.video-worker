@@ -1,0 +1,8 @@
+# Overlay trusted code onto an explicitly selected, already-local application
+# image with locked PyAV/Pillow and FFmpeg dependencies. No dependency downloads.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY src/scalar_forensic/ /worker-src/scalar_forensic/
+ENV PYTHONPATH=/worker-src PYTHONDONTWRITEBYTECODE=1
+USER 10001:10001
+ENTRYPOINT ["python", "-m", "scalar_forensic.media_worker.video_server"]
