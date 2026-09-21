@@ -27,7 +27,7 @@ from qdrant_client import QdrantClient
 from scalar_forensic.config import Settings
 from scalar_forensic.faces.audit import AuditLog
 from scalar_forensic.faces.chips import chip_paths, write_thumbnail
-from scalar_forensic.faces.provenance import PipelineConfig
+from scalar_forensic.faces.provenance import LEGACY_QUALITY_GATE_VERSION, PipelineConfig
 from scalar_forensic.faces.store import _HARD_FIELDS, FACE_VECTOR_NAME, FaceStore
 from scalar_forensic.video import extract_frame_at
 from scalar_forensic.web.pipeline import (
@@ -729,6 +729,7 @@ class StoredProbe:
 
 def _stored_probe_config(payload: dict) -> PipelineConfig:
     try:
+        payload = {"quality_gate_version": LEGACY_QUALITY_GATE_VERSION, **payload}
         values = {field.name: payload[field.name] for field in fields(PipelineConfig)}
     except (KeyError, TypeError) as exc:
         raise HTTPException(

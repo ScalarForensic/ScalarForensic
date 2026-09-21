@@ -147,6 +147,19 @@ def test_check_compat_soft_mismatch_warns(store):
     assert any("detector_model_hash" in w for w in warnings)
 
 
+@pytest.mark.parametrize("stored_version", [None, "image-x-v1", "eye-axis-v2"])
+def test_gate_version_is_soft_compatibility_with_legacy_default(store, stored_version):
+    s, client = store
+    payload = _cfg().to_payload()
+    if stored_version is None:
+        payload.pop("quality_gate_version", None)
+    else:
+        payload["quality_gate_version"] = stored_version
+    _existing_meta(client, {"case_collection": "case1", **payload})
+    warnings = s.check_compat(_cfg())
+    assert any("quality_gate_version" in w for w in warnings) is (stored_version != "eye-axis-v2")
+
+
 def test_check_compat_absent_hard_fields_require_rebuild(store):
     s, client = store
     _existing_meta(client, {"case_collection": "case1"})

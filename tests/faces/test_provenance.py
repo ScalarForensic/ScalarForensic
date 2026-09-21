@@ -64,3 +64,12 @@ def test_review_thresholds_are_in_the_payload():
     p = _cfg().to_payload()
     assert p["review_min_conf"] == 0.6
     assert p["review_min_size"] == 48
+
+
+def test_gate_algorithm_change_invalidates_processed_config():
+    # Captured before the algorithm change: old markers must not skip the new gate.
+    old_hash = "4ef863bf91dca989f1e8a29fa38d9aa41c1c25ab3c97d86ac526150ba2b4aeaf"
+    cfg = _cfg()
+    assert cfg.to_payload().get("quality_gate_version") == "eye-axis-v2"
+    assert cfg.config_hash != old_hash
+    assert _cfg(quality_gate_version="image-x-v1").config_hash == old_hash

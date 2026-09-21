@@ -26,7 +26,7 @@ from qdrant_client.models import (
 )
 
 from scalar_forensic.faces.align import ALIGNMENT_VERSION
-from scalar_forensic.faces.provenance import PipelineConfig
+from scalar_forensic.faces.provenance import LEGACY_QUALITY_GATE_VERSION, PipelineConfig
 from scalar_forensic.indexer import qdrant_scroll_all
 
 IDENTITY_SCHEMA_VERSION = 2
@@ -45,6 +45,7 @@ _HARD_FIELDS = (
 )
 # Soft fields change *which* faces get in, not what the vectors mean.
 _SOFT_FIELDS = (
+    "quality_gate_version",
     "detector_id",
     "detector_model_hash",
     "detect_max_size",
@@ -174,6 +175,7 @@ class FaceStore:
         Legacy identities and missing hard model provenance require a rebuild.
         """
         meta = self._meta_payload()
+        meta.setdefault("quality_gate_version", LEGACY_QUALITY_GATE_VERSION)
         if meta.get("identity_schema_version") != IDENTITY_SCHEMA_VERSION:
             raise ValueError(
                 "Face identity schema is legacy or unknown; rebuild the face collection "

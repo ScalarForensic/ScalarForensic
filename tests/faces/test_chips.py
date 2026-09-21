@@ -1,4 +1,7 @@
+import io
+
 import numpy as np
+import pytest
 from PIL import Image
 
 from scalar_forensic.faces.chips import (
@@ -153,6 +156,35 @@ def test_review_thumbnail_never_upscales(tmp_path):
     with Image.open(review) as r, Image.open(thumb) as t:
         assert t.size == r.size
         assert max(t.size) < 256
+    # No resize needed: a thumbnail must not introduce a second JPEG generation.
+    assert thumb.read_bytes() == review.read_bytes()
+
+
+@pytest.mark.parametrize("thumb_size", [32, 256])
+def test_new_thumbnail_uses_native_pixels_without_reopening_review(
+    tmp_path, monkeypatch, thumb_size
+):
+    src = np.random.default_rng(6).integers(0, 256, (96, 96, 3), dtype=np.uint8)
+
+    def unexpected_read(path):
+        pytest.fail(f"Native crop is already available; should not reread {path}")
+
+    monkeypatch.setattr("scalar_forensic.faces.chips.read_source", unexpected_read)
+    chash = write_review_chips(
+        tmp_path, src, bbox=(8, 8, 64, 64), dilation=0, thumb_size=thumb_size
+    )
+    review, thumb = review_chip_paths(tmp_path, chash)
+    before = review.read_bytes(), review.stat().st_mtime_ns
+    expected = io.BytesIO()
+    with Image.fromarray(src[8:72, 8:72]) as native:
+        native.thumbnail((thumb_size, thumb_size), Image.Resampling.LANCZOS)
+        native.save(expected, format="JPEG", quality=95)
+    assert thumb.read_bytes() == expected.getvalue()
+    # Re-indexing can recreate a missing thumbnail without rewriting shared evidence.
+    thumb.unlink()
+    write_review_chips(tmp_path, src, bbox=(8, 8, 64, 64), dilation=0, thumb_size=thumb_size)
+    assert thumb.read_bytes() == expected.getvalue()
+    assert (review.read_bytes(), review.stat().st_mtime_ns) == before
 
 
 def test_thumbnail_caps_long_side_and_keeps_aspect(tmp_path):
@@ -181,17 +213,21 @@ def test_small_review_chip_is_not_upscaled(tmp_path):
     assert Image.open(thumb).size == Image.open(jpg).size
 
 
-def test_write_thumbnail_regenerates_deleted_thumbnail(tmp_path):
+@pytest.mark.parametrize("thumb_size", [128, 512])
+def test_write_thumbnail_regenerates_deleted_thumbnail(tmp_path, thumb_size):
     rng = np.random.default_rng(4)
     aligned = rng.integers(0, 255, (112, 112, 3), np.uint8)
     source = rng.integers(0, 255, (480, 640, 3), np.uint8)
     _, rhash = write_aligned_chips(
-        tmp_path, aligned, source, bbox=(100, 100, 300, 300), dilation=0.15, thumb_size=128
+        tmp_path, aligned, source, bbox=(100, 100, 300, 300), dilation=0.15, thumb_size=thumb_size
     )
     jpg, thumb = review_chip_paths(tmp_path, rhash)
     thumb.unlink()
-    write_thumbnail(jpg, thumb, thumb_size=128)
-    assert thumb.exists() and max(Image.open(thumb).size) == 128
+    write_thumbnail(jpg, thumb, thumb_size=thumb_size)
+    with Image.open(jpg) as review, Image.open(thumb) as thumbnail:
+        assert max(thumbnail.size) == min(thumb_size, max(review.size))
+        if max(review.size) <= thumb_size:
+            assert thumb.read_bytes() == jpg.read_bytes()
 
 
 def test_aligned_chip_hash_ignores_thumbnail_presence(tmp_path):

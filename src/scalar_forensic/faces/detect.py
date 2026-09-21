@@ -72,8 +72,8 @@ class YuNetDetector:
             native = row[4:14].reshape(5, 2) / scale
             lm = native[_YUNET_TO_CANONICAL].astype(np.float32)
             # Runtime guard against a wrong _YUNET_TO_CANONICAL map: drop
-            # non-canonical output rather than raise — one legitimately rotated
-            # face must not crash a whole indexing run.  A wholesale-wrong map
+            # non-canonical output rather than raise — a malformed detection
+            # must not crash a whole indexing run.  A wholesale-wrong map
             # shows up as a large n_dropped_noncanonical on the marker and in
             # the index_run audit record — note it is NOT in the CLI summary,
             # so it has to be looked for rather than noticed.

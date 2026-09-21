@@ -16,6 +16,10 @@ review evidence.
   stricter user configuration elsewhere in Settings construction.
 - Embedding additionally checks pose, sharpness and exposure. Persist the
   exclusion reason and the thresholds actually used.
+- Pose measures nose displacement along the eye-to-eye axis, normalized by
+  eye separation. In-plane rotation alone must not turn a frontal face into
+  a rejected profile. Landmark validation preserves semantic eye/mouth order
+  under rotation and rejects mirrored, degenerate or nonfinite geometry.
 - Detector-input resizing and thumbnail downsampling are distinct from review
   crop creation. The source crop stays at native resolution; display must
   neither upscale nor silently centre-crop away evidence.
@@ -49,6 +53,14 @@ carry aligned and review hashes; review-only ones carry only a review hash.
 Aligned-chip requests for review-only observations return 404 rather than an
 unrelated aligned image.
 
+Create new thumbnails directly from the native crop in memory, before review
+JPEG compression, with one JPEG generation and no upscaling. Existing review
+JPEGs and thumbnails are reused without rewriting shared artifacts. The browse
+endpoint can regenerate a missing thumbnail from a stored review JPEG; when no
+resize is needed it copies the JPEG bytes. Resized regeneration can differ from
+the original thumbnail because only the compressed review crop is available.
+Thumbnails remain derived, non-evidentiary artifacts outside chip identity.
+
 Chips may be shared by multiple observations. Purge and reindex cleanup remove
 an artifact only when no surviving observation references it. Orphan cleanup
 must not erase a sibling source/frame's shared chip. Current observation IDs
@@ -75,6 +87,15 @@ lowering a review floor can silently leave old processed markers matching.
 Admission thresholds may be soft comparability fields, but must still trigger
 appropriate reprocessing. Do not confuse “which faces were admitted” with
 “what vector space these embeddings occupy.”
+
+`quality_gate_version` records the selection algorithm as well as numerical
+thresholds. `eye-axis-v2` uses roll-invariant pose and landmark checks. Older
+observations and collection metadata without this field mean `image-x-v1`;
+stored probes retain their historical config hash. A version difference is
+soft compatibility: existing embeddings remain comparable, with a warning.
+New indexing records the version in its config hash so old processed markers
+do not skip reevaluation on the next face-indexing run. Reading a stored face
+does not reprocess or relabel it.
 
 ## Presentation and later work
 

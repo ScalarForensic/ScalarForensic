@@ -83,17 +83,27 @@ def dilated_clamped_bbox(
     return x0, y0, x1 - x0, y1 - y0
 
 
+def _save_thumbnail(img: Image.Image, thumb_path: Path, thumb_size: int) -> None:
+    if max(img.size) > thumb_size:
+        img.thumbnail((thumb_size, thumb_size), Image.Resampling.LANCZOS)
+    thumb_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(thumb_path, format="JPEG", quality=_REVIEW_QUALITY)
+
+
 def write_thumbnail(review_path: Path, thumb_path: Path, thumb_size: int) -> None:
     """Downscale the review chip's long side to *thumb_size*; never upscale.
 
     Standalone so the browse endpoint can regenerate a deleted thumbnail
     without re-running the pipeline.
     """
-    with display_rgb(read_source(review_path)) as img:
-        if max(img.size) > thumb_size:
-            img.thumbnail((thumb_size, thumb_size), Image.LANCZOS)
-        thumb_path.parent.mkdir(parents=True, exist_ok=True)
-        img.save(thumb_path, format="JPEG", quality=_REVIEW_QUALITY)
+    data = read_source(review_path)
+    with display_rgb(data) as img:
+        if max(img.size) <= thumb_size:
+            # Preserve the stored JPEG exactly when no resampling is needed.
+            thumb_path.parent.mkdir(parents=True, exist_ok=True)
+            thumb_path.write_bytes(data)
+        else:
+            _save_thumbnail(img, thumb_path, thumb_size)
 
 
 def write_review_chips(
@@ -118,10 +128,13 @@ def write_review_chips(
     chash = review_chip_hash(crop)
     jpg, thumb = review_chip_paths(store_dir, chash)
     jpg.parent.mkdir(parents=True, exist_ok=True)
-    if not jpg.exists():
-        Image.fromarray(crop).save(jpg, format="JPEG", quality=_REVIEW_QUALITY)
-    if not thumb.exists():
-        write_thumbnail(jpg, thumb, thumb_size)
+    if not jpg.exists() or not thumb.exists():
+        with Image.fromarray(crop) as img:
+            if not jpg.exists():
+                img.save(jpg, format="JPEG", quality=_REVIEW_QUALITY)
+            if not thumb.exists():
+                # Use source pixels directly: no disk reread or JPEG generation loss.
+                _save_thumbnail(img, thumb, thumb_size)
     return chash
 
 

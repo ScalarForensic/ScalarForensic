@@ -284,14 +284,19 @@ def test_compare_before_detection_returns_400():
     store.list_faces.assert_not_called()
 
 
-def test_stored_only_probe_uses_its_persisted_config():
+@pytest.mark.parametrize("version", ["image-x-v1", "eye-axis-v2"])
+def test_stored_only_probe_uses_its_persisted_config(version):
     entry = _entry(None)
     entry.query_faces_cfg = None
     record = _record(PID_EMB, (0.5, 0.5))
+    if version == "image-x-v1":
+        record.payload.pop("quality_gate_version", None)
+    else:
+        record.payload["quality_gate_version"] = version
     store = _store(records=[record])
     response, search = _post_search(store, entry, {"point_ids": PID_EMB})
     assert response.status_code == 200
-    assert store.check_compat.call_args.args[0] is not None
+    assert getattr(store.check_compat.call_args.args[0], "quality_gate_version", None) == version
     assert search.called
 
 

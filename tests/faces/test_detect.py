@@ -65,6 +65,21 @@ def test_detect_drops_noncanonical_output_and_counts_it(tmp_path):
         assert det.n_dropped_noncanonical == 1
 
 
+def test_detect_retains_rotated_landmarks_in_semantic_order(tmp_path):
+    model = tmp_path / "yunet.onnx"
+    model.write_bytes(b"weights")
+    # A 90-degree clockwise face: subject-right eye is above subject-left eye.
+    landmarks = np.array([[60, 20], [60, 40], [50, 30], [40, 22], [40, 38]], np.float32)
+    rows = np.array([[30, 10, 40, 40, *landmarks.ravel(), 0.94]], np.float32)
+    ctx, _ = _fake_backend(rows)
+    with ctx:
+        detector = YuNetDetector(model, max_size=1600)
+        faces = detector.detect(np.zeros((100, 100, 3), np.uint8))
+    assert len(faces) == 1
+    assert detector.n_dropped_noncanonical == 0
+    np.testing.assert_array_equal(faces[0].landmarks, landmarks)
+
+
 def test_detect_converts_rgb_to_bgr_for_yunet(tmp_path):
     model = tmp_path / "yunet.onnx"
     model.write_bytes(b"weights")

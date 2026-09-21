@@ -178,9 +178,10 @@ the source-pixel equivalent derived and stored.
 
 **Detector contract.** `FaceDetection`: `bbox` (x, y, w, h, oriented source px), `landmarks`
 (5×2 float, oriented source px, **canonical order: left eye, right eye, nose tip, left mouth
-corner, right mouth corner — "left" meaning image-left, i.e. the subject's right side**),
+corner, right mouth corner — "left" meaning image-left on an upright face, i.e. the
+subject's right side, with that identity preserved under rotation**),
 `confidence`, `detect_scale`. Every detector adapter must reorder its native output into this
-order (YuNet's native order differs); a unit test with an asymmetric synthetic landmark set must
+order (YuNet already emits this order); a unit test with an asymmetric synthetic landmark set must
 fail if any pair is swapped — a swapped eye pair yields a plausible-looking but mirrored
 alignment that silently degrades matching, the worst failure class for this tool. Channel order
 is part of the contract at every boundary: decode produces RGB; the YuNet adapter converts to
@@ -200,8 +201,8 @@ because the signals live at different pipeline points:
 | Check | Signal | Bootstrap default (env; superseded by calibration record, §10) |
 |---|---|---|
 | Detector confidence | from detector | ≥ 0.8 (`SFN_FACE_MIN_CONF`) |
-| Resolution | bbox min side, detector-input px | ≥ 64 (`SFN_FACE_MIN_SIZE`) |
-| Pose | yaw/roll proxy from the 5 canonical landmarks (inter-eye vs eye-nose geometry) | reject strong profiles; calibrate |
+| Resolution | bbox min side, detector-input px | ≥ 40 (`SFN_FACE_MIN_SIZE`) |
+| Pose | nose displacement along the eye axis, divided by eye separation; invariant to roll | ≤ 0.35 (`SFN_FACE_MAX_POSE`); calibrate |
 
 **Post-alignment gate** (on the aligned crop, before embedding):
 | Check | Signal | Default |
@@ -215,7 +216,7 @@ gate** decides *retention*, and runs first:
 | Check | Signal | Bootstrap default |
 |---|---|---|
 | Detector confidence | from detector | ≥ 0.6 (`SFN_FACE_REVIEW_MIN_CONF`) |
-| Resolution | bbox min side, detector-input px | ≥ 48 (`SFN_FACE_REVIEW_MIN_SIZE`) |
+| Resolution | bbox min side, detector-input px | ≥ 24 (`SFN_FACE_REVIEW_MIN_SIZE`) |
 
 The review gate deliberately does **not** check pose: a face turned away from the camera is
 poor material for a vector and perfectly good material for a human examiner. Both review

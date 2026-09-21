@@ -138,6 +138,19 @@ def test_face_audit_reads_rejection_breakdown_from_persisted_marker():
     assert body["file_totals"]["rejected"] == {"confidence": 1}
 
 
+@pytest.mark.parametrize("recorded_version", [None, "eye-axis-v2"])
+def test_face_audit_reports_the_persisted_gate_algorithm(recorded_version):
+    from scalar_forensic.web.pipeline.faces_stats import face_audit
+
+    store = _audit_store()
+    if recorded_version is not None:
+        store.list_faces.return_value[0]["quality_gate_version"] = recorded_version
+    body = face_audit(store, "a" * 64)
+    expected = recorded_version or "image-x-v1"
+    assert body["gates_in_force_at_index_time"].get("quality_gate_version") == expected
+    assert getattr(store.check_compat.call_args.args[0], "quality_gate_version", None) == expected
+
+
 def test_face_audit_rejects_a_malformed_hash():
     with patch("scalar_forensic.web.routes.faces.Settings"):
         assert client.get("/api/faces/audit?image_hash=zz").status_code == 400

@@ -27,17 +27,19 @@ class GateResult:
 
 
 def pose_ratio(landmarks: np.ndarray) -> float:
-    """Yaw proxy: horizontal nose offset from the eye midpoint over eye span.
+    """Yaw proxy: nose offset along the eye axis, divided by eye separation.
 
-    0.0 = frontal; grows toward ±1 in profile.  Coarse by design — its job
-    is rejecting strong profiles, not estimating angles.
+    Using the face's eye axis makes the score invariant to in-plane rotation.
+    This remains a coarse profile gate, not an angle estimate.
     """
-    left_eye, right_eye, nose = landmarks[0], landmarks[1], landmarks[2]
-    eye_span = float(right_eye[0] - left_eye[0])
-    if eye_span <= 1.0:
+    left_eye, right_eye, nose = np.asarray(landmarks[:3], dtype=np.float64)
+    eye_axis = right_eye - left_eye
+    span_squared = float(eye_axis @ eye_axis)
+    if span_squared <= 1.0:
         return 1.0
-    mid_x = (left_eye[0] + right_eye[0]) / 2.0
-    return float(abs(nose[0] - mid_x) / eye_span)
+    offset = nose - (left_eye + right_eye) / 2.0
+    ratio = float(abs(offset @ eye_axis) / span_squared)
+    return ratio if np.isfinite(ratio) else 1.0
 
 
 def pre_align_gate(

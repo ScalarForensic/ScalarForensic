@@ -25,7 +25,7 @@ import statistics as _statistics
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from scalar_forensic.faces.provenance import EMBEDDER_IDENTITY_FIELDS
+from scalar_forensic.faces.provenance import EMBEDDER_IDENTITY_FIELDS, LEGACY_QUALITY_GATE_VERSION
 from scalar_forensic.faces.store import _HARD_FIELDS, _SOFT_FIELDS
 
 _HIST_BUCKETS = 20  # 0.05-wide buckets covering normalised [0.0, 1.0] (cosine [-1,1] → [0,1])
@@ -123,6 +123,7 @@ def face_score_stats(store, vector: list[float], *, sample_size: int) -> FaceSco
 
 
 _GATE_FIELDS = (
+    "quality_gate_version",
     "min_conf",
     "min_size",
     "max_pose",
@@ -203,7 +204,7 @@ def face_audit(
 
     # Every observation of one medium was produced by one pass, so the provenance
     # fields are identical across its rows — the first row carries them all.
-    row = faces[0] if faces else {}
+    row = {"quality_gate_version": LEGACY_QUALITY_GATE_VERSION, **faces[0]} if faces else {}
 
     if not faces:
         # Markers record totals, not the provenance needed for a comparison.

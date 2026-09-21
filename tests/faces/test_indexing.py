@@ -77,12 +77,17 @@ def _embedded_crops(pipeline):
     return pipeline.embedder.embed.call_args_list[0].args[0]
 
 
-def test_process_image_keeps_good_face_and_builds_payload():
+@pytest.mark.parametrize("roll", [0, 45, 90, 180])
+def test_process_image_keeps_good_face_and_builds_payload(roll):
+    angle = np.deg2rad(roll)
+    rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+    landmarks = (FRONTAL - [150, 150]) @ rotation.T + [150, 150]
     det = FaceDetection(
-        bbox=(100, 100, 100, 100), landmarks=FRONTAL, confidence=0.95, detect_scale=1.0
+        bbox=(100, 100, 100, 100), landmarks=landmarks, confidence=0.95, detect_scale=1.0
     )
     result = _pipeline([det]).process_image(_img_bytes(), image_hash="h1", image_path="/x.png")
     assert result.n_detected == 1 and result.n_kept == 1
+    assert FACE_VECTOR_NAME in result.points[0].vector
     payload = result.points[0].payload
     assert payload["is_face"] is True and payload["image_hash"] == "h1"
     assert payload["observation_key"] == "h1::obs"
