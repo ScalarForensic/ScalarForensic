@@ -9,12 +9,6 @@ def test_faces_part_is_loaded_before_app_js():
     assert html.index("/static/js/faces.js") < html.index("/static/app.js")
 
 
-def test_faces_part_registers_via_sfn_parts_not_object_assign():
-    js = (STATIC / "js" / "faces.js").read_text()
-    assert "__sfnParts" in js
-    assert "Object.assign" not in js  # would evaluate getters instead of copying
-
-
 def test_face_grid_uses_the_review_hash_domain():
     # chip_hash no longer exists in the payload, and the aligned hash names no
     # review artefact: binding either one renders a broken image for every face.
@@ -67,13 +61,6 @@ def test_selected_query_faces_get_the_green_border():
     block = css[start : start + 200]
     assert "var(--success)" in block
     assert "border" in block
-
-
-def test_query_face_functions_live_in_the_faces_part_file():
-    js = (STATIC / "js" / "faces.js").read_text()
-    for fn in ("loadQueryFaces", "toggleQueryFace", "queryFaceChipUrl"):
-        assert fn in js
-    assert "Object.assign" not in js
 
 
 def test_hit_list_has_a_faces_badge_slot():

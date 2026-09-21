@@ -74,16 +74,6 @@ def _embedder(settings: Settings) -> OnnxFaceEmbedder:
         return _embedder_cache[key]
 
 
-def pipeline_config(settings: Settings, detector, embedder) -> PipelineConfig:
-    """The provenance record for a query-time pass.
-
-    One builder with ``FacePipeline.from_settings`` (faces/indexing.py): the
-    query embedding is only meaningful against the collection if it was recorded
-    under the same fields.
-    """
-    return build_pipeline_config(settings, detector, embedder)
-
-
 @dataclass
 class QueryFaceResult:
     faces: list[QueryFace]
@@ -116,7 +106,7 @@ def detect_query_faces(data: bytes, settings: Settings, *, max_faces: int) -> Qu
     img = load_for_detection(data)
     detector = _detector(settings)
     embedder = _embedder(settings)
-    cfg = pipeline_config(settings, detector, embedder)
+    cfg = build_pipeline_config(settings, detector, embedder)
 
     with _detector_lock:
         dets = detector.detect(img)

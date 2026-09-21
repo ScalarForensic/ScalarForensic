@@ -113,6 +113,5 @@ select = ["E", "F", "I", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# --cov-fail-under: floor set 2026-08-13 at 65 (measured 67% on a clean tree);
-# raise after the index() decomposition (audit T7) lands.
+# Full-suite coverage floor; focused subsets use --no-cov.
 addopts = "--cov=scalar_forensic --cov-report=term-missing --cov-fail-under=65"

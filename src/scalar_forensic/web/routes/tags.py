@@ -422,11 +422,7 @@ async def triage(
     triage_collection = settings.collection
     try:
         with _tag_session() as (client, store):
-
-            def _get_tag() -> Tag | None:
-                return store.get(tag_id)
-
-            tag = await asyncio.to_thread(_get_tag)
+            tag = await asyncio.to_thread(store.get, tag_id)
             if tag is None:
                 raise HTTPException(status_code=404, detail="Tag not found")
             await asyncio.to_thread(_require_tag_compat, client, settings, triage_collection)

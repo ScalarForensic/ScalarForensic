@@ -104,7 +104,7 @@ def test_face_detector_resize_and_detect_are_atomic(monkeypatch):
     detector = MutableDetector()
     monkeypatch.setattr(faces_query, "_detector", lambda _: detector)
     monkeypatch.setattr(faces_query, "_embedder", lambda _: object())
-    monkeypatch.setattr(faces_query, "pipeline_config", lambda *args: object())
+    monkeypatch.setattr(faces_query, "build_pipeline_config", lambda *args: object())
     monkeypatch.setattr(faces_query, "load_for_detection", lambda data: np.zeros((int(data), 8, 3)))
     with ThreadPoolExecutor(4) as pool:
         results = list(

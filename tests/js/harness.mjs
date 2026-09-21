@@ -16,11 +16,8 @@
 // parts under test touch no DOM.  `package.json` therefore has no
 // `dependencies` at all: see it, and this paragraph, as one statement.
 //
-// WHAT IT DOES NOT COVER.  There is no DOM.  Markup — the `.vc-block`
-// template, Alpine directives, CSS — is still wiring-pinned only, and
-// rendering it needs a full analysis session with Qdrant and an indexed
-// corpus.  This harness pins the *script* half: that it parses, and that its
-// methods and getters compute what they claim to.
+// There is no DOM here. Tests in tests/browser/smoke.spec.mjs exercise markup
+// and Alpine behavior in Chromium with synthetic API responses.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
